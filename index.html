@@ -685,16 +685,23 @@ async function startSync() {
   log(`${followed.length} artistes suivis trouvés`, 'success');
   setProgress(10);
 
-  // 2. Pour chaque artiste → albums récents
-  const recentUris = [];
+  // Garde les URIs déjà ajoutés pour éviter les doublons
+  const addedUris = new Set();
+  let totalAdded = 0;
+  let totalReleases = 0;
+
+  // 2. Pour chaque artiste → scrape + ajout immédiat
   for (let i = 0; i < followed.length; i++) {
     const artist = followed[i];
     setStatus(`Scan ${i + 1}/${followed.length} — ${artist.name}`, true);
-    setProgress(10 + (i / followed.length) * 70);
+    setProgress(10 + (i / followed.length) * 88);
 
     const url = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`;
     const data = await apiGet(url);
-    if (!data.items) continue;
+    if (!data.items) {
+      await sleep(1000 + Math.random() * 2000);
+      continue;
+    }
 
     for (const album of data.items) {
       const releaseDate = new Date(album.release_date);
@@ -702,42 +709,43 @@ async function startSync() {
         // Récupère les pistes
         const tracksData = await apiGet(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
         if (!tracksData.items) continue;
-        const uris = tracksData.items.map(t => t.uri);
-        recentUris.push(...uris);
-        log(`${artist.name} — ${album.name} (${uris.length} titres)`, 'success');
+
+        // Filtre les doublons
+        const newUris = tracksData.items
+          .map(t => t.uri)
+          .filter(uri => !addedUris.has(uri));
+
+        if (newUris.length === 0) {
+          log(`${artist.name} — ${album.name} (déjà ajouté)`, 'info');
+          continue;
+        }
+
+        // Ajoute immédiatement par batch de 100
+        for (let j = 0; j < newUris.length; j += 100) {
+          const batch = newUris.slice(j, j + 100);
+          await apiPost(`https://api.spotify.com/v1/playlists/${PLAYLIST_ID}/tracks`, { uris: batch });
+          batch.forEach(uri => addedUris.add(uri));
+        }
+
+        totalAdded += newUris.length;
+        totalReleases++;
+        setStat('stat-albums', totalReleases);
+        setStat('stat-tracks', totalAdded);
+        log(`✓ ${artist.name} — ${album.name} (${newUris.length} titres ajoutés)`, 'success');
       }
     }
-    // Petit délai pour éviter le rate-limit
+
     await sleep(1000 + Math.random() * 2000);
   }
 
-  setStat('stat-albums', '✓');
-  setProgress(85);
-
-  if (recentUris.length === 0) {
+  setProgress(100);
+  if (totalAdded === 0) {
     log('Aucune nouvelle sortie trouvée dans cette période.', 'error');
     setStatus('Terminé — rien à ajouter.', false);
-    setStat('stat-tracks', '0');
-    btn.disabled = false;
-    return;
+  } else {
+    setStatus(`Synchronisation terminée ✓ — ${totalAdded} titres ajoutés`, false);
+    log(`Terminé ! ${totalAdded} titres ajoutés depuis ${totalReleases} sorties.`, 'success');
   }
-
-  // Déduplique
-  const unique = [...new Set(recentUris)];
-  log(`${unique.length} titres uniques à ajouter…`, 'info');
-
-  // 3. Ajoute par batch de 100 (limite API Spotify)
-  setStatus('Ajout dans la playlist…', true);
-  for (let i = 0; i < unique.length; i += 100) {
-    const batch = unique.slice(i, i + 100);
-    await apiPost(`https://api.spotify.com/v1/playlists/${PLAYLIST_ID}/tracks`, { uris: batch });
-    setProgress(85 + ((i / unique.length) * 15));
-  }
-
-  setProgress(100);
-  setStat('stat-tracks', unique.length);
-  setStatus('Synchronisation terminée ✓', false);
-  log(`${unique.length} titres ajoutés à ta playlist !`, 'success');
   btn.disabled = false;
 }
 
