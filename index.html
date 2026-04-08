@@ -539,9 +539,17 @@ async function apiGet(url) {
   const token = await getToken();
   const res   = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (res.status === 429) {
-    const retry = res.headers.get('Retry-After');
-    const err   = new Error('RATE_LIMIT');
-    err.retryAfter = retry !== null ? parseInt(retry) : '?';
+    // Spotify renvoie Retry-After en millisecondes
+    const raw        = res.headers.get('Retry-After');
+    const retryMs    = raw !== null ? parseInt(raw) : 60000;
+    const waitMs     = retryMs + 3000;
+    const waitSec    = (waitMs / 1000).toFixed(1);
+    const retrySec   = (retryMs / 1000).toFixed(1);
+    const err        = new Error('RATE_LIMIT');
+    err.retryAfter   = retrySec;
+    err.waitMs       = waitMs;
+    err.waitSec      = waitSec;
+    err.rawHeader    = raw;
     throw err;
   }
   return res.json();
@@ -789,12 +797,15 @@ async function startSync() {
     document.getElementById('eta-bar').classList.remove('visible');
 
     if (err.message === 'RATE_LIMIT') {
-      const val = err.retryAfter;
-      const valStr = val === '?' ? 'inconnue (header absent)' : `${val} seconde${val > 1 ? 's' : ''}`;
       log(`🚫 RATE LIMIT 429 — Spotify bloque les requêtes.`, 'error');
-      log(`⏱ Retry-After : ${valStr}`, 'error');
-      log(`Programme arrêté après ${artistsScanned} artiste${artistsScanned > 1 ? 's' : ''} scannés.`, 'error');
-      setStatus(`Arrêté — Rate limit 429 (retry dans ${val === '?' ? '?' : val + 's'})`, 'wait');
+      log(`⏱ Retry-After (brut) : ${err.rawHeader !== null ? err.rawHeader + 'ms' : 'header absent'}`, 'error');
+      log(`⏱ Retry-After : ${err.retryAfter}s + 3s de marge = attente de ${err.waitSec}s`, 'error');
+      log(`⏳ Programme en pause — relance automatique dans ${err.waitSec}s…`, 'wait');
+      setStatus(`Rate limit 429 — reprise dans ${err.waitSec}s`, 'wait');
+      startCountdown(err.waitMs);
+      await sleep(err.waitMs);
+      log(`✅ Délai écoulé — programme stoppé. Relancez manuellement.`, 'info');
+      setStatus(`Arrêté après rate limit. Relancez.`, 'green');
     } else {
       log(`Erreur inattendue : ${err.message}`, 'error');
       setStatus('Erreur — programme arrêté.', 'wait');
