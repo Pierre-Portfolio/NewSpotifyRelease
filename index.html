@@ -529,7 +529,7 @@
 const CLIENT_ID    = '672e41f0308f4378b4f2331844e08b20';
 const REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/';
 const PLAYLIST_ID  = '1DLS5DRwq1DbLEWVcUvjYn';
-const SCOPES = 'user-follow-read user-read-private playlist-modify-public playlist-modify-private';
+const SCOPES = 'user-follow-read user-read-private user-modify-playback-state user-read-playback-state';
 
 // Délai entre chaque artiste : 31 à 35 secondes
 const DELAY_MIN = 11000;
@@ -641,6 +641,20 @@ async function apiPost(url, body) {
     body: JSON.stringify(body),
   });
   return res.json();
+}
+
+async function apiPut(url, body) {
+  const token = await getToken();
+  const res   = await fetch(url, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  // 204 = success no content
+  if (res.status === 204) return { ok: true };
+  if (res.status === 403) return { error: 'forbidden' };
+  if (res.status === 404) return { error: 'no_active_device' };
+  return res.json().catch(() => ({ error: 'unknown' }));
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -928,30 +942,35 @@ async function startSync() {
             );
             if (!tracksData?.items) continue;
 
-            const newUris = tracksData.items
-              .map(t => t.uri)
-              .filter(uri => !addedUris.has(uri));
+            const uris = tracksData.items.map(t => t.uri);
 
-            if (newUris.length === 0) {
-              log(`${artist.name} — ${album.name} · déjà en playlist`, 'info');
+            if (uris.length === 0) continue;
+
+            // ── Lance le premier titre trouvé dans Spotify ──
+            const firstUri = uris[0];
+            if (addedUris.has(firstUri)) {
+              log(`${artist.name} — ${album.name} · déjà lancé`, 'info');
               continue;
             }
 
-            // ── Ajout immédiat dans la playlist ──
-            for (let j = 0; j < newUris.length; j += 100) {
-              const batch = newUris.slice(j, j + 100);
-              await apiPost(
-                `https://api.spotify.com/v1/playlists/${PLAYLIST_ID}/tracks`,
-                { uris: batch }
-              );
-              batch.forEach(uri => addedUris.add(uri));
-            }
+            const playRes = await apiPut('https://api.spotify.com/v1/me/player/play', {
+              uris: [firstUri]
+            });
 
-            totalAdded    += newUris.length;
-            totalReleases++;
-            setStat('stat-releases', totalReleases);
-            setStat('stat-tracks',   totalAdded);
-            log(`✓ ${artist.name} — ${album.name} · ${newUris.length} titre${newUris.length > 1 ? 's' : ''} ajouté${newUris.length > 1 ? 's' : ''}`, 'success');
+            if (playRes?.ok) {
+              addedUris.add(firstUri);
+              totalAdded++;
+              totalReleases++;
+              setStat('stat-releases', totalReleases);
+              setStat('stat-tracks', totalAdded);
+              log(`▶ ${artist.name} — ${album.name} · lancé dans Spotify`, 'success');
+            } else if (playRes?.error === 'no_active_device') {
+              log(`⚠ ${artist.name} — ${album.name} · aucun appareil Spotify actif`, 'error');
+            } else if (playRes?.error === 'forbidden') {
+              log(`⚠ ${artist.name} — ${album.name} · 403 sur playback aussi`, 'error');
+            } else {
+              log(`⚠ ${artist.name} — ${album.name} · erreur playback : ${JSON.stringify(playRes)}`, 'error');
+            }
           }
         }
       }
