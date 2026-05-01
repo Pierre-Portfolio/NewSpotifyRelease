@@ -336,30 +336,39 @@ function StoreProvider({ children }) {
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
-          // ── Sorties de cet artiste ──────────────────────────
-          const albumsData = await apiGet(
-            `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=20&market=FR`
-          );
+          // ── Sorties de cet artiste (pagination jusqu'à la cutoff) ──
+          // Parse release_date as local midnight to avoid UTC offset issues
+          const parseLocal = str => {
+            const parts = (str || '').split('-').map(Number);
+            if (parts.length === 3) return new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0);
+            if (parts.length === 2) return new Date(parts[0], parts[1] - 1, 1, 0, 0, 0, 0);
+            return new Date(parts[0], 0, 1, 0, 0, 0, 0);
+          };
 
-          if (albumsData?.items) {
-            // Parse release_date as local midnight to avoid UTC offset issues (FR = UTC+2)
-            const parseLocal = str => {
-              const parts = (str || '').split('-').map(Number);
-              return parts.length === 3
-                ? new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0)
-                : new Date(str);
-            };
+          let albumsUrl = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=50&market=from_token`;
+          const allAlbums = [];
+          let stopPaging = false;
 
-            const releasesInPeriod = albumsData.items.filter(a => {
-              const rd = parseLocal(a.release_date);
-              return rd >= cutoff && rd <= ceiling;
-            });
-
-            if (releasesInPeriod.length === 0) {
-              log(`— ${artist.name} · aucune sortie dans la période`, 'info');
+          while (albumsUrl && !stopPaging) {
+            const albumsData = await apiGet(albumsUrl);
+            if (!albumsData?.items) {
+              log(`⚠ ${artist.name} · erreur chargement albums`, 'warn');
+              break;
             }
+            for (const a of albumsData.items) {
+              const rd = parseLocal(a.release_date);
+              if (rd > ceiling) continue;       // futur, ignorer
+              if (rd < cutoff) { stopPaging = true; break; } // trop ancien, stop pagination
+              allAlbums.push(a);
+            }
+            albumsUrl = stopPaging ? null : (albumsData.next || null);
+          }
 
-            for (const album of albumsData.items) {
+          if (allAlbums.length === 0) {
+            log(`— ${artist.name} · aucune sortie dans la période`, 'info');
+          }
+
+          for (const album of allAlbums) {
               const rDate = parseLocal(album.release_date);
               if (rDate < cutoff || rDate > ceiling) continue;
 
