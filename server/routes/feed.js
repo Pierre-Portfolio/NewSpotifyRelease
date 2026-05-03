@@ -74,7 +74,7 @@ router.get('/:user_id/tracks', async (req, res) => {
       FROM tracks t
       JOIN releases r ON r.id = t.release_id
       JOIN artists  a ON a.id = r.artist_id
-      WHERE t.user_id = ? AND t.listened = false
+      WHERE t.user_id = ? AND t.listened = 0
       ORDER BY t.id ASC
       LIMIT ?
     `, [userId, parseInt(limit, 10)]);
@@ -105,7 +105,7 @@ router.get('/:user_id/next', async (req, res) => {
       FROM tracks t
       JOIN releases r ON r.id = t.release_id
       JOIN artists  a ON a.id = r.artist_id
-      WHERE t.user_id = ? AND t.listened = false
+      WHERE t.user_id = ? AND t.listened = 0
       ORDER BY t.id ASC
       LIMIT 1
     `, [userId]);
