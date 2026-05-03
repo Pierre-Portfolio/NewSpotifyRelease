@@ -54,11 +54,13 @@ router.post('/', async (req, res) => {
       'SELECT id FROM releases WHERE spotify_id = ?', [release.spotify_id]
     );
 
-    // Init discovery_status à 'unseen' (INSERT IGNORE = ne pas écraser si déjà vu)
-    await db.execute(`
-      INSERT IGNORE INTO discovery_status (user_id, release_id, status)
-      VALUES (?, ?, 'unseen')
-    `, [user_id, releaseRow.id]);
+    // discovery_status uniquement pour les singles/EPs (pas les albums — on stocke les tracks)
+    if (release.type !== 'album') {
+      await db.execute(`
+        INSERT IGNORE INTO discovery_status (user_id, release_id, status)
+        VALUES (?, ?, 'unseen')
+      `, [user_id, releaseRow.id]);
+    }
 
     res.json({ release_id: releaseRow.id, artist_id: artistRow.id });
   } catch (err) {

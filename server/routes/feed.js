@@ -32,6 +32,32 @@ router.get('/:user_id', async (req, res) => {
   }
 });
 
+// GET /api/feed/:user_id/tracks — tous les titres non écoutés avec contexte release/artiste
+router.get('/:user_id/tracks', async (req, res) => {
+  const { limit = 200 } = req.query;
+  try {
+    const [rows] = await db.execute(`
+      SELECT
+        t.id, t.spotify_uri, t.title, t.track_number, t.duration_ms, t.added_at,
+        r.title       AS release_title,
+        r.type        AS release_type,
+        r.cover_url,
+        r.release_date,
+        a.name        AS artist_name
+      FROM tracks t
+      JOIN releases r ON r.id = t.release_id
+      JOIN artists  a ON a.id = r.artist_id
+      WHERE t.user_id = ? AND t.listened = false
+      ORDER BY t.id ASC
+      LIMIT ?
+    `, [req.params.user_id, parseInt(limit)]);
+    res.json(rows);
+  } catch (err) {
+    console.error('[feed/tracks]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/feed/:user_id/next  — prochain titre à écouter (file d'attente)
 // = le plus petit id avec listened = false
 router.get('/:user_id/next', async (req, res) => {

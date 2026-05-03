@@ -152,6 +152,12 @@ async function backendPost(path, body) {
     return res.json();
   } catch { return null; }
 }
+async function backendGet(path) {
+  try {
+    const res = await fetch(API_BASE + path);
+    return res.json();
+  } catch { return null; }
+}
 async function backendPatch(path, body) {
   try {
     const res = await fetch(API_BASE + path, {
@@ -161,6 +167,22 @@ async function backendPatch(path, body) {
     });
     return res.json();
   } catch { return null; }
+}
+
+// ════════════════════════════════════════════════
+// TEST CONNEXION — joue Kaza · Connexion
+// ════════════════════════════════════════════════
+async function testConnection() {
+  try {
+    const search = await apiGet('https://api.spotify.com/v1/search?q=track:connexion%20artist:kaza&type=track&limit=1&market=FR');
+    const track  = search?.tracks?.items?.[0];
+    if (!track) { alert('Titre introuvable sur Spotify.'); return; }
+    const result = await apiPut('https://api.spotify.com/v1/me/player/play', { uris: [track.uri] });
+    if (result?.error === 'no_active_device') alert('Aucun appareil Spotify actif. Lance Spotify sur un appareil d\'abord.');
+    if (result?.error === 'forbidden')        alert('Lecture impossible — compte Spotify Free ?');
+  } catch (e) {
+    alert('Erreur : ' + e.message);
+  }
 }
 
 // ════════════════════════════════════════════════
@@ -201,6 +223,7 @@ function StoreProvider({ children }) {
   const [feed,          setFeed]          = React.useState([]);
   const [logs,          setLogs]          = React.useState([]);
   const [now,           setNow]           = React.useState(null);
+  const [delayChoice,   setDelayChoice]   = React.useState(30);
 
   const weekAgo = new Date(Date.now() - 7*86400000);
   const [dateFrom, setDateFrom] = React.useState(weekAgo.toISOString().slice(0,10));
@@ -245,7 +268,24 @@ function StoreProvider({ children }) {
             display_name: me.display_name || null,
             avatar_url:   me.images?.[0]?.url || null,
             product:      me.product || null,
-          }).then(u => u?.id && setDbUserId(u.id)).catch(() => {});
+          }).then(u => {
+            if (!u?.id) return;
+            setDbUserId(u.id);
+            backendGet(`/api/feed/${u.id}/tracks`).then(rows => {
+              if (!Array.isArray(rows) || rows.length === 0) return;
+              setFeed(rows.map(t => ({
+                id:         t.spotify_uri,
+                spotifyUri: t.spotify_uri,
+                label:      t.release_type === 'single' ? 'Single' : 'Album',
+                artist:     t.artist_name,
+                title:      t.title,
+                subtitle:   t.release_type !== 'single' ? t.release_title : null,
+                date:       new Date(t.release_date).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }),
+                image:      t.cover_url,
+                isNew:      false,
+              })));
+            }).catch(() => {});
+          }).catch(() => {});
         } else {
           setAuthState('login');
         }
@@ -330,7 +370,7 @@ function StoreProvider({ children }) {
 
       const seenUris = new Set();
       let totalTracks = 0, totalReleases = 0, artistsScanned = 0, totalArtists = ESTIMATED_TOTAL;
-      const avgDelay = (DELAY_MIN + DELAY_MAX) / 2;
+      const avgDelay = delayChoice * 1000;
       let nextUrl = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
       let pageNum  = 0;
 
@@ -413,16 +453,34 @@ function StoreProvider({ children }) {
               totalTracks += tracksData.items.length;
               totalReleases++;
               setStats(s => ({ ...s, releases: totalReleases, tracks: totalTracks }));
-              setFeed(F => [{
-                id:     uris[0],
-                type:   album.album_type === 'single' ? 'single' : 'release',
-                label:  album.album_type === 'single' ? 'Single' : 'Nouvel album',
-                artist: artist.name,
-                title:  album.name,
-                date:   rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }),
-                image:  album.images?.[0]?.url,
-                isNew:  true,
-              }, ...F].slice(0, 100));
+              const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
+              const coverImg = album.images?.[0]?.url;
+              if (album.album_type === 'single') {
+                setFeed(F => [{
+                  id:         uris[0],
+                  spotifyUri: uris[0],
+                  label:      'Single',
+                  artist:     artist.name,
+                  title:      album.name,
+                  subtitle:   null,
+                  date:       dateStr,
+                  image:      coverImg,
+                  isNew:      true,
+                }, ...F].slice(0, 200));
+              } else {
+                const trackItems = tracksData.items.map(t => ({
+                  id:         t.uri,
+                  spotifyUri: t.uri,
+                  label:      'Album',
+                  artist:     artist.name,
+                  title:      t.name,
+                  subtitle:   album.name,
+                  date:       dateStr,
+                  image:      coverImg,
+                  isNew:      true,
+                }));
+                setFeed(F => [...trackItems, ...F].slice(0, 200));
+              }
               log(`✓ ${artist.name} — ${album.name} · ${tracksData.items.length} titre(s) sauvegardé(s)`, 'ok');
             }
           }
@@ -438,9 +496,9 @@ function StoreProvider({ children }) {
 
           const isVeryLast = !nextUrl && i === artists.length - 1;
           if (!isVeryLast) {
-            const delay    = DELAY_MIN + Math.random() * (DELAY_MAX - DELAY_MIN);
+            const delay    = delayChoice * 1000;
             const nextName = i + 1 < artists.length ? artists[i + 1].name : 'page suivante';
-            updateETA(artistsScanned, totalArtists, avgDelay);
+            updateETA(artistsScanned, totalArtists, delay);
             setStatus(`Pause avant : ${nextName}`, 'wait');
             log(`⏳ Attente ${(delay/1000).toFixed(1)}s → ${nextName}`, 'wait');
             const sec = Math.ceil(delay / 1000);
@@ -497,6 +555,7 @@ function StoreProvider({ children }) {
     stats, progress, currentArtist, statusMsg, statusMode,
     nextCall, nextCallTotal, eta, feed, logs, now,
     dateFrom, setDateFrom,
+    delayChoice, setDelayChoice,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }
@@ -743,6 +802,10 @@ function DateRangePanel({ compact=false }) {
           </button>
         )}
       </div>
+      <button onClick={testConnection}
+        style={{ width:'100%', marginTop:8, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding: compact?'6px 0':'7px 0', cursor:'pointer', color:C.muted, fontSize:10, fontWeight:600, letterSpacing:'0.04em' }}>
+        ⚡ Tester la connexion
+      </button>
     </div>
   );
 }
@@ -764,6 +827,18 @@ function NextCallPanel({ compact=false }) {
           <span style={{ fontFamily:'DM Mono,monospace', color:C.accent }}>{s.eta}</span>
         </div>
       )}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginTop:10, paddingTop:8, borderTop:`1px solid ${C.border}` }}>
+        <span style={{ fontSize:10, color:C.dim, letterSpacing:'0.07em', fontWeight:700 }}>DÉLAI ENTRE ARTISTES</span>
+        <select
+          value={s.delayChoice}
+          onChange={e => s.setDelayChoice(Number(e.target.value))}
+          disabled={s.scraping}
+          style={{ background:'#111', border:`1px solid ${C.accent}44`, borderRadius:6, padding:'3px 8px', fontSize:11, fontFamily:'DM Mono,monospace', color:C.accent, outline:'none', cursor: s.scraping?'default':'pointer', opacity: s.scraping?0.5:1 }}>
+          <option value={10}>10s</option>
+          <option value={20}>20s</option>
+          <option value={30}>30s</option>
+        </select>
+      </div>
     </div>
   );
 }
@@ -790,21 +865,40 @@ function LogsPanel({ compact=false }) {
   );
 }
 
+async function playTrack(spotifyUri) {
+  if (!spotifyUri) return;
+  const result = await apiPut('https://api.spotify.com/v1/me/player/play', { uris: [spotifyUri] });
+  if (result?.error === 'no_active_device') alert('Aucun appareil Spotify actif. Ouvre Spotify d\'abord.');
+  if (result?.error === 'forbidden')        alert('Lecture impossible — compte Spotify Free ?');
+}
+
 function FeedItem({ item, i, isMobile=false }) {
+  const [playing, setPlaying] = React.useState(false);
+  const onPlay = async e => {
+    e.stopPropagation();
+    setPlaying(true);
+    await playTrack(item.spotifyUri);
+    setTimeout(() => setPlaying(false), 2000);
+  };
   return (
-    <div style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8, cursor:'pointer', transition:'background 0.15s' }}
+    <div style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8, transition:'background 0.15s' }}
       onMouseEnter={e => e.currentTarget.style.background = C.surface}
       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
       <span style={{ fontSize: isMobile?10:11, color:C.dim, fontFamily:'DM Mono,monospace', width: isMobile?14:16, textAlign:'right', flexShrink:0 }}>{i+1}</span>
       <AlbumArt size={38} letter={item.artist[0]} color={item.isNew ? C.accent : C.blue} image={item.image} />
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{item.title}</div>
-        <div style={{ fontSize: isMobile?10:11, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{item.artist}</div>
+        <div style={{ fontSize: isMobile?10:11, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+          {item.artist}{item.subtitle ? ` · ${item.subtitle}` : ''}
+        </div>
       </div>
       {isMobile
         ? (item.isNew && <Tag color={C.accent}>NEW</Tag>)
         : (<><Tag color={item.isNew ? C.accent : C.blue}>{item.label}</Tag><span style={{ fontSize:10, color:C.dim, flexShrink:0, width:44, textAlign:'right' }}>{item.date}</span></>)}
-      <span style={{ fontSize:13, color:C.dim, flexShrink:0 }}>▶</span>
+      <button onClick={onPlay}
+        style={{ width:28, height:28, borderRadius:'50%', border:'none', background: playing ? C.accent : `${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, transition:'background 0.2s' }}>
+        <svg width="9" height="10" viewBox="0 0 9 10" fill={playing ? '#000' : C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
+      </button>
     </div>
   );
 }
@@ -812,7 +906,7 @@ function FeedItem({ item, i, isMobile=false }) {
 function FeedList({ isMobile=false }) {
   const { feed } = useStore();
   if (feed.length === 0) {
-    return <div style={{ fontSize:11, color:C.dim, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucune sortie trouvée.<br/>Lance une synchronisation.</div>;
+    return <div style={{ fontSize:11, color:C.dim, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucune musique en attente.</div>;
   }
   return (
     <div style={{ display:'flex', flexDirection:'column' }}>
