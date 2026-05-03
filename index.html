@@ -21,6 +21,20 @@
   .logs-scroll::-webkit-scrollbar { width:4px; }
   .logs-scroll::-webkit-scrollbar-track { background:#111; border-radius:99px; }
   .logs-scroll::-webkit-scrollbar-thumb { background:#3a3a3a; border-radius:99px; }
+
+  /* Barres égaliseur — animation lecture en cours */
+  @keyframes eq { 0%,100% { transform:scaleY(0.25); } 50% { transform:scaleY(1); } }
+  .eq-bar { transform-origin:bottom; animation:eq 0.8s ease-in-out infinite; border-radius:2px; }
+  .eq-bar:nth-child(2) { animation-delay:0.18s; }
+  .eq-bar:nth-child(3) { animation-delay:0.36s; }
+
+  /* Disparition d'un item du feed */
+  @keyframes feed-out {
+    0%   { opacity:1; transform:translateX(0);   max-height:60px; margin-bottom:0; }
+    60%  { opacity:0; transform:translateX(40px); max-height:60px; }
+    100% { opacity:0; transform:translateX(40px); max-height:0;   margin-bottom:-2px; padding-top:0; padding-bottom:0; }
+  }
+  .feed-removing { animation:feed-out 0.55s cubic-bezier(0.4,0,0.2,1) forwards; overflow:hidden; pointer-events:none; }
 </style>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -221,6 +235,7 @@ function StoreProvider({ children }) {
   const [paused,   setPaused]             = React.useState(false);
   const pausedRef                         = React.useRef(false);
   const knownUrisRef                      = React.useRef(new Set());
+  const listenedUrisRef                   = React.useRef(new Set());
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
 
   const [stats,         setStats]         = React.useState({ artists:0, total:0, releases:0, tracks:0 });
@@ -294,6 +309,7 @@ function StoreProvider({ children }) {
               setFeed(rows.map(t => ({
                 id:         t.spotify_uri,
                 spotifyUri: t.spotify_uri,
+                dbId:       t.id,
                 label:      t.release_type === 'single' ? 'Single' : 'Album',
                 artist:     t.artist_name,
                 title:      t.title,
@@ -353,6 +369,34 @@ function StoreProvider({ children }) {
     const id = setInterval(() => setNextCall(v => Math.max(0, v - 1)), 1000);
     return () => clearInterval(id);
   }, [nextCall]);
+
+  // ── Marquer comme écouté dès que la lecture commence ──
+  React.useEffect(() => {
+    if (!now?.uri || !dbUserId) return;
+    const uri = now.uri;
+    if (listenedUrisRef.current.has(uri)) return;   // déjà traité
+
+    setFeed(F => {
+      const item = F.find(f => f.spotifyUri === uri);
+      if (!item?.dbId) return F;                     // pas dans le feed ou pas d'id DB
+
+      listenedUrisRef.current.add(uri);
+
+      // PATCH listened en DB
+      backendPatch(`/api/feed/tracks/${item.dbId}/listened`, { user_id: dbUserId })
+        .catch(() => listenedUrisRef.current.delete(uri));
+
+      // Rafraîchir les stats d'écoute
+      backendGet(`/api/feed/${dbUserId}/listen-stats`).then(s => {
+        if (s?.remaining !== undefined)
+          setListenStats({ remaining: s.remaining, this_month: s.this_month, this_year: s.this_year, all_time: s.all_time });
+      }).catch(() => {});
+
+      // Déclencher l'animation de suppression
+      setTimeout(() => setFeed(F2 => F2.filter(f => f.spotifyUri !== uri)), 600);
+      return F.map(f => f.spotifyUri === uri ? { ...f, removing: true } : f);
+    });
+  }, [now?.uri, dbUserId]);
 
   const togglePause = () => {
     setPaused(p => {
@@ -980,31 +1024,53 @@ async function playTrack(spotifyUri) {
 }
 
 function FeedItem({ item, i, isMobile=false }) {
+  const { now } = useStore();
   const [playing, setPlaying] = React.useState(false);
+  const isNowPlaying = now?.uri === item.spotifyUri;
+
   const onPlay = async e => {
     e.stopPropagation();
     setPlaying(true);
     await playTrack(item.spotifyUri);
     setTimeout(() => setPlaying(false), 2000);
   };
+
   return (
-    <div style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8, transition:'background 0.15s' }}
-      onMouseEnter={e => e.currentTarget.style.background = C.surface}
-      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-      <span style={{ fontSize: isMobile?10:11, color:C.dim, fontFamily:'DM Mono,monospace', width: isMobile?14:16, textAlign:'right', flexShrink:0 }}>{i+1}</span>
+    <div className={item.removing ? 'feed-removing' : ''}
+      style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8, transition:'background 0.15s', background: isNowPlaying ? `${C.accent}0d` : 'transparent' }}
+      onMouseEnter={e => { if (!item.removing) e.currentTarget.style.background = isNowPlaying ? `${C.accent}18` : C.surface; }}
+      onMouseLeave={e => { e.currentTarget.style.background = isNowPlaying ? `${C.accent}0d` : 'transparent'; }}>
+
+      {/* Numéro ou barres égaliseur */}
+      <div style={{ width: isMobile?14:16, flexShrink:0, display:'flex', alignItems:'flex-end', justifyContent:'center', height:16 }}>
+        {isNowPlaying
+          ? <div style={{ display:'flex', alignItems:'flex-end', gap:2, height:14 }}>
+              {[14, 10, 12].map((h, n) => (
+                <div key={n} className="eq-bar" style={{ width:3, height:h, background:C.accent }} />
+              ))}
+            </div>
+          : <span style={{ fontSize: isMobile?10:11, color:C.dim, fontFamily:'DM Mono,monospace' }}>{i+1}</span>
+        }
+      </div>
+
       <AlbumArt size={38} letter={item.artist[0]} color={item.isNew ? C.accent : C.blue} image={item.image} />
+
       <div style={{ flex:1, minWidth:0 }}>
-        <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{item.title}</div>
+        <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color: isNowPlaying ? C.accent : C.text }}>
+          {item.title}
+        </div>
         <div style={{ fontSize: isMobile?10:11, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
           {item.artist}{item.subtitle ? ` · ${item.subtitle}` : ''}
         </div>
       </div>
+
       {isMobile
         ? (item.isNew && <Tag color={C.accent}>NEW</Tag>)
         : (<><Tag color={item.isNew ? C.accent : C.blue}>{item.label}</Tag><span style={{ fontSize:10, color:C.dim, flexShrink:0, width:44, textAlign:'right' }}>{item.date}</span></>)}
+
       <button onClick={onPlay}
-        style={{ width:28, height:28, borderRadius:'50%', border:'none', background: playing ? C.accent : `${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, transition:'background 0.2s' }}>
-        <svg width="9" height="10" viewBox="0 0 9 10" fill={playing ? '#000' : C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
+        style={{ width:28, height:28, borderRadius:'50%', border:'none', background: (playing || isNowPlaying) ? C.accent : `${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, transition:'background 0.2s' }}>
+        <svg width="9" height="10" viewBox="0 0 9 10" fill={(playing || isNowPlaying) ? '#000' : C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
       </button>
     </div>
   );
