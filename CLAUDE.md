@@ -36,7 +36,7 @@ Si des modifications ont été faites dans le worktree par erreur, les copier ve
 ## Vue d'ensemble
 Application web permettant de scanner les artistes Spotify suivis par l'utilisateur, de détecter leurs nouvelles sorties (albums / singles) sur une période donnée, et de les stocker en base de données pour les découvrir dans l'interface Spotify+.
 
-L'utilisateur parcourt ensuite son feed de découverte, écoute les titres un par un, et ajoute manuellement ce qu'il aime à ses propres playlists Spotify. Aucun ajout automatique en playlist.
+L'utilisateur parcourt son feed de découverte, écoute les titres un par un via le player intégré. Quand un titre se termine, il est automatiquement marqué comme écouté et disparaît du feed avec une animation. Aucun ajout automatique en playlist.
 
 ---
 
@@ -44,18 +44,17 @@ L'utilisateur parcourt ensuite son feed de découverte, écoute les titres un pa
 
 | Fichier | Rôle |
 |---|---|
-| `index.html` | **Front principal** — design React (DM Sans + DM Mono), app complète |
-| `indexxx.html` | Ancien design vanilla JS — gardé comme référence du code de scraping |
-| `Old_index.html` | Version encore plus ancienne — ne pas utiliser |
-| `sql/create.sql` | Schéma MySQL complet — version ASCII safe (sans caractères spéciaux) |
-| `sql/InstallDataBase.txt` | Tuto d'installation complet MySQL + backend |
-| `server/server.js` | Entry point Express — lance avec `npm run dev` |
+| `index.html` | **Front principal** — React 18 CDN, app complète en un seul fichier |
+| `sql/create.sql` | Schéma MySQL complet (8 tables) |
+| `sql/migrations/001_add_last_artist_name.sql` | Migration : ajout colonne `last_artist_name` |
+| `sql/InstallDataBase.txt` | Tuto d'installation MySQL + backend |
+| `server/server.js` | Entry point Express — `npm run dev` |
 | `server/db.js` | Pool MySQL (mysql2) |
 | `server/routes/users.js` | `POST /api/users/upsert` |
-| `server/routes/sync.js` | Sessions de sync + logs |
+| `server/routes/sync.js` | Sessions de sync + logs + reprise |
 | `server/routes/releases.js` | Sauvegarde releases + tracks |
-| `server/routes/feed.js` | Feed de découverte + file d'attente |
-| `server/.env.example` | Template des variables d'environnement |
+| `server/routes/feed.js` | Feed de découverte + stats + file d'attente |
+| `server/.env.example` | Template variables d'environnement |
 
 ---
 
@@ -64,40 +63,46 @@ L'utilisateur parcourt ensuite son feed de découverte, écoute les titres un pa
 - **React 18** via CDN (pas de build tool), Babel standalone
 - **Fonts** : DM Sans (UI) + DM Mono (labels, logs, valeurs)
 - **Auth** : OAuth 2.0 PKCE — 100% client-side, token stocké en `localStorage`
-- **Pas de serveur** actuellement — tous les appels partent directement vers l'API Spotify
+- **Backend** : tous les appels DB passent par `http://localhost:3001`
 
 ### Config Spotify
 ```js
 CLIENT_ID    = '672e41f0308f4378b4f2331844e08b20'
 REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
-SCOPES       = 'user-follow-read user-read-private user-read-currently-playing'
+SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state'
 API_BASE     = 'http://localhost:3001'  // → IP du Raspi en prod
 ```
 
-### Délais de scraping
+### Délai de scraping
+Le délai entre chaque artiste est configurable via un sélecteur (10 / 20 / 30s) auquel s'ajoute un **jitter aléatoire de 1 à 3 secondes** pour éviter les patterns réguliers détectés par Spotify.
 ```js
-DELAY_MIN = 30000   // 30s
-DELAY_MAX = 35000   // 35s
+const delay = delayChoice * 1000 + Math.random() * 2000 + 1000;
 ```
-Délai aléatoire entre chaque artiste pour éviter le rate limit Spotify (429).
 
 ---
 
 ## Logique de scraping (dans `startSync`)
 
+Accepte un paramètre optionnel `options = { skipCount, resumeDateFrom }` pour la reprise.
+
 1. Vérifie le compte `/me`
-2. Vérifie la playlist cible (héritage — à supprimer avec le backend)
+2. Crée une session en DB via `POST /api/sync/start`
 3. Pagine `/me/following?type=artist&limit=50` en streaming
-4. Pour chaque artiste → `/artists/{id}/albums?include_groups=album,single&limit=10&market=FR`
-5. Filtre les albums dans la période choisie
-6. Pour chaque album dans la période → `/albums/{id}/tracks?limit=50`
-7. `const uris = tracksData.items.map(t => t.uri)` — récupère tous les URIs
-8. Dédoublonnage sur `uris[0]` (premier track = signature de l'album)
-9. **Actuellement** : `apiPost` vers playlist Spotify — **à remplacer** par appel backend → MySQL
+4. Pour chaque artiste (en sautant les `skipCount` premiers si reprise) :
+   - `/artists/{id}/albums?include_groups=album,single&limit=10&market=FR`
+   - Filtre par période choisie
+   - Pour chaque album dans la période → `/albums/{id}/tracks?limit=50`
+   - Dédoublonnage via `seenUris` Set + `knownUrisRef` (URIs déjà en DB)
+   - `POST /api/releases` → sauvegarde release + artiste
+   - `POST /api/releases/:id/tracks` → sauvegarde les tracks
+5. Après chaque artiste → `PATCH /api/sync/:id` avec `last_artist_name` (permet la reprise)
+6. À la fin → `PATCH /api/sync/:id` avec `status: 'completed'`
+
+### Reprise de synchro (`resumeSync`)
+Si une session a le statut `running` ou `error` avec `artists_scanned > 0`, le bouton **"Reprendre la synchro en cours"** apparaît au login. Il recharge la `date_from` et saute les artistes déjà scannés.
 
 ### Bouton "Tester la connexion"
-Lance Kaza — "Connexion" via `apiPut /me/player/play` pour vérifier que le playback fonctionne.
-Recherche le titre via `/search?q=track:connexion artist:kaza`.
+Lance Kaza — "Connexion" via `apiPut /me/player/play`. Recherche via `/search?q=track:connexion artist:kaza`.
 
 ---
 
@@ -105,61 +110,57 @@ Recherche le titre via `/search?q=track:connexion artist:kaza`.
 
 ```
 Browser
-  ├── Spotify API        (OAuth PKCE, lecture artistes/albums/tracks, player)
+  ├── Spotify API        (OAuth PKCE, artistes/albums/tracks, player controls)
   └── http://localhost:3001
-        ├── POST   /api/users/upsert                ← à chaque login
-        ├── POST   /api/sync/start                  ← début du scraping
-        ├── PATCH  /api/sync/:id                    ← maj stats en cours
-        ├── POST   /api/sync/:id/log                ← logs importants (ok/error/warn)
-        ├── GET    /api/sync/history/:user_id        ← historique sessions
-        ├── GET    /api/sync/:id/logs               ← logs d'une session
-        ├── POST   /api/releases                    ← save release + artiste
-        ├── POST   /api/releases/:id/tracks         ← save tracks d'une release
-        ├── GET    /api/feed/:user_id               ← feed (unseen par défaut)
-        ├── GET    /api/feed/:user_id/next          ← prochain titre à écouter
-        ├── PATCH  /api/feed/tracks/:id/listened    ← marquer écouté
-        ├── PATCH  /api/feed/releases/:id/status    ← liked/skipped/seen
-        └── GET    /api/health                      ← check serveur actif
+        ├── POST   /api/users/upsert
+        ├── POST   /api/sync/start
+        ├── PATCH  /api/sync/:id                    ← stats + last_artist_name + status
+        ├── POST   /api/sync/:id/log
+        ├── GET    /api/sync/resumable/:user_id      ← session reprise possible ?
+        ├── GET    /api/sync/history/:user_id
+        ├── GET    /api/sync/:id/logs
+        ├── POST   /api/releases
+        ├── POST   /api/releases/:id/tracks
+        ├── GET    /api/feed/:user_id                ← releases (filtre status)
+        ├── GET    /api/feed/:user_id/tracks         ← tracks non écoutées (avec dbId)
+        ├── GET    /api/feed/:user_id/uris           ← URIs déjà en base (dédup)
+        ├── GET    /api/feed/:user_id/stats          ← artists_total + releases + tracks
+        ├── GET    /api/feed/:user_id/listen-stats   ← remaining / mois / année / all-time
+        ├── GET    /api/feed/:user_id/next           ← prochain titre à écouter
+        ├── PATCH  /api/feed/tracks/:id/listened     ← marquer écouté (auto au changement de son)
+        ├── PATCH  /api/feed/releases/:id/status     ← unseen/seen/liked/skipped
+        └── GET    /api/health
 ```
 
 ### Lancer le backend
 ```bash
 cd server
-cp .env.example .env      # puis remplir DB_PASSWORD etc.
+cp .env.example .env      # remplir DB_PASSWORD etc.
 npm install
-npm run dev               # nodemon — redémarre auto sur changement
+npm run dev               # nodemon — redémarre auto
 ```
 
 ---
 
 ## Schéma base de données (`create.sql`)
 
-### Tables
-
 | Table | Rôle |
 |---|---|
 | `users` | Compte Spotify (spotify_id, display_name, avatar, product) |
-| `sync_sessions` | Historique des syncs (dates, stats, status running/completed/error) |
-| `sync_logs` | Logs ligne par ligne de chaque session (level: info/ok/warn/error/wait) |
-| `artists` | Cache des artistes suivis (évite de re-fetcher) |
+| `sync_sessions` | Historique des syncs — inclut `last_artist_name` pour la reprise |
+| `sync_logs` | Logs ligne par ligne (level: info/ok/warn/error/wait) |
+| `artists` | Cache des artistes suivis |
 | `user_artists` | Liaison user ↔ artistes suivis |
-| `releases` | Albums/singles trouvés (titre, type, date, cover, spotify_url) |
-| `tracks` | Titres individuels d'une release — **file d'attente de découverte** |
-| `discovery_status` | Statut user × release (unseen / seen / liked / skipped) |
+| `releases` | Albums/singles trouvés |
+| `tracks` | File d'attente de découverte (`listened` BOOLEAN + `listened_at`) |
+| `discovery_status` | Statut user × release (unseen/seen/liked/skipped) |
 
-### File d'attente de découverte
-`tracks.listened` (BOOLEAN, défaut `false`) + `tracks.listened_at` (DATETIME, défaut NULL).
-
+### Migration base existante
 ```sql
--- Prochain titre à écouter
-SELECT * FROM tracks
-WHERE user_id = ? AND listened = false
-ORDER BY id ASC
-LIMIT 1;
+-- sql/migrations/001_add_last_artist_name.sql
+ALTER TABLE sync_sessions
+  ADD COLUMN last_artist_name VARCHAR(255) DEFAULT NULL AFTER tracks_added;
 ```
-
-Le plus petit `id` avec `listened = false` = prochain titre à découvrir.
-Passe à `true` dès que l'utilisateur l'a écouté → le suivant remonte automatiquement.
 
 ---
 
@@ -167,50 +168,71 @@ Passe à `true` dès que l'utilisateur l'a écouté → le suivant remonte autom
 
 | Composant | Rôle |
 |---|---|
-| `StoreProvider` | Context global — auth, scraping state, stats, logs, feed |
+| `StoreProvider` | Context global — auth, scraping, stats, feed, rate-limit, player |
 | `Home` | Page de login (mobile + desktop) |
-| `WebApp` | Layout desktop (sidebar gauche + contenu principal) |
-| `MobileApp` | Layout mobile avec onglets (Scrapping / À écouter) |
-| `DateRangePanel` | Sélecteur de date + bouton lancer sync |
-| `ScrapingStatusPanel` | Stats en temps réel (artistes, sorties, titres, progress) |
-| `NextCallPanel` | Countdown avant le prochain appel API |
+| `WebApp` | Layout desktop (sidebar + contenu) |
+| `MobileApp` | Layout mobile — 3 onglets : Scrapping / À écouter / Stats |
+| `DateRangePanel` | Date + bouton Lancer / Reprendre la synchro / Tester connexion |
+| `ScrapingStatusPanel` | Stats temps réel (3 boîtes égales : Artistes / Sorties / Titres) |
+| `NextCallPanel` | Countdown + sélecteur délai (10/20/30s + jitter 1-3s) |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` / `FeedItem` | Feed des sorties trouvées |
-| `PlayerBar` / `MiniPlayer` | Lecture en cours via `currently-playing` (poll toutes les 5s) |
+| `FeedList` / `FeedItem` | Feed avec barres égaliseur animées sur le son en cours |
+| `VosEcoutesPanel` | Stats d'écoute (restantes / mois / année / all-time) |
+| `PlayerBar` | Barre du bas desktop — prev/play-pause/next (feed) + SeekBar + position |
+| `SeekBar` | Barre de progression cliquable/draggable → `PUT /me/player/seek` |
+| `MiniPlayer` | Barre compacte mobile — lecture en cours |
 
 ---
 
-## Points d'attention
+## Rate limit Spotify (guard module-level)
 
-- Le `PLAYLIST_ID` et les scopes `playlist-modify-*` sont des héritages à supprimer une fois le backend en place
-- La déduplication se fait aujourd'hui en mémoire (`addedUris` Set) → à déporter en DB côté backend
-- `user-read-currently-playing` est utilisé par le player bar (poll 5s) — à conserver
-- Le scraping est entièrement client-side, ce qui force les délais longs (rate limit) — avec un backend on pourrait optimiser
+Variables `_rlUntil` (timestamp ms) et `_rlNotify` (callback React).  
+`apiGet`, `apiPut`, `apiPost` vérifient `_rlUntil` avant chaque appel.  
+Sur 429 → `_rlSet(retryMs)` bloque tous les appels player jusqu'à expiration.  
+L'UI affiche un warning avec countdown dans le PlayerBar.
+
+---
+
+## Comportement "marquer comme écouté"
+
+- `prevUriRef` stocke l'URI du son précédent
+- Quand `now?.uri` change → l'URI précédente vient de se terminer
+- Si elle est dans le feed ET a un `dbId` → `PATCH /api/feed/tracks/:id/listened`
+- Animation slide-right + suppression du feed après 600ms
+- Stats "Vos écoutes" rafraîchies automatiquement
+- `listenedUrisRef` évite les doubles appels dans la même session
+
+**Important :** seuls les items chargés depuis la DB au login ont un `dbId`. Les items ajoutés pendant la sync courante seront marqués au login suivant.
 
 ---
 
 ## Bugs connus / fixes appliqués
 
-### mysql2 — `req.params` toujours string → `Incorrect arguments to mysqld_stmt_execute`
-mysql2 en mode `execute()` (prepared statements) est strict sur les types. `req.params.user_id` et `req.params.id` sont toujours des **strings** en Express, mais MySQL attend un `INT`. Il faut systématiquement caster avec `parseInt(req.params.user_id, 10)` avant de passer la valeur à `db.execute()`. Même chose pour `req.body.user_id` dans les endpoints PATCH.
-
-**Fichiers corrigés :** `server/routes/feed.js` (tous les endpoints), `server/routes/sync.js` (`GET /history/:user_id`).
-
-**Pattern à appliquer partout :**
+### mysql2 — params toujours string
+`req.params.user_id` est une string en Express, MySQL attend un INT.
 ```js
 const userId = parseInt(req.params.user_id, 10);
 if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
 ```
+Appliqué dans tous les endpoints de `feed.js` et `sync.js`.
 
-### Requêtes SQL utiles pour débugger
+### SeekBar — race condition useEffect
+Les listeners `mousemove`/`mouseup` doivent être attachés **directement dans `onMouseDown`**, pas dans un `useEffect`. Sinon un clic rapide (mousedown + mouseup) se termine avant que React ait re-rendu et attaché les listeners.
+
+### Requêtes SQL utiles
 ```sql
--- Derniers logs de sync (toutes sessions)
-SELECT sl.id, ss.id AS session_id, ss.user_id, sl.level, sl.message, sl.created_at
-FROM sync_logs sl
-JOIN sync_sessions ss ON ss.id = sl.session_id
-ORDER BY sl.created_at DESC
-LIMIT 50;
+-- Derniers logs de sync
+SELECT sl.id, ss.id AS session_id, sl.level, sl.message, sl.created_at
+FROM sync_logs sl JOIN sync_sessions ss ON ss.id = sl.session_id
+ORDER BY sl.created_at DESC LIMIT 50;
 
--- Historique sessions d'un user (remplacer 1 par l'id MySQL du user)
+-- Sessions d'un user
 SELECT * FROM sync_sessions WHERE user_id = 1 ORDER BY started_at DESC;
+
+-- Tracks écoutées / non écoutées
+SELECT t.title, a.name AS artist, t.listened, t.listened_at
+FROM tracks t
+JOIN releases r ON r.id = t.release_id
+JOIN artists a ON a.id = r.artist_id
+WHERE t.user_id = 1 ORDER BY t.id ASC;
 ```
