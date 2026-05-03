@@ -38,6 +38,27 @@ router.get('/:user_id', async (req, res) => {
   }
 });
 
+// GET /api/feed/:user_id/stats — compteurs DB pour affichage "avant sync"
+router.get('/:user_id/stats', async (req, res) => {
+  const userId = parseInt(req.params.user_id, 10);
+  if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
+
+  try {
+    const [[{ artists }]]  = await db.execute('SELECT COUNT(*) AS artists FROM user_artists WHERE user_id = ?', [userId]);
+    const [[{ releases }]] = await db.execute(
+      'SELECT COUNT(DISTINCT r.id) AS releases FROM releases r JOIN user_artists ua ON ua.artist_id = r.artist_id WHERE ua.user_id = ?',
+      [userId]
+    );
+    const [[{ tracks }]]   = await db.execute('SELECT COUNT(*) AS tracks FROM tracks WHERE user_id = ?', [userId]);
+
+    console.log(`[feed/stats] user_id=${userId} → artists=${artists} releases=${releases} tracks=${tracks}`);
+    res.json({ artists, releases, tracks });
+  } catch (err) {
+    console.error('[feed/stats]', err.message, { userId });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/feed/:user_id/uris — tous les spotify_uri déjà en base (écoutés ou non)
 router.get('/:user_id/uris', async (req, res) => {
   const userId = parseInt(req.params.user_id, 10);
