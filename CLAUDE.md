@@ -12,6 +12,11 @@ Spotify+ backend v1.0.7 → http://localhost:3001
 Et `GET /api/health` retourne `{ "version": "1.0.7", ... }`.
 → Toujours vérifier que la version affichée correspond avant de tester.
 
+**⚠️ ERREUR RÉCURRENTE :** À chaque incrément de VERSION, mettre à jour **les 3 endroits simultanément** :
+1. `const VERSION = '1.0.X'` dans `server/server.js`
+2. `**Version actuelle : \`1.0.X\`**` dans ce fichier CLAUDE.md
+3. Le bloc d'exemple ` ```Spotify+ backend v1.0.X``` ` juste au-dessus
+
 ---
 
 # ⚠️ ERREUR RÉCURRENTE DE CLAUDE — Worktree vs dépôt principal
