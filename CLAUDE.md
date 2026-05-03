@@ -3,7 +3,7 @@
 La constante `VERSION` dans `server/server.js` doit être incrémentée à **chaque modification du backend**.
 Format : `1.0.X` — X = numéro de patch, à incrémenter de 1 à chaque PR / session de fix.
 
-**Version actuelle : `1.0.4`**
+**Version actuelle : `1.0.5`**
 
 Au démarrage, le serveur affiche :
 ```

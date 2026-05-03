@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 
 const app = express();
 
