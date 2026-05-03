@@ -153,3 +153,31 @@ Passe à `true` dès que l'utilisateur l'a écouté → le suivant remonte autom
 - La déduplication se fait aujourd'hui en mémoire (`addedUris` Set) → à déporter en DB côté backend
 - `user-read-currently-playing` est utilisé par le player bar (poll 5s) — à conserver
 - Le scraping est entièrement client-side, ce qui force les délais longs (rate limit) — avec un backend on pourrait optimiser
+
+---
+
+## Bugs connus / fixes appliqués
+
+### mysql2 — `req.params` toujours string → `Incorrect arguments to mysqld_stmt_execute`
+mysql2 en mode `execute()` (prepared statements) est strict sur les types. `req.params.user_id` et `req.params.id` sont toujours des **strings** en Express, mais MySQL attend un `INT`. Il faut systématiquement caster avec `parseInt(req.params.user_id, 10)` avant de passer la valeur à `db.execute()`. Même chose pour `req.body.user_id` dans les endpoints PATCH.
+
+**Fichiers corrigés :** `server/routes/feed.js` (tous les endpoints), `server/routes/sync.js` (`GET /history/:user_id`).
+
+**Pattern à appliquer partout :**
+```js
+const userId = parseInt(req.params.user_id, 10);
+if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
+```
+
+### Requêtes SQL utiles pour débugger
+```sql
+-- Derniers logs de sync (toutes sessions)
+SELECT sl.id, ss.id AS session_id, ss.user_id, sl.level, sl.message, sl.created_at
+FROM sync_logs sl
+JOIN sync_sessions ss ON ss.id = sl.session_id
+ORDER BY sl.created_at DESC
+LIMIT 50;
+
+-- Historique sessions d'un user (remplacer 1 par l'id MySQL du user)
+SELECT * FROM sync_sessions WHERE user_id = 1 ORDER BY started_at DESC;
+```

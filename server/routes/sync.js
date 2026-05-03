@@ -69,14 +69,17 @@ router.post('/:id/log', async (req, res) => {
 
 // GET /api/sync/history/:user_id
 router.get('/history/:user_id', async (req, res) => {
+  const userId = parseInt(req.params.user_id, 10);
+  if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
+
   try {
     const [rows] = await db.execute(
       'SELECT * FROM sync_sessions WHERE user_id = ? ORDER BY started_at DESC LIMIT 20',
-      [req.params.user_id]
+      [userId]
     );
     res.json(rows);
   } catch (err) {
-    console.error('[sync/history]', err.message);
+    console.error('[sync/history]', err.message, { userId });
     res.status(500).json({ error: err.message });
   }
 });
