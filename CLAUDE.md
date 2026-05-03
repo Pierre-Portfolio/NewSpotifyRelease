@@ -1,3 +1,19 @@
+# ⚠️ PRIORITÉ ABSOLUE — Version du build serveur
+
+La constante `VERSION` dans `server/server.js` doit être incrémentée à **chaque modification du backend**.
+Format : `1.0.X` — X = numéro de patch, à incrémenter de 1 à chaque PR / session de fix.
+
+**Version actuelle : `1.0.3`**
+
+Au démarrage, le serveur affiche :
+```
+Spotify+ backend v1.0.3 → http://localhost:3001
+```
+Et `GET /api/health` retourne `{ "version": "1.0.3", ... }`.
+→ Toujours vérifier que la version affichée correspond avant de tester.
+
+---
+
 # Spotify+ · Nouvelles Sorties — Contexte projet
 
 ## Vue d'ensemble

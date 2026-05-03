@@ -7,8 +7,10 @@ router.get('/:user_id', async (req, res) => {
   const userId = parseInt(req.params.user_id, 10);
   const { status = 'unseen', limit = 50, offset = 0 } = req.query;
 
+  const limitInt  = parseInt(limit, 10)  || 50;
+  const offsetInt = parseInt(offset, 10) || 0;
   if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
-  console.log(`[feed/get] user_id=${userId} status=${status} limit=${limit} offset=${offset}`);
+  console.log(`[feed/get] user_id=${userId} status=${status} limit=${limitInt} offset=${offsetInt}`);
 
   try {
     const [rows] = await db.execute(`
@@ -26,8 +28,8 @@ router.get('/:user_id', async (req, res) => {
                            ON ds.release_id = r.id AND ds.user_id = ?
       WHERE COALESCE(ds.status, 'unseen') = ?
       ORDER BY r.release_date DESC
-      LIMIT ? OFFSET ?
-    `, [userId, userId, status, parseInt(limit, 10), parseInt(offset, 10)]);
+      LIMIT ${limitInt} OFFSET ${offsetInt}
+    `, [userId, userId, status]);
 
     res.json(rows);
   } catch (err) {
@@ -59,8 +61,9 @@ router.get('/:user_id/tracks', async (req, res) => {
   const userId = parseInt(req.params.user_id, 10);
   const { limit = 200 } = req.query;
 
+  const limitInt = parseInt(limit, 10) || 200;
   if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
-  console.log(`[feed/tracks] user_id=${userId} limit=${limit}`);
+  console.log(`[feed/tracks] user_id=${userId} limit=${limitInt}`);
 
   try {
     const [rows] = await db.execute(`
@@ -76,8 +79,8 @@ router.get('/:user_id/tracks', async (req, res) => {
       JOIN artists  a ON a.id = r.artist_id
       WHERE t.user_id = ? AND t.listened = 0
       ORDER BY t.id ASC
-      LIMIT ?
-    `, [userId, parseInt(limit, 10)]);
+      LIMIT ${limitInt}
+    `, [userId]);
     res.json(rows);
   } catch (err) {
     console.error('[feed/tracks]', err.message, { userId, limit });
