@@ -36,6 +36,7 @@ CREATE TABLE sync_sessions (
   artists_scanned INT UNSIGNED DEFAULT 0,
   releases_found  INT UNSIGNED DEFAULT 0,
   tracks_added    INT UNSIGNED DEFAULT 0,
+  last_artist_name VARCHAR(255) DEFAULT NULL,
   status          ENUM('running','completed','error','paused') DEFAULT 'running',
   started_at      DATETIME DEFAULT NOW(),
   completed_at    DATETIME,

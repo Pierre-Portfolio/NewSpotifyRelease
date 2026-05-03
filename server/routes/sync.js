@@ -21,16 +21,17 @@ router.post('/start', async (req, res) => {
 });
 
 // PATCH /api/sync/:id
-// Body : { artists_total?, artists_scanned?, releases_found?, tracks_added?, status? }
+// Body : { artists_total?, artists_scanned?, releases_found?, tracks_added?, last_artist_name?, status? }
 router.patch('/:id', async (req, res) => {
-  const { artists_total, artists_scanned, releases_found, tracks_added, status } = req.body;
+  const { artists_total, artists_scanned, releases_found, tracks_added, last_artist_name, status } = req.body;
   const fields = [], values = [];
 
-  if (artists_total   != null) { fields.push('artists_total = ?');   values.push(artists_total); }
-  if (artists_scanned != null) { fields.push('artists_scanned = ?'); values.push(artists_scanned); }
-  if (releases_found  != null) { fields.push('releases_found = ?');  values.push(releases_found); }
-  if (tracks_added    != null) { fields.push('tracks_added = ?');    values.push(tracks_added); }
-  if (status          != null) {
+  if (artists_total    != null) { fields.push('artists_total = ?');    values.push(artists_total); }
+  if (artists_scanned  != null) { fields.push('artists_scanned = ?');  values.push(artists_scanned); }
+  if (releases_found   != null) { fields.push('releases_found = ?');   values.push(releases_found); }
+  if (tracks_added     != null) { fields.push('tracks_added = ?');     values.push(tracks_added); }
+  if (last_artist_name != null) { fields.push('last_artist_name = ?'); values.push(last_artist_name); }
+  if (status           != null) {
     fields.push('status = ?');
     values.push(status);
     if (status === 'completed' || status === 'error') fields.push('completed_at = NOW()');
@@ -63,6 +64,30 @@ router.post('/:id/log', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[sync/log]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/sync/resumable/:user_id
+// Retourne la session la plus recente interrompue (running ou error, avec au moins 1 artiste scanne)
+router.get('/resumable/:user_id', async (req, res) => {
+  const userId = parseInt(req.params.user_id, 10);
+  if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
+
+  try {
+    const [rows] = await db.execute(
+      `SELECT id, date_from, date_to, artists_scanned, artists_total, last_artist_name, status, started_at
+       FROM sync_sessions
+       WHERE user_id = ?
+         AND status IN ('running', 'error')
+         AND artists_scanned > 0
+       ORDER BY started_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    res.json(rows[0] || null);
+  } catch (err) {
+    console.error('[sync/resumable]', err.message);
     res.status(500).json({ error: err.message });
   }
 });

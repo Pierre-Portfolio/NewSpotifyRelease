@@ -3,14 +3,26 @@
 La constante `VERSION` dans `server/server.js` doit être incrémentée à **chaque modification du backend**.
 Format : `1.0.X` — X = numéro de patch, à incrémenter de 1 à chaque PR / session de fix.
 
-**Version actuelle : `1.0.5`**
+**Version actuelle : `1.0.6`**
 
 Au démarrage, le serveur affiche :
 ```
-Spotify+ backend v1.0.3 → http://localhost:3001
+Spotify+ backend v1.0.6 → http://localhost:3001
 ```
-Et `GET /api/health` retourne `{ "version": "1.0.3", ... }`.
+Et `GET /api/health` retourne `{ "version": "1.0.6", ... }`.
 → Toujours vérifier que la version affichée correspond avant de tester.
+
+---
+
+# ⚠️ ERREUR RÉCURRENTE DE CLAUDE — Worktree vs dépôt principal
+
+Claude travaille souvent dans un **worktree temporaire** (`\.claude\worktrees\...`) au lieu du dépôt principal.
+Les modifications dans le worktree ne sont **pas visibles dans GitHub Desktop** et ne peuvent pas être committées.
+
+**Règle absolue : toujours éditer les fichiers dans `C:\Users\petil\Documents\GitHub\NewSpotifyRelease\`**
+Jamais dans `.claude\worktrees\*`.
+
+Si des modifications ont été faites dans le worktree par erreur, les copier vers le dépôt principal avant de conclure.
 
 ---
 

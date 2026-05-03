@@ -204,7 +204,8 @@ function StoreProvider({ children }) {
   const [user,     setUser]       = React.useState(null);
   const [playlist, setPlaylist]   = React.useState(null);
 
-  const [dbUserId,  setDbUserId]           = React.useState(null);
+  const [dbUserId,         setDbUserId]         = React.useState(null);
+  const [resumableSession, setResumableSession] = React.useState(null);
   const [scraping, setScraping]           = React.useState(false);
   const [paused,   setPaused]             = React.useState(false);
   const pausedRef                         = React.useRef(false);
@@ -271,6 +272,9 @@ function StoreProvider({ children }) {
           }).then(u => {
             if (!u?.id) return;
             setDbUserId(u.id);
+            backendGet(`/api/sync/resumable/${u.id}`).then(s => {
+              if (s && s.id) setResumableSession(s);
+            }).catch(() => {});
             backendGet(`/api/feed/${u.id}/uris`).then(uris => {
               if (Array.isArray(uris)) uris.forEach(u => knownUrisRef.current.add(u));
             }).catch(() => {});
@@ -346,10 +350,22 @@ function StoreProvider({ children }) {
   };
   const waitWhilePaused = async () => { while (pausedRef.current) await sleep(500); };
 
+  const resumeSync = () => {
+    if (!resumableSession) return;
+    startSync({
+      skipCount:      resumableSession.artists_scanned || 0,
+      resumeDateFrom: (resumableSession.date_from || '').slice(0, 10),
+    });
+  };
+
   // ── SYNC ──
-  const startSync = async () => {
+  const startSync = async (options = {}) => {
     if (scraping) return;
-    if (!dateFrom) { setStatus('Sélectionne une date de début.', 'wait'); return; }
+    const { skipCount = 0, resumeDateFrom = null } = options;
+    const effectiveDateFrom = resumeDateFrom || dateFrom;
+    if (!effectiveDateFrom) { setStatus('Sélectionne une date de début.', 'wait'); return; }
+    if (resumeDateFrom) setDateFrom(resumeDateFrom);
+    setResumableSession(null);
 
     setScraping(true); setPaused(false);
     setLogs([]); setFeed([]); setProgress(0);
@@ -367,20 +383,21 @@ function StoreProvider({ children }) {
       // Créer la session en DB
       const sessionRes = await backendPost('/api/sync/start', {
         user_id:   dbUserId,
-        date_from: dateFrom,
+        date_from: effectiveDateFrom,
         date_to:   new Date().toISOString().slice(0, 10),
       });
       sessionId = sessionRes?.session_id || null;
       if (sessionId) log(`✓ Session #${sessionId} créée en base`, 'ok');
       else log('⚠ Backend non joignable — scraping sans sauvegarde DB', 'warn');
 
-      const cutoff  = new Date(dateFrom);
+      const cutoff  = new Date(effectiveDateFrom);
       const ceiling = new Date();
       log(`── Période : ${cutoff.toLocaleDateString('fr-FR')} → ${ceiling.toLocaleDateString('fr-FR')} ──`, 'info');
       setStatus('Chargement des artistes…', 'pulse');
 
       const seenUris = new Set(knownUrisRef.current);
-      let totalTracks = 0, totalReleases = 0, artistsScanned = 0, totalArtists = ESTIMATED_TOTAL;
+      let totalTracks = 0, totalReleases = 0, artistsScanned = skipCount, totalArtists = ESTIMATED_TOTAL;
+      let globalArtistIndex = 0;
       const avgDelay = delayChoice * 1000;
       let nextUrl = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
       let pageNum  = 0;
@@ -399,6 +416,8 @@ function StoreProvider({ children }) {
         log(`✓ ${artists.length} artiste(s) — page ${pageNum}`, 'ok');
 
         for (let i = 0; i < artists.length; i++) {
+          globalArtistIndex++;
+          if (globalArtistIndex <= skipCount) continue;
           await waitWhilePaused();
           const artist = artists[i];
           artistsScanned++;
@@ -496,12 +515,13 @@ function StoreProvider({ children }) {
             }
           }
 
-          // Mise à jour stats DB toutes les 10 artistes
-          if (sessionId && artistsScanned % 10 === 0) {
+          // Mise à jour stats DB après chaque artiste
+          if (sessionId) {
             backendPatch(`/api/sync/${sessionId}`, {
-              artists_scanned: artistsScanned,
-              releases_found:  totalReleases,
-              tracks_added:    totalTracks,
+              artists_scanned:  artistsScanned,
+              releases_found:   totalReleases,
+              tracks_added:     totalTracks,
+              last_artist_name: artist.name,
             }).catch(() => {});
           }
 
@@ -568,6 +588,7 @@ function StoreProvider({ children }) {
     dateFrom, setDateFrom,
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
+    resumableSession, resumeSync,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }
@@ -813,6 +834,15 @@ function DateRangePanel({ compact=false }) {
           </button>
         )}
       </div>
+      {!s.scraping && s.resumableSession && (
+        <button onClick={s.resumeSync}
+          style={{ width:'100%', marginTop:8, background:`${C.accent}14`, border:`1px solid ${C.accent}44`, borderRadius:6, padding: compact?'7px 10px':'8px 10px', cursor:'pointer', color:C.accent, fontSize:10, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
+          <div>↩ Reprendre la synchro en cours</div>
+          <div style={{ fontSize:9, color:C.muted, fontWeight:400, marginTop:2, fontFamily:'DM Mono,monospace' }}>
+            Depuis {(s.resumableSession.date_from || '').slice(0, 10)} · {s.resumableSession.artists_scanned} artiste(s) · {s.resumableSession.last_artist_name || '–'}
+          </div>
+        </button>
+      )}
       <button onClick={testConnection}
         style={{ width:'100%', marginTop:8, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding: compact?'6px 0':'7px 0', cursor:'pointer', color:C.muted, fontSize:10, fontWeight:600, letterSpacing:'0.04em' }}>
         ⚡ Tester la connexion
