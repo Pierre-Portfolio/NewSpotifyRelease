@@ -32,6 +32,20 @@ router.get('/:user_id', async (req, res) => {
   }
 });
 
+// GET /api/feed/:user_id/uris — tous les spotify_uri déjà en base (écoutés ou non)
+router.get('/:user_id/uris', async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      'SELECT spotify_uri FROM tracks WHERE user_id = ?',
+      [req.params.user_id]
+    );
+    res.json(rows.map(r => r.spotify_uri));
+  } catch (err) {
+    console.error('[feed/uris]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/feed/:user_id/tracks — tous les titres non écoutés avec contexte release/artiste
 router.get('/:user_id/tracks', async (req, res) => {
   const { limit = 200 } = req.query;
