@@ -126,40 +126,69 @@ function logoutClear() {
 // ════════════════════════════════════════════════
 // API HELPERS
 // ════════════════════════════════════════════════
+
+// ── Rate-limit guard (module-level) ──────────────
+let _rlUntil  = 0;          // timestamp ms jusqu'auquel on est bloqué
+let _rlNotify = null;       // callback → met à jour le state React du store
+function _rlSet(retryMs) {
+  _rlUntil = Date.now() + retryMs + 2000;
+  if (_rlNotify) _rlNotify(_rlUntil);
+}
+function _rlCheck() {
+  if (Date.now() < _rlUntil) return { error: 'rate_limited', blockedUntil: _rlUntil };
+  return null;
+}
+
 async function apiGet(url) {
+  const blocked = _rlCheck();
+  if (blocked) return null; // le polling currently-playing n'a pas besoin de throw
   const token = await getToken();
   const res   = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (res.status === 429) {
-    const raw    = res.headers.get('Retry-After');
+    const raw     = res.headers.get('Retry-After');
     const retryMs = raw !== null ? parseInt(raw) * 1000 : 60000;
-    const waitMs  = retryMs + 3000;
+    _rlSet(retryMs);
     const err = new Error('RATE_LIMIT');
     err.retryAfter = (retryMs/1000).toFixed(1);
-    err.waitMs  = waitMs;
-    err.waitSec = (waitMs/1000).toFixed(1);
+    err.waitMs  = retryMs + 2000;
+    err.waitSec = ((retryMs + 2000)/1000).toFixed(1);
     err.rawHeader = raw;
     throw err;
   }
   return res.json();
 }
 async function apiPut(url, body) {
+  const blocked = _rlCheck();
+  if (blocked) return blocked;
   const token = await getToken();
   const res   = await fetch(url, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 429) {
+    const raw = res.headers.get('Retry-After');
+    _rlSet(raw !== null ? parseInt(raw) * 1000 : 30000);
+    return { error: 'rate_limited', blockedUntil: _rlUntil };
+  }
   if (res.status === 204) return { ok: true };
   if (res.status === 403) return { error: 'forbidden' };
   if (res.status === 404) return { error: 'no_active_device' };
   return res.json().catch(() => ({ error: 'unknown' }));
 }
 async function apiPost(url) {
+  const blocked = _rlCheck();
+  if (blocked) return blocked;
   const token = await getToken();
   const res   = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
   });
+  if (res.status === 429) {
+    const raw = res.headers.get('Retry-After');
+    _rlSet(raw !== null ? parseInt(raw) * 1000 : 30000);
+    return { error: 'rate_limited', blockedUntil: _rlUntil };
+  }
   if (res.status === 204) return { ok: true };
   if (res.status === 403) return { error: 'forbidden' };
   if (res.status === 404) return { error: 'no_active_device' };
@@ -250,7 +279,8 @@ function StoreProvider({ children }) {
   const [eta,           setEta]           = React.useState('');
   const [feed,          setFeed]          = React.useState([]);
   const [logs,          setLogs]          = React.useState([]);
-  const [now,           setNow]           = React.useState(null);
+  const [now,             setNow]           = React.useState(null);
+  const [rateLimitUntil,  setRateLimitUntil] = React.useState(0);
   const [delayChoice,   setDelayChoice]   = React.useState(30);
 
   const weekAgo = new Date(Date.now() - 7*86400000);
@@ -403,6 +433,17 @@ function StoreProvider({ children }) {
       return F.map(f => f.spotifyUri === prevUri ? { ...f, removing: true } : f);
     });
   }, [now?.uri, dbUserId]);
+
+  // Connecte le guard module-level au state React
+  React.useEffect(() => {
+    _rlNotify = (until) => setRateLimitUntil(until);
+    return () => { _rlNotify = null; };
+  }, []);
+
+  const seek = async (positionMs) => {
+    const r = await apiPut(`https://api.spotify.com/v1/me/player/seek?position_ms=${Math.round(positionMs)}`);
+    if (!r?.error) setNow(n => n ? { ...n, current: Math.round(positionMs / 1000) } : n);
+  };
 
   const togglePause = () => {
     setPaused(p => {
@@ -652,6 +693,7 @@ function StoreProvider({ children }) {
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
     resumableSession, resumeSync,
+    rateLimitUntil, seek,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }
@@ -682,6 +724,71 @@ function ProgressBar({ pct, color=C.accent, height=3 }) {
   return (
     <div style={{ width:'100%', height, background:'#2a2a2a', borderRadius:99, overflow:'hidden' }}>
       <div style={{ width:`${pct}%`, height:'100%', background:color, borderRadius:99, transition:'width 0.6s linear' }} />
+    </div>
+  );
+}
+
+function SeekBar({ now }) {
+  const { seek } = useStore();
+  const barRef   = React.useRef(null);
+  const [hover,    setHover]    = React.useState(false);
+  const [dragging, setDragging] = React.useState(false);
+  const [localPct, setLocalPct] = React.useState(null);
+
+  const pct = (dragging && localPct !== null)
+    ? localPct
+    : (now.current / Math.max(now.duration, 1)) * 100;
+
+  const getPct = (clientX) => {
+    const r = barRef.current.getBoundingClientRect();
+    return Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100));
+  };
+
+  const onMouseDown = (e) => {
+    e.preventDefault();
+    setDragging(true);
+    setLocalPct(getPct(e.clientX));
+  };
+
+  React.useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e) => setLocalPct(getPct(e.clientX));
+    const onUp   = (e) => {
+      const p = getPct(e.clientX);
+      setDragging(false);
+      setLocalPct(null);
+      seek((p / 100) * now.duration * 1000);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup',   onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup',   onUp);
+    };
+  }, [dragging, now.duration]);
+
+  const showThumb = hover || dragging;
+
+  return (
+    <div ref={barRef}
+      onMouseDown={onMouseDown}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ flex:1, height:18, display:'flex', alignItems:'center', cursor:'pointer', position:'relative', userSelect:'none' }}>
+      {/* Track */}
+      <div style={{ width:'100%', height: showThumb ? 4 : 3, background:'#2a2a2a', borderRadius:99, overflow: showThumb ? 'visible' : 'hidden', transition:'height 0.15s', position:'relative' }}>
+        <div style={{ width:`${pct}%`, height:'100%', background:C.accent, borderRadius:99, transition: dragging ? 'none' : 'width 0.6s linear' }} />
+      </div>
+      {/* Thumb */}
+      <div style={{
+        position:'absolute', left:`${pct}%`, top:'50%',
+        transform:'translate(-50%, -50%)',
+        width:12, height:12, borderRadius:'50%', background:'#fff',
+        boxShadow:'0 1px 4px rgba(0,0,0,0.5)',
+        opacity: showThumb ? 1 : 0,
+        transition: dragging ? 'none' : 'opacity 0.15s',
+        pointerEvents:'none',
+      }} />
     </div>
   );
 }
