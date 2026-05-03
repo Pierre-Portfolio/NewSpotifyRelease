@@ -44,15 +44,19 @@ router.get('/:user_id/stats', async (req, res) => {
   if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
 
   try {
-    const [[{ artists }]]  = await db.execute('SELECT COUNT(*) AS artists FROM user_artists WHERE user_id = ?', [userId]);
     const [[{ releases }]] = await db.execute(
       'SELECT COUNT(DISTINCT r.id) AS releases FROM releases r JOIN user_artists ua ON ua.artist_id = r.artist_id WHERE ua.user_id = ?',
       [userId]
     );
-    const [[{ tracks }]]   = await db.execute('SELECT COUNT(*) AS tracks FROM tracks WHERE user_id = ?', [userId]);
+    const [[{ tracks }]] = await db.execute('SELECT COUNT(*) AS tracks FROM tracks WHERE user_id = ?', [userId]);
+    // artists_total = total d'artistes Spotify suivis, tiré de la dernière session complétée
+    const [[{ artists_total }]] = await db.execute(
+      'SELECT COALESCE(MAX(artists_total), 0) AS artists_total FROM sync_sessions WHERE user_id = ? AND status = ?',
+      [userId, 'completed']
+    );
 
-    console.log(`[feed/stats] user_id=${userId} → artists=${artists} releases=${releases} tracks=${tracks}`);
-    res.json({ artists, releases, tracks });
+    console.log(`[feed/stats] user_id=${userId} → artists_total=${artists_total} releases=${releases} tracks=${tracks}`);
+    res.json({ artists_total, releases, tracks });
   } catch (err) {
     console.error('[feed/stats]', err.message, { userId });
     res.status(500).json({ error: err.message });
