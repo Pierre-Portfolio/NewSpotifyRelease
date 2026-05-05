@@ -21,9 +21,10 @@ router.post('/start', async (req, res) => {
 });
 
 // PATCH /api/sync/:id
-// Body : { artists_total?, artists_scanned?, releases_found?, tracks_added?, last_artist_name?, status? }
+// Body : { artists_total?, artists_scanned?, releases_found?, tracks_added?, last_artist_name?, artist_spotify_id?, status? }
+// artist_spotify_id : si présent, met à jour last_scraped_at = NOW() pour cet artiste
 router.patch('/:id', async (req, res) => {
-  const { artists_total, artists_scanned, releases_found, tracks_added, last_artist_name, status } = req.body;
+  const { artists_total, artists_scanned, releases_found, tracks_added, last_artist_name, artist_spotify_id, status } = req.body;
   const fields = [], values = [];
 
   if (artists_total    != null) { fields.push('artists_total = ?');    values.push(artists_total); }
@@ -37,11 +38,19 @@ router.patch('/:id', async (req, res) => {
     if (status === 'completed' || status === 'error') fields.push('completed_at = NOW()');
   }
 
-  if (!fields.length) return res.status(400).json({ error: 'rien à mettre à jour' });
-  values.push(req.params.id);
+  if (!fields.length && !artist_spotify_id) return res.status(400).json({ error: 'rien à mettre à jour' });
 
   try {
-    await db.execute(`UPDATE sync_sessions SET ${fields.join(', ')} WHERE id = ?`, values);
+    if (fields.length) {
+      values.push(req.params.id);
+      await db.execute(`UPDATE sync_sessions SET ${fields.join(', ')} WHERE id = ?`, values);
+    }
+    if (artist_spotify_id) {
+      await db.execute(
+        'UPDATE artists SET last_scraped_at = NOW() WHERE spotify_id = ?',
+        [artist_spotify_id]
+      );
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error('[sync/patch]', err.message);

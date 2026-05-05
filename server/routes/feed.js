@@ -111,9 +111,9 @@ router.get('/:user_id/uris', async (req, res) => {
 // GET /api/feed/:user_id/tracks — tous les titres non écoutés avec contexte release/artiste
 router.get('/:user_id/tracks', async (req, res) => {
   const userId = parseInt(req.params.user_id, 10);
-  const { limit = 200 } = req.query;
+  const { limit = 1000 } = req.query;
 
-  const limitInt = parseInt(limit, 10) || 200;
+  const limitInt = parseInt(limit, 10) || 1000;
   if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
   console.log(`[feed/tracks] user_id=${userId} limit=${limitInt}`);
 

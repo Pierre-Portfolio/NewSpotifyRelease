@@ -266,6 +266,13 @@ function StoreProvider({ children }) {
   const knownUrisRef                      = React.useRef(new Set());
   const listenedUrisRef                   = React.useRef(new Set());
   const prevUriRef                        = React.useRef(null);
+  const [loopEnabled, setLoopEnabled]     = React.useState(false);
+  const loopEnabledRef                    = React.useRef(false);
+  const feedRef                           = React.useRef([]);
+  const prevPositionRef                   = React.useRef(0);
+  const prevDurationRef                   = React.useRef(0);
+  React.useEffect(() => { loopEnabledRef.current = loopEnabled; }, [loopEnabled]);
+  React.useEffect(() => { feedRef.current = feed; }, [feed]);
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
 
   const [stats,         setStats]         = React.useState({ artists:0, total:0, releases:0, tracks:0 });
@@ -434,7 +441,38 @@ function StoreProvider({ children }) {
       setTimeout(() => setFeed(F2 => F2.filter(f => f.spotifyUri !== prevUri)), 600);
       return F.map(f => f.spotifyUri === prevUri ? { ...f, removing: true } : f);
     });
+
+    // Auto-avance : si rien ne joue et que prevUri était dans le feed → passer au suivant
+    if (!currentUri && !loopEnabledRef.current) {
+      const f = feedRef.current;
+      const idx = f.findIndex(item => item.spotifyUri === prevUri);
+      if (idx !== -1) {
+        const next = f[idx + 1] ?? f[0];
+        if (next) playTrack(next.spotifyUri);
+      }
+    }
   }, [now?.uri, dbUserId]);
+
+  // ── Détecter le redémarrage du même morceau (position reset) ──
+  React.useEffect(() => {
+    if (!now) { prevPositionRef.current = 0; prevDurationRef.current = 0; return; }
+    const prevPos = prevPositionRef.current;
+    const prevDur = prevDurationRef.current;
+    prevPositionRef.current = now.current;
+    prevDurationRef.current = now.duration;
+
+    // Position revenue à < 5s après avoir été proche de la fin → redémarrage détecté
+    if (now.duration > 15 && now.current < 5 && prevPos > prevDur - 10 && prevDur > 0) {
+      if (!loopEnabledRef.current) {
+        const f = feedRef.current;
+        const idx = f.findIndex(item => item.spotifyUri === now.uri);
+        if (idx !== -1) {
+          const next = f[idx + 1] ?? f[0];
+          if (next) playTrack(next.spotifyUri);
+        }
+      }
+    }
+  }, [now?.current]);
 
   // Connecte le guard module-level au state React
   React.useEffect(() => {
@@ -621,13 +659,14 @@ function StoreProvider({ children }) {
             }
           }
 
-          // Mise à jour stats DB après chaque artiste
+          // Mise à jour stats DB après chaque artiste + horodatage du dernier scrapping
           if (sessionId) {
             backendPatch(`/api/sync/${sessionId}`, {
-              artists_scanned:  artistsScanned,
-              releases_found:   totalReleases,
-              tracks_added:     totalTracks,
-              last_artist_name: artist.name,
+              artists_scanned:   artistsScanned,
+              releases_found:    totalReleases,
+              tracks_added:      totalTracks,
+              last_artist_name:  artist.name,
+              artist_spotify_id: artist.id,
             }).catch(() => {});
           }
 
@@ -697,6 +736,7 @@ function StoreProvider({ children }) {
     listenStats, setListenStats,
     resumableSession, resumeSync,
     rateLimitUntil, seek,
+    loopEnabled, setLoopEnabled,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }
@@ -900,7 +940,7 @@ function MiniPlayer() {
 }
 
 function PlayerBar() {
-  const { now, feed } = useStore();
+  const { now, feed, loopEnabled, setLoopEnabled } = useStore();
 
   const togglePlayPause = async () => {
     if (!now) return;
@@ -909,6 +949,12 @@ function PlayerBar() {
     } else {
       await apiPut('https://api.spotify.com/v1/me/player/play');
     }
+  };
+
+  const toggleLoop = async () => {
+    const next = !loopEnabled;
+    setLoopEnabled(next);
+    await apiPut(`https://api.spotify.com/v1/me/player/repeat?state=${next ? 'track' : 'off'}`);
   };
 
   // Navigation dans le feed des nouveautés
@@ -965,6 +1011,16 @@ function PlayerBar() {
             <svg width="16" height="16" viewBox="0 0 16 16" fill={C.muted}>
               <rect x="13" y="1" width="2" height="14" rx="1"/>
               <path d="M3 1l9 7-9 7V1z"/>
+            </svg>
+          </button>
+          {/* Boucle */}
+          <button onClick={toggleLoop} style={{ background:'none', border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', padding:6, borderRadius:6 }} title={loopEnabled ? 'Désactiver la boucle' : 'Répéter ce titre'}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={loopEnabled ? C.accent : C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="17 1 21 5 17 9"/>
+              <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+              <polyline points="7 23 3 19 7 15"/>
+              <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+              {loopEnabled && <text x="9" y="15" fontSize="8" fill={C.accent} stroke="none" fontWeight="bold">1</text>}
             </svg>
           </button>
         </div>
