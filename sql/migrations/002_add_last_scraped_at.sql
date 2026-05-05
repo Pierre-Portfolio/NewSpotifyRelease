@@ -5,7 +5,7 @@
 USE spotifyplus;
 
 ALTER TABLE artists
-  ADD COLUMN last_scraped_at DATETIME DEFAULT NULL
+  ADD COLUMN last_scraped_at DATETIME DEFAULT '2016-01-01 00:00:00'
   AFTER last_fetched_at;
 
 -- Initialiser tous les artistes existants au 15 mars 2026

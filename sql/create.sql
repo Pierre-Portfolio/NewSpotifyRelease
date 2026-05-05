@@ -59,7 +59,8 @@ CREATE TABLE artists (
   spotify_id      VARCHAR(100) NOT NULL UNIQUE,
   name            VARCHAR(255) NOT NULL,
   image_url       TEXT,
-  last_fetched_at DATETIME
+  last_fetched_at DATETIME,
+  last_scraped_at DATETIME DEFAULT '2016-01-01 00:00:00'
 );
 
 -- USER_ARTISTS
