@@ -69,8 +69,11 @@ router.get('/:user_id/listen-stats', async (req, res) => {
   if (isNaN(userId)) return res.status(400).json({ error: 'user_id invalide (entier attendu)' });
 
   try {
-    const [[{ remaining }]]  = await db.execute(
+    const [[{ remaining }]]    = await db.execute(
       'SELECT COUNT(*) AS remaining FROM tracks WHERE user_id = ? AND listened = 0', [userId]
+    );
+    const [[{ remaining_ms }]] = await db.execute(
+      'SELECT COALESCE(SUM(duration_ms), 0) AS remaining_ms FROM tracks WHERE user_id = ? AND listened = 0', [userId]
     );
     const [[{ this_month }]] = await db.execute(
       'SELECT COUNT(*) AS this_month FROM tracks WHERE user_id = ? AND listened = 1 AND YEAR(listened_at) = YEAR(NOW()) AND MONTH(listened_at) = MONTH(NOW())', [userId]
@@ -82,8 +85,8 @@ router.get('/:user_id/listen-stats', async (req, res) => {
       'SELECT COUNT(*) AS all_time FROM tracks WHERE user_id = ? AND listened = 1', [userId]
     );
 
-    console.log(`[feed/listen-stats] user_id=${userId} → remaining=${remaining} month=${this_month} year=${this_year} all=${all_time}`);
-    res.json({ remaining, this_month, this_year, all_time });
+    console.log(`[feed/listen-stats] user_id=${userId} → remaining=${remaining} remaining_ms=${remaining_ms} month=${this_month} year=${this_year} all=${all_time}`);
+    res.json({ remaining, remaining_ms, this_month, this_year, all_time });
   } catch (err) {
     console.error('[feed/listen-stats]', err.message, { userId });
     res.status(500).json({ error: err.message });

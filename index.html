@@ -276,7 +276,7 @@ function StoreProvider({ children }) {
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
 
   const [stats,         setStats]         = React.useState({ artists:0, total:0, releases:0, tracks:0 });
-  const [listenStats,   setListenStats]   = React.useState({ remaining:0, this_month:0, this_year:0, all_time:0 });
+  const [listenStats,   setListenStats]   = React.useState({ remaining:0, remaining_ms:0, this_month:0, this_year:0, all_time:0 });
   const [progress,      setProgress]      = React.useState(0);
   const [currentArtist, setCurrentArtist] = React.useState('');
   const [statusMsg,     setStatusMsg]     = React.useState('Prêt.');
@@ -292,8 +292,6 @@ function StoreProvider({ children }) {
   const delayChoiceRef = React.useRef(30);
   React.useEffect(() => { delayChoiceRef.current = delayChoice; }, [delayChoice]);
 
-  const weekAgo = new Date(Date.now() - 7*86400000);
-  const [dateFrom, setDateFrom] = React.useState(weekAgo.toISOString().slice(0,10));
 
   const log = React.useCallback((msg, type='info') => {
     const time = new Date().toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
@@ -366,7 +364,7 @@ function StoreProvider({ children }) {
             }).catch(() => {});
             backendGet(`/api/feed/${u.id}/listen-stats`).then(s => {
               if (!s || typeof s.remaining === 'undefined') return;
-              setListenStats({ remaining: s.remaining, this_month: s.this_month, this_year: s.this_year, all_time: s.all_time });
+              setListenStats({ remaining: s.remaining, remaining_ms: s.remaining_ms || 0, this_month: s.this_month, this_year: s.this_year, all_time: s.all_time });
             }).catch(() => {});
           }).catch(() => {});
         } else {
@@ -434,7 +432,7 @@ function StoreProvider({ children }) {
       // Rafraîchir les stats d'écoute
       backendGet(`/api/feed/${dbUserId}/listen-stats`).then(s => {
         if (s?.remaining !== undefined)
-          setListenStats({ remaining: s.remaining, this_month: s.this_month, this_year: s.this_year, all_time: s.all_time });
+          setListenStats({ remaining: s.remaining, remaining_ms: s.remaining_ms || 0, this_month: s.this_month, this_year: s.this_year, all_time: s.all_time });
       }).catch(() => {});
 
       // Animation puis suppression
@@ -496,19 +494,14 @@ function StoreProvider({ children }) {
 
   const resumeSync = () => {
     if (!resumableSession) return;
-    startSync({
-      skipCount:      resumableSession.artists_scanned || 0,
-      resumeDateFrom: (resumableSession.date_from || '').slice(0, 10),
-    });
+    if (!resumableSession) return;
+    startSync({ skipCount: resumableSession.artists_scanned || 0 });
   };
 
   // ── SYNC ──
   const startSync = async (options = {}) => {
     if (scraping) return;
-    const { skipCount = 0, resumeDateFrom = null } = options;
-    const effectiveDateFrom = resumeDateFrom || dateFrom;
-    if (!effectiveDateFrom) { setStatus('Sélectionne une date de début.', 'wait'); return; }
-    if (resumeDateFrom) setDateFrom(resumeDateFrom);
+    const { skipCount = 0 } = options;
     setResumableSession(null);
 
     setScraping(true); setPaused(false);
@@ -524,19 +517,23 @@ function StoreProvider({ children }) {
       if (!me?.id) { log('Erreur : impossible de récupérer le compte.', 'error'); setScraping(false); return; }
       log(`✓ Compte : ${me.display_name || me.id}`, 'ok');
 
+      // Récupérer les dates de dernier scrapping par artiste
+      const today = new Date().toISOString().slice(0, 10);
+      const scrapedDates = (dbUserId ? await backendGet(`/api/artists/scraped-dates/${dbUserId}`).catch(() => ({})) : {}) || {};
+      log(`✓ Dates de scrapping chargées (${Object.keys(scrapedDates).length} artiste(s) connus)`, 'ok');
+
       // Créer la session en DB
       const sessionRes = await backendPost('/api/sync/start', {
         user_id:   dbUserId,
-        date_from: effectiveDateFrom,
-        date_to:   new Date().toISOString().slice(0, 10),
+        date_from: '2016-01-01',
+        date_to:   today,
       });
       sessionId = sessionRes?.session_id || null;
       if (sessionId) log(`✓ Session #${sessionId} créée en base`, 'ok');
       else log('⚠ Backend non joignable — scraping sans sauvegarde DB', 'warn');
 
-      const cutoff  = new Date(effectiveDateFrom);
       const ceiling = new Date();
-      log(`── Période : ${cutoff.toLocaleDateString('fr-FR')} → ${ceiling.toLocaleDateString('fr-FR')} ──`, 'info');
+      log('── Scraping par date individuelle par artiste ──', 'info');
       setStatus('Chargement des artistes…', 'pulse');
 
       const seenUris = new Set(knownUrisRef.current);
@@ -570,12 +567,13 @@ function StoreProvider({ children }) {
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
+          const cutoff = new Date(scrapedDates[artist.id] || '2016-01-01');
           const albumsData = await apiGet(
             `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`
           );
           if (albumsData?.items) {
             const inRange = albumsData.items.filter(a => { const d = new Date(a.release_date); return d >= cutoff && d <= ceiling; });
-            if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie`, 'info');
+            if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
 
             for (const album of albumsData.items) {
               const rDate = new Date(album.release_date);
@@ -731,7 +729,6 @@ function StoreProvider({ children }) {
     scraping, paused, togglePause, startSync, logout,
     stats, progress, currentArtist, statusMsg, statusMode,
     nextCall, nextCallTotal, eta, feed, logs, now,
-    dateFrom, setDateFrom,
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
     resumableSession, resumeSync,
@@ -1090,14 +1087,6 @@ function DateRangePanel({ compact=false }) {
   return (
     <div style={{ borderRadius:10, background: compact?C.surface:C.surfaceHigh, border:`1px solid ${C.border}`, padding: compact?'10px 12px':'12px 14px' }}>
       <div style={{ fontSize:10, color:C.dim, letterSpacing:'0.07em', fontWeight:700, marginBottom: compact?8:10 }}>SYNCHRONISATION</div>
-      <div style={{ fontSize:10, color:C.muted, marginBottom:4 }}>À partir du</div>
-      <input
-        type="date"
-        value={s.dateFrom}
-        onChange={e => s.setDateFrom(e.target.value)}
-        disabled={s.scraping}
-        style={{ width:'100%', background:'#111', border:`1px solid ${C.accent}44`, borderRadius:6, padding: compact?'6px 8px':'5px 8px', fontSize:11, fontFamily:'DM Mono,monospace', color:C.accent, outline:'none', colorScheme:'dark', marginBottom:10 }}
-      />
       <div style={{ display:'flex', gap: compact?8:6 }}>
         <button onClick={s.startSync} disabled={s.scraping}
           style={{ flex:2, background:C.accent, border:'none', borderRadius:6, padding: compact?'8px 0':'7px 0', cursor: s.scraping?'default':'pointer', color:'#000', fontSize:11, fontWeight:700, opacity: s.scraping?0.6:1 }}>
@@ -1115,7 +1104,7 @@ function DateRangePanel({ compact=false }) {
           style={{ width:'100%', marginTop:8, background:`${C.accent}14`, border:`1px solid ${C.accent}44`, borderRadius:6, padding: compact?'7px 10px':'8px 10px', cursor:'pointer', color:C.accent, fontSize:10, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
           <div>↩ Reprendre la synchro en cours</div>
           <div style={{ fontSize:9, color:C.muted, fontWeight:400, marginTop:2, fontFamily:'DM Mono,monospace' }}>
-            Depuis {(s.resumableSession.date_from || '').slice(0, 10)} · {s.resumableSession.artists_scanned} artiste(s) · {s.resumableSession.last_artist_name || '–'}
+            {s.resumableSession.artists_scanned} artiste(s) · dernier : {s.resumableSession.last_artist_name || '–'}
           </div>
         </button>
       )}
@@ -1244,9 +1233,16 @@ function FeedItem({ item, i, isMobile=false }) {
 function VosEcoutesPanel() {
   const { listenStats: ls } = useStore();
   const fmt = n => Number(n).toLocaleString('fr-FR');
+  const fmtDuration = ms => {
+    const totalMin = Math.floor((ms || 0) / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  };
   const cards = [
-    { label:'RESTANTES À ÉCOUTER', value: fmt(ls.remaining),  sub:'dans la file', icon:'⏳', color:'#c8956c' },
-    { label:'CE MOIS-CI',          value: fmt(ls.this_month), sub:'écoutées',      icon:'📅', color: C.accent },
+    { label:'RESTANTES À ÉCOUTER', value: fmt(ls.remaining),        sub:'dans la file',    icon:'⏳', color:'#c8956c' },
+    { label:'TEMPS D\'ÉCOUTE',     value: fmtDuration(ls.remaining_ms), sub:'hh:mm restantes', icon:'⏱', color:'#e07b54' },
+    { label:'CE MOIS-CI',          value: fmt(ls.this_month),        sub:'écoutées',        icon:'📅', color: C.accent },
     { label:'CETTE ANNÉE',         value: fmt(ls.this_year),  sub:'écoutées',      icon:'🗓', color:'#7b8ff7' },
     { label:'DEPUIS TOUJOURS',     value: fmt(ls.all_time),   sub:'écoutées',      icon:'🎵', color:'#b07fe8' },
   ];
