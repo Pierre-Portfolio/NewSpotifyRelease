@@ -18,7 +18,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 
 -- Réinitialiser le champ last_scraped_at au 15 mars 2026 pour tous les artistes
 SET SQL_SAFE_UPDATES = 0;
-UPDATE artists SET last_scraped_at = '2026-03-14 00:00:00' WHERE id > 0;
+UPDATE artists SET last_scraped_at = '2026-03-15 00:00:00';
 SET SQL_SAFE_UPDATES = 1;
 
 -- Vérification
