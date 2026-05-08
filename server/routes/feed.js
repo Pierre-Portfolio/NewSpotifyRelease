@@ -27,7 +27,7 @@ router.get('/:user_id', async (req, res) => {
       LEFT JOIN discovery_status ds
                            ON ds.release_id = r.id AND ds.user_id = ?
       WHERE COALESCE(ds.status, 'unseen') = ?
-      ORDER BY r.release_date DESC
+      ORDER BY r.id ASC
       LIMIT ${limitInt} OFFSET ${offsetInt}
     `, [userId, userId, status]);
 

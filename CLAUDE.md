@@ -36,7 +36,7 @@ Si des modifications ont été faites dans le worktree par erreur, les copier ve
 ## Vue d'ensemble
 Application web permettant de scanner les artistes Spotify suivis par l'utilisateur, de détecter leurs nouvelles sorties (albums / singles) et de les stocker en base de données pour les découvrir dans l'interface Spotify+.
 
-Chaque artiste est scrappé **depuis sa propre date de dernier scan** (`last_scraped_at`), pas depuis une date globale. Un artiste jamais scrappé repart de 2016-01-01.
+Chaque artiste est scrappé **depuis sa propre date de dernier scan** (`last_scraped_at`), pas depuis une date globale. Un artiste jamais scrappé repart de 2026-03-15.
 
 L'utilisateur parcourt son feed de découverte, écoute les titres un par un via le player intégré. Quand un titre se termine, il est automatiquement marqué comme écouté, le suivant se lance automatiquement, et le titre disparaît du feed avec une animation. Aucun ajout automatique en playlist.
 
@@ -95,7 +95,7 @@ Accepte un paramètre optionnel `options = { skipCount }` pour la reprise.
 3. Crée une session en DB via `POST /api/sync/start` (`date_from: '2016-01-01'`, `date_to: today`)
 4. Pagine `/me/following?type=artist&limit=50` en streaming
 5. Pour chaque artiste (en sautant les `skipCount` premiers si reprise) :
-   - Calcule `cutoff = scrapedDates[artist.id] || '2016-01-01'` (individuel par artiste)
+   - Calcule `cutoff = scrapedDates[artist.id] || '2026-03-15'` (individuel par artiste)
    - `/artists/{id}/albums?include_groups=album,single&limit=10&market=FR`
    - Filtre par `cutoff` ≤ `release_date` ≤ aujourd'hui
    - Pour chaque album dans la période → `/albums/{id}/tracks?limit=50`
