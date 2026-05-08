@@ -15,8 +15,8 @@ router.post('/', async (req, res) => {
   try {
     // Upsert artiste
     await db.execute(`
-      INSERT INTO artists (spotify_id, name, image_url, last_fetched_at)
-      VALUES (?, ?, ?, NOW())
+      INSERT INTO artists (spotify_id, name, image_url, last_fetched_at, last_scraped_at)
+      VALUES (?, ?, ?, NOW(), '2026-03-15 00:00:00')
       ON DUPLICATE KEY UPDATE
         name            = VALUES(name),
         image_url       = VALUES(image_url),
