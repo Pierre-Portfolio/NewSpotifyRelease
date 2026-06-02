@@ -1,3 +1,14 @@
+# ⚠️ RÈGLE ABSOLUE — Maintenir README.md et CLAUDE.md à jour
+
+Après **chaque modification fonctionnelle** (nouvelle feature, changement de comportement, ajout de composant, modification d'architecture), mettre à jour **systématiquement** :
+
+- **`CLAUDE.md`** : logique technique, composants, store, fonctions module-level, comportements
+- **`README.md`** : fonctionnalités visibles par l'utilisateur, stack, structure du projet
+
+**Ne pas attendre que l'utilisateur le demande.** Si un changement de code mérite d'être documenté, le faire dans le même commit ou dans un commit/PR dédié immédiatement après.
+
+---
+
 # ⚠️ ERREUR RÉCURRENTE DE CLAUDE — Worktree vs dépôt principal
 
 Claude travaille souvent dans un **worktree temporaire** (`\.claude\worktrees\...`) au lieu du dépôt principal.
