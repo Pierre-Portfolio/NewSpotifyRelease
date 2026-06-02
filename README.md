@@ -61,6 +61,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Barre de progression draggable** (touch) pour se déplacer dans le titre
 - Bouton **❤️ like/unlike** — synchronisé avec les titres likés Spotify
 - Boutons **précédent / play-pause / suivant** dans le feed
+- Bouton **loop / auto-avance** : alterne entre répéter le titre en cours et passer automatiquement au suivant
 
 ### Interface
 - Responsive — desktop (sidebar) et mobile (3 onglets : Scrapping / À écouter / Stats)
