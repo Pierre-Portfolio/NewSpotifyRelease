@@ -7,8 +7,6 @@
 
 # Spotify+ — Nouvelles Sorties
 
-> ⏰ **TODO (à partir du 04/06/2026)** — Ajouter une fonctionnalité qui importe automatiquement une fois par semaine la playlist "Découvertes de la semaine" Spotify dans la file d'attente du feed.
-
 ## Aperçu
 Application web PWA pour scanner les artistes Spotify suivis, détecter leurs nouvelles sorties et les stocker **localement sur l'appareil** (sql.js + IndexedDB). Aucun serveur requis. Chaque artiste est scrappé depuis sa propre date de dernier scan. L'utilisateur explore son feed de découverte, écoute les titres un par un et les valide — aucun ajout automatique en playlist.
 
@@ -22,6 +20,11 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Pause / reprise de la sync en cours de session
 - **Reprise après interruption** : si l'app est fermée ou le tel éteint en plein milieu, la progression est sauvegardée dans `localStorage`. Au prochain login, un bouton **"↩ Reprendre la synchro en cours"** apparaît avec le compteur et le dernier artiste traité
 - Protection rate-limit : sur erreur 429, tous les appels Spotify sont bloqués jusqu'à expiration du cooldown
+
+### Découvertes de la semaine (auto-import hebdo)
+- Au login, si la playlist Spotify **"Découvertes de la semaine"** n'a pas été importée depuis 7 jours → import automatique dans le feed
+- Les titres apparaissent avec le tag **Découvertes** (violet) et le sous-titre "Découvertes de la semaine"
+- La date du dernier import est sauvegardée dans `localStorage` (`spotifyplus_dw_last_import`)
 
 ### Stockage local (sql.js + IndexedDB)
 - Base SQLite WebAssembly chargée au démarrage depuis IndexedDB (clé `spotifyplus_db`)

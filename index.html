@@ -308,6 +308,64 @@ function loadListenStatsFromDB() {
 }
 
 // ════════════════════════════════════════════════
+// DÉCOUVERTES DE LA SEMAINE — import hebdo auto
+// ════════════════════════════════════════════════
+const DW_LS_KEY      = 'spotifyplus_dw_last_import';
+const DW_MAX_AGE_MS  = 7 * 24 * 60 * 60 * 1000; // 7 jours
+
+async function importDiscoverWeekly(addLog) {
+  const last = localStorage.getItem(DW_LS_KEY);
+  if (last && Date.now() - parseInt(last) < DW_MAX_AGE_MS) return;
+
+  addLog('── Import Découvertes de la semaine ──', 'info');
+
+  // Chercher la playlist parmi les playlists de l'utilisateur
+  let playlistId = null;
+  let nextUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
+  while (nextUrl && !playlistId) {
+    const data = await apiGet(nextUrl);
+    if (!data?.items) break;
+    const pl = data.items.find(p =>
+      p.owner?.id === 'spotify' &&
+      (p.name?.toLowerCase().includes('découvertes') || p.name?.toLowerCase().includes('discover weekly'))
+    );
+    if (pl) playlistId = pl.id;
+    nextUrl = data.next || null;
+  }
+
+  if (!playlistId) {
+    addLog('⚠ Playlist "Découvertes de la semaine" introuvable — abonne-toi à elle sur Spotify', 'warn');
+    return;
+  }
+
+  const today      = new Date().toISOString().slice(0, 10);
+  const tracksData = await apiGet(`https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50`);
+  if (!tracksData?.items?.length) return;
+
+  let added = 0;
+  for (const item of tracksData.items) {
+    const t = item.track;
+    if (!t?.uri || t.is_local) continue;
+    try {
+      dbRun(
+        "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [t.uri, t.artists?.map(a => a.name).join(', ') || '?', t.name, 'Découvertes de la semaine', 'discover_weekly', today, t.album?.images?.[0]?.url || null, t.duration_ms || null]
+      );
+      added++;
+    } catch {}
+  }
+
+  if (added > 0) {
+    await saveDB();
+    localStorage.setItem(DW_LS_KEY, Date.now().toString());
+    addLog(`✓ ${added} titre(s) de "Découvertes de la semaine" ajoutés au feed`, 'ok');
+  } else {
+    addLog('Découvertes de la semaine : tous les titres sont déjà dans le feed', 'info');
+    localStorage.setItem(DW_LS_KEY, Date.now().toString());
+  }
+}
+
+// ════════════════════════════════════════════════
 // TEST CONNEXION — joue After Dark · Mr. Kitty
 // ════════════════════════════════════════════════
 async function testConnection() {
@@ -425,7 +483,15 @@ function StoreProvider({ children }) {
             dbRun("UPDATE stats SET listened_this_year = 0, last_reset_year = ? WHERE id = 1", [curYear]);
           }
 
-          // Load known URIs for dedup
+          // Import Découvertes de la semaine si besoin (1x par semaine)
+          const initMsgs = [];
+          const addInitLog = (msg, type='info') => {
+            const t = new Date().toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+            initMsgs.push({ time: t, msg, type });
+          };
+          await importDiscoverWeekly(addInitLog).catch(() => {});
+
+          // Load known URIs for dedup (inclut les DW tracks fraîchement importées)
           const uriRows = dbAll("SELECT spotify_uri FROM tracks");
           uriRows.forEach(r => knownUrisRef.current.add(r.spotify_uri));
 
@@ -435,10 +501,10 @@ function StoreProvider({ children }) {
             setFeed(trackRows.map(t => ({
               id:         t.spotify_uri,
               spotifyUri: t.spotify_uri,
-              label:      t.release_type === 'single' ? 'Single' : 'Album',
+              label:      t.release_type === 'single' ? 'Single' : t.release_type === 'discover_weekly' ? 'Découvertes' : 'Album',
               artist:     t.artist_name,
               title:      t.title,
-              subtitle:   t.release_type !== 'single' ? t.release_title : null,
+              subtitle:   t.release_type === 'discover_weekly' ? 'Découvertes de la semaine' : t.release_type !== 'single' ? t.release_title : null,
               date:       t.release_date ? new Date(t.release_date).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : '',
               scraped_at: t.added_at ? new Date(t.added_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : null,
               image:      t.cover_url,
@@ -458,6 +524,7 @@ function StoreProvider({ children }) {
             }
           } catch {}
 
+          if (initMsgs.length > 0) setLogs(initMsgs);
           setDbReady(true);
         } else {
           setAuthState('login');
@@ -1269,7 +1336,7 @@ function FeedItem({ item, i, isMobile=false }) {
         }
       </div>
 
-      <AlbumArt size={38} letter={item.artist[0]} color={item.isNew ? C.accent : C.blue} image={item.image} />
+      <AlbumArt size={38} letter={item.artist[0]} color={item.isNew ? C.accent : item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.blue} image={item.image} />
 
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color: isNowPlaying ? C.accent : C.text }}>
@@ -1281,9 +1348,9 @@ function FeedItem({ item, i, isMobile=false }) {
       </div>
 
       {isMobile
-        ? (item.isNew && <Tag color={C.accent}>NEW</Tag>)
+        ? (item.label === 'Découvertes' ? <Tag color='oklch(0.65 0.18 300)'>DW</Tag> : item.isNew && <Tag color={C.accent}>NEW</Tag>)
         : (<>
-            <Tag color={item.isNew ? C.accent : C.blue}>{item.label}</Tag>
+            <Tag color={item.isNew ? C.accent : item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.blue}>{item.label}</Tag>
             <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', flexShrink:0, gap:1 }}>
               <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>{item.date}</span>
               {item.scraped_at && <span style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }} title="Date de scraping">↓ {item.scraped_at}</span>}

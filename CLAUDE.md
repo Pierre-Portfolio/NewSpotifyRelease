@@ -98,11 +98,20 @@ let _db = null;                        // instance sql.js Database
 
 async function initDB()                // charge depuis IndexedDB ou crée le schéma
 async function saveDB()                // exporte _db.export() → IndexedDB
+async function importDiscoverWeekly(addLog)  // import hebdo playlist "Découvertes de la semaine"
 function dbRun(sql, params=[])         // execute sans retour
 function dbAll(sql, params=[])         // retourne tableau d'objets
 function dbGet(sql, params=[])         // retourne le premier objet ou null
 function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time }
 ```
+
+### Découvertes de la semaine (`importDiscoverWeekly`)
+- Appelée dans l'init **avant** le chargement du feed (les tracks DW sont visibles dès le login)
+- Cherche dans `GET /me/playlists` la playlist dont `owner.id === 'spotify'` et dont le nom contient `'découvertes'` ou `'discover weekly'`
+- Insère les tracks avec `release_type = 'discover_weekly'`, `release_title = 'Découvertes de la semaine'`
+- Skip si `localStorage('spotifyplus_dw_last_import')` < 7 jours
+- Les messages sont collectés dans `initMsgs[]` et affichés dans le panneau Logs au login
+- Tag **Découvertes** (violet `oklch(0.65 0.18 300)`) dans le feed, tag **DW** sur mobile
 
 ### Règles d'écriture DB
 - `saveDB()` est appelé **après chaque artiste scrapé** et **après chaque écoute marquée** et **après une purge**
