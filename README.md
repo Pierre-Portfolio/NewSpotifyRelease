@@ -20,6 +20,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Dates de scraping par artiste** : chaque artiste est scrappé depuis sa propre `last_scraped_at` (défaut : 2026-03-15) — plus de date globale à choisir
 - Mise à jour automatique de `last_scraped_at` dans `artists_scraped` après chaque artiste scanné
 - Pause / reprise de la sync en cours de session
+- **Reprise après interruption** : si l'app est fermée ou le tel éteint en plein milieu, la progression est sauvegardée dans `localStorage`. Au prochain login, un bouton **"↩ Reprendre la synchro en cours"** apparaît avec le compteur et le dernier artiste traité
 - Protection rate-limit : sur erreur 429, tous les appels Spotify sont bloqués jusqu'à expiration du cooldown
 
 ### Stockage local (sql.js + IndexedDB)

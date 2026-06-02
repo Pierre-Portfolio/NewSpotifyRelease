@@ -125,11 +125,18 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
    - **Singles** : `INSERT OR IGNORE` d'une seule ligne (`uris[0]`, `title = album.name`, `release_title = null`)
    - **Albums** : `INSERT OR IGNORE` d'une ligne par track (`title = t.name`, `release_title = album.name`)
 5. Après chaque artiste → `INSERT OR REPLACE INTO artists_scraped (spotify_id, last_scraped_at) VALUES (?, datetime('now'))`
-6. Après chaque artiste → `saveDB()` (asynchrone, non bloquant)
-7. À la fin → `saveDB()` final + `setProgress(100)`
+6. Après chaque artiste → `saveDB()` (async) + `localStorage.setItem('spotifyplus_sync_progress', { artists_scanned, total_artists, last_artist_name })`
+7. À la fin → `saveDB()` final + `localStorage.removeItem('spotifyplus_sync_progress')` + `setProgress(100)`
 
-### Pas de session de sync
-Il n'y a plus de sessions en base, pas de `resumableSession`, pas de `skipCount`. Si la sync est interrompue, elle repart du début (les artistes déjà scrapés sont sautés grâce à `seenUris`).
+### Reprise de synchro après interruption / redémarrage
+- La progression est sauvegardée dans `localStorage` (`spotifyplus_sync_progress`) après chaque artiste
+- Au login, si une progression existe → `setResumableSession(p)` → bouton **"↩ Reprendre"** affiché
+- `startSync({ skipCount: N })` utilise `globalArtistIndex` pour sauter les N premiers artistes
+- `localStorage` nettoyé quand la sync se termine normalement
+
+### UX DateRangePanel — quand `resumableSession` existe
+- Bouton **"↩ Reprendre la synchro en cours"** affiché **en premier**, pleine largeur, avec `artists_scanned / total_artists` et `last_artist_name`
+- Bouton "Lancer" devient **"↺ Recommencer la synchro de 0"** (rouge foncé) avec `confirm()` avant d'exécuter
 
 ---
 
@@ -185,7 +192,7 @@ Il n'y a plus de sessions en base, pas de `resumableSession`, pas de `skipCount`
 | `Home` | Page de login (mobile + desktop) |
 | `WebApp` | Layout desktop (sidebar + contenu) |
 | `MobileApp` | Layout mobile — 3 onglets : Scrapping / À écouter / Stats |
-| `DateRangePanel` | Bouton Lancer / Pause / Tester connexion |
+| `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause / Tester connexion |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes / Sorties / Titres) |
 | `NextCallPanel` | Countdown + sélecteur délai (10/20/30s + jitter 1-3s) |
 | `LogsPanel` | Journal en temps réel |
@@ -215,8 +222,11 @@ loopEnabled      // boolean
 delayChoice      // 10 | 20 | 30 (secondes)
 rateLimitUntil   // timestamp ms
 
+resumableSession // { artists_scanned, total_artists, last_artist_name } | null
+
 // Méthodes
-startSync()
+startSync({ skipCount })  // skipCount=0 par défaut, N pour reprendre
+resumeSync()              // raccourci → startSync({ skipCount: resumableSession.artists_scanned })
 togglePause()
 purgeListened()
 logout()
