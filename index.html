@@ -341,7 +341,8 @@ function StoreProvider({ children }) {
   const [user,     setUser]       = React.useState(null);
   const [playlist, setPlaylist]   = React.useState(null);
 
-  const [dbReady,  setDbReady]    = React.useState(false);
+  const [dbReady,  setDbReady]          = React.useState(false);
+  const [resumableSession, setResumableSession] = React.useState(null);
   const [scraping, setScraping]   = React.useState(false);
   const [paused,   setPaused]     = React.useState(false);
   const pausedRef                 = React.useRef(false);
@@ -447,6 +448,15 @@ function StoreProvider({ children }) {
 
           // Load listen stats
           setListenStats(loadListenStatsFromDB());
+
+          // Vérifier si une synchro était en cours (reprise possible)
+          try {
+            const saved = localStorage.getItem('spotifyplus_sync_progress');
+            if (saved) {
+              const p = JSON.parse(saved);
+              if (p?.artists_scanned > 0) setResumableSession(p);
+            }
+          } catch {}
 
           setDbReady(true);
         } else {
@@ -580,9 +590,16 @@ function StoreProvider({ children }) {
     alert(`${count} titre(s) supprimé(s).`);
   };
 
+  const resumeSync = () => {
+    if (!resumableSession) return;
+    startSync({ skipCount: resumableSession.artists_scanned });
+  };
+
   // ── SYNC ──
-  const startSync = async () => {
+  const startSync = async (options = {}) => {
     if (scraping) return;
+    const { skipCount = 0 } = options;
+    setResumableSession(null);
     setScraping(true); setPaused(false);
     setLogs([]); setProgress(0);
     setStats({ artists:0, total:0, releases:0, tracks:0 });
@@ -605,9 +622,12 @@ function StoreProvider({ children }) {
       setStatus('Chargement des artistes…', 'pulse');
 
       const seenUris = new Set(knownUrisRef.current);
-      let totalTracks = 0, totalReleases = 0, artistsScanned = 0, totalArtists = ESTIMATED_TOTAL;
+      let totalTracks = 0, totalReleases = 0, artistsScanned = skipCount, totalArtists = ESTIMATED_TOTAL;
+      let globalArtistIndex = 0;
       let nextUrl = 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
       let pageNum  = 0;
+
+      if (skipCount > 0) log(`↩ Reprise à partir de l'artiste #${skipCount + 1}`, 'ok');
 
       while (nextUrl) {
         pageNum++;
@@ -622,6 +642,8 @@ function StoreProvider({ children }) {
         log(`✓ ${artists.length} artiste(s) — page ${pageNum}`, 'ok');
 
         for (let i = 0; i < artists.length; i++) {
+          globalArtistIndex++;
+          if (globalArtistIndex <= skipCount) continue;
           await waitWhilePaused();
           const artist = artists[i];
           artistsScanned++;
@@ -710,6 +732,13 @@ function StoreProvider({ children }) {
             [artist.id]
           );
 
+          // Sauvegarder la progression pour reprise après redémarrage
+          localStorage.setItem('spotifyplus_sync_progress', JSON.stringify({
+            artists_scanned:  artistsScanned,
+            total_artists:    totalArtists,
+            last_artist_name: artist.name,
+          }));
+
           const isVeryLast = !nextUrl && i === artists.length - 1;
           if (!isVeryLast) {
             saveDB().catch(() => {});
@@ -728,6 +757,7 @@ function StoreProvider({ children }) {
 
       setProgress(100); setNextCall(0); setEta('');
       await saveDB();
+      localStorage.removeItem('spotifyplus_sync_progress');
       if (totalTracks === 0) {
         setStatus('Terminé — aucune nouvelle sortie.', 'green');
         log('Aucune sortie trouvée dans cette période.', 'info');
@@ -766,6 +796,7 @@ function StoreProvider({ children }) {
     rateLimitUntil, seek,
     loopEnabled, setLoopEnabled,
     dbReady, purgeListened,
+    resumableSession, resumeSync,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
 }
@@ -1118,6 +1149,15 @@ function DateRangePanel({ compact=false }) {
           </button>
         )}
       </div>
+      {!s.scraping && s.resumableSession && (
+        <button onClick={s.resumeSync}
+          style={{ width:'100%', marginTop:8, background:`${C.accent}14`, border:`1px solid ${C.accent}44`, borderRadius:6, padding: compact?'7px 10px':'8px 10px', cursor:'pointer', color:C.accent, fontSize:10, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
+          <div>↩ Reprendre la synchro en cours</div>
+          <div style={{ fontSize:9, color:C.muted, fontWeight:400, marginTop:2, fontFamily:'DM Mono,monospace' }}>
+            {s.resumableSession.artists_scanned}/{s.resumableSession.total_artists || '?'} artistes · dernier : {s.resumableSession.last_artist_name || '–'}
+          </div>
+        </button>
+      )}
       <button onClick={testConnection}
         style={{ width:'100%', marginTop:8, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding: compact?'6px 0':'7px 0', cursor:'pointer', color:C.muted, fontSize:10, fontWeight:600, letterSpacing:'0.04em' }}>
         ⚡ Tester la connexion
