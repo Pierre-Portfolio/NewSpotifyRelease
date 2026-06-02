@@ -176,6 +176,10 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
 
 **Important** : les items ajoutés pendant la sync courante SONT immédiatement en DB et peuvent être marqués écoutés dans la même session.
 
+**⚠️ Ordre critique dans l'effet URI :** l'auto-avance doit être placée **avant** `if (listenedUrisRef.current.has(prevUri)) return` — sinon elle est court-circuitée si le titre a déjà été traité dans la session.
+
+L'auto-avance se déclenche si `prevUri` était dans le feed ET que `currentUri` n'y est pas (couvre aussi le cas où Spotify auto-joue un titre hors feed).
+
 ---
 
 ## Statistiques
