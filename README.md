@@ -83,8 +83,6 @@ NewSpotifyRelease/
   CLAUDE.md           → Documentation technique pour Claude
   assets/
     images/github/    → Images README
-  server/             → Backend Node.js/Express (obsolète — conservé pour référence)
-  sql/                → Schéma MySQL (obsolète — conservé pour référence)
 ```
 
 ## Schéma de la base locale (sql.js)
