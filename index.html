@@ -196,6 +196,14 @@ async function apiPost(url) {
   if (res.status === 404) return { error: 'no_active_device' };
   return res.json().catch(() => ({ error: 'unknown' }));
 }
+async function apiDel(url) {
+  const blocked = _rlCheck();
+  if (blocked) return blocked;
+  const token = await getToken();
+  const res   = await fetch(url, { method:'DELETE', headers: { Authorization:`Bearer ${token}` } });
+  if (res.status === 429) { const raw = res.headers.get('Retry-After'); _rlSet(raw ? parseInt(raw)*1000 : 30000); return { error:'rate_limited' }; }
+  return { ok: true };
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ════════════════════════════════════════════════
@@ -910,23 +918,37 @@ function SeekBar({ now }) {
     return Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100));
   };
 
+  const startDrag = (clientX) => {
+    setDragging(true);
+    setLocalPct(getPct(clientX));
+  };
   const onMouseDown = (e) => {
     e.preventDefault();
-    const p0 = getPct(e.clientX);
-    setDragging(true);
-    setLocalPct(p0);
-
+    startDrag(e.clientX);
     const onMove = (ev) => setLocalPct(getPct(ev.clientX));
     const onUp   = (ev) => {
       const p = getPct(ev.clientX);
-      setDragging(false);
-      setLocalPct(null);
+      setDragging(false); setLocalPct(null);
       seek((p / 100) * now.duration * 1000);
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup',   onUp);
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
+  };
+  const onTouchStart = (e) => {
+    e.preventDefault();
+    startDrag(e.touches[0].clientX);
+    const onMove = (ev) => setLocalPct(getPct(ev.touches[0].clientX));
+    const onEnd  = (ev) => {
+      const p = getPct(ev.changedTouches[0].clientX);
+      setDragging(false); setLocalPct(null);
+      seek((p / 100) * now.duration * 1000);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend',  onEnd);
+    };
+    window.addEventListener('touchmove', onMove, { passive:false });
+    window.addEventListener('touchend',  onEnd);
   };
 
   const pct       = (dragging && localPct !== null) ? localPct : (now.current / Math.max(now.duration, 1)) * 100;
@@ -935,9 +957,10 @@ function SeekBar({ now }) {
   return (
     <div ref={barRef}
       onMouseDown={onMouseDown}
+      onTouchStart={onTouchStart}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{ flex:1, height:20, display:'flex', alignItems:'center', cursor:'pointer', position:'relative', userSelect:'none' }}>
+      style={{ flex:1, height:28, display:'flex', alignItems:'center', cursor:'pointer', position:'relative', userSelect:'none', touchAction:'none' }}>
       <div style={{ width:'100%', height: showThumb ? 4 : 3, background:'#2a2a2a', borderRadius:99, overflow:'visible', transition:'height 0.12s', position:'relative' }}>
         <div style={{ width:`${pct}%`, height:'100%', background:C.accent, borderRadius:99, transition: dragging ? 'none' : 'width 0.6s linear' }} />
       </div>
@@ -1041,24 +1064,93 @@ function Home({ isMobile }) {
 // ════════════════════════════════════════════════
 // PLAYER BARS
 // ════════════════════════════════════════════════
-function MiniPlayer() {
-  const { now } = useStore();
+function MobilePlayer() {
+  const { now, feed } = useStore();
+  const [isLiked, setIsLiked] = React.useState(false);
+
+  // Vérifier si le titre en cours est liké sur Spotify
+  React.useEffect(() => {
+    if (!now?.uri) { setIsLiked(false); return; }
+    const id = now.uri.split(':')[2];
+    if (!id) return;
+    apiGet(`https://api.spotify.com/v1/me/tracks/contains?ids=${id}`)
+      .then(data => { if (Array.isArray(data)) setIsLiked(data[0]); })
+      .catch(() => {});
+  }, [now?.uri]);
+
   if (!now) return null;
+
+  const trackId      = now.uri?.split(':')[2];
+  const currentIndex = feed.findIndex(f => f.spotifyUri === now.uri);
+  const hasFeed      = feed.length > 0;
+
+  const togglePlayPause = async () => {
+    if (now.playing) await apiPut('https://api.spotify.com/v1/me/player/pause');
+    else             await apiPut('https://api.spotify.com/v1/me/player/play');
+  };
+  const prevTrack = async () => {
+    const idx = currentIndex > 0 ? currentIndex - 1 : feed.length - 1;
+    if (feed[idx]) await playTrack(feed[idx].spotifyUri);
+  };
+  const nextTrack = async () => {
+    const idx = currentIndex >= 0 && currentIndex < feed.length - 1 ? currentIndex + 1 : 0;
+    if (feed[idx]) await playTrack(feed[idx].spotifyUri);
+  };
+  const toggleLike = async () => {
+    if (!trackId) return;
+    if (isLiked) {
+      await apiDel(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`);
+      setIsLiked(false);
+    } else {
+      await apiPut('https://api.spotify.com/v1/me/tracks', { ids: [trackId] });
+      setIsLiked(true);
+    }
+  };
+
+  const btnCtrl = { background:'none', border:'none', cursor:'pointer', padding:10, display:'flex', alignItems:'center', justifyContent:'center' };
+
   return (
-    <div style={{ background:C.surfaceHigh, borderTop:`1px solid ${C.border}`, padding:'8px 14px 10px', flexShrink:0 }}>
-      <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
-        <AlbumArt size={36} letter={(now.title||'?')[0]} color={C.accent} image={now.image} />
+    <div style={{ height:'50vh', minHeight:220, background:'linear-gradient(180deg,#131313 0%,#0a0a0a 100%)', borderTop:`1px solid ${C.border}`, display:'flex', flexDirection:'column', padding:'14px 20px 28px', flexShrink:0, gap:10 }}>
+
+      {/* Pochette + titre + artiste + position + like */}
+      <div style={{ display:'flex', alignItems:'center', gap:14, flex:1, minHeight:0 }}>
+        <AlbumArt size={80} letter={(now.title||'?')[0]} color={C.accent} image={now.image} />
         <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{now.title}</div>
-          <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{now.artist}</div>
+          <div style={{ fontSize:15, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{now.title}</div>
+          <div style={{ fontSize:12, color:C.muted, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{now.artist}</div>
+          {currentIndex >= 0 && (
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:5 }}>{currentIndex + 1} / {feed.length}</div>
+          )}
         </div>
-        <div>
-          {now.playing
-            ? <svg width="12" height="12" viewBox="0 0 12 14" fill={C.accent}><rect x="0" y="0" width="4" height="14" rx="1"/><rect x="8" y="0" width="4" height="14" rx="1"/></svg>
-            : <svg width="12" height="12" viewBox="0 0 12 14" fill={C.accent}><path d="M1 0l11 7-11 7V0z"/></svg>}
-        </div>
+        {/* Bouton Like */}
+        <button onClick={toggleLike} style={{ ...btnCtrl, flexShrink:0 }}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill={isLiked ? '#e05050' : 'none'} stroke={isLiked ? '#e05050' : C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+          </svg>
+        </button>
       </div>
-      <ProgressBar pct={(now.current / Math.max(now.duration, 1)) * 100} />
+
+      {/* Barre de progression */}
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', width:32, textAlign:'right', flexShrink:0 }}>{fmt(now.current)}</span>
+        <SeekBar now={now} />
+        <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', width:32, flexShrink:0 }}>{fmt(now.duration)}</span>
+      </div>
+
+      {/* Contrôles */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:16 }}>
+        <button onClick={prevTrack} style={{ ...btnCtrl, opacity: hasFeed ? 1 : 0.3 }}>
+          <svg width="26" height="26" viewBox="0 0 16 16" fill={C.muted}><rect x="1" y="1" width="2" height="14" rx="1"/><path d="M13 1L4 8l9 7V1z"/></svg>
+        </button>
+        <button onClick={togglePlayPause} style={{ width:56, height:56, borderRadius:'50%', background:C.accent, border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+          {now.playing
+            ? <svg width="16" height="18" viewBox="0 0 12 14" fill="#000"><rect x="0" y="0" width="4" height="14" rx="1"/><rect x="8" y="0" width="4" height="14" rx="1"/></svg>
+            : <svg width="16" height="18" viewBox="0 0 12 14" fill="#000"><path d="M1 0l11 7-11 7V0z"/></svg>}
+        </button>
+        <button onClick={nextTrack} style={{ ...btnCtrl, opacity: hasFeed ? 1 : 0.3 }}>
+          <svg width="26" height="26" viewBox="0 0 16 16" fill={C.muted}><rect x="13" y="1" width="2" height="14" rx="1"/><path d="M3 1l9 7-9 7V1z"/></svg>
+        </button>
+      </div>
     </div>
   );
 }
@@ -1466,7 +1558,7 @@ function MobileApp() {
           </div>
         )}
       </div>
-      <MiniPlayer />
+      <MobilePlayer />
     </div>
   );
 }
