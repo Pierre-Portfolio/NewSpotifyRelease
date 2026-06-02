@@ -55,6 +55,13 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Installable sur écran d'accueil Android (Chrome) — bouton "Ajouter à l'écran d'accueil"
 - `manifest.json` + `service-worker.js` — cache l'app shell pour usage offline
 
+### Player mobile (50vh)
+- Quand une musique joue, le bas de l'écran affiche un **player plein format (50% de hauteur)**
+- Pochette + titre + artiste + position dans le feed (`3 / 25`)
+- **Barre de progression draggable** (touch) pour se déplacer dans le titre
+- Bouton **❤️ like/unlike** — synchronisé avec les titres likés Spotify
+- Boutons **précédent / play-pause / suivant** dans le feed
+
 ### Interface
 - Responsive — desktop (sidebar) et mobile (3 onglets : Scrapping / À écouter / Stats)
 - Logs en temps réel pendant la sync
@@ -62,6 +69,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ## Technologies
 - React 18 (CDN) + Babel Standalone
+- `apiDel()` — helper DELETE pour l'API Spotify (unlike)
 - **sql.js 1.10.2** (SQLite WebAssembly) via CDN
 - **IndexedDB** (persistance locale du binaire SQLite)
 - Spotify Web API

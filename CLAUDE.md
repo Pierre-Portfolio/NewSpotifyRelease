@@ -208,8 +208,8 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
 | `FeedList` / `FeedItem` | Feed avec barres égaliseur animées sur le son en cours (limite 1000) |
 | `VosEcoutesPanel` | Stats d'écoute + bouton Purger les écoutés |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
-| `SeekBar` | Barre de progression cliquable/draggable → `PUT /me/player/seek` |
-| `MiniPlayer` | Barre compacte mobile — lecture en cours |
+| `MobilePlayer` | Player mobile **50vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles |
+| `SeekBar` | Barre de progression cliquable/draggable — mouse ET touch (`onTouchStart/Move/End`) |
 
 ---
 
@@ -243,6 +243,16 @@ seek(positionMs)
 setLoopEnabled(bool)
 setDelayChoice(n)
 ```
+
+---
+
+## MobilePlayer — player 50vh
+
+- Remplace `MiniPlayer` sur mobile (affiché quand `now` est défini)
+- **Like/unlike** : `GET /me/tracks/contains?ids=trackId` au changement d'URI pour initialiser l'état → `PUT /me/tracks` pour liker, `DELETE /me/tracks` via `apiDel()` pour unliker
+- **SeekBar** : support touch complet (`onTouchStart` + `touchmove`/`touchend` sur `window`, `passive:false`) + `touchAction:'none'` pour bloquer le scroll pendant le drag
+- **Hauteur** : `50vh` avec `minHeight:220px`
+- Position dans le feed affichée (`currentIndex + 1 / feed.length`)
 
 ---
 
