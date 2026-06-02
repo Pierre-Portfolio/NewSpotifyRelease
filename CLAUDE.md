@@ -30,8 +30,6 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 | `service-worker.js` | Cache app shell (`./`, `./index.html`) pour usage offline |
 | `icon-192.png` | Icône PWA 192×192 (à ajouter au repo) |
 | `icon-512.png` | Icône PWA 512×512 (à ajouter au repo) |
-| `server/` | Backend Node.js/Express obsolète — **ne plus modifier** |
-| `sql/` | Schéma MySQL obsolète — **ne plus modifier** |
 
 ---
 
