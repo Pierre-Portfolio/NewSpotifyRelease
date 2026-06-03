@@ -178,10 +178,14 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
 
 **⚠️ Ordre critique dans l'effet URI :** l'auto-avance doit être placée **avant** `if (listenedUrisRef.current.has(prevUri)) return` — sinon elle est court-circuitée si le titre a déjà été traité dans la session.
 
-**⚠️ Limitation Spotify :** quand un titre se termine, Spotify retourne `200 + is_playing:false` avec l'item toujours présent → `now.uri` ne change jamais → l'effet URI ne se déclenche pas. L'auto-avance principale repose donc sur un **timer** planifié par l'effet `now?.current` :
-- Quand `now.playing && remaining ≤ 10s` → `setTimeout(remaining + 1s)` sur `advanceTimerRef`
-- Timer annulé (`clearTimeout`) à chaque tick (synchronisé avec la position réelle)
-- À expiration → `playTrack(next)` sur l'URI capturée au scheduling
+**⚠️ Limitation Spotify :** quand un titre se termine, Spotify retourne `200 + is_playing:false` avec la même URI → `now?.uri` ne change pas ET `now?.current` est gelé → ni l'effet URI ni l'effet current ne se déclenchent.
+
+**3 mécanismes d'auto-avance (triple couverture) :**
+1. **Effet `now?.uri`** : `currentUri` est null ou hors feed → avance (cas Spotify radio/queue)
+2. **Effet `now?.current`** : `remaining ≤ 3s` ET titre dans le feed → avance (fin imminente détectée en live)
+3. **Effet `now?.playing`** : transition `true → false` ET `remaining ≤ 8s` ET titre dans le feed → avance **(cas principal : fin naturelle)**
+
+`advancedForRef` (ref, pas state) empêche les doubles appels sur le même titre. `prevPlayingRef` capture l'état playing du tick précédent pour détecter la transition.
 
 ---
 
