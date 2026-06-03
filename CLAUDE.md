@@ -282,6 +282,11 @@ Sur 429 → `_rlSet(retryMs)` bloque tous les appels player jusqu'à expiration.
 
 ## Bugs connus / fixes appliqués
 
+### apiGet — HTTP 204 No Content
+`/me/player/currently-playing` retourne 204 quand rien ne joue (pas de body).
+Sans le guard `if (res.status === 204) return null`, `.json()` lève une exception → catch silencieux → `setNow(null)` jamais appelé → `now?.uri` ne change pas → auto-avance ne se déclenche jamais.
+**Toujours retourner `null` sur 204 dans `apiGet`.**
+
 ### SeekBar — race condition useEffect
 Les listeners `mousemove`/`mouseup` doivent être attachés **directement dans `onMouseDown`**, pas dans un `useEffect`. Sinon un clic rapide (mousedown + mouseup) se termine avant que React ait re-rendu et attaché les listeners.
 
