@@ -178,7 +178,10 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
 
 **⚠️ Ordre critique dans l'effet URI :** l'auto-avance doit être placée **avant** `if (listenedUrisRef.current.has(prevUri)) return` — sinon elle est court-circuitée si le titre a déjà été traité dans la session.
 
-L'auto-avance se déclenche si `prevUri` était dans le feed ET que `currentUri` n'y est pas (couvre aussi le cas où Spotify auto-joue un titre hors feed).
+**⚠️ Limitation Spotify :** quand un titre se termine, Spotify retourne `200 + is_playing:false` avec l'item toujours présent → `now.uri` ne change jamais → l'effet URI ne se déclenche pas. L'auto-avance principale repose donc sur un **timer** planifié par l'effet `now?.current` :
+- Quand `now.playing && remaining ≤ 10s` → `setTimeout(remaining + 1s)` sur `advanceTimerRef`
+- Timer annulé (`clearTimeout`) à chaque tick (synchronisé avec la position réelle)
+- À expiration → `playTrack(next)` sur l'URI capturée au scheduling
 
 ---
 
