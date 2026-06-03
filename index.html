@@ -422,7 +422,7 @@ function StoreProvider({ children }) {
   const prevPositionRef           = React.useRef(0);
   const prevDurationRef           = React.useRef(0);
   const advancedForRef            = React.useRef(null); // URI pour laquelle on a déjà déclenché l'avance
-  const prevPlayingRef            = React.useRef(false); // état playing au tick précédent
+  const prevNowRef                = React.useRef({ playing:false, uri:null, current:0, duration:0 });
   React.useEffect(() => { loopEnabledRef.current = loopEnabled; }, [loopEnabled]);
   React.useEffect(() => { feedRef.current = feed; }, [feed]);
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
@@ -658,29 +658,39 @@ function StoreProvider({ children }) {
     }
   }, [now?.current]);
 
-  // ── Détecter arrêt du titre (playing: true → false) → avancer si fin proche ──
+  // ── Détecter arrêt du titre (playing true → stopped) → avancer si fin proche ──
+  // Surveille now entier pour capturer aussi le cas now=null (204 Spotify)
   React.useEffect(() => {
-    const wasPlaying = prevPlayingRef.current;
-    prevPlayingRef.current = now?.playing ?? false;
+    const prev = prevNowRef.current;
+    // Mémoriser l'état courant (garder l'URI même si now=null)
+    prevNowRef.current = {
+      playing:  now?.playing  ?? false,
+      uri:      now?.uri      ?? prev.uri,   // conserve la dernière URI connue
+      current:  now?.current  ?? prev.current,
+      duration: now?.duration ?? prev.duration,
+    };
 
-    // Uniquement sur la transition true → false
-    if (!wasPlaying || now?.playing !== false) return;
+    // Transition : était en lecture → maintenant arrêté (false ou null)
+    if (!prev.playing) return;               // n'était pas en lecture avant
+    if (now?.playing === true) return;       // toujours en lecture
     if (loopEnabledRef.current) return;
-    if (!now?.uri || !dbReady) return;
-    if (advancedForRef.current === now.uri) return;
+    if (!dbReady) return;
+
+    const uri = prev.uri;
+    if (!uri || advancedForRef.current === uri) return;
 
     const f = feedRef.current;
-    const idx = f.findIndex(item => item.spotifyUri === now.uri);
+    const idx = f.findIndex(item => item.spotifyUri === uri);
     if (idx === -1) return; // titre pas dans notre feed
 
-    // Avancer si on est dans les 8 dernières secondes (couvre position gelée)
-    const remaining = (now.duration ?? 0) - (now.current ?? 0);
-    if (remaining <= 8) {
-      advancedForRef.current = now.uri;
+    // Avancer si les dernières secondes connues indiquent la fin du titre
+    const remaining = prev.duration - prev.current;
+    if (prev.duration > 15 && remaining <= 8) {
+      advancedForRef.current = uri;
       const next = f[idx + 1] ?? f[0];
       if (next) playTrack(next.spotifyUri);
     }
-  }, [now?.playing, dbReady]);
+  }, [now]);
 
   // Connecte le guard module-level au state React
   React.useEffect(() => {
