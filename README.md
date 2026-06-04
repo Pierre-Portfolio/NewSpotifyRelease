@@ -60,7 +60,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Compteur journalier de scraping (limite Spotify 100/jour)
 - Compteur de scrapings effectués aujourd'hui affiché dans la carte **Artistes** (`X/100 aujourd'hui`)
 - Persisté dans `localStorage` (`spotifyplus_daily_scrapings`) avec la date du jour — remise à zéro automatique le lendemain
-- **"Temps total de la session"** dans le panneau NextCall : calcule en combien de jours calendaires la synchro totale sera terminée à raison de 100 artistes/jour
+- **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes d'aujourd'hui (`(100 − scrapés) × délai moyen`)
 
 ### Titres likés (onglet ❤ Likés)
 - Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats") avec badge du nombre de likés
@@ -126,7 +126,8 @@ NewSpotifyRelease/
 -- Titres à écouter (feed)
 tracks (id, spotify_uri UNIQUE, artist_name, title, release_title,
         release_type, release_date, cover_url, duration_ms,
-        listened DEFAULT 0, added_at DEFAULT datetime('now'))
+        listened DEFAULT 0, liked DEFAULT 0,
+        added_at DEFAULT datetime('now'))
 
 -- Dates de dernier scraping par artiste
 artists_scraped (spotify_id PRIMARY KEY, last_scraped_at)
@@ -142,6 +143,9 @@ stats (id=1, total_listened, listened_this_month, listened_this_year,
 // Afficher les tracks non écoutées
 dbAll("SELECT * FROM tracks WHERE listened = 0 ORDER BY id ASC LIMIT 20")
 
+// Afficher les tracks likées
+dbAll("SELECT * FROM tracks WHERE liked = 1 ORDER BY id DESC LIMIT 20")
+
 // Vérifier les stats
 dbGet("SELECT * FROM stats WHERE id = 1")
 
@@ -149,7 +153,7 @@ dbGet("SELECT * FROM stats WHERE id = 1")
 dbAll("SELECT * FROM artists_scraped ORDER BY last_scraped_at DESC LIMIT 10")
 
 // Compter les tracks par état
-dbAll("SELECT listened, COUNT(*) as c FROM tracks GROUP BY listened")
+dbAll("SELECT listened, liked, COUNT(*) as c FROM tracks GROUP BY listened, liked")
 ```
 
 ## Aperçu de l'interface

@@ -245,8 +245,8 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 | `WebApp` | Layout desktop (sidebar + contenu) |
 | `MobileApp` | Layout mobile — 4 onglets : Scrapping / À écouter / ❤ Likés / Stats |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause / Tester connexion |
-| `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes / Sorties / Titres) |
-| `NextCallPanel` | Countdown + sélecteur délai (10/20/30s + jitter 1-3s) |
+| `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
+| `NextCallPanel` | Countdown + "Temps total restant" (ETA sync) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
 | `FeedList` | Feed avec filtre (Tous/Singles/Albums/Découvertes), tri (ajout/date/artiste), bannière titres masqués |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton ❤ like, bouton × supprimer, swipe gauche=suppr / droite=prev |
@@ -301,7 +301,7 @@ setDelayChoice(n)
 - Incrémenté dans `startSync` après chaque artiste scrapé
 - Remise à zéro automatique si `date` ≠ aujourd'hui
 - Affiché dans la carte **Artistes** de `ScrapingStatusPanel` (`X/100 aujourd'hui`)
-- Utilisé dans `NextCallPanel` pour calculer **"Temps total de la session"** (jours calendaires restants à 100/jour)
+- Utilisé dans `NextCallPanel` pour **"Temps total de la session"** : `(100 - dailyScrapings) × délai moyen (delayChoice + 2s)` — temps restant pour finir les 100 artistes du jour, affiché uniquement pendant une synchro active
 
 ---
 
