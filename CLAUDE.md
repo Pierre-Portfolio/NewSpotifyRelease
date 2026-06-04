@@ -122,9 +122,10 @@ function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max
 `initDB()` exécute `ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0` dans un try/catch après chaque chargement (nouveau ou depuis IndexedDB). Sans effet si la colonne existe déjà.
 
 ### Champs des items feed
-Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, date, rawDate, image, isNew, liked`
+Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, date, rawDate, image, isNew, liked, duration_ms`
 - `rawDate` : date ISO brute (`YYYY-MM-DD`) utilisée pour le tri par date de sortie
 - `liked` : 0 ou 1, synchronisé depuis DB et mis à jour en temps réel par `setTrackLiked`
+- `duration_ms` : durée en millisecondes — utilisée pour le seek à 25% au clic next
 
 ### syncInitialLikes
 Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à 300 tracks non écoutés, interroge `/me/tracks/contains` par batch de 50, met à jour `liked` en DB + feed array + `likedTracks` state.
@@ -248,8 +249,8 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sync) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` | Feed avec filtre (Tous/Singles/Albums/Découvertes), tri (ajout/date/artiste), bannière titres masqués |
-| `FeedItem` | Ligne du feed : égaliseur animé, bouton ❤ like, bouton × supprimer, swipe gauche=suppr / droite=prev |
+| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués |
+| `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `VosEcoutesPanel` | Stats d'écoute + bouton Purger les écoutés |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
@@ -308,7 +309,8 @@ setDelayChoice(n)
 ## MobilePlayer — player 50vh
 
 - Remplace `MiniPlayer` sur mobile (affiché quand `now` est défini)
-- **Like/unlike** : `GET /me/tracks/contains?ids=trackId` au changement d'URI pour initialiser l'état → `PUT /me/tracks` pour liker, `DELETE /me/tracks` via `apiDel()` pour unliker
+- **Like/unlike** : au changement d'URI, `isLiked` est initialisé **immédiatement** depuis `likedTracks` (store local), puis confirmé/corrigé par `GET /me/tracks/contains`. Évite le flash "cœur vide" sur les titres déjà likés.
+- **Clic next** : seek à 25% de `duration_ms` après 400ms (laisse le temps à Spotify de démarrer)
 - **SeekBar** : support touch complet (`onTouchStart` + `touchmove`/`touchend` sur `window`, `passive:false`) + `touchAction:'none'` pour bloquer le scroll pendant le drag
 - **Bouton loop** : alterne entre boucle (icône accent + "1") et auto-avance (icône muted) — partagé avec `loopEnabled` du store, synchronisé avec le PlayerBar desktop
 - **Hauteur** : `25vh` avec `minHeight:160px`
