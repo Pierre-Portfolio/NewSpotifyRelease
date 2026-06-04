@@ -34,11 +34,16 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Feed de découverte
 - File d'attente ordonnée par ID (les plus anciens en premier), jusqu'à **1000 titres** affichés
+- **Indicateur titres masqués** : si plus de 1000 titres en DB, un bandeau orange avertit du nombre caché
 - Barres égaliseur animées sur le titre en cours de lecture
 - Marquage automatique comme écouté quand le titre se termine → disparition animée du feed
 - **Auto-avance** : quand un titre se termine, le suivant dans le feed est lancé automatiquement
 - Navigation dans le feed via les flèches ← → de la barre du bas
 - **Bouton × par titre** : supprime définitivement un titre de la file d'attente sans le compter comme écouté
+- **Bouton ❤ par titre** : like/unlike directement depuis le feed (synchronisé Spotify + DB locale)
+- **Filtre** par type : Tous / Singles / Albums / Découvertes
+- **Tri** : ordre d'ajout / date de sortie ↓ / artiste A→Z
+- **Swipe gauche** (mobile) : supprime le titre · **Swipe droite** : piste précédente
 
 ### Player
 - Barre de lecture en temps réel (poll toutes les 5s)
@@ -55,14 +60,17 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Compteur journalier de scraping (limite Spotify 100/jour)
 - Compteur de scrapings effectués aujourd'hui affiché dans la carte **Artistes** (`X/100 aujourd'hui`)
 - Persisté dans `localStorage` (`spotifyplus_daily_scrapings`) avec la date du jour — remise à zéro automatique le lendemain
-- **"Temps total de la session"** dans le panneau NextCall : calcule en combien de jours calendaires la synchro totale sera terminée à raison de 100 artistes/jour
+- **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes d'aujourd'hui (`(100 − scrapés) × délai moyen`)
 
 ### Titres likés (onglet ❤ Likés)
-- Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats")
-- Quand l'utilisateur like ❤️ un titre dans le player, il est marqué `liked = 1` en base locale
-- La liste des likés est persistée dans la table `tracks` (colonne `liked`) et chargée au démarrage
-- Chaque titre liké est affiché avec son artiste, sa pochette, un bouton ❤ pour unliker, et un bouton lecture
+- Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats") avec badge du nombre de likés
+- Like/unlike depuis le **player mobile**, depuis le **feed** (bouton ❤ sur chaque titre), ou depuis l'onglet Likés
+- **Sync initiale au login** : l'app vérifie automatiquement les likes Spotify pour les 300 premiers titres du feed (`/me/tracks/contains`) — les titres likés avant cette session apparaissent directement dans l'onglet
+- La liste est persistée dans la table `tracks` (colonne `liked`) et chargée au démarrage
 - Unliker retire le like sur Spotify ET met à jour la base locale
+
+### Notifications
+- **Fin de session** (100 artistes/jour atteints) : notification navigateur envoyée automatiquement (permission demandée si nécessaire)
 
 ### PWA
 - Installable sur écran d'accueil Android (Chrome) — bouton "Ajouter à l'écran d'accueil"
@@ -118,7 +126,8 @@ NewSpotifyRelease/
 -- Titres à écouter (feed)
 tracks (id, spotify_uri UNIQUE, artist_name, title, release_title,
         release_type, release_date, cover_url, duration_ms,
-        listened DEFAULT 0, added_at DEFAULT datetime('now'))
+        listened DEFAULT 0, liked DEFAULT 0,
+        added_at DEFAULT datetime('now'))
 
 -- Dates de dernier scraping par artiste
 artists_scraped (spotify_id PRIMARY KEY, last_scraped_at)
@@ -134,6 +143,9 @@ stats (id=1, total_listened, listened_this_month, listened_this_year,
 // Afficher les tracks non écoutées
 dbAll("SELECT * FROM tracks WHERE listened = 0 ORDER BY id ASC LIMIT 20")
 
+// Afficher les tracks likées
+dbAll("SELECT * FROM tracks WHERE liked = 1 ORDER BY id DESC LIMIT 20")
+
 // Vérifier les stats
 dbGet("SELECT * FROM stats WHERE id = 1")
 
@@ -141,7 +153,7 @@ dbGet("SELECT * FROM stats WHERE id = 1")
 dbAll("SELECT * FROM artists_scraped ORDER BY last_scraped_at DESC LIMIT 10")
 
 // Compter les tracks par état
-dbAll("SELECT listened, COUNT(*) as c FROM tracks GROUP BY listened")
+dbAll("SELECT listened, liked, COUNT(*) as c FROM tracks GROUP BY listened, liked")
 ```
 
 ## Aperçu de l'interface
