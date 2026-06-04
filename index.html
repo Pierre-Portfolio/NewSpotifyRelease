@@ -540,12 +540,15 @@ function StoreProvider({ children }) {
               scraped_at: t.added_at ? new Date(t.added_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : null,
               image:      t.cover_url,
               isNew:      false,
+              liked:      t.liked || 0,
+              rawDate:    t.release_date || '',
             })));
           }
 
           // Load listen stats
           setListenStats(loadListenStatsFromDB());
           setLikedTracks(loadLikedTracksFromDB());
+          // syncInitialLikes est appelé après setDbReady(true) via useEffect
 
           // Vérifier si une synchro était en cours (reprise possible)
           try {
@@ -765,7 +768,44 @@ function StoreProvider({ children }) {
     dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [bool ? 1 : 0, uri]);
     await saveDB();
     setLikedTracks(loadLikedTracksFromDB());
+    setFeed(f => f.map(item => item.spotifyUri === uri ? { ...item, liked: bool ? 1 : 0 } : item));
   };
+
+  const syncInitialLikes = async () => {
+    try {
+      const uriRows = dbAll("SELECT spotify_uri FROM tracks WHERE listened = 0 LIMIT 300");
+      if (uriRows.length === 0) return;
+      const ids = uriRows.map(r => r.spotify_uri.split(':')[2]).filter(Boolean);
+      for (let i = 0; i < ids.length; i += 50) {
+        const batch = ids.slice(i, i + 50);
+        const data = await apiGet(`https://api.spotify.com/v1/me/tracks/contains?ids=${batch.join(',')}`);
+        if (!Array.isArray(data)) continue;
+        batch.forEach((id, j) => {
+          dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [data[j] ? 1 : 0, `spotify:track:${id}`]);
+        });
+      }
+      await saveDB();
+      const likedUris = new Set(dbAll("SELECT spotify_uri FROM tracks WHERE liked = 1").map(r => r.spotify_uri));
+      setFeed(f => f.map(item => ({ ...item, liked: likedUris.has(item.spotifyUri) ? 1 : 0 })));
+      setLikedTracks(loadLikedTracksFromDB());
+    } catch {}
+  };
+
+  const navigateFeed = async (dir) => {
+    const f = feedRef.current;
+    if (f.length === 0) return;
+    const nowUri = prevNowRef.current?.uri;
+    const currentIdx = nowUri ? f.findIndex(item => item.spotifyUri === nowUri) : -1;
+    let nextIdx;
+    if (dir === -1) nextIdx = currentIdx > 0 ? currentIdx - 1 : f.length - 1;
+    else nextIdx = currentIdx < f.length - 1 ? currentIdx + 1 : 0;
+    if (f[nextIdx]) await playTrack(f[nextIdx].spotifyUri);
+  };
+
+  // Sync des likes Spotify → DB dès que la DB est prête
+  React.useEffect(() => {
+    if (dbReady) syncInitialLikes();
+  }, [dbReady]); // eslint-disable-line
 
   const resumeSync = () => {
     if (!resumableSession) return;
@@ -832,6 +872,11 @@ function StoreProvider({ children }) {
             setStatus('Limite 100/jour atteinte', 'error');
             setScraping(false);
             await saveDB();
+            if ('Notification' in window) {
+              const send = () => new Notification('Spotify+ — Session terminée', { body: '100 artistes scrapés aujourd\'hui. Relance demain.', icon: './icon-192.png' });
+              if (Notification.permission === 'granted') send();
+              else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') send(); });
+            }
             return;
           }
           const artist = artists[i];
@@ -897,8 +942,10 @@ function StoreProvider({ children }) {
                   title:      album.name,
                   subtitle:   null,
                   date:       dateStr,
+                  rawDate:    album.release_date || '',
                   image:      coverUrl,
                   isNew:      true,
+                  liked:      0,
                 }].slice(0, 200));
               } else {
                 const trackItems = tracksData.items.map(t => ({
@@ -909,8 +956,10 @@ function StoreProvider({ children }) {
                   title:      t.name,
                   subtitle:   album.name,
                   date:       dateStr,
+                  rawDate:    album.release_date || '',
                   image:      coverUrl,
                   isNew:      true,
+                  liked:      0,
                 }));
                 setFeed(F => [...F, ...trackItems].slice(0, 200));
               }
@@ -988,7 +1037,7 @@ function StoreProvider({ children }) {
     rateLimitUntil, seek,
     loopEnabled, setLoopEnabled,
     dbReady, purgeListened, removeFromFeed, setTrackLiked,
-    likedTracks, setLikedTracks,
+    likedTracks, setLikedTracks, navigateFeed,
     resumableSession, resumeSync,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
@@ -1570,9 +1619,16 @@ async function playTrack(spotifyUri) {
 }
 
 function FeedItem({ item, i, isMobile=false }) {
-  const { now, removeFromFeed } = useStore();
-  const [playing, setPlaying] = React.useState(false);
+  const { now, removeFromFeed, setTrackLiked, navigateFeed } = useStore();
+  const [playing, setPlaying]       = React.useState(false);
+  const [liked,   setLikedLocal]    = React.useState(item.liked || 0);
+  const [swipeDx, setSwipeDx]       = React.useState(0);
+  const touchStartX = React.useRef(0);
+  const swiping     = React.useRef(false);
   const isNowPlaying = now?.uri === item.spotifyUri;
+
+  // Sync liked depuis les mises à jour du store
+  React.useEffect(() => { setLikedLocal(item.liked || 0); }, [item.liked]);
 
   const onPlay = async e => {
     e.stopPropagation();
@@ -1581,11 +1637,46 @@ function FeedItem({ item, i, isMobile=false }) {
     setTimeout(() => setPlaying(false), 2000);
   };
 
+  const onToggleLike = async e => {
+    e.stopPropagation();
+    const newVal = liked ? 0 : 1;
+    setLikedLocal(newVal);
+    const trackId = item.spotifyUri?.split(':')[2];
+    if (trackId) {
+      if (newVal) await apiPut('https://api.spotify.com/v1/me/tracks', { ids: [trackId] });
+      else await apiDel(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`);
+    }
+    setTrackLiked(item.spotifyUri, !!newVal);
+  };
+
+  const onTouchStart = e => {
+    touchStartX.current = e.touches[0].clientX;
+    swiping.current = true;
+  };
+  const onTouchMove = e => {
+    if (!swiping.current) return;
+    setSwipeDx(e.touches[0].clientX - touchStartX.current);
+  };
+  const onTouchEnd = () => {
+    swiping.current = false;
+    if (swipeDx < -60) removeFromFeed(item.spotifyUri);
+    else if (swipeDx > 60) navigateFeed(-1);
+    setSwipeDx(0);
+  };
+
+  const swipeColor = swipeDx < -30 ? '#e0505033' : swipeDx > 30 ? `${C.accent}33` : 'transparent';
+
   return (
     <div className={item.removing ? 'feed-removing' : ''}
-      style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8, transition:'background 0.15s', background: isNowPlaying ? `${C.accent}0d` : 'transparent' }}
-      onMouseEnter={e => { if (!item.removing) e.currentTarget.style.background = isNowPlaying ? `${C.accent}18` : C.surface; }}
-      onMouseLeave={e => { e.currentTarget.style.background = isNowPlaying ? `${C.accent}0d` : 'transparent'; }}>
+      style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8,
+        transition: swiping.current ? 'none' : 'background 0.15s, transform 0.2s',
+        transform: `translateX(${swipeDx}px)`,
+        background: swipeColor || (isNowPlaying ? `${C.accent}0d` : 'transparent') }}
+      onMouseEnter={e => { if (!item.removing && !swipeDx) e.currentTarget.style.background = isNowPlaying ? `${C.accent}18` : C.surface; }}
+      onMouseLeave={e => { e.currentTarget.style.background = isNowPlaying ? `${C.accent}0d` : 'transparent'; }}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}>
 
       <div style={{ width: isMobile?14:16, flexShrink:0, display:'flex', alignItems:'flex-end', justifyContent:'center', height:16 }}>
         {isNowPlaying
@@ -1619,6 +1710,15 @@ function FeedItem({ item, i, isMobile=false }) {
             </div>
           </>)}
 
+      <button onClick={onToggleLike}
+        title={liked ? 'Retirer le like' : 'Liker'}
+        style={{ width:26, height:26, borderRadius:'50%', border:'none', background:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, transition:'transform 0.15s' }}
+        onMouseEnter={e => e.currentTarget.style.transform='scale(1.2)'}
+        onMouseLeave={e => e.currentTarget.style.transform='scale(1)'}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill={liked ? '#e05050' : 'none'} stroke={liked ? '#e05050' : C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        </svg>
+      </button>
       <button onClick={e => { e.stopPropagation(); removeFromFeed(item.spotifyUri); }}
         title="Retirer de la liste"
         style={{ width:26, height:26, borderRadius:'50%', border:'1px solid #5a2020', background:'#2a0e0e', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, color:'#e05050', fontSize:15, lineHeight:1, transition:'background 0.15s, border-color 0.15s' }}
@@ -1671,13 +1771,65 @@ function VosEcoutesPanel() {
 }
 
 function FeedList({ isMobile=false }) {
-  const { feed } = useStore();
+  const { feed, listenStats } = useStore();
+  const [filterType, setFilterType] = React.useState('all');
+  const [sortBy,     setSortBy]     = React.useState('default');
+
+  const hidden = Math.max(0, (listenStats.remaining || 0) - feed.length);
+
+  const filtered = feed.filter(item => {
+    if (filterType === 'all') return true;
+    if (filterType === 'single') return item.label === 'Single';
+    if (filterType === 'album')  return item.label === 'Album';
+    if (filterType === 'dw')     return item.label === 'Découvertes';
+    return true;
+  });
+
+  const sorted = [...filtered].sort((a, b) => {
+    if (sortBy === 'date_desc') return (b.rawDate || '').localeCompare(a.rawDate || '');
+    if (sortBy === 'artist')    return (a.artist || '').localeCompare(b.artist || '');
+    return 0; // default = ordre DB (id ASC)
+  });
+
+  const btnFilter = active => ({
+    background: active ? `${C.accent}22` : 'none',
+    border: active ? `1px solid ${C.accent}55` : `1px solid ${C.border}`,
+    borderRadius: 6, padding: '3px 8px', cursor: 'pointer',
+    color: active ? C.accent : C.muted, fontSize: 10, fontWeight: active ? 700 : 400,
+  });
+
   if (feed.length === 0) {
     return <div style={{ fontSize:11, color:C.dim, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucune musique en attente.</div>;
   }
+
   return (
-    <div style={{ display:'flex', flexDirection:'column' }}>
-      {feed.map((item, i) => <FeedItem key={item.id + i} item={item} i={i} isMobile={isMobile} />)}
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {/* Toolbar filtre + tri */}
+      <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+        {[['all','Tous'],['single','Singles'],['album','Albums'],['dw','Découvertes']].map(([k,n]) => (
+          <button key={k} onClick={() => setFilterType(k)} style={btnFilter(filterType===k)}>{n}</button>
+        ))}
+        <div style={{ marginLeft:'auto', display:'flex', gap:4 }}>
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)}
+            style={{ background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'3px 7px', fontSize:10, color:C.muted, outline:'none', cursor:'pointer' }}>
+            <option value="default">Ordre d'ajout</option>
+            <option value="date_desc">Date sortie ↓</option>
+            <option value="artist">Artiste A→Z</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Bannière titres masqués */}
+      {hidden > 0 && (
+        <div style={{ fontSize:10, color:'#c8956c', background:'#1a1208', border:'1px solid #3a2a10', borderRadius:6, padding:'6px 10px', textAlign:'center' }}>
+          ⚠ {hidden} titre{hidden > 1 ? 's' : ''} masqué{hidden > 1 ? 's' : ''} — purge pour les afficher
+        </div>
+      )}
+
+      <div style={{ display:'flex', flexDirection:'column' }}>
+        {sorted.map((item, i) => <FeedItem key={item.id + i} item={item} i={i} isMobile={isMobile} />)}
+        {sorted.length === 0 && <div style={{ fontSize:11, color:C.dim, padding:'20px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucun titre pour ce filtre.</div>}
+      </div>
     </div>
   );
 }
@@ -1744,7 +1896,7 @@ function MobileApp() {
           <span style={{ color:C.accent }}>Spotify</span><span style={{ color:C.text }}>+</span>
         </div>
         <div style={{ display:'flex', gap:4 }}>
-          {[['scrapping','Scrapping'],['ecouter','À écouter'],['liker','❤ Likés'],['stats','Stats']].map(([k,n]) => {
+          {[['scrapping','Scrapping'],['ecouter',`À écouter`],['liker',`❤ Likés${s.likedTracks.length > 0 ? ` · ${s.likedTracks.length}` : ''}`],['stats','Stats']].map(([k,n]) => {
             const active = tab === k;
             return <button key={k} onClick={() => setTab(k)} style={{ background: active?`${C.accent}18`:'none', border: active?`1px solid ${C.accent}40`:'1px solid transparent', color: active?C.accent:C.muted, borderRadius:6, padding:'3px 8px', cursor:'pointer', fontSize:10, fontWeight: active?700:400 }}>{n}</button>;
           })}

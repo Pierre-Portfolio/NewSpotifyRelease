@@ -121,6 +121,22 @@ function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max
 ### Migration DB
 `initDB()` exécute `ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0` dans un try/catch après chaque chargement (nouveau ou depuis IndexedDB). Sans effet si la colonne existe déjà.
 
+### Champs des items feed
+Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, date, rawDate, image, isNew, liked`
+- `rawDate` : date ISO brute (`YYYY-MM-DD`) utilisée pour le tri par date de sortie
+- `liked` : 0 ou 1, synchronisé depuis DB et mis à jour en temps réel par `setTrackLiked`
+
+### syncInitialLikes
+Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à 300 tracks non écoutés, interroge `/me/tracks/contains` par batch de 50, met à jour `liked` en DB + feed array + `likedTracks` state.
+
+### FeedItem — swipe mobile
+- `onTouchStart` : capture `touchStartX`
+- `onTouchMove` : calcule `swipeDx`, applique `translateX` + teinte de fond (rouge=gauche, accent=droite)
+- `onTouchEnd` : `swipeDx < -60` → `removeFromFeed` · `swipeDx > 60` → `navigateFeed(-1)`
+
+### Notification fin de session
+Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notification` du navigateur (permission demandée si `'default'`, silencieuse si `'denied'`).
+
 ### Découvertes de la semaine (`importDiscoverWeekly`)
 - Appelée dans l'init **avant** le chargement du feed (les tracks DW sont visibles dès le login)
 - Cherche dans `GET /me/playlists` la playlist dont `owner.id === 'spotify'` et dont le nom contient `'découvertes'` ou `'discover weekly'`
@@ -232,7 +248,8 @@ function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes / Sorties / Titres) |
 | `NextCallPanel` | Countdown + sélecteur délai (10/20/30s + jitter 1-3s) |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` / `FeedItem` | Feed avec barres égaliseur animées sur le son en cours (limite 1000) + bouton × pour supprimer |
+| `FeedList` | Feed avec filtre (Tous/Singles/Albums/Découvertes), tri (ajout/date/artiste), bannière titres masqués |
+| `FeedItem` | Ligne du feed : égaliseur animé, bouton ❤ like, bouton × supprimer, swipe gauche=suppr / droite=prev |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `VosEcoutesPanel` | Stats d'écoute + bouton Purger les écoutés |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
@@ -269,7 +286,9 @@ resumeSync()                   // raccourci → startSync({ skipCount: resumable
 togglePause()
 purgeListened()
 removeFromFeed(uri)            // DELETE track de la DB + retire du feed (sans compter comme écouté)
-setTrackLiked(uri, bool)       // UPDATE liked en DB + recharge likedTracks
+setTrackLiked(uri, bool)       // UPDATE liked en DB + recharge likedTracks + met à jour feed array
+syncInitialLikes()             // vérifie /me/tracks/contains par batch de 50 (max 300 tracks) au login
+navigateFeed(dir)              // dir=-1 prev, +1 next — joue le titre adjacent dans le feed
 logout()
 seek(positionMs)
 setLoopEnabled(bool)
