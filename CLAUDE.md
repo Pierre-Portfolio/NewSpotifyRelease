@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   cover_url TEXT,
   duration_ms INTEGER,
   listened INTEGER DEFAULT 0,
+  liked INTEGER DEFAULT 0,  -- 1 si liké via le player (colonne migrée via ALTER TABLE)
   added_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -107,14 +108,18 @@ CREATE TABLE IF NOT EXISTS stats (
 ```js
 let _db = null;                        // instance sql.js Database
 
-async function initDB()                // charge depuis IndexedDB ou crée le schéma
+async function initDB()                // charge depuis IndexedDB ou crée le schéma + migration liked
 async function saveDB()                // exporte _db.export() → IndexedDB
 async function importDiscoverWeekly(addLog)  // import hebdo playlist "Découvertes de la semaine"
 function dbRun(sql, params=[])         // execute sans retour
 function dbAll(sql, params=[])         // retourne tableau d'objets
 function dbGet(sql, params=[])         // retourne le premier objet ou null
 function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time }
+function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max 500) mappées en items feed
 ```
+
+### Migration DB
+`initDB()` exécute `ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0` dans un try/catch après chaque chargement (nouveau ou depuis IndexedDB). Sans effet si la colonne existe déjà.
 
 ### Découvertes de la semaine (`importDiscoverWeekly`)
 - Appelée dans l'init **avant** le chargement du feed (les tracks DW sont visibles dès le login)
@@ -222,12 +227,13 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
 | `StoreProvider` | Context global — auth, dbReady, scraping, stats, feed, rate-limit, player, loopEnabled |
 | `Home` | Page de login (mobile + desktop) |
 | `WebApp` | Layout desktop (sidebar + contenu) |
-| `MobileApp` | Layout mobile — 3 onglets : Scrapping / À écouter / Stats |
+| `MobileApp` | Layout mobile — 4 onglets : Scrapping / À écouter / ❤ Likés / Stats |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause / Tester connexion |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes / Sorties / Titres) |
 | `NextCallPanel` | Countdown + sélecteur délai (10/20/30s + jitter 1-3s) |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` / `FeedItem` | Feed avec barres égaliseur animées sur le son en cours (limite 1000) |
+| `FeedList` / `FeedItem` | Feed avec barres égaliseur animées sur le son en cours (limite 1000) + bouton × pour supprimer |
+| `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `VosEcoutesPanel` | Stats d'écoute + bouton Purger les écoutés |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
 | `MobilePlayer` | Player mobile **25vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles + loop |
@@ -249,22 +255,34 @@ logs             // array de logs
 now              // état lecture Spotify en cours
 stats            // { artists, total, releases, tracks } — compteurs sync
 listenStats      // { remaining, remaining_ms, this_month, this_year, all_time }
+likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
 loopEnabled      // boolean
 delayChoice      // 10 | 20 | 30 (secondes)
+dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)
 rateLimitUntil   // timestamp ms
 
 resumableSession // { artists_scanned, total_artists, last_artist_name } | null
 
 // Méthodes
-startSync({ skipCount })  // skipCount=0 par défaut, N pour reprendre
-resumeSync()              // raccourci → startSync({ skipCount: resumableSession.artists_scanned })
+startSync({ skipCount })       // skipCount=0 par défaut, N pour reprendre
+resumeSync()                   // raccourci → startSync({ skipCount: resumableSession.artists_scanned })
 togglePause()
 purgeListened()
+removeFromFeed(uri)            // DELETE track de la DB + retire du feed (sans compter comme écouté)
+setTrackLiked(uri, bool)       // UPDATE liked en DB + recharge likedTracks
 logout()
 seek(positionMs)
 setLoopEnabled(bool)
 setDelayChoice(n)
 ```
+
+### Compteur journalier `dailyScrapings`
+- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ date: 'YYYY-MM-DD', count: N }`
+- Chargé au démarrage de l'app (dans l'init useEffect)
+- Incrémenté dans `startSync` après chaque artiste scrapé
+- Remise à zéro automatique si `date` ≠ aujourd'hui
+- Affiché dans la carte **Artistes** de `ScrapingStatusPanel` (`X/100 aujourd'hui`)
+- Utilisé dans `NextCallPanel` pour calculer **"Temps total de la session"** (jours calendaires restants à 100/jour)
 
 ---
 

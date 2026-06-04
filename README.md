@@ -38,6 +38,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Marquage automatique comme écouté quand le titre se termine → disparition animée du feed
 - **Auto-avance** : quand un titre se termine, le suivant dans le feed est lancé automatiquement
 - Navigation dans le feed via les flèches ← → de la barre du bas
+- **Bouton × par titre** : supprime définitivement un titre de la file d'attente sans le compter comme écouté
 
 ### Player
 - Barre de lecture en temps réel (poll toutes les 5s)
@@ -50,6 +51,18 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
+
+### Compteur journalier de scraping (limite Spotify 100/jour)
+- Compteur de scrapings effectués aujourd'hui affiché dans la carte **Artistes** (`X/100 aujourd'hui`)
+- Persisté dans `localStorage` (`spotifyplus_daily_scrapings`) avec la date du jour — remise à zéro automatique le lendemain
+- **"Temps total de la session"** dans le panneau NextCall : calcule en combien de jours calendaires la synchro totale sera terminée à raison de 100 artistes/jour
+
+### Titres likés (onglet ❤ Likés)
+- Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats")
+- Quand l'utilisateur like ❤️ un titre dans le player, il est marqué `liked = 1` en base locale
+- La liste des likés est persistée dans la table `tracks` (colonne `liked`) et chargée au démarrage
+- Chaque titre liké est affiché avec son artiste, sa pochette, un bouton ❤ pour unliker, et un bouton lecture
+- Unliker retire le like sur Spotify ET met à jour la base locale
 
 ### PWA
 - Installable sur écran d'accueil Android (Chrome) — bouton "Ajouter à l'écran d'accueil"
@@ -65,7 +78,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
 
 ### Interface
-- Responsive — desktop (sidebar) et mobile (3 onglets : Scrapping / À écouter / Stats)
+- Responsive — desktop (sidebar) et mobile (4 onglets : Scrapping / À écouter / ❤ Likés / Stats)
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
 
