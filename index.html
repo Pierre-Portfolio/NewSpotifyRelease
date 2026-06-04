@@ -456,6 +456,30 @@ function StoreProvider({ children }) {
   const [nextCallTotal, setNextCallTotal] = React.useState(0);
   const [eta,           setEta]         = React.useState('');
   const [dailyScrapings, setDailyScrapings] = React.useState(0);
+
+  // Filtres du feed — partagés entre FeedList, PlayerBar, MobilePlayer
+  const [filterType,   setFilterType]   = React.useState('all');
+  const [sortBy,       setSortBy]       = React.useState('default');
+  const [artistSearch, setArtistSearch] = React.useState('');
+  const resetFilters = () => { setFilterType('all'); setSortBy('default'); setArtistSearch(''); };
+
+  const filteredFeed = React.useMemo(() => {
+    let r = feed.filter(item => {
+      if (filterType === 'single' && item.label !== 'Single') return false;
+      if (filterType === 'album'  && item.label !== 'Album')  return false;
+      if (filterType === 'dw'     && item.label !== 'Découvertes') return false;
+      if (artistSearch.trim()) return (item.artist || '').toLowerCase().includes(artistSearch.trim().toLowerCase());
+      return true;
+    });
+    return [...r].sort((a, b) => {
+      if (sortBy === 'date_desc') return (b.rawDate || '').localeCompare(a.rawDate || '');
+      if (sortBy === 'artist')    return (a.artist || '').localeCompare(b.artist || '');
+      return 0;
+    });
+  }, [feed, filterType, sortBy, artistSearch]);
+
+  const filteredFeedRef = React.useRef([]);
+  React.useEffect(() => { filteredFeedRef.current = filteredFeed; }, [filteredFeed]);
   const [feed,          setFeed]        = React.useState([]);
   const [logs,          setLogs]        = React.useState([]);
   const [now,           setNow]         = React.useState(null);
@@ -623,8 +647,8 @@ function StoreProvider({ children }) {
     // Auto-avance — AVANT le check listenedUrisRef pour ne pas être bloqué
     // Déclenche si : loop désactivé ET (rien ne joue OU le nouveau titre n'est pas dans le feed)
     if (!loopEnabledRef.current && dbReady) {
-      const f = feedRef.current;
-      const prevIdx      = f.findIndex(item => item.spotifyUri === prevUri);
+      const f = filteredFeedRef.current;
+      const prevIdx       = f.findIndex(item => item.spotifyUri === prevUri);
       const currentInFeed = currentUri ? f.some(item => item.spotifyUri === currentUri) : false;
       if (prevIdx !== -1 && !currentInFeed) {
         const next = f[prevIdx + 1] ?? f[0];
@@ -668,7 +692,7 @@ function StoreProvider({ children }) {
 
     // Restart detection (même titre qui repart du début)
     if (now.duration > 15 && now.current < 5 && prevPos > prevDur - 10 && prevDur > 0) {
-      const f = feedRef.current;
+      const f = filteredFeedRef.current;
       const idx = f.findIndex(item => item.spotifyUri === now.uri);
       if (idx !== -1) {
         const next = f[idx + 1] ?? f[0];
@@ -681,7 +705,7 @@ function StoreProvider({ children }) {
     if (now.duration > 15 && advancedForRef.current !== now.uri) {
       const remaining = now.duration - now.current;
       if (remaining >= 0 && remaining <= 3) {
-        const f = feedRef.current;
+        const f = filteredFeedRef.current;
         const idx = f.findIndex(item => item.spotifyUri === now.uri);
         if (idx !== -1) {
           advancedForRef.current = now.uri; // marquer pour éviter le double appel
@@ -713,9 +737,9 @@ function StoreProvider({ children }) {
     const uri = prev.uri;
     if (!uri || advancedForRef.current === uri) return;
 
-    const f = feedRef.current;
+    const f = filteredFeedRef.current;
     const idx = f.findIndex(item => item.spotifyUri === uri);
-    if (idx === -1) return; // titre pas dans notre feed
+    if (idx === -1) return; // titre pas dans notre feed (ou filtré)
 
     // Avancer si les dernières secondes connues indiquent la fin du titre
     const remaining = prev.duration - prev.current;
@@ -793,7 +817,7 @@ function StoreProvider({ children }) {
   };
 
   const navigateFeed = async (dir) => {
-    const f = feedRef.current;
+    const f = filteredFeedRef.current;
     if (f.length === 0) return;
     const nowUri = prevNowRef.current?.uri;
     const currentIdx = nowUri ? f.findIndex(item => item.spotifyUri === nowUri) : -1;
@@ -1041,6 +1065,8 @@ function StoreProvider({ children }) {
     loopEnabled, setLoopEnabled,
     dbReady, purgeListened, removeFromFeed, setTrackLiked,
     likedTracks, setLikedTracks, navigateFeed,
+    filteredFeed, filterType, setFilterType, sortBy, setSortBy,
+    artistSearch, setArtistSearch, resetFilters,
     resumableSession, resumeSync,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
@@ -1235,7 +1261,7 @@ function Home({ isMobile }) {
 // PLAYER BARS
 // ════════════════════════════════════════════════
 function MobilePlayer() {
-  const { now, feed, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks } = useStore();
+  const { now, feed, filteredFeed, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks } = useStore();
   const [isLiked, setIsLiked] = React.useState(false);
 
   // Vérifier si le titre en cours est liké
@@ -1255,22 +1281,22 @@ function MobilePlayer() {
   if (!now) return null;
 
   const trackId      = now.uri?.split(':')[2];
-  const currentIndex = feed.findIndex(f => f.spotifyUri === now.uri);
-  const hasFeed      = feed.length > 0;
+  const currentIndex = filteredFeed.findIndex(f => f.spotifyUri === now.uri);
+  const hasFeed      = filteredFeed.length > 0;
 
   const togglePlayPause = async () => {
     if (now.playing) await apiPut('https://api.spotify.com/v1/me/player/pause');
     else             await apiPut('https://api.spotify.com/v1/me/player/play');
   };
   const prevTrack = async () => {
-    const idx = currentIndex > 0 ? currentIndex - 1 : feed.length - 1;
-    if (feed[idx]) await playTrack(feed[idx].spotifyUri);
+    const idx = currentIndex > 0 ? currentIndex - 1 : filteredFeed.length - 1;
+    if (filteredFeed[idx]) await playTrack(filteredFeed[idx].spotifyUri);
   };
   const nextTrack = async () => {
-    const idx = currentIndex >= 0 && currentIndex < feed.length - 1 ? currentIndex + 1 : 0;
-    if (!feed[idx]) return;
-    await playTrack(feed[idx].spotifyUri);
-    const dur = feed[idx].duration_ms;
+    const idx = currentIndex >= 0 && currentIndex < filteredFeed.length - 1 ? currentIndex + 1 : 0;
+    if (!filteredFeed[idx]) return;
+    await playTrack(filteredFeed[idx].spotifyUri);
+    const dur = filteredFeed[idx].duration_ms;
     if (dur > 0) setTimeout(() => seek(Math.floor(dur * 0.25)), 400);
   };
   const toggleLoop = async () => {
@@ -1303,7 +1329,7 @@ function MobilePlayer() {
           <div style={{ fontSize:15, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{now.title}</div>
           <div style={{ fontSize:12, color:C.muted, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{now.artist}</div>
           {currentIndex >= 0 && (
-            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:5 }}>{currentIndex + 1} / {feed.length}</div>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:5 }}>{currentIndex + 1} / {filteredFeed.length}</div>
           )}
         </div>
         {/* Bouton +1min */}
@@ -1361,7 +1387,7 @@ function MobilePlayer() {
 }
 
 function PlayerBar() {
-  const { now, feed, loopEnabled, setLoopEnabled, seek } = useStore();
+  const { now, feed, filteredFeed, loopEnabled, setLoopEnabled, seek } = useStore();
 
   const togglePlayPause = async () => {
     if (!now) return;
@@ -1378,21 +1404,21 @@ function PlayerBar() {
     await apiPut(`https://api.spotify.com/v1/me/player/repeat?state=${next ? 'track' : 'off'}`);
   };
 
-  const currentIndex = now?.uri ? feed.findIndex(f => f.spotifyUri === now.uri) : -1;
+  const currentIndex = now?.uri ? filteredFeed.findIndex(f => f.spotifyUri === now.uri) : -1;
 
   const prevTrack = async () => {
-    const idx = currentIndex > 0 ? currentIndex - 1 : feed.length - 1;
-    if (feed[idx]) await playTrack(feed[idx].spotifyUri);
+    const idx = currentIndex > 0 ? currentIndex - 1 : filteredFeed.length - 1;
+    if (filteredFeed[idx]) await playTrack(filteredFeed[idx].spotifyUri);
   };
   const nextTrack = async () => {
-    const idx = currentIndex >= 0 && currentIndex < feed.length - 1 ? currentIndex + 1 : 0;
-    if (!feed[idx]) return;
-    await playTrack(feed[idx].spotifyUri);
-    const dur = feed[idx].duration_ms;
+    const idx = currentIndex >= 0 && currentIndex < filteredFeed.length - 1 ? currentIndex + 1 : 0;
+    if (!filteredFeed[idx]) return;
+    await playTrack(filteredFeed[idx].spotifyUri);
+    const dur = filteredFeed[idx].duration_ms;
     if (dur > 0) setTimeout(() => seek(Math.floor(dur * 0.25)), 400);
   };
 
-  const hasFeed = feed.length > 0;
+  const hasFeed = filteredFeed.length > 0;
   const btnStyle = active => ({ background:'none', border:'none', cursor: active ? 'pointer' : 'default', display:'flex', alignItems:'center', justifyContent:'center', padding:6, borderRadius:6, opacity: active ? 0.7 : 0.25 });
 
   if (!now) {
@@ -1448,7 +1474,7 @@ function PlayerBar() {
       </div>
       <div style={{ width:130, display:'flex', flexDirection:'column', alignItems:'flex-end', gap:2 }}>
         {currentIndex >= 0
-          ? <span style={{ fontSize:10, color:C.accent, fontFamily:'DM Mono,monospace' }}>{currentIndex + 1} / {feed.length}</span>
+          ? <span style={{ fontSize:10, color:C.accent, fontFamily:'DM Mono,monospace' }}>{currentIndex + 1} / {filteredFeed.length}</span>
           : <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>En direct ↗</span>
         }
         {currentIndex >= 0 && feed[currentIndex]?.label &&
@@ -1784,28 +1810,12 @@ function VosEcoutesPanel() {
 }
 
 function FeedList({ isMobile=false }) {
-  const { feed, listenStats } = useStore();
-  const [filterType,   setFilterType]   = React.useState('all');
-  const [sortBy,       setSortBy]       = React.useState('default');
-  const [artistSearch, setArtistSearch] = React.useState('');
+  const { feed, listenStats, filteredFeed,
+          filterType, setFilterType, sortBy, setSortBy,
+          artistSearch, setArtistSearch, resetFilters } = useStore();
 
-  const hidden = Math.max(0, (listenStats.remaining || 0) - feed.length);
-
-  const filtered = feed.filter(item => {
-    if (filterType === 'single' && item.label !== 'Single') return false;
-    if (filterType === 'album'  && item.label !== 'Album')  return false;
-    if (filterType === 'dw'     && item.label !== 'Découvertes') return false;
-    if (artistSearch.trim()) {
-      return (item.artist || '').toLowerCase().includes(artistSearch.trim().toLowerCase());
-    }
-    return true;
-  });
-
-  const sorted = [...filtered].sort((a, b) => {
-    if (sortBy === 'date_desc') return (b.rawDate || '').localeCompare(a.rawDate || '');
-    if (sortBy === 'artist')    return (a.artist || '').localeCompare(b.artist || '');
-    return 0; // default = ordre DB (id ASC)
-  });
+  const hidden      = Math.max(0, (listenStats.remaining || 0) - feed.length);
+  const filtersOn   = filterType !== 'all' || sortBy !== 'default' || artistSearch.trim();
 
   const btnFilter = active => ({
     background: active ? `${C.accent}22` : 'none',
@@ -1820,26 +1830,30 @@ function FeedList({ isMobile=false }) {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-      {/* Toolbar filtre + tri */}
+      {/* Toolbar filtre + tri + reset */}
       <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
         {[['all','Tous'],['single','Singles'],['album','Albums'],['dw','Découvertes']].map(([k,n]) => (
           <button key={k} onClick={() => setFilterType(k)} style={btnFilter(filterType===k)}>{n}</button>
         ))}
-        <div style={{ marginLeft:'auto', display:'flex', gap:4 }}>
+        <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
           <select value={sortBy} onChange={e => setSortBy(e.target.value)}
             style={{ background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'3px 7px', fontSize:10, color:C.muted, outline:'none', cursor:'pointer' }}>
             <option value="default">Ordre d'ajout</option>
             <option value="date_desc">Date sortie ↓</option>
             <option value="artist">Artiste A→Z</option>
           </select>
+          {filtersOn && (
+            <button onClick={resetFilters} title="Réinitialiser les filtres"
+              style={{ width:22, height:22, borderRadius:6, border:`1px solid #5a2020`, background:'#2a0e0e', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'#e05050', fontSize:12, flexShrink:0 }}>
+              🗑
+            </button>
+          )}
         </div>
       </div>
+
       {/* Filtre artiste */}
       <div style={{ position:'relative' }}>
-        <input
-          type="text"
-          placeholder="Filtrer par artiste…"
-          value={artistSearch}
+        <input type="text" placeholder="Filtrer par artiste…" value={artistSearch}
           onChange={e => setArtistSearch(e.target.value)}
           style={{ width:'100%', background:'#111', border:`1px solid ${artistSearch ? C.accent : C.border}`, borderRadius:6, padding:'5px 28px 5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }}
         />
@@ -1859,8 +1873,8 @@ function FeedList({ isMobile=false }) {
       )}
 
       <div style={{ display:'flex', flexDirection:'column' }}>
-        {sorted.map((item, i) => <FeedItem key={item.id + i} item={item} i={i} isMobile={isMobile} />)}
-        {sorted.length === 0 && <div style={{ fontSize:11, color:C.dim, padding:'20px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucun titre pour ce filtre.</div>}
+        {filteredFeed.map((item, i) => <FeedItem key={item.id + i} item={item} i={i} isMobile={isMobile} />)}
+        {filteredFeed.length === 0 && <div style={{ fontSize:11, color:C.dim, padding:'20px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucun titre pour ce filtre.</div>}
       </div>
     </div>
   );
