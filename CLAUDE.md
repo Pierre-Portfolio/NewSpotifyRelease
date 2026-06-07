@@ -114,7 +114,7 @@ async function importDiscoverWeekly(addLog)  // import hebdo playlist "Découver
 function dbRun(sql, params=[])         // execute sans retour
 function dbAll(sql, params=[])         // retourne tableau d'objets
 function dbGet(sql, params=[])         // retourne le premier objet ou null
-function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time }
+function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time, listened_ms }
 function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max 500) mappées en items feed
 ```
 
@@ -154,6 +154,16 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 ---
 
 ## Logique de scraping (dans `startSync`)
+
+### Gestion du rate-limit 429 (wrapper `apiGetSafe`)
+Défini localement dans `startSync`. Boucle infinie qui appelle `apiGet(url)` et, sur erreur `RATE_LIMIT` :
+- `setPaused(true)` → UI passe en mode pause
+- Countdown visible (`setNextCall`)
+- `await sleep(err.waitMs)` — attend le Retry-After + 2s
+- `setPaused(false)` + log de reprise
+- Retry la même URL automatiquement
+
+Les 3 appels critiques utilisent `apiGetSafe` : page artistes, albums d'un artiste, tracks d'un album.
 
 1. Vérifie le compte `/me`
 2. Charge les dates de scrapping depuis `SELECT spotify_id, last_scraped_at FROM artists_scraped`
@@ -216,6 +226,7 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 - Table `stats` avec une seule ligne (id=1) — compteurs incrémentés à chaque écoute
 - `remaining` = `SELECT COUNT(*) FROM tracks WHERE listened = 0` (recalculé)
 - `remaining_ms` = `SELECT SUM(duration_ms) FROM tracks WHERE listened = 0` (recalculé)
+- `listened_ms` = `SELECT SUM(duration_ms) FROM tracks WHERE listened = 1` (recalculé) — affiché dans `VosEcoutesPanel` + `now.duration * 1000` pour le titre en cours
 - Réinitialisation mois/année : vérifiée au démarrage via `last_reset_month` / `last_reset_year`
 
 ---
@@ -252,7 +263,7 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 | `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
-| `VosEcoutesPanel` | Stats d'écoute + bouton Purger les écoutés |
+| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**) + bouton Purger |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
 | `MobilePlayer` | Player mobile **25vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles + loop |
 | `SeekBar` | Barre de progression cliquable/draggable — mouse ET touch (`onTouchStart/Move/End`) |
@@ -272,12 +283,16 @@ feed             // array d'items du feed
 logs             // array de logs
 now              // état lecture Spotify en cours
 stats            // { artists, total, releases, tracks } — compteurs sync
-listenStats      // { remaining, remaining_ms, this_month, this_year, all_time }
+listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms }
 likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
 loopEnabled      // boolean
 delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)
 rateLimitUntil   // timestamp ms
+filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
+filterType       // 'all' | 'single' | 'album' | 'dw'
+sortBy           // 'default' | 'date_desc' | 'artist'
+artistSearch     // string — filtre texte sur artist_name
 
 resumableSession // { artists_scanned, total_artists, last_artist_name } | null
 
@@ -289,7 +304,8 @@ purgeListened()
 removeFromFeed(uri)            // DELETE track de la DB + retire du feed (sans compter comme écouté)
 setTrackLiked(uri, bool)       // UPDATE liked en DB + recharge likedTracks + met à jour feed array
 syncInitialLikes()             // vérifie /me/tracks/contains par batch de 50 (max 300 tracks) au login
-navigateFeed(dir)              // dir=-1 prev, +1 next — joue le titre adjacent dans le feed
+navigateFeed(dir)              // dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed
+resetFilters()                 // remet filterType='all', sortBy='default', artistSearch=''
 logout()
 seek(positionMs)
 setLoopEnabled(bool)
@@ -314,7 +330,7 @@ setDelayChoice(n)
 - **SeekBar** : support touch complet (`onTouchStart` + `touchmove`/`touchend` sur `window`, `passive:false`) + `touchAction:'none'` pour bloquer le scroll pendant le drag
 - **Bouton loop** : alterne entre boucle (icône accent + "1") et auto-avance (icône muted) — partagé avec `loopEnabled` du store, synchronisé avec le PlayerBar desktop
 - **Hauteur** : `25vh` avec `minHeight:160px`
-- Position dans le feed affichée (`currentIndex + 1 / feed.length`)
+- Position dans le feed affichée (`currentIndex + 1 / filteredFeed.length`)
 
 ---
 
@@ -341,6 +357,8 @@ Les listeners `mousemove`/`mouseup` doivent être attachés **directement dans `
 
 ### Babel — var hoisting
 Babel compile `const`/`let` en `var`. Les `useEffect` qui référencent des variables déclarées plus bas dans la même fonction body fonctionnent car les callbacks sont exécutés après le rendu complet (les vars sont initialisées). Ne pas déplacer les useEffect après leurs dépendances.
+
+**⚠️ `useMemo` est différent de `useEffect`** : son callback s'exécute **pendant le rendu**, pas après. Les variables référencées doivent donc être déclarées **avant** le `useMemo` dans le source. Ex : `filteredFeed` (useMemo) doit être déclaré après `feed` (useState), sinon `feed` vaut `undefined` au premier rendu.
 
 ### Limites connues
 - iOS/Safari : stockage IndexedDB limité à ~50 Mo, purge automatique si l'app n'est pas ouverte 7 jours → privilégier Android
