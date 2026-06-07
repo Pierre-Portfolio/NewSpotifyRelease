@@ -19,7 +19,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Mise à jour automatique de `last_scraped_at` dans `artists_scraped` après chaque artiste scanné
 - Pause / reprise de la sync en cours de session
 - **Reprise après interruption** : si l'app est fermée ou le tel éteint en plein milieu, la progression est sauvegardée dans `localStorage`. Au prochain login, un bouton **"↩ Reprendre la synchro en cours"** apparaît avec le compteur et le dernier artiste traité
-- Protection rate-limit : sur erreur 429, tous les appels Spotify sont bloqués jusqu'à expiration du cooldown
+- **Protection rate-limit** : sur erreur 429, le scraping se met en **pause automatique** (countdown visible), attend le Retry-After, puis reprend seul sans perdre la position
 
 ### Découvertes de la semaine (auto-import hebdo)
 - Au login, si la playlist Spotify **"Découvertes de la semaine"** n'a pas été importée depuis 7 jours → import automatique dans le feed
@@ -43,7 +43,9 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Bouton ❤ par titre** : like/unlike directement depuis le feed (synchronisé Spotify + DB locale)
 - **Filtre** par type : Tous / Singles / Albums / Découvertes
 - **Filtre artiste** : champ texte (insensible à la casse) combinable avec le filtre type et le tri
+- **Bouton 🗑 reset** : réinitialise tous les filtres en un clic (visible uniquement si un filtre est actif)
 - **Tri** : ordre d'ajout / date de sortie ↓ / artiste A→Z
+- **Navigation filtrée** : next/prev et auto-avance respectent l'ordre du feed filtré
 - **Swipe gauche** (mobile) : supprime le titre · **Swipe droite** : piste précédente
 
 ### Player
@@ -56,6 +58,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Stats
 - Compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
+- **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
 
