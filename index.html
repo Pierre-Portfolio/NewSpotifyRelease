@@ -849,6 +849,30 @@ function StoreProvider({ children }) {
     setEta(''); setStatus('Vérification du compte…', 'pulse');
 
     try {
+      // Wrapper apiGet qui gère le 429 : pause automatique + reprise
+      const apiGetSafe = async (url) => {
+        while (true) {
+          try {
+            return await apiGet(url);
+          } catch (err) {
+            if (err.message === 'RATE_LIMIT') {
+              log(`🚫 Rate limit 429 — pause automatique ${err.waitSec}s`, 'error');
+              setStatus(`⏸ Rate limit — reprise dans ${err.waitSec}s`, 'wait');
+              setPaused(true);
+              setNextCallTotal(Math.ceil(err.waitMs / 1000));
+              setNextCall(Math.ceil(err.waitMs / 1000));
+              await sleep(err.waitMs);
+              setPaused(false);
+              setStatus('▶ Reprise après rate limit…', 'pulse');
+              log('▶ Reprise après rate limit.', 'ok');
+              // boucle → retry
+            } else {
+              throw err;
+            }
+          }
+        }
+      };
+
       log('── Étape 1 : vérification du compte ──', 'info');
       const me = await apiGet('https://api.spotify.com/v1/me');
       if (!me?.id) { log('Erreur : impossible de récupérer le compte.', 'error'); setScraping(false); return; }
@@ -879,7 +903,7 @@ function StoreProvider({ children }) {
 
       while (nextUrl) {
         pageNum++;
-        const pageData = await apiGet(nextUrl);
+        const pageData = await apiGetSafe(nextUrl);
         if (!pageData?.artists?.items) { log('Erreur chargement artistes.', 'error'); break; }
         if (pageData.artists.total) {
           totalArtists = pageData.artists.total;
@@ -916,7 +940,7 @@ function StoreProvider({ children }) {
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
           const cutoff = new Date(scrapedDates[artist.id] || '2026-03-15');
-          const albumsData = await apiGet(
+          const albumsData = await apiGetSafe(
             `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`
           );
           if (albumsData?.items) {
@@ -927,7 +951,7 @@ function StoreProvider({ children }) {
               const rDate = new Date(album.release_date);
               if (rDate < cutoff || rDate > ceiling) continue;
 
-              const tracksData = await apiGet(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
+              const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
               if (!tracksData?.items?.length) continue;
               const uris = tracksData.items.map(t => t.uri);
               if (seenUris.has(uris[0])) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
@@ -1036,18 +1060,8 @@ function StoreProvider({ children }) {
       }
     } catch (err) {
       setNextCall(0); setEta('');
-      if (err.message === 'RATE_LIMIT') {
-        log(`🚫 RATE LIMIT 429 — Retry-After: ${err.rawHeader}`, 'error');
-        log(`⏳ Pause ${err.waitSec}s…`, 'wait');
-        setStatus(`Rate limit 429 — pause ${err.waitSec}s`, 'wait');
-        setNextCallTotal(Math.ceil(err.waitMs/1000)); setNextCall(Math.ceil(err.waitMs/1000));
-        await sleep(err.waitMs);
-        log('Délai écoulé. Relancez manuellement.', 'info');
-        setStatus('Arrêté après rate limit.', 'green');
-      } else {
-        log(`Erreur : ${err.message}`, 'error');
-        setStatus('Erreur — arrêté.', 'wait');
-      }
+      log(`Erreur : ${err.message}`, 'error');
+      setStatus('Erreur — arrêté.', 'wait');
     } finally {
       setScraping(false); setPaused(false);
     }
