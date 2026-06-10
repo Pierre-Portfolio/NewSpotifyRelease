@@ -66,7 +66,7 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 ```js
 CLIENT_ID    = '672e41f0308f4378b4f2331844e08b20'
 REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
-SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state'
+SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
 ### Délai de scraping
@@ -139,8 +139,15 @@ Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, 
 - `duration_ms` : durée en millisecondes — utilisée pour le seek à 25% au clic next
 
 ### syncInitialLikes
-Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à 300 tracks non écoutés, interroge `/me/tracks/contains` par batch de 50, met à jour `liked` en DB + feed array + `likedTracks` state.
-**TTL 24h** (`localStorage spotifyplus_likes_synced_at`) : jusqu'à 6 requêtes par appel, inutile à chaque reload de page.
+Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à 300 tracks non écoutés, interroge `/me/library/contains` (helper `libraryContains`) par batch de **40 URIs** (max imposé par l'API), met à jour `liked` en DB + feed array + `likedTracks` state.
+**TTL 24h** (`localStorage spotifyplus_likes_synced_at`) : jusqu'à 8 requêtes par appel, inutile à chaque reload de page.
+
+### Helpers library — migration API Spotify février 2026
+`/me/tracks/contains` et `PUT/DELETE /me/tracks` ont été **supprimés** par Spotify (appliqué aux apps Development Mode existantes le 9 mars 2026). Remplaçants génériques module-level dans `index.html` :
+- `libraryContains(uris)` → `GET /me/library/contains?uris=…` (max 40 URIs, retourne un tableau de booléens ou `null` si erreur/403/rate-limit)
+- `librarySave(uri)` / `libraryRemove(uri)` → `PUT/DELETE /me/library?uris=…` — **URIs en query string, même pour le PUT** (pas de body)
+- `libraryScopeAlert(result)` : si l'API répond `403 forbidden` (token émis avant l'ajout des scopes `user-library-read/modify`), affiche une alerte demandant une déconnexion/reconnexion et retourne `true` (le caller annule sa mise à jour d'état)
+- ⚠ `apiDel` mappe désormais aussi le statut 403 sur `{ error: 'forbidden' }` (comme `apiPut`/`apiPost`)
 
 ### FeedItem — swipe mobile
 - `onTouchStart` : capture `touchStartX`
@@ -156,6 +163,7 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 - Cherche dans `GET /me/playlists` la playlist dont `owner.id === 'spotify'` et dont le nom contient `'découvertes'` ou `'discover weekly'`
 - Insère les tracks avec `release_type = 'discover_weekly'`, `release_title = 'Découvertes de la semaine'`
 - Skip si `localStorage('spotifyplus_dw_last_import')` < 7 jours
+- **⚠ Migration février 2026** : l'appel utilise `GET /playlists/{id}/items` (ex-`/tracks`, renommé) et lit `entry.item || entry.track` (champ renommé). Le contenu des playlists n'est renvoyé **que** pour les playlists possédées/collaboratives — "Découvertes de la semaine" appartenant à Spotify, l'API répond généralement 403 ou sans `items` : dans ce cas, log ⚠ explicite + `DW_LS_KEY` posé (nouvel essai dans 7 jours, auto-réparant si Spotify rouvre l'accès). L'import est donc **probablement inopérant** tant que Spotify n'expose plus ses playlists éditoriales aux apps tierces.
 - Les messages sont collectés dans `initMsgs[]` et affichés dans le panneau Logs au login
 - Tag **Découvertes** (violet `oklch(0.65 0.18 300)`) dans le feed, tag **DW** sur mobile
 
@@ -317,7 +325,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `Home` | Page de login (mobile + desktop) |
 | `WebApp` | Layout desktop (sidebar + contenu) |
 | `MobileApp` | Layout mobile — 4 onglets : Scrapping / À écouter / ❤ Likés / Stats |
-| `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause / Tester connexion |
+| `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sync) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
@@ -367,7 +375,7 @@ togglePause()                  // bascule syncState entre 'paused' et 'running' 
 purgeListened()                // DELETE listened=1 AND liked=0 — les likés sont conservés
 removeFromFeed(uri)            // useCallback([dbReady]) — DELETE de la DB (ou UPDATE listened=1 si liké) + retire du feed (sans compter comme écouté)
 setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + recharge likedTracks + met à jour feed array
-syncInitialLikes()             // vérifie /me/tracks/contains par batch de 50 (max 300 tracks), sleep 400ms entre batchs, TTL 24h
+syncInitialLikes()             // vérifie /me/library/contains par batch de 40 URIs (max 300 tracks), sleep 400ms entre batchs, TTL 24h
 navigateFeed(dir)              // useCallback([]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed
 resetFilters()                 // remet filterType='all', sortBy='default', artistSearch=''
 logout()
@@ -389,7 +397,7 @@ setDelayChoice(n)
 ## MobilePlayer — player 50vh
 
 - Remplace `MiniPlayer` sur mobile (affiché quand `now` est défini)
-- **Like/unlike** : au changement d'URI, `isLiked` est initialisé depuis le local (`likedTracks` + `feed`). `GET /me/tracks/contains` n'est appelé **que si le titre est inconnu localement** (titre hors feed) — économise 1 requête par changement de titre dans le cas courant.
+- **Like/unlike** : au changement d'URI, `isLiked` est initialisé depuis le local (`likedTracks` + `feed`). `GET /me/library/contains` n'est appelé **que si le titre est inconnu localement** (titre hors feed) — économise 1 requête par changement de titre dans le cas courant. Écritures via `librarySave`/`libraryRemove` + `libraryScopeAlert` sur 403.
 - **Clic next** : seek à 25% de `duration_ms` après 400ms (laisse le temps à Spotify de démarrer)
 - **SeekBar** : support touch complet (`onTouchStart` + `touchmove`/`touchend` sur `window`, `passive:false`) + `touchAction:'none'` pour bloquer le scroll pendant le drag
 - **Bouton loop** : alterne entre boucle (icône accent + "1") et auto-avance (icône muted) — partagé avec `loopEnabled` du store, synchronisé avec le PlayerBar desktop

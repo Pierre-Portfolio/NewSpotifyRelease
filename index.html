@@ -57,7 +57,9 @@
 // ════════════════════════════════════════════════
 const CLIENT_ID    = '672e41f0308f4378b4f2331844e08b20';
 const REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/';
-const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state';
+// user-library-read/modify : requis par les endpoints /me/library (migration Spotify fév. 2026).
+// Un compte connecté avant l'ajout de ces scopes doit se déconnecter/reconnecter pour les accorder.
+const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify';
 const ESTIMATED_TOTAL = 1400;
 
 // ════════════════════════════════════════════════
@@ -253,9 +255,32 @@ async function apiDel(url, _retried = false) {
     if (ok) return apiDel(url, true);
   }
   if (res.status === 429) { _rlSet(_parseRetryAfterMs(res.headers.get('Retry-After'), 30000)); return { error:'rate_limited', rate_limited: true }; }
+  if (res.status === 403) return { error: 'forbidden' };
   return { ok: true };
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ════════════════════════════════════════════════
+// LIBRARY — migration API Spotify février 2026
+// /me/tracks/contains et PUT/DELETE /me/tracks ont été supprimés (appliqué aux apps
+// Development Mode existantes le 9 mars 2026) → endpoints génériques /me/library
+// qui acceptent des URIs Spotify (max 40 par requête), en query string même pour PUT.
+// Scopes requis : user-library-read (contains) / user-library-modify (save/remove).
+// ════════════════════════════════════════════════
+const _uriQS = uris => uris.map(encodeURIComponent).join(',');
+async function libraryContains(uris) {
+  const data = await apiGet(`https://api.spotify.com/v1/me/library/contains?uris=${_uriQS(uris)}`);
+  return Array.isArray(data) ? data : null; // null = erreur, rate-limit ou scope manquant (403)
+}
+const librarySave   = uri => apiPut(`https://api.spotify.com/v1/me/library?uris=${_uriQS([uri])}`);
+const libraryRemove = uri => apiDel(`https://api.spotify.com/v1/me/library?uris=${_uriQS([uri])}`);
+// Alerte commune quand le token a été émis avant l'ajout des scopes user-library-* :
+// l'API répond 403 tant que l'utilisateur ne s'est pas déconnecté/reconnecté
+function libraryScopeAlert(result) {
+  if (result?.error !== 'forbidden') return false;
+  alert('Spotify a refusé la gestion des likes (nouvelle permission requise).\nDéconnecte-toi puis reconnecte-toi pour l\'accorder.');
+  return true;
+}
 // Jour LOCAL (YYYY-MM-DD) — toISOString() donnerait le jour UTC : le compteur
 // journalier se réinitialiserait à 2h du matin en France l'été au lieu de minuit
 const localDay = () => {
@@ -441,12 +466,20 @@ async function importDiscoverWeekly(addLog) {
   }
 
   const today      = new Date().toISOString().slice(0, 10);
-  const tracksData = await apiGet(`https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50`);
-  if (!tracksData?.items?.length) return;
+  // Migration Spotify fév. 2026 : /playlists/{id}/tracks → /playlists/{id}/items, et le
+  // contenu n'est renvoyé QUE pour les playlists possédées/collaboratives. "Découvertes de
+  // la semaine" appartient à Spotify → l'API peut refuser (403) ou renvoyer sans items.
+  const tracksData = await apiGet(`https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50`);
+  if (tracksData?.rate_limited) return; // fenêtre 429 — retentera au prochain login
+  if (tracksData?.error || !tracksData?.items?.length) {
+    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible — depuis la migration Spotify de février 2026, les playlists éditoriales Spotify ne sont plus lisibles par les apps tierces. Import désactivé, nouvel essai dans 7 jours.', 'warn');
+    localStorage.setItem(DW_LS_KEY, Date.now().toString()); // ne pas réessayer à chaque login
+    return;
+  }
 
   let added = 0;
-  for (const item of tracksData.items) {
-    const t = item.track;
+  for (const entry of tracksData.items) {
+    const t = entry.item || entry.track; // champ renommé track → item par la migration 2026
     if (!t?.uri || t.is_local) continue;
     try {
       dbRun(
@@ -464,19 +497,6 @@ async function importDiscoverWeekly(addLog) {
   } else {
     addLog('Découvertes de la semaine : tous les titres sont déjà dans le feed', 'info');
     localStorage.setItem(DW_LS_KEY, Date.now().toString());
-  }
-}
-
-// ════════════════════════════════════════════════
-// TEST CONNEXION — joue After Dark · Mr. Kitty
-// ════════════════════════════════════════════════
-async function testConnection() {
-  try {
-    const result = await apiPut('https://api.spotify.com/v1/me/player/play', { uris: ['spotify:track:2LKOHdMsL0K9KwcPRlJK2v'] });
-    if (result?.error === 'no_active_device') alert('Aucun appareil Spotify actif. Lance Spotify sur un appareil d\'abord.');
-    if (result?.error === 'forbidden')        alert('Lecture impossible — compte Spotify Free ?');
-  } catch (e) {
-    alert('Erreur : ' + e.message);
   }
 }
 
@@ -946,19 +966,19 @@ function StoreProvider({ children }) {
 
   const syncInitialLikes = async () => {
     try {
-      // 1×/24h max : jusqu'à 6 requêtes par appel, inutile à chaque reload de page
+      // 1×/24h max : jusqu'à 8 requêtes par appel, inutile à chaque reload de page
       const last = parseInt(localStorage.getItem('spotifyplus_likes_synced_at') || '0');
       if (Date.now() - last < 24 * 60 * 60 * 1000) return;
       const uriRows = dbAll("SELECT spotify_uri FROM tracks WHERE listened = 0 LIMIT 300");
       if (uriRows.length === 0) return;
-      const ids = uriRows.map(r => r.spotify_uri.split(':')[2]).filter(Boolean);
-      for (let i = 0; i < ids.length; i += 50) {
-        if (i > 0) await sleep(400); // lisse le burst d'appels au login (jusqu'à 6 batchs)
-        const batch = ids.slice(i, i + 50);
-        const data = await apiGet(`https://api.spotify.com/v1/me/tracks/contains?ids=${batch.join(',')}`);
-        if (!Array.isArray(data)) continue;
-        batch.forEach((id, j) => {
-          dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [data[j] ? 1 : 0, `spotify:track:${id}`]);
+      const uris = uriRows.map(r => r.spotify_uri).filter(Boolean);
+      for (let i = 0; i < uris.length; i += 40) { // /me/library/contains : max 40 URIs par requête
+        if (i > 0) await sleep(400); // lisse le burst d'appels au login (jusqu'à 8 batchs)
+        const batch = uris.slice(i, i + 40);
+        const data = await libraryContains(batch);
+        if (!data) continue; // erreur, rate-limit ou scope manquant — on garde l'état local
+        batch.forEach((uri, j) => {
+          dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [data[j] ? 1 : 0, uri]);
         });
       }
       await saveDB();
@@ -1569,18 +1589,15 @@ function MobilePlayer() {
     setIsLiked(inLocal);
     if (!now?.uri) return;
     // Titre connu localement (feed ou likés) : la DB fait foi, pas besoin d'une
-    // requête /me/tracks/contains à chaque changement de titre
+    // requête /me/library/contains à chaque changement de titre
     if (feedItem || inLocal) return;
-    const id = now.uri.split(':')[2];
-    if (!id) return;
-    apiGet(`https://api.spotify.com/v1/me/tracks/contains?ids=${id}`)
-      .then(data => { if (Array.isArray(data)) setIsLiked(data[0]); })
+    libraryContains([now.uri])
+      .then(data => { if (data) setIsLiked(data[0]); })
       .catch(() => {});
   }, [now?.uri]);
 
   if (!now) return null;
 
-  const trackId      = now.uri?.split(':')[2];
   const currentIndex = filteredFeed.findIndex(f => f.spotifyUri === now.uri);
   const hasFeed      = filteredFeed.length > 0;
 
@@ -1605,13 +1622,15 @@ function MobilePlayer() {
     await apiPut(`https://api.spotify.com/v1/me/player/repeat?state=${next ? 'track' : 'off'}`);
   };
   const toggleLike = async () => {
-    if (!trackId) return;
+    if (!now.uri) return;
     if (isLiked) {
-      await apiDel(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`);
+      const res = await libraryRemove(now.uri);
+      if (libraryScopeAlert(res)) return;
       setIsLiked(false);
       setTrackLiked(now.uri, false);
     } else {
-      await apiPut('https://api.spotify.com/v1/me/tracks', { ids: [trackId] });
+      const res = await librarySave(now.uri);
+      if (libraryScopeAlert(res)) return;
       setIsLiked(true);
       setTrackLiked(now.uri, true);
     }
@@ -1884,11 +1903,6 @@ function DateRangePanel({ compact=false }) {
           </button>
         )}
       </div>
-
-      <button onClick={testConnection}
-        style={{ width:'100%', marginTop:8, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding: compact?'6px 0':'7px 0', cursor:'pointer', color:C.muted, fontSize:10, fontWeight:600, letterSpacing:'0.04em' }}>
-        ⚡ Tester la connexion
-      </button>
     </div>
   );
 }
@@ -2000,10 +2014,9 @@ const FeedItem = React.memo(function FeedItem({ item, i, isMobile=false, isNowPl
     e.stopPropagation();
     const newVal = liked ? 0 : 1;
     setLikedLocal(newVal);
-    const trackId = item.spotifyUri?.split(':')[2];
-    if (trackId) {
-      if (newVal) await apiPut('https://api.spotify.com/v1/me/tracks', { ids: [trackId] });
-      else await apiDel(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`);
+    if (item.spotifyUri) {
+      const res = newVal ? await librarySave(item.spotifyUri) : await libraryRemove(item.spotifyUri);
+      if (libraryScopeAlert(res)) { setLikedLocal(liked ? 1 : 0); return; }
     }
     setTrackLiked(item.spotifyUri, !!newVal);
   };
@@ -2227,8 +2240,10 @@ function LikerPanel() {
   const { likedTracks, removeFromFeed, setTrackLiked } = useStore();
 
   const onUnlike = async (item) => {
-    const trackId = item.spotifyUri?.split(':')[2];
-    if (trackId) await apiDel(`https://api.spotify.com/v1/me/tracks?ids=${trackId}`);
+    if (item.spotifyUri) {
+      const res = await libraryRemove(item.spotifyUri);
+      if (libraryScopeAlert(res)) return;
+    }
     setTrackLiked(item.spotifyUri, false);
   };
 

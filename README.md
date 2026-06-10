@@ -32,6 +32,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Au login, si la playlist Spotify **"Découvertes de la semaine"** n'a pas été importée depuis 7 jours → import automatique dans le feed
 - Les titres apparaissent avec le tag **Découvertes** (violet) et le sous-titre "Découvertes de la semaine"
 - La date du dernier import est sauvegardée dans `localStorage` (`spotifyplus_dw_last_import`)
+- **⚠ Probablement inopérant depuis la migration Spotify de février 2026** : le contenu des playlists éditoriales Spotify n'est plus lisible par les apps tierces. L'app le détecte, l'explique dans les logs et réessaie automatiquement chaque semaine (auto-réparant si Spotify rouvre l'accès)
 
 ### Stockage local (sql.js + IndexedDB)
 - Base SQLite WebAssembly chargée au démarrage depuis IndexedDB (clé `spotifyplus_db`)
@@ -80,9 +81,10 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Titres likés (onglet ❤ Likés)
 - Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats") avec badge du nombre de likés
 - Like/unlike depuis le **player mobile**, depuis le **feed** (bouton ❤ sur chaque titre), ou depuis l'onglet Likés
-- **Sync initiale au login** : l'app vérifie automatiquement les likes Spotify pour les 300 premiers titres du feed (`/me/tracks/contains`) — les titres likés avant cette session apparaissent directement dans l'onglet (1× par 24h max)
+- **Sync initiale au login** : l'app vérifie automatiquement les likes Spotify pour les 300 premiers titres du feed (`/me/library/contains`, par lots de 40) — les titres likés avant cette session apparaissent directement dans l'onglet (1× par 24h max)
 - La liste est persistée dans la table `tracks` (colonne `liked`) et chargée au démarrage
 - Unliker retire le like sur Spotify ET met à jour la base locale
+- **⚠ Si tu étais déjà connecté avant la mise à jour** : les likes nécessitent désormais les permissions Spotify `user-library-read/modify` — déconnecte-toi puis reconnecte-toi une fois pour les accorder (l'app affiche une alerte si besoin)
 
 ### Notifications
 - **Fin de session** (100 artistes/jour atteints) : notification navigateur envoyée automatiquement (permission demandée si nécessaire)
