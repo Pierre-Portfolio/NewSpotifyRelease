@@ -1,7 +1,10 @@
-// v2 : network-first pour l'app shell. L'ancienne stratégie cache-first servait
-// l'index.html du cache pour toujours → les utilisateurs PWA ne recevaient jamais les mises à jour.
-const CACHE  = 'spotifyplus-v2';
-const ASSETS = ['./', './index.html'];
+// v3 : network-first pour l'app shell (v2) + clé de cache NORMALISÉE : on stocke toujours
+// sous './index.html', jamais sous l'URL réelle de navigation — sinon le retour OAuth
+// (?code=...&state=...) écrivait le code d'autorisation dans Cache Storage.
+// L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
+// → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
+const CACHE  = 'spotifyplus-v3';
+const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm'];
 
 self.addEventListener('install', e => {
   self.skipWaiting();
@@ -28,10 +31,10 @@ self.addEventListener('fetch', e => {
       fetch(e.request)
         .then(res => {
           const copy = res.clone();
-          caches.open(CACHE).then(c => c.put(e.request, copy));
+          caches.open(CACHE).then(c => c.put('./index.html', copy));
           return res;
         })
-        .catch(() => caches.match(e.request).then(r => r || caches.match('./index.html')))
+        .catch(() => caches.match('./index.html'))
     );
   } else {
     // Autres ressources : cache-first comme avant

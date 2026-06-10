@@ -38,7 +38,9 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 |---|---|
 | `index.html` | **App complète** — React 18 CDN + Babel + sql.js, tout en un seul fichier |
 | `manifest.json` | Config PWA (nom, icônes, display standalone) |
-| `service-worker.js` | Cache app shell (`./`, `./index.html`) pour usage offline |
+| `service-worker.js` | Cache app shell + vendor pour usage offline (v3, clé de cache normalisée) |
+| `vendor/sql-wasm.js` | sql.js 1.10.2 **auto-hébergé** (hash sha384 vérifié = ancien SRI cdnjs) |
+| `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
 | `icon-192.png` | Icône PWA 192×192 (à ajouter au repo) |
 | `icon-512.png` | Icône PWA 512×512 (à ajouter au repo) |
 
@@ -47,15 +49,18 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 ## Stack (`index.html`)
 
 - **React 18.3.1** via CDN (pas de build tool), Babel standalone **7.29.7**
-- **⚠️ CDN épinglés + SRI** : les 4 `<script>` CDN ont des versions exactes + attribut `integrity` (sha384) + `crossorigin="anonymous"`. **Ne jamais changer une version sans recalculer le hash SRI** (sinon le script est bloqué par le navigateur). Le `.wasm` de sql.js (chargé via `locateFile`) ne peut pas avoir de SRI.
-- **sql.js 1.10.2** via CDN : SQLite WebAssembly — `initSqlJs({ locateFile: f => CDN + f })`
-- **IndexedDB** : persistance du binaire SQLite (clé `spotifyplus_db` dans le store `db` de la base `spotifyplus`)
+- **⚠️ CDN épinglés + SRI** : les 3 `<script>` CDN restants (react, react-dom, babel — unpkg) ont des versions exactes + attribut `integrity` (sha384) + `crossorigin="anonymous"`. **Ne jamais changer une version sans recalculer le hash SRI** (sinon le script est bloqué par le navigateur).
+- **sql.js 1.10.2 auto-hébergé** dans `vendor/` — `initSqlJs({ locateFile: f => './vendor/' + f })`. Le `.wasm` ne peut pas avoir de SRI : l'auto-hébergement ferme le dernier vecteur CDN.
+- **⚠️ CSP** (`<meta http-equiv="Content-Security-Policy">` dans le `<head>`) : `connect-src` limité à `'self'` + `api.spotify.com` + `accounts.spotify.com` — même en cas d'XSS, le token ne peut pas être exfiltré vers un domaine attaquant. `'unsafe-inline'`/`'unsafe-eval'` requis par Babel standalone, `'wasm-unsafe-eval'` par sql.js. **Toute nouvelle origine (script, image, fetch) doit être ajoutée à la CSP sinon elle est bloquée par le navigateur.**
+- **IndexedDB** : persistance du binaire SQLite (clé `spotifyplus_db` dans le store `db` de la base `spotifyplus`). Connexion **unique mise en cache** (`_idbPromise` dans `idbOpen`) — ne pas rouvrir à chaque get/set. `navigator.storage.persist()` est demandé au login (réduit le risque d'éviction iOS).
 - **Fonts** : DM Sans (UI) + DM Mono (labels, logs, valeurs)
 - **Auth** : OAuth 2.0 PKCE — 100% client-side, token stocké en `localStorage`
   - Paramètre `state` anti-CSRF généré au login (`pkce_state`), vérifié au callback avant `exchangeCode`
   - `refreshToken()` est protégé par un **mutex** (`_refreshPromise`) : les refresh tokens Spotify sont à usage unique (rotation) — deux refresh simultanés (poll player + scraping) invalideraient le compte. Le refresh token **roté est re-stocké**.
-  - `apiGet` retry **une fois** après refresh sur HTTP 401
+  - Sur `invalid_grant` (refresh token définitivement mort) : `logoutClear()` + reload — sinon le poll player enverrait des 401 toutes les 5s pour toujours
+  - `apiGet`, `apiPut`, `apiPost` et `apiDel` retry **une fois** après refresh sur HTTP 401
 - **Aucun appel backend** — l'app appelle uniquement l'API Spotify + sql.js local
+- **Garde multi-onglets** : `BroadcastChannel('spotifyplus_tabs')` (ping/pong) — le deuxième onglet ouvert affiche un bandeau d'avertissement (`otherTab` dans le store, rendu dans `Shell`), car chaque `saveDB()` exporte toute la DB : deux onglets s'écraseraient mutuellement
 
 ### Config Spotify
 ```js
@@ -135,6 +140,7 @@ Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, 
 
 ### syncInitialLikes
 Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à 300 tracks non écoutés, interroge `/me/tracks/contains` par batch de 50, met à jour `liked` en DB + feed array + `likedTracks` state.
+**TTL 24h** (`localStorage spotifyplus_likes_synced_at`) : jusqu'à 6 requêtes par appel, inutile à chaque reload de page.
 
 ### FeedItem — swipe mobile
 - `onTouchStart` : capture `touchStartX`
@@ -146,6 +152,7 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 
 ### Découvertes de la semaine (`importDiscoverWeekly`)
 - Appelée dans l'init **avant** le chargement du feed (les tracks DW sont visibles dès le login)
+- Early-return si `Date.now() < _rlUntil` (fenêtre rate-limit active) — retente au prochain login
 - Cherche dans `GET /me/playlists` la playlist dont `owner.id === 'spotify'` et dont le nom contient `'découvertes'` ou `'discover weekly'`
 - Insère les tracks avec `release_type = 'discover_weekly'`, `release_title = 'Découvertes de la semaine'`
 - Skip si `localStorage('spotifyplus_dw_last_import')` < 7 jours
@@ -162,28 +169,43 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 
 ## Logique de scraping (dans `startSync`)
 
+### État de synchro unifié — `syncState` (enum)
+**Un seul état remplace les 3 booléens** `scraping`/`paused`/`rlWaiting` :
+`syncState : 'idle' | 'running' | 'paused' (pause manuelle) | 'rl_waiting' (attente 429)`
+- `setSync(st)` pose **synchroniquement** `syncStateRef.current` puis `setSyncState` — le guard anti double-clic de `startSync` et le `checkpoint()` lisent l'état réel, pas celui du dernier render
+- Les booléens `scraping` (`!== 'idle'`), `paused`, `rlWaiting` sont **dérivés** et toujours exposés dans l'api du store (l'UI ne change pas)
+- Pause pendant `rl_waiting` → passe à `paused` ; à la reprise, le checkpoint re-détecte la fenêtre 429 et re-pose `rl_waiting`
+
+### Conditions de NON-démarrage — toutes en tête de `startSync`, AVANT toute requête
+1. `syncStateRef.current !== 'idle'` → return (guard par **ref** : insensible au double-clic avant re-render)
+2. `Date.now() < _rlUntil` (fenêtre rate-limit persistée) → log + bandeau, return
+3. **Quota journalier** ≥ 100 (lu depuis `spotifyplus_daily_scrapings`) → log "réessaie demain", return — avant, cliquer Lancer/Reprendre avec le quota consommé dépensait `/me` + les pages d'artistes pour rien
+
 ### Arrêts de synchro unifiés — `endSync(reason)` + `checkpoint()`
 **Tous les chemins d'arrêt passent par `endSync(reason)`** (`'completed' | 'daily_limit' | 'error'`) :
-- reset `nextCall` / `nextCallTotal` / `eta`, `setScraping(false)`, `setPaused(false)`, `setRlWaiting(false)`
+- reset `nextCall` / `nextCallTotal` / `eta`, `setSync('idle')`
 - `'completed'` → supprime `spotifyplus_sync_progress` + `setResumableSession(null)`
 - autres raisons → **relit le localStorage et re-set `resumableSession`** : le bouton "↩ Reprendre" apparaît immédiatement, sans reload
 - `await saveDB()` final dans tous les cas
 
-**`checkpoint()`** est attendu avant **chaque** appel API de la synchro (via `apiGetSafe`) : boucle tant que `pausedRef.current` (pause manuelle) OU `Date.now() < _rlUntil` (fenêtre rate-limit globale, posée aussi par les 429 du player). **Plus aucune requête ne part pendant une pause.**
+**`checkpoint()`** est attendu avant **chaque** appel API de la synchro (via `apiGetSafe`). **UNE seule boucle d'attente** pour : la pause manuelle (`syncStateRef === 'paused'`) ET la fenêtre rate-limit globale (`Date.now() < _rlUntil`, posée par n'importe quel 429, player compris). Quand il attend sur la fenêtre 429, c'est lui qui pose `rl_waiting` + le countdown (`setNextCall` dérivé de `_rlUntil`) et qui repasse en `running` à l'expiration. **Plus aucune requête ne part pendant une pause, et plus de sleep parallèle dans `apiGetSafe`.**
 
 ### Gestion du rate-limit 429 (wrapper `apiGetSafe`)
 Défini localement dans `startSync` :
 - `await checkpoint()` en tête de chaque tentative
-- Sur erreur `RATE_LIMIT` : incrémente `rl429Streak`, **abandonne après 3 429 consécutifs** → écrit `spotifyplus_blocked_until` en localStorage (`max(Retry-After, 15 min)`), `setBlockedUntil`, throw `SYNC_RATE_ABORT` → catch → `endSync('error')`. Sinon : `setRlWaiting(true)` (état **distinct** de la pause manuelle — ne l'écrase plus), countdown `setNextCall`, `sleep(waitMs)`, retry la même URL. Le streak est remis à 0 au premier appel réussi.
-- Retour `null` (bloqué par `_rlUntil`) → re-checkpoint puis retry, **jamais** traité comme une réponse valide
+- Sur erreur `RATE_LIMIT` : incrémente `rl429Streak`, **abandonne après 3 429 consécutifs** → `_rlSet(max(Retry-After, 15 min))` (fenêtre **persistée**, partagée par tous les appels), `setBlockedUntil`, throw `SYNC_RATE_ABORT` → catch → `endSync('error')`. Sinon : log du streak puis `continue` — **c'est le checkpoint qui attend** (la fenêtre `_rlUntil` a été posée par le throw d'`apiGet`). Le streak est remis à 0 au premier appel réussi.
+- Retour `{ rate_limited: true }` (bloqué par le guard global) → `continue` : re-checkpoint puis retry, **jamais** traité comme une réponse valide
 - Body d'erreur HTTP (`data.error` : 401 non rattrapé, 403, 5xx) → **throw** (la synchro s'arrête en gardant la progression — elle ne termine plus en silence comme si tout était scanné)
 
 Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste, tracks d'un album.
 
-### Blocage persisté `spotifyplus_blocked_until`
-- Écrit après 3 429 consécutifs — **survit au F5** (relu au login dans l'init)
-- `startSync` refuse de démarrer tant qu'il est dans le futur
+### Fenêtre rate-limit persistée `spotifyplus_blocked_until` (= `_rlUntil`)
+- **Une seule source de vérité** : `_rlUntil` (module-level) est écrit dans localStorage à chaque `_rlSet()` (429 simple OU disjoncteur) et **relu au chargement du module** — un blocage survit au F5 pour TOUS les appels (player, login, synchro), pas seulement pour le bouton Lancer
+- `startSync` refuse de démarrer tant que `Date.now() < _rlUntil`
+- `_rlNotify → setBlockedUntil` : tout 429 (player compris) affiche le bandeau et désactive Lancer
 - `DateRangePanel` désactive Lancer/Reprendre + bandeau countdown "🚫 Rate limit Spotify — réessaie dans X min"
+- Au boot pendant une fenêtre active : `/me` retourne `rate_limited` → l'app entre quand même en mode **connecté dégradé** (`user=null`) au lieu d'éjecter vers le login
+- `Retry-After` est blindé par `_parseRetryAfterMs` (un header malformé donnait `NaN` → guard inopérant + retry immédiat → streak 3×429 en ~1s)
 
 1. Vérifie le compte `/me` (via `apiGetSafe` — un échec **throw**, ne termine plus la synchro en silence)
 2. Charge les dates de scrapping depuis `SELECT spotify_id, last_scraped_at FROM artists_scraped`
@@ -197,17 +219,20 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
    - **Singles** : `INSERT OR IGNORE` d'une seule ligne (`uris[0]`, `title = album.name`, `release_title = null`)
    - **Albums** : `INSERT OR IGNORE` d'une ligne par track (`title = t.name`, `release_title = album.name`)
 5. Après chaque artiste → `INSERT OR REPLACE INTO artists_scraped` **uniquement si la liste d'albums a été lue avec succès** (sinon log ⚠ et date non avancée)
-6. Après chaque artiste → `saveDB()` (async) + `localStorage.setItem('spotifyplus_sync_progress', { artists_scanned, total_artists, last_artist_name })`
+6. Après chaque artiste → `saveDB()` (async) + `localStorage.setItem('spotifyplus_sync_progress', { artists_scanned, total_artists, last_artist_name, page_url, page_offset })` — `page_url` = URL de la page `/me/following` en cours, `page_offset` = nombre d'artistes de cette page déjà traités
 7. À la fin → `endSync('completed')` (saveDB final + nettoyage localStorage) + `setProgress(100)`
 
 ### Limite journalière (100 artistes/jour)
-- Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**)
+- Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**) — et aussi vérifiée **en tête de `startSync`** (refus avant toute requête)
+- **`dailyCount` est incrémenté APRÈS la requête albums** (pas avant) : un throw (erreur API, disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné
+- **Jour LOCAL** via `localDay()` (helper module-level) — `toISOString()` donnait le jour UTC : le compteur se réinitialisait à 2h du matin en France l'été
 - **Passage de minuit pendant une synchro** : la date est revérifiée à chaque artiste — si le jour change, `dailyCount` repart à 0 sans arrêter la synchro
 
 ### Reprise de synchro après interruption / redémarrage
-- La progression est sauvegardée dans `localStorage` (`spotifyplus_sync_progress`) après chaque artiste
+- La progression est sauvegardée dans `localStorage` (`spotifyplus_sync_progress`) après chaque artiste, **avec le curseur de pagination** (`page_url` + `page_offset`)
 - Au login, si une progression existe → `setResumableSession(p)` → bouton **"↩ Reprendre"** affiché
-- `startSync({ skipCount: N })` utilise `globalArtistIndex` pour sauter les N premiers artistes
+- `resumeSync()` → `startSync({ skipCount, resumeUrl: page_url, resumeOffset: page_offset })` : la reprise **repart directement sur la bonne page** — avant, elle re-paginait `/me/following` depuis le début (~20 fetchs dos à dos sans délai pour sauter 1000 artistes = burst exactement au pire moment post-429)
+- Compat : une ancienne progression sans `page_url` retombe sur l'ancien re-parcours avec saut (`globalArtistIndex <= skipCount → continue`)
 - `localStorage` nettoyé quand la sync se termine normalement
 
 ### UX DateRangePanel — quand `resumableSession` existe
@@ -237,7 +262,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 **⚠️ Limitation Spotify :** quand un titre se termine, Spotify retourne `200 + is_playing:false` avec la même URI → `now?.uri` ne change pas ET `now?.current` est gelé → ni l'effet URI ni l'effet current ne se déclenchent.
 
 **3 mécanismes d'auto-avance (triple couverture) :**
-1. **Effet `now?.uri`** : `currentUri` est null ou hors feed → avance (cas Spotify radio/queue)
+1. **Effet `now?.uri`** : `currentUri` est null ou hors feed **ET le titre quitté était proche de sa fin** (`prevNowRef` : `duration - current ≤ 12s` au dernier tick) → avance (cas Spotify radio/queue). **⚠ Garde anti-vol de lecture** : sans la condition `nearEnd`, lancer manuellement un titre hors feed (ou stopper la lecture) en plein milieu d'un titre du feed déclenchait `playTrack` et écrasait le choix de l'utilisateur. `prevNowRef` est mis à jour par l'effet 3 (déclaré APRÈS) → il contient encore l'état du tick précédent quand l'effet 1 s'exécute.
 2. **Effet `now?.current`** : `remaining ≤ 3s` ET titre dans le feed → avance (fin imminente détectée en live)
 3. **Effet `now?.playing`** : transition `true → false` ET `remaining ≤ 8s` ET titre dans le feed → avance **(cas principal : fin naturelle)**
 
@@ -246,6 +271,10 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 **Écritures DB hors updater** : le marquage écouté (`UPDATE tracks/stats` + `saveDB`) est fait **en dehors** de l'updater `setFeed` (les updaters React doivent rester purs) — l'item est lu via `feedRef.current`.
 
 **Poll player avec bail-out** : le tick 5s compare le nouvel état `now` au précédent et garde la même référence si rien n'a changé (lecture en pause) → pas de re-render global inutile.
+
+**Poll player — économie de requêtes** :
+- **Onglet caché** (`visibilityState === 'hidden'`) → le tick ne fait aucun appel ; au retour (`visible`), un tick de rattrapage part immédiatement
+- **Fenêtre 429 active** → `apiGet` retourne `{ rate_limited: true }` et le tick **garde l'état `now` affiché tel quel** — avant, le `null` faisait disparaître le player et polluait les effets d'auto-avance alors que la musique jouait toujours
 
 ---
 
@@ -262,7 +291,9 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## Purge
 
 - Bouton **"Purger les écoutés"** dans `VosEcoutesPanel` (desktop sidebar + mobile onglet Stats)
-- Action : `DELETE FROM tracks WHERE listened = 1` → `saveDB()` → `setListenStats(loadListenStatsFromDB())`
+- Action : `DELETE FROM tracks WHERE listened = 1 AND liked = 0` → `saveDB()` → `setListenStats` + `setLikedTracks`
+- **Les titres likés sont conservés** : leur ligne DB est la seule trace locale du like — les purger viderait l'onglet ❤ Likés au prochain reload
+- Même logique dans `removeFromFeed` (bouton ×) : un titre liké est marqué `listened = 1` (sort du feed) au lieu d'être `DELETE` (les compteurs de la table `stats` ne sont pas touchés)
 - Affiche une `alert` avec le nombre de titres supprimés
 
 ---
@@ -270,7 +301,8 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## PWA
 
 - `manifest.json` à la racine — `start_url: /NewSpotifyRelease/`, `display: standalone`
-- `service-worker.js` (cache `spotifyplus-v2`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne ; cache-first pour le reste. Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
+- `service-worker.js` (cache `spotifyplus-v3`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne ; cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
+- **⚠️ Clé de cache NORMALISÉE** : l'app shell est toujours stocké sous `'./index.html'` (`c.put('./index.html', copy)`), jamais sous l'URL réelle de navigation — sinon le retour OAuth (`?code=...&state=...`) écrivait le code d'autorisation dans Cache Storage
 - **⚠️ L'ancienne stratégie cache-first servait l'index.html du cache pour toujours** → les PWA installées ne recevaient jamais les mises à jour. Ne pas revenir en cache-first pour l'app shell.
 - Enregistrement dans `<head>` : `navigator.serviceWorker.register('./service-worker.js')`
 - Icônes manquantes : `icon-192.png` et `icon-512.png` à ajouter à la racine du repo
@@ -281,7 +313,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 
 | Composant | Rôle |
 |---|---|
-| `StoreProvider` | Context global — auth, dbReady, scraping, stats, feed, rate-limit, player, loopEnabled |
+| `StoreProvider` | Context global — auth, dbReady, syncState (+ scraping/paused/rlWaiting dérivés), stats, feed, rate-limit, player, loopEnabled, otherTab |
 | `Home` | Page de login (mobile + desktop) |
 | `WebApp` | Layout desktop (sidebar + contenu) |
 | `MobileApp` | Layout mobile — 4 onglets : Scrapping / À écouter / ❤ Likés / Stats |
@@ -304,12 +336,14 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ```js
 // Clés exposées dans l'api du StoreProvider
 authState        // 'loading' | 'login' | 'connected'
-user             // objet Spotify /me
+user             // objet Spotify /me (null si boot pendant une fenêtre 429 — mode dégradé)
+otherTab         // boolean — un autre onglet de l'app est ouvert (bandeau d'avertissement)
 dbReady          // boolean — DB sql.js initialisée et prête
-scraping         // boolean
-paused           // boolean — pause MANUELLE uniquement
-rlWaiting        // boolean — pause auto rate-limit (distincte : ne s'écrasent plus mutuellement)
-blockedUntil     // timestamp ms — blocage après 3×429 (localStorage spotifyplus_blocked_until)
+syncState        // 'idle' | 'running' | 'paused' | 'rl_waiting' — source de vérité unique
+scraping         // boolean DÉRIVÉ (syncState !== 'idle')
+paused           // boolean DÉRIVÉ (syncState === 'paused') — pause MANUELLE
+rlWaiting        // boolean DÉRIVÉ (syncState === 'rl_waiting') — attente auto 429
+blockedUntil     // timestamp ms — fenêtre rate-limit persistée (localStorage spotifyplus_blocked_until = _rlUntil)
 feed             // array d'items du feed
 logs             // array de logs
 now              // état lecture Spotify en cours
@@ -319,22 +353,21 @@ likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après 
 loopEnabled      // boolean
 delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)
-rateLimitUntil   // timestamp ms
 filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
 filterType       // 'all' | 'single' | 'album' | 'dw'
 sortBy           // 'default' | 'date_desc' | 'artist'
 artistSearch     // string — filtre texte sur artist_name
 
-resumableSession // { artists_scanned, total_artists, last_artist_name } | null
+resumableSession // { artists_scanned, total_artists, last_artist_name, page_url, page_offset } | null
 
 // Méthodes
-startSync({ skipCount })       // skipCount=0 par défaut, N pour reprendre
-resumeSync()                   // raccourci → startSync({ skipCount: resumableSession.artists_scanned })
-togglePause()
-purgeListened()
-removeFromFeed(uri)            // useCallback([dbReady]) — DELETE track de la DB + retire du feed (sans compter comme écouté)
+startSync({ skipCount, resumeUrl, resumeOffset })  // tous les refus (déjà en cours / fenêtre 429 / quota jour) sont en tête, AVANT toute requête
+resumeSync()                   // → startSync({ skipCount, resumeUrl: page_url, resumeOffset: page_offset }) — reprise par curseur
+togglePause()                  // bascule syncState entre 'paused' et 'running' (no-op si 'idle')
+purgeListened()                // DELETE listened=1 AND liked=0 — les likés sont conservés
+removeFromFeed(uri)            // useCallback([dbReady]) — DELETE de la DB (ou UPDATE listened=1 si liké) + retire du feed (sans compter comme écouté)
 setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + recharge likedTracks + met à jour feed array
-syncInitialLikes()             // vérifie /me/tracks/contains par batch de 50 (max 300 tracks) au login, sleep 400ms entre batchs
+syncInitialLikes()             // vérifie /me/tracks/contains par batch de 50 (max 300 tracks), sleep 400ms entre batchs, TTL 24h
 navigateFeed(dir)              // useCallback([]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed
 resetFilters()                 // remet filterType='all', sortBy='default', artistSearch=''
 logout()
@@ -344,10 +377,10 @@ setDelayChoice(n)
 ```
 
 ### Compteur journalier `dailyScrapings`
-- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ date: 'YYYY-MM-DD', count: N }`
+- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ date: 'YYYY-MM-DD' (jour LOCAL via localDay()), count: N }`
 - Chargé au démarrage de l'app (dans l'init useEffect)
-- Incrémenté dans `startSync` après chaque artiste scrapé
-- Remise à zéro automatique si `date` ≠ aujourd'hui
+- Incrémenté dans `startSync` **après la requête albums de chaque artiste** (un échec ne consomme pas le quota)
+- Remise à zéro automatique si `date` ≠ aujourd'hui (minuit **local**, pas UTC)
 - Affiché dans la carte **Artistes** de `ScrapingStatusPanel` (`X/100 aujourd'hui`)
 - Utilisé dans `NextCallPanel` pour **"Temps total de la session"** : `(100 - dailyScrapings) × délai moyen (delayChoice + 2s)` — temps restant pour finir les 100 artistes du jour, affiché uniquement pendant une synchro active
 
@@ -356,7 +389,7 @@ setDelayChoice(n)
 ## MobilePlayer — player 50vh
 
 - Remplace `MiniPlayer` sur mobile (affiché quand `now` est défini)
-- **Like/unlike** : au changement d'URI, `isLiked` est initialisé **immédiatement** depuis `likedTracks` (store local), puis confirmé/corrigé par `GET /me/tracks/contains`. Évite le flash "cœur vide" sur les titres déjà likés.
+- **Like/unlike** : au changement d'URI, `isLiked` est initialisé depuis le local (`likedTracks` + `feed`). `GET /me/tracks/contains` n'est appelé **que si le titre est inconnu localement** (titre hors feed) — économise 1 requête par changement de titre dans le cas courant.
 - **Clic next** : seek à 25% de `duration_ms` après 400ms (laisse le temps à Spotify de démarrer)
 - **SeekBar** : support touch complet (`onTouchStart` + `touchmove`/`touchend` sur `window`, `passive:false`) + `touchAction:'none'` pour bloquer le scroll pendant le drag
 - **Bouton loop** : alterne entre boucle (icône accent + "1") et auto-avance (icône muted) — partagé avec `loopEnabled` du store, synchronisé avec le PlayerBar desktop
@@ -365,11 +398,12 @@ setDelayChoice(n)
 
 ---
 
-## Rate limit Spotify (guard module-level)
+## Rate limit Spotify (guard module-level, persisté)
 
-Variables `_rlUntil` (timestamp ms) et `_rlNotify` (callback React).
-`apiGet`, `apiPut`, `apiPost` vérifient `_rlUntil` avant chaque appel.
-Sur 429 → `_rlSet(retryMs)` bloque tous les appels player jusqu'à expiration.
+Variables `_rlUntil` (timestamp ms, **relu depuis localStorage `spotifyplus_blocked_until` au chargement du module**) et `_rlNotify` (callback React → `setBlockedUntil`).
+`apiGet`, `apiPut`, `apiPost`, `apiDel` vérifient `_rlUntil` avant chaque appel et retournent `{ error:'rate_limited', rate_limited: true }` si bloqué (jamais `null` : les callers distinguent "bloqué" de "204 rien ne joue").
+Sur 429 → `_rlSet(retryMs)` **persiste la fenêtre en localStorage** et bloque TOUS les appels jusqu'à expiration — y compris après un F5.
+`_parseRetryAfterMs(raw, fallback)` blinde le parsing du header `Retry-After` contre `NaN`.
 
 ---
 
@@ -378,7 +412,13 @@ Sur 429 → `_rlSet(retryMs)` bloque tous les appels player jusqu'à expiration.
 ### apiGet — HTTP 204 No Content
 `/me/player/currently-playing` retourne 204 quand rien ne joue (pas de body).
 Sans le guard `if (res.status === 204) return null`, `.json()` lève une exception → catch silencieux → `setNow(null)` jamais appelé → `now?.uri` ne change pas → auto-avance ne se déclenche jamais.
-**Toujours retourner `null` sur 204 dans `apiGet`.**
+**Toujours retourner `null` sur 204 dans `apiGet`** — et `{ rate_limited: true }` (pas `null`) quand le guard bloque, pour que le tick puisse distinguer les deux cas.
+
+### FeedItem — clé React stable
+`key={item.id}` (l'URI, unique) et **jamais** `key={item.id + i}` : avec l'index concaténé, retirer un titre changeait la clé de tous les suivants → remount complet de centaines de lignes, `React.memo` inopérant.
+
+### PlayerBar — tableau cohérent
+`currentIndex` est calculé sur `filteredFeed` → le label doit être lu dans `filteredFeed[currentIndex]`, pas `feed[currentIndex]` (mauvais titre affiché dès qu'un filtre/tri est actif).
 
 ### SeekBar — race condition useEffect
 Les listeners `mousemove`/`mouseup` doivent être attachés **directement dans `onMouseDown`**, pas dans un `useEffect`. Sinon un clic rapide (mousedown + mouseup) se termine avant que React ait re-rendu et attaché les listeners.
