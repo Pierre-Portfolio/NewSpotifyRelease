@@ -212,7 +212,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 3. Pagine `/me/following?type=artist&limit=50` en streaming (échec de page → **throw**, pas `break`)
 4. Pour chaque artiste :
    - `cutoff = (scrapedDates[artist.id] || '2026-03-15').slice(0, 10)` — **tronqué au jour** : une sortie publiée le jour du dernier scan mais indexée après n'est plus ratée (doublons absorbés par `INSERT OR IGNORE`)
-   - `/artists/{id}/albums?include_groups=album,single&limit=20&market=FR`
+   - `/artists/{id}/albums?include_groups=album,single&limit=10&market=FR` — **⚠ limit max = 10 depuis la migration Spotify de février 2026** (appliquée aux apps existantes le 9 mars 2026 ; avant : max 50). `limit=20` → `400 "Invalid limit"`. Ne jamais remonter au-dessus de 10.
    - Filtre par `cutoff ≤ release_date ≤ aujourd'hui`
    - Pour chaque album dans la période → `/albums/{id}/tracks?limit=50`
    - Dédoublonnage via `seenUris` Set + `knownUrisRef` — skip **seulement si TOUTES les pistes sont connues** (`uris.every`) : un album dont la piste 1 est sortie en single avant n'est plus sauté en entier
