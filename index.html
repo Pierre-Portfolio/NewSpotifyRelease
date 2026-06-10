@@ -155,7 +155,7 @@ function logoutClear() {
 // ── Rate-limit guard (module-level, PERSISTÉ) ────
 // Une seule fenêtre "aucune requête avant T", partagée par TOUS les appels
 // (player, login, synchro) et relue au chargement du module : un blocage
-// (429 simple ou disjoncteur 3×429) survit au F5 — avant, _rlUntil repartait
+// (429 player ou stop synchro min. 15 min) survit au F5 — avant, _rlUntil repartait
 // à 0 au refresh et le poll player re-hammerait une API qui venait de throttle.
 const RL_LS_KEY = 'spotifyplus_blocked_until';
 let _rlUntil  = parseInt(localStorage.getItem(RL_LS_KEY) || '0') || 0;
@@ -171,7 +171,7 @@ function _rlCheck() {
   return null;
 }
 // Retry-After blindé : un header malformé donnerait parseInt→NaN → _rlUntil=NaN (guard inopérant)
-// + sleep(NaN)=retry immédiat → le streak 3×429 serait atteint en ~1 seconde
+// → retry immédiat en boucle sur une API qui vient de throttle
 function _parseRetryAfterMs(raw, fallbackMs) {
   const n = parseInt(raw);
   return Number.isFinite(n) && n >= 0 ? n * 1000 : fallbackMs;
@@ -1052,7 +1052,7 @@ function StoreProvider({ children }) {
   const startSync = async (options = {}) => {
     if (syncStateRef.current !== 'idle') return;
 
-    // Fenêtre rate-limit persistée (429 simple ou disjoncteur 3×429) — survit au F5
+    // Fenêtre rate-limit persistée (429 player ou stop synchro min. 15 min) — survit au F5
     if (Date.now() < _rlUntil) {
       setBlockedUntil(_rlUntil);
       log(`🚫 Synchro bloquée (rate limit Spotify) — réessaie dans ${Math.ceil((_rlUntil - Date.now()) / 60000)} min`, 'error');
@@ -1109,8 +1109,7 @@ function StoreProvider({ children }) {
         }
       };
 
-      // Wrapper apiGet : checkpoint avant chaque tentative + disjoncteur après 3 429 consécutifs
-      let rl429Streak = 0;
+      // Wrapper apiGet : checkpoint avant chaque tentative + stop complet dès le PREMIER 429
       const apiGetSafe = async (url) => {
         while (true) {
           await checkpoint();
@@ -1119,19 +1118,15 @@ function StoreProvider({ children }) {
             data = await apiGet(url);
           } catch (err) {
             if (err.message === 'RATE_LIMIT') {
-              rl429Streak++;
-              if (rl429Streak >= 3) {
-                // Spotify nous throttle sérieusement : on s'arrête et on bloque TOUS les
-                // appels (min. 15 min) via la fenêtre persistée — survit au F5
-                const blockMs = Math.max(err.waitMs || 0, 15 * 60 * 1000);
-                _rlSet(blockMs);
-                setBlockedUntil(_rlUntil);
-                const e = new Error('SYNC_RATE_ABORT');
-                e.blockMin = Math.ceil(blockMs / 60000);
-                throw e;
-              }
-              log(`🚫 Rate limit 429 (${rl429Streak}/3) — pause automatique ${err.waitSec}s`, 'error');
-              continue; // le checkpoint attendra la fin de la fenêtre _rlUntil posée par apiGet
+              // Stop complet immédiat : on bloque TOUS les appels (min. 15 min) via la
+              // fenêtre persistée — survit au F5. La progression est sauvegardée, le
+              // bouton ↩ Reprendre réapparaît via endSync('error').
+              const blockMs = Math.max(err.waitMs || 0, 15 * 60 * 1000);
+              _rlSet(blockMs);
+              setBlockedUntil(_rlUntil);
+              const e = new Error('SYNC_RATE_ABORT');
+              e.blockMin = Math.ceil(blockMs / 60000);
+              throw e;
             }
             throw err;
           }
@@ -1142,7 +1137,6 @@ function StoreProvider({ children }) {
             // au lieu de terminer en silence comme si tout était scanné
             throw new Error(`API ${data.error.status || '?'} : ${data.error.message || 'erreur inconnue'}`);
           }
-          rl429Streak = 0;
           return data;
         }
       };
@@ -1360,7 +1354,7 @@ function StoreProvider({ children }) {
       await endSync('completed');
     } catch (err) {
       if (err.message === 'SYNC_RATE_ABORT') {
-        log(`🚫 3 rate limits consécutifs — synchro stoppée. Réessaie dans ~${err.blockMin} min.`, 'error');
+        log(`🚫 Rate limit 429 — synchro stoppée. Réessaie dans ~${err.blockMin} min.`, 'error');
         setStatus(`Bloqué ${err.blockMin} min — rate limit Spotify`, 'error');
       } else {
         log(`Erreur : ${err.message}`, 'error');

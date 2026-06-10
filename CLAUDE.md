@@ -201,19 +201,19 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 ### Gestion du rate-limit 429 (wrapper `apiGetSafe`)
 Défini localement dans `startSync` :
 - `await checkpoint()` en tête de chaque tentative
-- Sur erreur `RATE_LIMIT` : incrémente `rl429Streak`, **abandonne après 3 429 consécutifs** → `_rlSet(max(Retry-After, 15 min))` (fenêtre **persistée**, partagée par tous les appels), `setBlockedUntil`, throw `SYNC_RATE_ABORT` → catch → `endSync('error')`. Sinon : log du streak puis `continue` — **c'est le checkpoint qui attend** (la fenêtre `_rlUntil` a été posée par le throw d'`apiGet`). Le streak est remis à 0 au premier appel réussi.
+- Sur erreur `RATE_LIMIT` : **stop complet dès le PREMIER 429** → `_rlSet(max(Retry-After, 15 min))` (fenêtre **persistée**, partagée par tous les appels), `setBlockedUntil`, throw `SYNC_RATE_ABORT` → catch → `endSync('error')` (progression sauvegardée, bouton ↩ Reprendre immédiat). Plus de streak/disjoncteur à 3 : l'ancien comportement (pause `Retry-After` + retry jusqu'à 3 429 consécutifs) a été retiré à la demande de l'utilisateur.
 - Retour `{ rate_limited: true }` (bloqué par le guard global) → `continue` : re-checkpoint puis retry, **jamais** traité comme une réponse valide
 - Body d'erreur HTTP (`data.error` : 401 non rattrapé, 403, 5xx) → **throw** (la synchro s'arrête en gardant la progression — elle ne termine plus en silence comme si tout était scanné)
 
 Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste, tracks d'un album.
 
 ### Fenêtre rate-limit persistée `spotifyplus_blocked_until` (= `_rlUntil`)
-- **Une seule source de vérité** : `_rlUntil` (module-level) est écrit dans localStorage à chaque `_rlSet()` (429 simple OU disjoncteur) et **relu au chargement du module** — un blocage survit au F5 pour TOUS les appels (player, login, synchro), pas seulement pour le bouton Lancer
+- **Une seule source de vérité** : `_rlUntil` (module-level) est écrit dans localStorage à chaque `_rlSet()` (429 player OU stop synchro min. 15 min) et **relu au chargement du module** — un blocage survit au F5 pour TOUS les appels (player, login, synchro), pas seulement pour le bouton Lancer
 - `startSync` refuse de démarrer tant que `Date.now() < _rlUntil`
 - `_rlNotify → setBlockedUntil` : tout 429 (player compris) affiche le bandeau et désactive Lancer
 - `DateRangePanel` désactive Lancer/Reprendre + bandeau countdown "🚫 Rate limit Spotify — réessaie dans X min"
 - Au boot pendant une fenêtre active : `/me` retourne `rate_limited` → l'app entre quand même en mode **connecté dégradé** (`user=null`) au lieu d'éjecter vers le login
-- `Retry-After` est blindé par `_parseRetryAfterMs` (un header malformé donnait `NaN` → guard inopérant + retry immédiat → streak 3×429 en ~1s)
+- `Retry-After` est blindé par `_parseRetryAfterMs` (un header malformé donnait `NaN` → guard inopérant + retry immédiat sur une API qui vient de throttle)
 
 1. Vérifie le compte `/me` (via `apiGetSafe` — un échec **throw**, ne termine plus la synchro en silence)
 2. Charge les dates de scrapping depuis `SELECT spotify_id, last_scraped_at FROM artists_scraped`
@@ -232,7 +232,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 
 ### Limite journalière (100 artistes/jour)
 - Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**) — et aussi vérifiée **en tête de `startSync`** (refus avant toute requête)
-- **`dailyCount` est incrémenté APRÈS la requête albums** (pas avant) : un throw (erreur API, disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné
+- **`dailyCount` est incrémenté APRÈS la requête albums** (pas avant) : un throw (erreur API, stop 429) ne brûle plus le quota d'un artiste qui n'a pas été scanné
 - **Jour LOCAL** via `localDay()` (helper module-level) — `toISOString()` donnait le jour UTC : le compteur se réinitialisait à 2h du matin en France l'été
 - **Passage de minuit pendant une synchro** : la date est revérifiée à chaque artiste — si le jour change, `dailyCount` repart à 0 sans arrêter la synchro
 
