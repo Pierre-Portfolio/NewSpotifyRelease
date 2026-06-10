@@ -13,13 +13,16 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ## Fonctionnalités
 
 ### Synchronisation
-- Authentification sécurisée via OAuth 2.0 PKCE (100% client-side)
+- Authentification sécurisée via OAuth 2.0 PKCE (100% client-side, paramètre `state` anti-CSRF)
 - Scraping des artistes suivis avec délai configurable (10 / 20 / 30s) + jitter aléatoire 1-3s
 - **Dates de scraping par artiste** : chaque artiste est scrappé depuis sa propre `last_scraped_at` (défaut : 2026-03-15) — plus de date globale à choisir
-- Mise à jour automatique de `last_scraped_at` dans `artists_scraped` après chaque artiste scanné
-- Pause / reprise de la sync en cours de session
-- **Reprise après interruption** : si l'app est fermée ou le tel éteint en plein milieu, la progression est sauvegardée dans `localStorage`. Au prochain login, un bouton **"↩ Reprendre la synchro en cours"** apparaît avec le compteur et le dernier artiste traité
+- Mise à jour automatique de `last_scraped_at` dans `artists_scraped` après chaque artiste scanné — **uniquement si le scan a réussi** (un échec réseau ne fait plus perdre de sorties)
+- **Les sorties publiées le jour même du dernier scan ne sont plus ratées** (cutoff arrondi au jour)
+- **Un album dont une piste était déjà sortie en single n'est plus sauté** — les 20 dernières sorties de chaque artiste sont vérifiées
+- Pause / reprise de la sync en cours de session — **la pause bloque vraiment tous les appels Spotify**
+- **Reprise après interruption** : si l'app est fermée ou le tel éteint en plein milieu, la progression est sauvegardée dans `localStorage`. Le bouton **"↩ Reprendre la synchro en cours"** apparaît immédiatement (plus besoin de recharger la page), avec le compteur et le dernier artiste traité
 - **Protection rate-limit** : sur erreur 429, le scraping se met en **pause automatique** (countdown visible), attend le Retry-After, puis reprend seul sans perdre la position
+- **Disjoncteur anti-429** : après **3 erreurs 429 consécutives**, la synchro s'arrête et se bloque pendant **15 minutes minimum** (persiste même après un F5) — le bouton Lancer est désactivé avec un countdown. Évite de se faire throttle en boucle quand on relance trop tôt
 
 ### Découvertes de la semaine (auto-import hebdo)
 - Au login, si la playlist Spotify **"Découvertes de la semaine"** n'a pas été importée depuis 7 jours → import automatique dans le feed
@@ -29,7 +32,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Stockage local (sql.js + IndexedDB)
 - Base SQLite WebAssembly chargée au démarrage depuis IndexedDB (clé `spotifyplus_db`)
 - Schéma minimal en 3 tables : `tracks`, `artists_scraped`, `stats`
-- Sauvegarde binaire dans IndexedDB après chaque artiste scrapé et après chaque écoute
+- Sauvegarde binaire dans IndexedDB après chaque artiste scrapé, après chaque écoute, à chaque fin de synchro **et quand l'app passe en arrière-plan** (sécurité mobile)
+- Sauvegardes **sérialisées** : jamais deux écritures IndexedDB en parallèle, aucune donnée perdue en cas d'actions simultanées
 - **Bouton Purger les écoutés** : `DELETE FROM tracks WHERE listened = 1` — libère de la place sur le long terme
 
 ### Feed de découverte
@@ -79,7 +83,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### PWA
 - Installable sur écran d'accueil Android (Chrome) — bouton "Ajouter à l'écran d'accueil"
-- `manifest.json` + `service-worker.js` — cache l'app shell pour usage offline
+- `manifest.json` + `service-worker.js` — **network-first** : les mises à jour de l'app sont reçues dès qu'on est en ligne, le cache ne sert qu'en mode hors-ligne
 
 ### Player mobile (50vh)
 - Quand une musique joue, le bas de l'écran affiche un **player plein format (50% de hauteur)**
@@ -96,11 +100,11 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Countdown avant le prochain appel Spotify
 
 ## Technologies
-- React 18 (CDN) + Babel Standalone
+- React 18.3.1 (CDN) + Babel Standalone 7.29.7 — **versions épinglées + SRI** (un CDN compromis ne peut plus injecter de code)
 - `apiDel()` — helper DELETE pour l'API Spotify (unlike)
 - **sql.js 1.10.2** (SQLite WebAssembly) via CDN
 - **IndexedDB** (persistance locale du binaire SQLite)
-- Spotify Web API
+- Spotify Web API (refresh token avec rotation + mutex — plus de déconnexions aléatoires)
 - OAuth 2.0 PKCE
 - GitHub Pages (hébergement statique — aucun serveur)
 

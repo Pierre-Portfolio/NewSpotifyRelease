@@ -37,10 +37,11 @@
   }
   .feed-removing { animation:feed-out 0.55s cubic-bezier(0.4,0,0.2,1) forwards; overflow:hidden; pointer-events:none; }
 </style>
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"></script>
+<!-- CDN épinglés en version exacte + SRI : un CDN compromis ne peut plus injecter de code (token en localStorage) -->
+<script crossorigin="anonymous" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin="anonymous" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin="anonymous" integrity="sha384-ezQ6HS3FLspd9te19o2McUV6FAK091+GG7KO54f/R8DKgCDi7fULhapNrd5LY+vG" src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
+<script crossorigin="anonymous" integrity="sha384-/2HxK3kObxd3+ww+DG94zYpLU1yodAI1+vAauuriYyEXkQ+zBvXYvJPL9Ey87/lN" src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.2/sql-wasm.js"></script>
 <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js');</script>
 </head>
 <body>
@@ -76,10 +77,12 @@ async function generateCodeChallenge(verifier) {
 async function loginWithSpotify() {
   const verifier   = generateRandomString(64);
   const challenge  = await generateCodeChallenge(verifier);
+  const state      = generateRandomString(16);
   localStorage.setItem('pkce_verifier', verifier);
+  localStorage.setItem('pkce_state', state);
   const params = new URLSearchParams({
     client_id: CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI,
-    scope: SCOPES, code_challenge_method: 'S256', code_challenge: challenge,
+    scope: SCOPES, code_challenge_method: 'S256', code_challenge: challenge, state,
   });
   window.location = `https://accounts.spotify.com/authorize?${params}`;
 }
@@ -93,6 +96,8 @@ async function exchangeCode(code) {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
   });
   const data = await res.json();
+  localStorage.removeItem('pkce_verifier');
+  localStorage.removeItem('pkce_state');
   if (data.access_token) {
     localStorage.setItem('spotify_token', data.access_token);
     localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
@@ -101,20 +106,29 @@ async function exchangeCode(code) {
   }
   return false;
 }
-async function refreshToken() {
-  const refresh = localStorage.getItem('spotify_refresh');
-  if (!refresh) return false;
-  const body = new URLSearchParams({ client_id: CLIENT_ID, grant_type: 'refresh_token', refresh_token: refresh });
-  const res  = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
-  });
-  const data = await res.json();
-  if (data.access_token) {
-    localStorage.setItem('spotify_token', data.access_token);
-    localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
-    return true;
-  }
-  return false;
+// Mutex : les refresh tokens Spotify PKCE sont à usage unique (rotation).
+// Deux refresh simultanés (poll player + scraping) consommeraient le même token → invalid_grant → déconnexion.
+let _refreshPromise = null;
+function refreshToken() {
+  if (_refreshPromise) return _refreshPromise;
+  _refreshPromise = (async () => {
+    const refresh = localStorage.getItem('spotify_refresh');
+    if (!refresh) return false;
+    const body = new URLSearchParams({ client_id: CLIENT_ID, grant_type: 'refresh_token', refresh_token: refresh });
+    const res  = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      localStorage.setItem('spotify_token', data.access_token);
+      localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
+      if (data.refresh_token) localStorage.setItem('spotify_refresh', data.refresh_token); // rotation : stocker le nouveau
+      return true;
+    }
+    return false;
+  })().catch(() => false);
+  _refreshPromise.finally(() => { _refreshPromise = null; });
+  return _refreshPromise;
 }
 async function getToken() {
   const expiry = parseInt(localStorage.getItem('spotify_token_expiry') || '0');
@@ -122,7 +136,7 @@ async function getToken() {
   return localStorage.getItem('spotify_token');
 }
 function logoutClear() {
-  ['spotify_token','spotify_token_expiry','spotify_refresh','pkce_verifier'].forEach(k => localStorage.removeItem(k));
+  ['spotify_token','spotify_token_expiry','spotify_refresh','pkce_verifier','pkce_state'].forEach(k => localStorage.removeItem(k));
 }
 
 // ════════════════════════════════════════════════
@@ -141,11 +155,16 @@ function _rlCheck() {
   return null;
 }
 
-async function apiGet(url) {
+async function apiGet(url, _retried = false) {
   const blocked = _rlCheck();
   if (blocked) return null;
   const token = await getToken();
   const res   = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 401 && !_retried) {
+    // Token expiré côté serveur — un refresh puis un seul retry (sinon le body d'erreur remonte au caller)
+    const ok = await refreshToken();
+    if (ok) return apiGet(url, true);
+  }
   if (res.status === 429) {
     const raw     = res.headers.get('Retry-After');
     const retryMs = raw !== null ? parseInt(raw) * 1000 : 60000;
@@ -277,15 +296,28 @@ async function initDB() {
     `);
     _db.run("INSERT OR IGNORE INTO stats (id) VALUES (1)");
   }
-  // Migration — ajoute la colonne liked si elle n'existe pas encore
+  // Migrations idempotentes
   try { _db.run("ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0"); } catch {}
+  try { _db.run("ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0"); } catch {}
   return _db;
 }
 
+// Sérialisation des sauvegardes : jamais deux exports/écritures IndexedDB en parallèle.
+// Pas de debounce temporel : chaque appel garantit une écriture incluant ses données
+// (la boucle do/while ré-exporte si un appel est arrivé pendant l'écriture en cours).
+let _savePromise = null;
+let _saveQueued  = false;
 async function saveDB() {
   if (!_db) return;
-  const data = _db.export();
-  await idbSet(IDB_KEY, data.buffer);
+  if (_savePromise) { _saveQueued = true; return _savePromise; }
+  _savePromise = (async () => {
+    do {
+      _saveQueued = false;
+      const data = _db.export();
+      await idbSet(IDB_KEY, data.buffer);
+    } while (_saveQueued);
+  })();
+  try { await _savePromise; } finally { _savePromise = null; }
 }
 
 function dbRun(sql, params = []) {
@@ -306,17 +338,16 @@ function dbGet(sql, params = []) {
 }
 
 function loadListenStatsFromDB() {
-  const s          = dbGet("SELECT * FROM stats WHERE id = 1");
-  const rem        = dbGet("SELECT COUNT(*) as c FROM tracks WHERE listened = 0");
-  const remMs      = dbGet("SELECT SUM(duration_ms) as s FROM tracks WHERE listened = 0");
-  const listenedMs = dbGet("SELECT SUM(duration_ms) as s FROM tracks WHERE listened = 1");
+  const s     = dbGet("SELECT * FROM stats WHERE id = 1");
+  const rem   = dbGet("SELECT COUNT(*) as c FROM tracks WHERE listened = 0");
+  const remMs = dbGet("SELECT SUM(duration_ms) as s FROM tracks WHERE listened = 0");
   return {
     remaining:    rem?.c  || 0,
     remaining_ms: remMs?.s || 0,
-    this_month:   s?.listened_this_month || 0,
-    this_year:    s?.listened_this_year  || 0,
-    all_time:     s?.total_listened      || 0,
-    listened_ms:  listenedMs?.s || 0,
+    this_month:   s?.listened_this_month  || 0,
+    this_year:    s?.listened_this_year   || 0,
+    all_time:     s?.total_listened       || 0,
+    listened_ms:  s?.total_listened_ms    || 0,
   };
 }
 
@@ -444,8 +475,8 @@ function StoreProvider({ children }) {
   const advancedForRef            = React.useRef(null); // URI pour laquelle on a déjà déclenché l'avance
   const prevNowRef                = React.useRef({ playing:false, uri:null, current:0, duration:0 });
   React.useEffect(() => { loopEnabledRef.current = loopEnabled; }, [loopEnabled]);
-  React.useEffect(() => { feedRef.current = feed; }, [feed]);
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
+  // ⚠ l'effet de sync feedRef est déclaré APRÈS le useState de feed (les deps [feed] sont évaluées pendant le rendu)
 
   const [stats,         setStats]       = React.useState({ artists:0, total:0, releases:0, tracks:0 });
   const [listenStats,   setListenStats] = React.useState({ remaining:0, remaining_ms:0, this_month:0, this_year:0, all_time:0 });
@@ -460,6 +491,10 @@ function StoreProvider({ children }) {
   const [dailyScrapings, setDailyScrapings] = React.useState(0);
 
   const [feed,          setFeed]        = React.useState([]);
+  React.useEffect(() => { feedRef.current = feed; }, [feed]);
+
+  const [rlWaiting,    setRlWaiting]    = React.useState(false); // pause auto rate-limit (distincte de la pause manuelle)
+  const [blockedUntil, setBlockedUntil] = React.useState(0);     // blocage persisté après 429 répétés (spotifyplus_blocked_until)
 
   // Filtres du feed — APRÈS feed (useMemo référence feed, doit être déclaré après)
   const [filterType,   setFilterType]   = React.useState('all');
@@ -514,7 +549,10 @@ function StoreProvider({ children }) {
       const params = new URLSearchParams(window.location.search);
       const code   = params.get('code');
       if (code) {
-        const ok = await exchangeCode(code);
+        // Anti-CSRF : le state retourné doit correspondre à celui généré au départ
+        const returnedState = params.get('state');
+        const stateOk = returnedState && returnedState === localStorage.getItem('pkce_state');
+        const ok = stateOk && await exchangeCode(code);
         window.history.replaceState({}, '', window.location.pathname);
         if (!ok) { setAuthState('login'); return; }
       }
@@ -596,6 +634,13 @@ function StoreProvider({ children }) {
             }
           } catch {}
 
+          // Blocage rate-limit persisté (429 répétés lors d'une session précédente)
+          try {
+            const b = parseInt(localStorage.getItem('spotifyplus_blocked_until') || '0');
+            if (b > Date.now()) setBlockedUntil(b);
+            else localStorage.removeItem('spotifyplus_blocked_until');
+          } catch {}
+
           if (initMsgs.length > 0) setLogs(initMsgs);
           setDbReady(true);
         } else {
@@ -613,7 +658,7 @@ function StoreProvider({ children }) {
       try {
         const r = await apiGet('https://api.spotify.com/v1/me/player/currently-playing');
         if (!stop && r?.item) {
-          setNow({
+          const next = {
             title:    r.item.name,
             artist:   r.item.artists.map(a => a.name).join(', '),
             duration: Math.floor(r.item.duration_ms / 1000),
@@ -621,9 +666,15 @@ function StoreProvider({ children }) {
             image:    r.item.album?.images?.[0]?.url,
             playing:  r.is_playing,
             uri:      r.item.uri,
-          });
+          };
+          // Bail-out : si rien n'a changé (lecture en pause), garder la même référence → pas de re-render global
+          setNow(prev => (prev &&
+            prev.uri === next.uri && prev.current === next.current &&
+            prev.playing === next.playing && prev.duration === next.duration &&
+            prev.title === next.title && prev.artist === next.artist &&
+            prev.image === next.image) ? prev : next);
         } else if (!stop && !r?.item) {
-          setNow(null);
+          setNow(n => n === null ? n : null);
         }
       } catch {}
     };
@@ -645,6 +696,12 @@ function StoreProvider({ children }) {
     const prevUri    = prevUriRef.current;
     prevUriRef.current = currentUri;
 
+    // Le marqueur d'auto-avance ne vaut que pour le titre qu'on vient de quitter :
+    // le reset permet de ré-avancer si l'utilisateur réécoute le même titre plus tard dans la session
+    if (currentUri && advancedForRef.current && advancedForRef.current !== currentUri) {
+      advancedForRef.current = null;
+    }
+
     if (!prevUri || prevUri === currentUri) return;
 
     // Auto-avance — AVANT le check listenedUrisRef pour ne pas être bloqué
@@ -662,24 +719,28 @@ function StoreProvider({ children }) {
     if (listenedUrisRef.current.has(prevUri)) return;
     if (!dbReady) return;
 
-    setFeed(F => {
-      const item = F.find(f => f.spotifyUri === prevUri);
-      if (!item) return F;
+    // Écritures DB hors de l'updater setFeed (les updaters React doivent rester purs)
+    const item = feedRef.current.find(f => f.spotifyUri === prevUri);
+    if (!item) return;
 
-      listenedUrisRef.current.add(prevUri);
+    listenedUrisRef.current.add(prevUri);
+    try {
+      const trackRow = dbGet("SELECT duration_ms FROM tracks WHERE spotify_uri = ?", [prevUri]);
+      const durMs = trackRow?.duration_ms || 0;
+      dbRun("UPDATE tracks SET listened = 1 WHERE spotify_uri = ?", [prevUri]);
+      dbRun(
+        "UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1, total_listened_ms = total_listened_ms + ? WHERE id = 1",
+        [durMs]
+      );
+      saveDB().catch(() => {});
+      setListenStats(loadListenStatsFromDB());
+    } catch {
+      listenedUrisRef.current.delete(prevUri);
+      return;
+    }
 
-      try {
-        dbRun("UPDATE tracks SET listened = 1 WHERE spotify_uri = ?", [prevUri]);
-        dbRun("UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1 WHERE id = 1");
-        saveDB().catch(() => {});
-        setListenStats(loadListenStatsFromDB());
-      } catch {
-        listenedUrisRef.current.delete(prevUri);
-      }
-
-      setTimeout(() => setFeed(F2 => F2.filter(f => f.spotifyUri !== prevUri)), 600);
-      return F.map(f => f.spotifyUri === prevUri ? { ...f, removing: true } : f);
-    });
+    setFeed(F => F.map(f => f.spotifyUri === prevUri ? { ...f, removing: true } : f));
+    setTimeout(() => setFeed(F2 => F2.filter(f => f.spotifyUri !== prevUri)), 600);
   }, [now?.uri, dbReady]);
 
   // ── Détecter fin de titre (≤ 3s restantes) → passer au suivant ──
@@ -771,7 +832,6 @@ function StoreProvider({ children }) {
       return nv;
     });
   };
-  const waitWhilePaused = async () => { while (pausedRef.current) await sleep(500); };
 
   const purgeListened = async () => {
     if (!dbReady) return;
@@ -783,21 +843,22 @@ function StoreProvider({ children }) {
     alert(`${count} titre(s) supprimé(s).`);
   };
 
-  const removeFromFeed = async (uri) => {
+  // useCallback : identités stables pour que React.memo(FeedItem) soit efficace
+  const removeFromFeed = React.useCallback(async (uri) => {
     if (!dbReady) return;
     dbRun("DELETE FROM tracks WHERE spotify_uri = ?", [uri]);
     await saveDB();
     setFeed(f => f.filter(item => item.spotifyUri !== uri));
     setListenStats(loadListenStatsFromDB());
-  };
+  }, [dbReady]);
 
-  const setTrackLiked = async (uri, bool) => {
+  const setTrackLiked = React.useCallback(async (uri, bool) => {
     if (!dbReady) return;
     dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [bool ? 1 : 0, uri]);
     await saveDB();
     setLikedTracks(loadLikedTracksFromDB());
     setFeed(f => f.map(item => item.spotifyUri === uri ? { ...item, liked: bool ? 1 : 0 } : item));
-  };
+  }, [dbReady]);
 
   const syncInitialLikes = async () => {
     try {
@@ -805,6 +866,7 @@ function StoreProvider({ children }) {
       if (uriRows.length === 0) return;
       const ids = uriRows.map(r => r.spotify_uri.split(':')[2]).filter(Boolean);
       for (let i = 0; i < ids.length; i += 50) {
+        if (i > 0) await sleep(400); // lisse le burst d'appels au login (jusqu'à 6 batchs)
         const batch = ids.slice(i, i + 50);
         const data = await apiGet(`https://api.spotify.com/v1/me/tracks/contains?ids=${batch.join(',')}`);
         if (!Array.isArray(data)) continue;
@@ -819,7 +881,7 @@ function StoreProvider({ children }) {
     } catch {}
   };
 
-  const navigateFeed = async (dir) => {
+  const navigateFeed = React.useCallback(async (dir) => {
     const f = filteredFeedRef.current;
     if (f.length === 0) return;
     const nowUri = prevNowRef.current?.uri;
@@ -828,56 +890,128 @@ function StoreProvider({ children }) {
     if (dir === -1) nextIdx = currentIdx > 0 ? currentIdx - 1 : f.length - 1;
     else nextIdx = currentIdx < f.length - 1 ? currentIdx + 1 : 0;
     if (f[nextIdx]) await playTrack(f[nextIdx].spotifyUri);
-  };
+  }, []);
 
   // Sync des likes Spotify → DB dès que la DB est prête
   React.useEffect(() => {
     if (dbReady) syncInitialLikes();
   }, [dbReady]); // eslint-disable-line
 
+  // Sauvegarde de sécurité quand l'app passe en arrière-plan (mobile : l'OS peut tuer l'onglet)
+  React.useEffect(() => {
+    if (!dbReady) return;
+    const h = () => { if (document.visibilityState === 'hidden') saveDB().catch(() => {}); };
+    document.addEventListener('visibilitychange', h);
+    return () => document.removeEventListener('visibilitychange', h);
+  }, [dbReady]);
+
   const resumeSync = () => {
     if (!resumableSession) return;
     startSync({ skipCount: resumableSession.artists_scanned });
   };
 
+  // ── Fin de synchro unifiée — TOUS les chemins d'arrêt passent par ici ──
+  // reason: 'completed' | 'daily_limit' | 'error'
+  const endSync = async (reason) => {
+    setNextCall(0); setNextCallTotal(0); setEta('');
+    setScraping(false); setPaused(false); setRlWaiting(false);
+    if (reason === 'completed') {
+      localStorage.removeItem('spotifyplus_sync_progress');
+      setResumableSession(null);
+    } else {
+      // Restaure le bouton "↩ Reprendre" immédiatement, sans attendre un reload
+      try {
+        const saved = localStorage.getItem('spotifyplus_sync_progress');
+        if (saved) {
+          const p = JSON.parse(saved);
+          if (p?.artists_scanned > 0) setResumableSession(p);
+        }
+      } catch {}
+    }
+    try { await saveDB(); } catch {}
+  };
+
   // ── SYNC ──
   const startSync = async (options = {}) => {
     if (scraping) return;
+
+    // Blocage persisté après 429 répétés — refuse de relancer trop tôt (survit au F5)
+    const blockedTs = parseInt(localStorage.getItem('spotifyplus_blocked_until') || '0');
+    if (blockedTs > Date.now()) {
+      setBlockedUntil(blockedTs);
+      log(`🚫 Synchro bloquée (rate limits répétés) — réessaie dans ${Math.ceil((blockedTs - Date.now()) / 60000)} min`, 'error');
+      setStatus('Bloqué — rate limit Spotify', 'error');
+      return;
+    }
+    localStorage.removeItem('spotifyplus_blocked_until');
+    setBlockedUntil(0);
+
     const { skipCount = 0 } = options;
     setResumableSession(null);
-    setScraping(true); setPaused(false);
+    setScraping(true); setPaused(false); setRlWaiting(false);
     setLogs([]); setProgress(0);
     setStats({ artists:0, total:0, releases:0, tracks:0 });
     setEta(''); setStatus('Vérification du compte…', 'pulse');
 
     try {
-      // Wrapper apiGet qui gère le 429 : pause automatique + reprise
+      // Point de contrôle unique, attendu avant CHAQUE appel API de la synchro :
+      // bloque pendant la pause manuelle ET pendant la fenêtre rate-limit globale (_rlUntil,
+      // qui peut être posée par un 429 du player) — plus aucune requête ne part en pause.
+      const checkpoint = async () => {
+        while (pausedRef.current || Date.now() < _rlUntil) await sleep(500);
+      };
+
+      // Wrapper apiGet : checkpoint + pause auto sur 429 + abandon après 3 429 consécutifs
+      let rl429Streak = 0;
       const apiGetSafe = async (url) => {
         while (true) {
+          await checkpoint();
+          let data;
           try {
-            return await apiGet(url);
+            data = await apiGet(url);
           } catch (err) {
             if (err.message === 'RATE_LIMIT') {
-              log(`🚫 Rate limit 429 — pause automatique ${err.waitSec}s`, 'error');
+              rl429Streak++;
+              if (rl429Streak >= 3) {
+                // Spotify nous throttle sérieusement : on s'arrête et on bloque les relances (min. 15 min)
+                const blockMs = Math.max(err.waitMs, 15 * 60 * 1000);
+                localStorage.setItem('spotifyplus_blocked_until', String(Date.now() + blockMs));
+                setBlockedUntil(Date.now() + blockMs);
+                const e = new Error('SYNC_RATE_ABORT');
+                e.blockMin = Math.ceil(blockMs / 60000);
+                throw e;
+              }
+              log(`🚫 Rate limit 429 (${rl429Streak}/3) — pause automatique ${err.waitSec}s`, 'error');
               setStatus(`⏸ Rate limit — reprise dans ${err.waitSec}s`, 'wait');
-              setPaused(true);
+              setRlWaiting(true);
               setNextCallTotal(Math.ceil(err.waitMs / 1000));
               setNextCall(Math.ceil(err.waitMs / 1000));
               await sleep(err.waitMs);
-              setPaused(false);
+              setRlWaiting(false);
               setStatus('▶ Reprise après rate limit…', 'pulse');
               log('▶ Reprise après rate limit.', 'ok');
-              // boucle → retry
-            } else {
-              throw err;
+              continue; // retry même URL
             }
+            throw err;
           }
+          if (data === null) {
+            // null = bloqué par le guard global (_rlUntil) — re-checkpoint puis retry
+            if (Date.now() < _rlUntil) continue;
+            return null;
+          }
+          if (data.error) {
+            // Body d'erreur HTTP (401 non rattrapé, 403, 5xx…) : on s'arrête proprement
+            // au lieu de terminer en silence comme si tout était scanné
+            throw new Error(`API ${data.error.status || '?'} : ${data.error.message || 'erreur inconnue'}`);
+          }
+          rl429Streak = 0;
+          return data;
         }
       };
 
       log('── Étape 1 : vérification du compte ──', 'info');
-      const me = await apiGet('https://api.spotify.com/v1/me');
-      if (!me?.id) { log('Erreur : impossible de récupérer le compte.', 'error'); setScraping(false); return; }
+      const me = await apiGetSafe('https://api.spotify.com/v1/me');
+      if (!me?.id) throw new Error('impossible de récupérer le compte');
       log(`✓ Compte : ${me.display_name || me.id}`, 'ok');
 
       // Charger les dates de scrapping depuis la DB locale
@@ -890,10 +1024,12 @@ function StoreProvider({ children }) {
       log('── Scraping par date individuelle par artiste ──', 'info');
       setStatus('Chargement des artistes…', 'pulse');
 
-      const _today = new Date().toISOString().slice(0, 10);
-      const _dailyRaw = localStorage.getItem('spotifyplus_daily_scrapings');
-      let dailyCount = (_dailyRaw ? JSON.parse(_dailyRaw) : null)?.date === _today
-        ? (JSON.parse(_dailyRaw).count || 0) : 0;
+      let curDay = new Date().toISOString().slice(0, 10);
+      let dailyCount = 0;
+      try {
+        const d = JSON.parse(localStorage.getItem('spotifyplus_daily_scrapings') || 'null');
+        if (d?.date === curDay) dailyCount = d.count || 0;
+      } catch {}
 
       const seenUris = new Set(knownUrisRef.current);
       let totalTracks = 0, totalReleases = 0, artistsScanned = skipCount, totalArtists = ESTIMATED_TOTAL;
@@ -906,7 +1042,8 @@ function StoreProvider({ children }) {
       while (nextUrl) {
         pageNum++;
         const pageData = await apiGetSafe(nextUrl);
-        if (!pageData?.artists?.items) { log('Erreur chargement artistes.', 'error'); break; }
+        // throw (et non break) : un échec ici ne doit PAS terminer la synchro comme si elle était complète
+        if (!pageData?.artists?.items) throw new Error('chargement des artistes impossible');
         if (pageData.artists.total) {
           totalArtists = pageData.artists.total;
           setStats(s => ({ ...s, total: totalArtists }));
@@ -918,32 +1055,41 @@ function StoreProvider({ children }) {
         for (let i = 0; i < artists.length; i++) {
           globalArtistIndex++;
           if (globalArtistIndex <= skipCount) continue;
-          await waitWhilePaused();
+          await checkpoint();
+
+          // Passage de minuit pendant la synchro → reset du compteur journalier
+          const dNow = new Date().toISOString().slice(0, 10);
+          if (dNow !== curDay) {
+            curDay = dNow; dailyCount = 0; setDailyScrapings(0);
+            log('🌅 Nouveau jour — compteur journalier remis à zéro', 'info');
+          }
+
           if (dailyCount >= 100) {
             log('⛔ Limite journalière atteinte (100 artistes/jour). Synchro arrêtée — relancer demain.', 'error');
             setStatus('Limite 100/jour atteinte', 'error');
-            setScraping(false);
-            await saveDB();
             if ('Notification' in window) {
               const send = () => new Notification('Spotify+ — Session terminée', { body: '100 artistes scrapés aujourd\'hui. Relance demain.', icon: './icon-192.png' });
               if (Notification.permission === 'granted') send();
               else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') send(); });
             }
+            await endSync('daily_limit');
             return;
           }
           const artist = artists[i];
           artistsScanned++;
           dailyCount++;
-          localStorage.setItem('spotifyplus_daily_scrapings', JSON.stringify({ date: _today, count: dailyCount }));
+          localStorage.setItem('spotifyplus_daily_scrapings', JSON.stringify({ date: curDay, count: dailyCount }));
           setDailyScrapings(dailyCount);
           setStats(s => ({ ...s, artists: artistsScanned }));
           setProgress(Math.min(98, (artistsScanned / totalArtists) * 100));
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
-          const cutoff = new Date(scrapedDates[artist.id] || '2026-03-15');
+          // Cutoff tronqué au JOUR du dernier scan : une sortie publiée le jour même du scan
+          // mais indexée après ne doit pas être ratée (les doublons sont absorbés par INSERT OR IGNORE)
+          const cutoff = new Date((scrapedDates[artist.id] || '2026-03-15').slice(0, 10));
           const albumsData = await apiGetSafe(
-            `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`
+            `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=20&market=FR`
           );
           if (albumsData?.items) {
             const inRange = albumsData.items.filter(a => { const d = new Date(a.release_date); return d >= cutoff && d <= ceiling; });
@@ -956,7 +1102,9 @@ function StoreProvider({ children }) {
               const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
               if (!tracksData?.items?.length) continue;
               const uris = tracksData.items.map(t => t.uri);
-              if (seenUris.has(uris[0])) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
+              // Skip seulement si TOUTES les pistes sont connues : un album dont la piste 1
+              // est sortie en single auparavant ne doit pas être sauté en entier
+              if (uris.every(u => seenUris.has(u))) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
 
               // Sauvegarder en DB locale
               const coverUrl = album.images?.[0]?.url || null;
@@ -999,7 +1147,7 @@ function StoreProvider({ children }) {
                   isNew:       true,
                   liked:       0,
                   duration_ms: tracksData.items[0]?.duration_ms || 0,
-                }].slice(0, 200));
+                }].slice(0, 1000)); // même cap que le chargement initial (sinon les nouveaux titres restent invisibles jusqu'au reload)
               } else {
                 const trackItems = tracksData.items.map(t => ({
                   id:          t.uri,
@@ -1015,17 +1163,20 @@ function StoreProvider({ children }) {
                   liked:       0,
                   duration_ms: t.duration_ms || 0,
                 }));
-                setFeed(F => [...F, ...trackItems].slice(0, 200));
+                setFeed(F => [...F, ...trackItems].slice(0, 1000));
               }
               log(`✓ ${artist.name} — ${album.name} · ${addedCount} titre(s) sauvegardé(s)`, 'ok');
             }
-          }
 
-          // Mise à jour de la date de scrapping de l'artiste
-          dbRun(
-            "INSERT OR REPLACE INTO artists_scraped (spotify_id, last_scraped_at) VALUES (?, datetime('now'))",
-            [artist.id]
-          );
+            // Date de scan avancée UNIQUEMENT si la liste d'albums a bien été lue —
+            // sinon la fenêtre de scan serait brûlée sans avoir rien scanné (sorties perdues à jamais)
+            dbRun(
+              "INSERT OR REPLACE INTO artists_scraped (spotify_id, last_scraped_at) VALUES (?, datetime('now'))",
+              [artist.id]
+            );
+          } else {
+            log(`⚠ ${artist.name} — albums inaccessibles, date de scan non avancée`, 'warn');
+          }
 
           // Sauvegarder la progression pour reprise après redémarrage
           localStorage.setItem('spotifyplus_sync_progress', JSON.stringify({
@@ -1050,9 +1201,7 @@ function StoreProvider({ children }) {
         }
       }
 
-      setProgress(100); setNextCall(0); setEta('');
-      await saveDB();
-      localStorage.removeItem('spotifyplus_sync_progress');
+      setProgress(100);
       if (totalTracks === 0) {
         setStatus('Terminé — aucune nouvelle sortie.', 'green');
         log('Aucune sortie trouvée dans cette période.', 'info');
@@ -1060,12 +1209,16 @@ function StoreProvider({ children }) {
         setStatus(`Terminé ✓ — ${totalTracks} titre(s)`, 'green');
         log(`🎵 ${totalTracks} titre(s) depuis ${totalReleases} sortie(s) sauvegardés en base.`, 'ok');
       }
+      await endSync('completed');
     } catch (err) {
-      setNextCall(0); setEta('');
-      log(`Erreur : ${err.message}`, 'error');
-      setStatus('Erreur — arrêté.', 'wait');
-    } finally {
-      setScraping(false); setPaused(false);
+      if (err.message === 'SYNC_RATE_ABORT') {
+        log(`🚫 3 rate limits consécutifs — synchro stoppée. Réessaie dans ~${err.blockMin} min.`, 'error');
+        setStatus(`Bloqué ${err.blockMin} min — rate limit Spotify`, 'error');
+      } else {
+        log(`Erreur : ${err.message}`, 'error');
+        setStatus('Erreur — arrêté.', 'wait');
+      }
+      await endSync('error');
     }
   };
 
@@ -1073,7 +1226,7 @@ function StoreProvider({ children }) {
 
   const api = {
     authState, user, playlist,
-    scraping, paused, togglePause, startSync, logout,
+    scraping, paused, rlWaiting, blockedUntil, togglePause, startSync, logout,
     stats, progress, currentArtist, statusMsg, statusMode,
     nextCall, nextCallTotal, eta, dailyScrapings, feed, logs, now,
     delayChoice, setDelayChoice,
@@ -1510,7 +1663,7 @@ function ScrapingStatusPanel({ compact=false }) {
   const total = Math.max(s.stats.total, 1);
   const pct   = (s.stats.artists / total) * 100;
   const label = s.scraping
-    ? (s.paused ? 'EN PAUSE' : 'EN COURS')
+    ? ((s.paused || s.rlWaiting) ? 'EN PAUSE' : 'EN COURS')
     : (s.stats.artists > 0 ? 'TERMINÉ' : 'EN ATTENTE');
 
   return (
@@ -1547,6 +1700,19 @@ function DateRangePanel({ compact=false }) {
   const s = useStore();
   const hasResume = !s.scraping && s.resumableSession;
 
+  // Blocage après 429 répétés : countdown re-rendu chaque seconde tant qu'il est actif
+  const [, forceTick] = React.useState(0);
+  const blocked = s.blockedUntil > Date.now();
+  React.useEffect(() => {
+    if (s.blockedUntil <= Date.now()) return;
+    const id = setInterval(() => {
+      forceTick(v => v + 1);
+      if (Date.now() >= s.blockedUntil) clearInterval(id);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [s.blockedUntil]);
+  const blockedMin = blocked ? Math.ceil((s.blockedUntil - Date.now()) / 60000) : 0;
+
   const onLancer = () => {
     if (hasResume) {
       if (!confirm('Êtes-vous sûr de vouloir recommencer la synchro de 0 ?\nLa progression en cours sera perdue.')) return;
@@ -1558,10 +1724,17 @@ function DateRangePanel({ compact=false }) {
     <div style={{ borderRadius:10, background: compact?C.surface:C.surfaceHigh, border:`1px solid ${C.border}`, padding: compact?'10px 12px':'12px 14px' }}>
       <div style={{ fontSize:10, color:C.dim, letterSpacing:'0.07em', fontWeight:700, marginBottom: compact?8:10 }}>SYNCHRONISATION</div>
 
+      {/* Bandeau blocage rate-limit */}
+      {blocked && (
+        <div style={{ fontSize:10, color:'#c05050', background:'#1a0a0a', border:'1px solid #3a1a1a', borderRadius:6, padding:'6px 10px', marginBottom:8, textAlign:'center' }}>
+          🚫 Rate limit Spotify — réessaie dans {blockedMin} min
+        </div>
+      )}
+
       {/* Bouton Reprendre — affiché EN PREMIER si session en cours */}
       {hasResume && (
-        <button onClick={s.resumeSync}
-          style={{ width:'100%', marginBottom:8, background:`${C.accent}18`, border:`1px solid ${C.accent}55`, borderRadius:6, padding: compact?'10px 12px':'12px 14px', cursor:'pointer', color:C.accent, textAlign:'left' }}>
+        <button onClick={s.resumeSync} disabled={blocked}
+          style={{ width:'100%', marginBottom:8, background:`${C.accent}18`, border:`1px solid ${C.accent}55`, borderRadius:6, padding: compact?'10px 12px':'12px 14px', cursor: blocked?'default':'pointer', color:C.accent, textAlign:'left', opacity: blocked?0.5:1 }}>
           <div style={{ fontSize: compact?12:13, fontWeight:700, letterSpacing:'0.02em' }}>↩ Reprendre la synchro en cours</div>
           <div style={{ fontSize:10, color:C.muted, fontWeight:400, marginTop:3, fontFamily:'DM Mono,monospace' }}>
             {s.resumableSession.artists_scanned} / {s.resumableSession.total_artists || '?'} artistes · dernier : {s.resumableSession.last_artist_name || '–'}
@@ -1570,8 +1743,8 @@ function DateRangePanel({ compact=false }) {
       )}
 
       <div style={{ display:'flex', gap: compact?8:6 }}>
-        <button onClick={onLancer} disabled={s.scraping}
-          style={{ flex:2, background: hasResume ? '#2a1a1a' : C.accent, border: hasResume ? '1px solid #5a2a2a' : 'none', borderRadius:6, padding: compact?'8px 0':'7px 0', cursor: s.scraping?'default':'pointer', color: hasResume ? '#c05050' : '#000', fontSize:11, fontWeight:700, opacity: s.scraping?0.6:1 }}>
+        <button onClick={onLancer} disabled={s.scraping || blocked}
+          style={{ flex:2, background: hasResume ? '#2a1a1a' : C.accent, border: hasResume ? '1px solid #5a2a2a' : 'none', borderRadius:6, padding: compact?'8px 0':'7px 0', cursor: (s.scraping || blocked)?'default':'pointer', color: hasResume ? '#c05050' : '#000', fontSize:11, fontWeight:700, opacity: (s.scraping || blocked)?0.6:1 }}>
           {s.scraping ? '▶ En cours…' : hasResume ? '↺ Recommencer la synchro de 0' : '▶ Lancer la synchronisation'}
         </button>
         {s.scraping && (
@@ -1674,14 +1847,14 @@ async function playTrack(spotifyUri) {
   if (result?.error === 'forbidden')        alert('Lecture impossible — compte Spotify Free ?');
 }
 
-function FeedItem({ item, i, isMobile=false }) {
-  const { now, removeFromFeed, setTrackLiked, navigateFeed } = useStore();
+// React.memo + props explicites (pas de useStore) : seuls les items dont les props changent
+// re-render — sans ça, les ~1000 lignes du feed re-rendaient à chaque tick du poll player (5s)
+const FeedItem = React.memo(function FeedItem({ item, i, isMobile=false, isNowPlaying, removeFromFeed, setTrackLiked, navigateFeed }) {
   const [playing, setPlaying]       = React.useState(false);
   const [liked,   setLikedLocal]    = React.useState(item.liked || 0);
   const [swipeDx, setSwipeDx]       = React.useState(0);
   const touchStartX = React.useRef(0);
   const swiping     = React.useRef(false);
-  const isNowPlaying = now?.uri === item.spotifyUri;
 
   // Sync liked depuis les mises à jour du store
   React.useEffect(() => { setLikedLocal(item.liked || 0); }, [item.liked]);
@@ -1788,7 +1961,7 @@ function FeedItem({ item, i, isMobile=false }) {
       </button>
     </div>
   );
-}
+});
 
 function VosEcoutesPanel() {
   const { listenStats: ls, purgeListened, dbReady, now } = useStore();
@@ -1840,9 +2013,10 @@ function VosEcoutesPanel() {
 }
 
 function FeedList({ isMobile=false }) {
-  const { feed, listenStats, filteredFeed,
+  const { feed, listenStats, filteredFeed, now,
           filterType, setFilterType, sortBy, setSortBy,
-          artistSearch, setArtistSearch, resetFilters } = useStore();
+          artistSearch, setArtistSearch, resetFilters,
+          removeFromFeed, setTrackLiked, navigateFeed } = useStore();
 
   const hidden      = Math.max(0, (listenStats.remaining || 0) - feed.length);
   const filtersOn   = filterType !== 'all' || sortBy !== 'default' || artistSearch.trim();
@@ -1903,7 +2077,11 @@ function FeedList({ isMobile=false }) {
       )}
 
       <div style={{ display:'flex', flexDirection:'column' }}>
-        {filteredFeed.map((item, i) => <FeedItem key={item.id + i} item={item} i={i} isMobile={isMobile} />)}
+        {filteredFeed.map((item, i) => (
+          <FeedItem key={item.id + i} item={item} i={i} isMobile={isMobile}
+            isNowPlaying={now?.uri === item.spotifyUri}
+            removeFromFeed={removeFromFeed} setTrackLiked={setTrackLiked} navigateFeed={navigateFeed} />
+        ))}
         {filteredFeed.length === 0 && <div style={{ fontSize:11, color:C.dim, padding:'20px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucun titre pour ce filtre.</div>}
       </div>
     </div>
