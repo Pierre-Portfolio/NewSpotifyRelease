@@ -76,6 +76,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Compteur de scrapings effectués aujourd'hui affiché dans la carte **Artistes** (`X/100 aujourd'hui`)
 - Persisté dans `localStorage` (`spotifyplus_daily_scrapings`) avec la date du jour — remise à zéro automatique le lendemain
 - **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes d'aujourd'hui (`(100 − scrapés) × délai moyen`)
+- **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/jour)
 
 ### Titres likés (onglet ❤ Likés)
 - Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats") avec badge du nombre de likés

@@ -327,7 +327,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `MobileApp` | Layout mobile — 4 onglets : Scrapping / À écouter / ❤ Likés / Stats |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
-| `NextCallPanel` | Countdown + "Temps total restant" (ETA sync) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
+| `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
 | `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
