@@ -55,6 +55,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Filtre artiste** : champ texte (insensible à la casse) combinable avec le filtre type et le tri
 - **Bouton 🗑 reset** : réinitialise tous les filtres en un clic (visible uniquement si un filtre est actif)
 - **Tri** : ordre d'ajout / date de sortie ↓ / artiste A→Z
+- **Bannières de date** (mobile) : séparateur "📅 20 juin 2026" entre chaque jour de sortie — repère visuel affiché en tri "Ordre d'ajout" et "Date sortie ↓" (pas en tri artiste)
 - **Navigation filtrée** : next/prev et auto-avance respectent l'ordre du feed filtré
 - **Swipe gauche** (mobile) : supprime le titre · **Swipe droite** : piste précédente
 
