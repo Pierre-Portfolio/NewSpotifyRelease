@@ -331,7 +331,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↓", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables |
+| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton Purger |
@@ -365,7 +365,7 @@ delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)
 filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
 filterType       // 'all' | 'single' | 'album' | 'dw'
-sortBy           // 'default' | 'date_desc' | 'artist'
+sortBy           // 'default' | 'date_asc' (plus ancien en haut) | 'artist'
 artistSearch     // string — filtre texte sur artist_name
 
 resumableSession // { artists_scanned, total_artists, last_artist_name, page_url, page_offset } | null
