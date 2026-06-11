@@ -123,7 +123,7 @@ async function importDiscoverWeekly(addLog)  // import hebdo playlist "Découver
 function dbRun(sql, params=[])         // execute sans retour
 function dbAll(sql, params=[])         // retourne tableau d'objets
 function dbGet(sql, params=[])         // retourne le premier objet ou null
-function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time, listened_ms }
+function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max 500) mappées en items feed
 ```
 
@@ -131,6 +131,7 @@ function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max
 `initDB()` exécute dans des try/catch après chaque chargement (nouveau ou depuis IndexedDB) — sans effet si la colonne existe déjà :
 - `ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0`
 - `ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0`
+- `ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0` — compteur de likes posés **dans l'app** (via `setTrackLiked` uniquement, PAS par `syncInitialLikes`) ; persistant, non purgeable
 
 ### Champs des items feed
 Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, date, rawDate, image, isNew, liked, duration_ms`
@@ -292,6 +293,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 - `remaining` = `SELECT COUNT(*) FROM tracks WHERE listened = 0` (recalculé)
 - `remaining_ms` = `SELECT SUM(duration_ms) FROM tracks WHERE listened = 0` (recalculé)
 - `listened_ms` = `SELECT SUM(duration_ms) FROM tracks WHERE listened = 1` (recalculé) — affiché dans `VosEcoutesPanel` + `now.duration * 1000` pour le titre en cours
+- `total_liked` (colonne `stats`) = compteur de likes posés **dans l'app** : +1 à chaque like, −1 (plancher 0) à chaque unlike via `setTrackLiked` — **jamais** alimenté par `syncInitialLikes` (les likes Spotify importés ne comptent pas). Affiché dans `VosEcoutesPanel` en **% likés** = `total_liked / total_listened × 100`. Persistant : la purge ne touche pas la table `stats`
 - Réinitialisation mois/année : vérifiée au démarrage via `last_reset_month` / `last_reset_year`
 
 ---
@@ -332,7 +334,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
-| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**) + bouton Purger |
+| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton Purger |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
 | `MobilePlayer` | Player mobile **25vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles + loop |
 | `SeekBar` | Barre de progression cliquable/draggable — mouse ET touch (`onTouchStart/Move/End`) |
@@ -356,7 +358,7 @@ feed             // array d'items du feed
 logs             // array de logs
 now              // état lecture Spotify en cours
 stats            // { artists, total, releases, tracks } — compteurs sync
-listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms }
+listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
 loopEnabled      // boolean
 delayChoice      // 10 | 20 | 30 (secondes)
@@ -374,7 +376,7 @@ resumeSync()                   // → startSync({ skipCount, resumeUrl: page_url
 togglePause()                  // bascule syncState entre 'paused' et 'running' (no-op si 'idle')
 purgeListened()                // DELETE listened=1 AND liked=0 — les likés sont conservés
 removeFromFeed(uri)            // useCallback([dbReady]) — DELETE de la DB (ou UPDATE listened=1 si liké) + retire du feed (sans compter comme écouté)
-setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + recharge likedTracks + met à jour feed array
+setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + stats.total_liked ±1 + recharge likedTracks/listenStats + met à jour feed array
 syncInitialLikes()             // vérifie /me/library/contains par batch de 40 URIs (max 300 tracks), sleep 400ms entre batchs, TTL 24h
 navigateFeed(dir)              // useCallback([]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed
 resetFilters()                 // remet filterType='all', sortBy='default', artistSearch=''

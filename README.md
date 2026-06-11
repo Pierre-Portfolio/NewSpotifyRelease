@@ -69,6 +69,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Stats
 - Compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
+- **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
 

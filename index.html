@@ -365,6 +365,7 @@ async function initDB() {
   // Migrations idempotentes
   try { _db.run("ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0"); } catch {}
   try { _db.run("ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0"); } catch {}
+  try { _db.run("ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0"); } catch {}
   return _db;
 }
 
@@ -414,6 +415,7 @@ function loadListenStatsFromDB() {
     this_year:    s?.listened_this_year   || 0,
     all_time:     s?.total_listened       || 0,
     listened_ms:  s?.total_listened_ms    || 0,
+    total_liked:  s?.total_liked          || 0,
   };
 }
 
@@ -959,8 +961,14 @@ function StoreProvider({ children }) {
   const setTrackLiked = React.useCallback(async (uri, bool) => {
     if (!dbReady) return;
     dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [bool ? 1 : 0, uri]);
+    // Compteur persistant des likes posés DANS l'app (base du "% likés" de VosEcoutesPanel).
+    // Volontairement dans la table stats (survit à la purge) et PAS alimenté par
+    // syncInitialLikes (les likes Spotify importés ne comptent pas). Un unlike décrémente.
+    if (bool) dbRun("UPDATE stats SET total_liked = total_liked + 1 WHERE id = 1");
+    else      dbRun("UPDATE stats SET total_liked = MAX(total_liked - 1, 0) WHERE id = 1");
     await saveDB();
     setLikedTracks(loadLikedTracksFromDB());
+    setListenStats(loadListenStatsFromDB());
     setFeed(f => f.map(item => item.spotifyUri === uri ? { ...item, liked: bool ? 1 : 0 } : item));
   }, [dbReady]);
 
@@ -2122,6 +2130,11 @@ function VosEcoutesPanel() {
   const currentTrackMs = now?.duration ? now.duration * 1000 : 0;
   const totalListenedMs = (ls.listened_ms || 0) + currentTrackMs;
 
+  // % likés = likes posés dans l'app (stats.total_liked, jamais purgé) / écoutes all-time
+  const totalLiked = ls.total_liked || 0;
+  const likedPct = ls.all_time > 0 ? (totalLiked / ls.all_time) * 100 : 0;
+  const likedPctStr = `${(Math.round(likedPct * 10) / 10).toLocaleString('fr-FR')} %`;
+
   const cards = [
     { label:'RESTANTES À ÉCOUTER', value: fmtN(ls.remaining),           sub:'dans la file',       icon:'⏳', color:'#c8956c' },
     { label:'TEMPS D\'ÉCOUTE',     value: fmtDuration(ls.remaining_ms),  sub:'heures restantes',   icon:'⏱', color:'#e07b54' },
@@ -2129,6 +2142,7 @@ function VosEcoutesPanel() {
     { label:'CETTE ANNÉE',         value: fmtN(ls.this_year),            sub:'écoutées',           icon:'🗓', color:'#7b8ff7' },
     { label:'DEPUIS TOUJOURS',     value: fmtN(ls.all_time),             sub:'écoutées',           icon:'🎵', color:'#b07fe8' },
     { label:'TEMPS TOTAL ÉCOUTÉ',  value: fmtListenedTime(totalListenedMs), sub:'durée cumulée',   icon:'⌛', color:'#a78bfa' },
+    { label:'TITRES LIKÉS',        value: likedPctStr,                   sub:`${fmtN(totalLiked)} like(s) via l'app`, icon:'❤', color:'#e0608a' },
   ];
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
