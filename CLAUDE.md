@@ -360,7 +360,7 @@ now              // état lecture Spotify en cours
 stats            // { artists, total, releases, tracks } — compteurs sync
 listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
-loopEnabled      // boolean
+loopEnabled      // boolean — persisté dans localStorage (spotifyplus_loop, '1'/'0') : survit au changement d'onglet / F5
 delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)
 filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
