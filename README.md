@@ -40,7 +40,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Sauvegardes **sérialisées** : jamais deux écritures IndexedDB en parallèle, aucune donnée perdue en cas d'actions simultanées
 - **Persistance demandée au navigateur** (`navigator.storage.persist()`) — réduit le risque d'éviction des données, surtout sur iOS
 - **Garde multi-onglets** : si l'app est ouverte dans deux onglets, un bandeau d'avertissement s'affiche (les sauvegardes s'écraseraient mutuellement)
-- **Bouton Purger les écoutés** : supprime les titres écoutés **sauf les likés** (ils portent le like local) — libère de la place sur le long terme
+- **Bouton Purger les écoutés** : supprime **tous** les titres écoutés (likés compris, ce qui vide aussi l'Historique et l'onglet Likés des titres écoutés) — libère de la place sur le long terme. Le **% de titres likés** n'est PAS affecté (compteur indépendant dans la table `stats`)
 
 ### Feed de découverte
 - File d'attente ordonnée par ID (les plus anciens en premier), jusqu'à **1000 titres** affichés
@@ -88,6 +88,12 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Unliker retire le like sur Spotify ET met à jour la base locale
 - **⚠ Si tu étais déjà connecté avant la mise à jour** : les likes nécessitent désormais les permissions Spotify `user-library-read/modify` — déconnecte-toi puis reconnecte-toi une fois pour les accorder (l'app affiche une alerte si besoin)
 
+### Historique (onglet Historique)
+- Liste des **derniers titres écoutés** non purgés, le **plus récent en haut**
+- Chaque ligne affiche le titre, l'artiste, l'horodatage relatif de l'écoute (« il y a 5 min », « hier »…) et un bouton **réécouter**
+- Desktop : section **Historique** dans la barre latérale droite (sous « Vos écoutes ») · Mobile : onglet **Historique**
+- L'historique est vidé par le bouton **Purger les écoutés**
+
 ### Notifications
 - **Fin de session** (100 artistes/jour atteints) : notification navigateur envoyée automatiquement (permission demandée si nécessaire)
 
@@ -105,7 +111,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
 
 ### Interface
-- Responsive — desktop (sidebar) et mobile (4 onglets : Scrapping / À écouter / ❤ Likés / Stats)
+- Responsive — desktop (sidebar) et mobile (5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats)
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
 
@@ -149,7 +155,7 @@ NewSpotifyRelease/
 -- Titres à écouter (feed)
 tracks (id, spotify_uri UNIQUE, artist_name, title, release_title,
         release_type, release_date, cover_url, duration_ms,
-        listened DEFAULT 0, liked DEFAULT 0,
+        listened DEFAULT 0, liked DEFAULT 0, listened_at,
         added_at DEFAULT datetime('now'))
 
 -- Dates de dernier scraping par artiste

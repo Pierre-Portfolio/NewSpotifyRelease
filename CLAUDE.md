@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   duration_ms INTEGER,
   listened INTEGER DEFAULT 0,
   liked INTEGER DEFAULT 0,  -- 1 si liké via le player (colonne migrée via ALTER TABLE)
+  listened_at TEXT,         -- horodatage UTC de l'écoute (colonne migrée) — alimente l'Historique
   added_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -125,11 +126,13 @@ function dbAll(sql, params=[])         // retourne tableau d'objets
 function dbGet(sql, params=[])         // retourne le premier objet ou null
 function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max 500) mappées en items feed
+function loadHistoryFromDB()           // retourne les tracks WHERE listened=1 (max 200) ORDER BY listened_at DESC — plus récent en haut (Historique)
 ```
 
 ### Migrations DB (idempotentes)
 `initDB()` exécute dans des try/catch après chaque chargement (nouveau ou depuis IndexedDB) — sans effet si la colonne existe déjà :
 - `ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0`
+- `ALTER TABLE tracks ADD COLUMN listened_at TEXT` — horodatage UTC posé via `datetime('now')` au moment où un titre passe `listened = 1` (marquage auto fin de titre + `removeFromFeed` d'un liké) ; alimente l'Historique
 - `ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0`
 - `ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0` — compteur de likes posés **dans l'app** (via `setTrackLiked` uniquement, PAS par `syncInitialLikes`) ; persistant, non purgeable
 
@@ -326,7 +329,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `StoreProvider` | Context global — auth, dbReady, syncState (+ scraping/paused/rlWaiting dérivés), stats, feed, rate-limit, player, loopEnabled, otherTab |
 | `Home` | Page de login (mobile + desktop) |
 | `WebApp` | Layout desktop (sidebar + contenu) |
-| `MobileApp` | Layout mobile — 4 onglets : Scrapping / À écouter / ❤ Likés / Stats |
+| `MobileApp` | Layout mobile — 5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats (barre d'onglets en `flexWrap`) |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
@@ -334,6 +337,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
+| `HistoryPanel` | **Historique** des titres écoutés non purgés (listened=1), trié `listened_at DESC` (plus récent en haut) — horodatage relatif (`formatListenedAt`) + bouton réécouter. Desktop : sidebar droite sous VOS ÉCOUTES · Mobile : onglet **Historique** |
 | `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton Purger |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
 | `MobilePlayer` | Player mobile **25vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles + loop |
@@ -360,6 +364,7 @@ now              // état lecture Spotify en cours
 stats            // { artists, total, releases, tracks } — compteurs sync
 listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
+history          // array d'items (tracks WHERE listened=1, max 200, plus récent en haut), rechargé à chaque écoute / removeFromFeed / purge
 loopEnabled      // boolean — persisté dans localStorage (spotifyplus_loop, '1'/'0') : survit au changement d'onglet / F5
 delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)

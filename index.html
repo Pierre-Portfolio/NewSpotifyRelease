@@ -364,6 +364,7 @@ async function initDB() {
   }
   // Migrations idempotentes
   try { _db.run("ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0"); } catch {}
+  try { _db.run("ALTER TABLE tracks ADD COLUMN listened_at TEXT"); } catch {} // horodatage de l'écoute (historique)
   try { _db.run("ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0"); } catch {}
   try { _db.run("ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0"); } catch {}
   return _db;
@@ -431,6 +432,25 @@ function loadLikedTracksFromDB() {
     label: r.release_type === 'discover_weekly' ? 'Découvertes' : (r.release_type || ''),
     date: r.release_date || '',
     image: r.cover_url,
+    isNew: false,
+  }));
+}
+
+// Historique des écoutes : titres écoutés (listened=1) non purgés, le plus récent en haut.
+// Les anciennes lignes sans listened_at (avant la migration) retombent en bas (NULL = dernier en DESC).
+function loadHistoryFromDB() {
+  return dbAll(
+    "SELECT * FROM tracks WHERE listened = 1 ORDER BY listened_at DESC, id DESC LIMIT 200"
+  ).map(r => ({
+    id: r.id,
+    spotifyUri: r.spotify_uri,
+    artist: r.artist_name,
+    title: r.title,
+    subtitle: r.release_title,
+    label: r.release_type === 'discover_weekly' ? 'Découvertes' : (r.release_type || ''),
+    date: r.release_date || '',
+    image: r.cover_url,
+    listenedAt: r.listened_at,
     isNew: false,
   }));
 }
@@ -556,6 +576,7 @@ function StoreProvider({ children }) {
   const [stats,         setStats]       = React.useState({ artists:0, total:0, releases:0, tracks:0 });
   const [listenStats,   setListenStats] = React.useState({ remaining:0, remaining_ms:0, this_month:0, this_year:0, all_time:0 });
   const [likedTracks,   setLikedTracks] = React.useState([]);
+  const [history,       setHistory]     = React.useState([]); // titres écoutés non purgés, plus récent en haut
   const [progress,      setProgress]    = React.useState(0);
   const [currentArtist, setCurrentArtist] = React.useState('');
   const [statusMsg,     setStatusMsg]   = React.useState('Prêt.');
@@ -693,6 +714,7 @@ function StoreProvider({ children }) {
           // Load listen stats
           setListenStats(loadListenStatsFromDB());
           setLikedTracks(loadLikedTracksFromDB());
+          setHistory(loadHistoryFromDB());
           // syncInitialLikes est appelé après setDbReady(true) via useEffect
 
           // Vérifier si une synchro était en cours (reprise possible)
@@ -817,13 +839,14 @@ function StoreProvider({ children }) {
     try {
       const trackRow = dbGet("SELECT duration_ms FROM tracks WHERE spotify_uri = ?", [prevUri]);
       const durMs = trackRow?.duration_ms || 0;
-      dbRun("UPDATE tracks SET listened = 1 WHERE spotify_uri = ?", [prevUri]);
+      dbRun("UPDATE tracks SET listened = 1, listened_at = datetime('now') WHERE spotify_uri = ?", [prevUri]);
       dbRun(
         "UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1, total_listened_ms = total_listened_ms + ? WHERE id = 1",
         [durMs]
       );
       saveDB().catch(() => {});
       setListenStats(loadListenStatsFromDB());
+      setHistory(loadHistoryFromDB());
     } catch {
       listenedUrisRef.current.delete(prevUri);
       return;
@@ -946,6 +969,7 @@ function StoreProvider({ children }) {
     await saveDB();
     setListenStats(loadListenStatsFromDB());
     setLikedTracks(loadLikedTracksFromDB());
+    setHistory(loadHistoryFromDB());
     alert(`${count} titre(s) supprimé(s).`);
   };
 
@@ -955,11 +979,12 @@ function StoreProvider({ children }) {
     // Un titre liké n'est pas supprimé de la DB (il porte le like) : il est marqué
     // écouté pour sortir du feed, sans toucher les compteurs de la table stats
     const row = dbGet("SELECT liked FROM tracks WHERE spotify_uri = ?", [uri]);
-    if (row?.liked) dbRun("UPDATE tracks SET listened = 1 WHERE spotify_uri = ?", [uri]);
+    if (row?.liked) dbRun("UPDATE tracks SET listened = 1, listened_at = datetime('now') WHERE spotify_uri = ?", [uri]);
     else dbRun("DELETE FROM tracks WHERE spotify_uri = ?", [uri]);
     await saveDB();
     setFeed(f => f.filter(item => item.spotifyUri !== uri));
     setListenStats(loadListenStatsFromDB());
+    setHistory(loadHistoryFromDB());
   }, [dbReady]);
 
   const setTrackLiked = React.useCallback(async (uri, bool) => {
@@ -1389,7 +1414,7 @@ function StoreProvider({ children }) {
     seek,
     loopEnabled, setLoopEnabled,
     dbReady, purgeListened, removeFromFeed, setTrackLiked,
-    likedTracks, setLikedTracks, navigateFeed,
+    likedTracks, setLikedTracks, history, navigateFeed,
     filteredFeed, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, resetFilters,
     resumableSession, resumeSync,
@@ -2322,6 +2347,62 @@ function LikerPanel() {
 }
 
 // ════════════════════════════════════════════════
+// HISTORIQUE PANEL — derniers titres écoutés (non purgés)
+// ════════════════════════════════════════════════
+function formatListenedAt(s) {
+  if (!s) return '';
+  const d = new Date(s.replace(' ', 'T') + 'Z'); // listened_at est en UTC (datetime('now'))
+  if (isNaN(d)) return '';
+  const diff = Date.now() - d.getTime();
+  const min  = Math.floor(diff / 60000);
+  if (min < 1)  return "à l'instant";
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24)   return `il y a ${h} h`;
+  const j = Math.floor(h / 24);
+  if (j === 1)  return 'hier';
+  if (j < 7)    return `il y a ${j} j`;
+  return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+}
+
+function HistoryPanel() {
+  const { history } = useStore();
+
+  if (history.length === 0) {
+    return (
+      <div style={{ fontSize:11, color:C.dim, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+        Aucune écoute pour l'instant.<br/>
+        <span style={{ fontSize:10, color:C.muted }}>Les titres écoutés s'affichent ici jusqu'à la purge.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column' }}>
+      {history.map(item => (
+        <div key={item.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px', borderRadius:8, background:'transparent' }}>
+          <AlbumArt size={38} letter={item.artist[0]} color={item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.accent} image={item.image} />
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{item.title}</div>
+            <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {item.artist}{item.subtitle ? ` · ${item.subtitle}` : ''}
+            </div>
+          </div>
+          {item.listenedAt && (
+            <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', flexShrink:0, whiteSpace:'nowrap' }}>{formatListenedAt(item.listenedAt)}</span>
+          )}
+          <button onClick={() => playTrack(item.spotifyUri)}
+            title="Réécouter"
+            style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+            <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════
 // MOBILE APP
 // ════════════════════════════════════════════════
 function MobileApp() {
@@ -2333,8 +2414,8 @@ function MobileApp() {
         <div style={{ fontWeight:800, fontSize:16, letterSpacing:'-0.03em' }}>
           <span style={{ color:C.accent }}>Spotify</span><span style={{ color:C.text }}>+</span>
         </div>
-        <div style={{ display:'flex', gap:4 }}>
-          {[['scrapping','Scrapping'],['ecouter',`À écouter`],['liker',`❤ Likés${s.likedTracks.length > 0 ? ` · ${s.likedTracks.length}` : ''}`],['stats','Stats']].map(([k,n]) => {
+        <div style={{ display:'flex', gap:4, flexWrap:'wrap', justifyContent:'flex-end' }}>
+          {[['scrapping','Scrapping'],['ecouter',`À écouter`],['liker',`❤ Likés${s.likedTracks.length > 0 ? ` · ${s.likedTracks.length}` : ''}`],['historique','Historique'],['stats','Stats']].map(([k,n]) => {
             const active = tab === k;
             return <button key={k} onClick={() => setTab(k)} style={{ background: active?`${C.accent}18`:'none', border: active?`1px solid ${C.accent}40`:'1px solid transparent', color: active?C.accent:C.muted, borderRadius:6, padding:'3px 8px', cursor:'pointer', fontSize:10, fontWeight: active?700:400 }}>{n}</button>;
           })}
@@ -2371,6 +2452,12 @@ function MobileApp() {
           <div style={{ padding:'12px 14px' }}>
             <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:'0.07em', marginBottom:10 }}>TITRES LIKÉS · {s.likedTracks.length}</div>
             <LikerPanel />
+          </div>
+        )}
+        {tab === 'historique' && (
+          <div style={{ padding:'12px 14px' }}>
+            <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:'0.07em', marginBottom:10 }}>HISTORIQUE · <span style={{ color:C.accent }}>{s.history.length}</span></div>
+            <HistoryPanel />
           </div>
         )}
         {tab === 'stats' && (
@@ -2438,6 +2525,8 @@ function WebApp() {
         <div style={{ width:240, borderLeft:`1px solid ${C.border}`, background:C.surface, padding:'22px 16px', display:'flex', flexDirection:'column', gap:10, overflowY:'auto', flexShrink:0 }}>
           <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:C.dim, marginBottom:4 }}>VOS ÉCOUTES</div>
           <VosEcoutesPanel />
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:C.dim, marginTop:14, marginBottom:4 }}>HISTORIQUE · <span style={{ color:C.accent }}>{s.history.length}</span></div>
+          <HistoryPanel />
         </div>
       </div>
 
