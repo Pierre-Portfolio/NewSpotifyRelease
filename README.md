@@ -81,7 +81,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/jour)
 
 ### Titres likés (onglet ❤ Likés)
-- Onglet **❤ Likés** sur mobile (entre "À écouter" et "Stats") avec badge du nombre de likés
+- Onglet **❤ Likés** sur mobile (entre "À écouter" et "Historique")
 - Like/unlike depuis le **player mobile**, depuis le **feed** (bouton ❤ sur chaque titre), ou depuis l'onglet Likés
 - **Sync initiale au login** : l'app vérifie automatiquement les likes Spotify pour les 300 premiers titres du feed (`/me/library/contains`, par lots de 40) — les titres likés avant cette session apparaissent directement dans l'onglet (1× par 24h max)
 - La liste est persistée dans la table `tracks` (colonne `liked`) et chargée au démarrage
