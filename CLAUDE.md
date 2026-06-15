@@ -301,9 +301,9 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## Purge
 
 - Bouton **"Purger les écoutés"** dans `VosEcoutesPanel` (desktop sidebar + mobile onglet Stats)
-- Action : `DELETE FROM tracks WHERE listened = 1 AND liked = 0` → `saveDB()` → `setListenStats` + `setLikedTracks`
-- **Les titres likés sont conservés** : leur ligne DB est la seule trace locale du like — les purger viderait l'onglet ❤ Likés au prochain reload
-- Même logique dans `removeFromFeed` (bouton ×) : un titre liké est marqué `listened = 1` (sort du feed) au lieu d'être `DELETE` (les compteurs de la table `stats` ne sont pas touchés)
+- Action : `DELETE FROM tracks WHERE listened = 1` (**likés compris**) → `saveDB()` → `setListenStats` + `setLikedTracks`
+- **L'onglet ❤ Likés est aussi vidé** des titres écoutés. Le **% likés** n'est PAS affecté : il vit dans la table `stats` (`total_liked / total_listened`), indépendante des lignes `tracks` supprimées
+- `removeFromFeed` (bouton ×) garde sa logique : un titre liké encore dans le feed est marqué `listened = 1` (sort du feed sans toucher les compteurs `stats`) — il sera ensuite purgé par le bouton Purger
 - Affiche une `alert` avec le nombre de titres supprimés
 
 ---
