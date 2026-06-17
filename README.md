@@ -112,7 +112,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Interface
 - Responsive — desktop (sidebar) et mobile (5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats)
-- **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant**
+- **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant / ❤ like**
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
 

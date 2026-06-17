@@ -330,7 +330,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `Home` | Page de login (mobile + desktop) |
 | `WebApp` | Layout desktop (sidebar + contenu) |
 | `MobileApp` | Layout mobile — 5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats (barre d'onglets en `flexWrap`) |
-| `CompactPlayer` | **Vue ultra-compacte** affichée à la place de `MobileApp` quand le viewport est très court (`useShortViewport`, `innerHeight < 500` — ex. fenêtre du bas en split-screen sur tel). N'affiche QUE titre/artiste + contrôles **précédent / play-pause / suivant**. Sélectionné dans `Shell` : `isMobile && shortViewport → <CompactPlayer/>` |
+| `CompactPlayer` | **Vue ultra-compacte** affichée à la place de `MobileApp` quand le viewport est très court (`useShortViewport`, `innerHeight < 500` — ex. fenêtre du bas en split-screen sur tel). Affiche titre/artiste + contrôles **précédent / play-pause / suivant / ❤ like**. Le bouton like reprend la logique du `MobilePlayer` (`isLiked` initialisé en local depuis `feed`/`likedTracks`, `libraryContains` seulement si le titre est inconnu ; écritures via `librarySave`/`libraryRemove` + `libraryScopeAlert` + `setTrackLiked`). Sélectionné dans `Shell` : `isMobile && shortViewport → <CompactPlayer/>` |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
