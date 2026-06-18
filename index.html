@@ -281,12 +281,28 @@ function libraryScopeAlert(result) {
   alert('Spotify a refusé la gestion des likes (nouvelle permission requise).\nDéconnecte-toi puis reconnecte-toi pour l\'accorder.');
   return true;
 }
-// Jour LOCAL (YYYY-MM-DD) — toISOString() donnerait le jour UTC : le compteur
-// journalier se réinitialiserait à 2h du matin en France l'été au lieu de minuit
-const localDay = () => {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-};
+// ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
+// Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
+// puis 100 de plus à 00h30 (1h plus tard). Désormais, atteindre 100 démarre un
+// compteur de 24h ; la prochaine session est refusée jusqu'à expiration de cette
+// fenêtre. Stockage : localStorage spotifyplus_daily_scrapings = { count, until }.
+const QUOTA_LS_KEY = 'spotifyplus_daily_scrapings';
+const QUOTA_MAX = 100;
+const QUOTA_MS = 24 * 60 * 60 * 1000;
+// Lit le quota persisté ; si la fenêtre 24h est expirée, le compteur repart à 0.
+function loadQuota() {
+  try {
+    const d = JSON.parse(localStorage.getItem(QUOTA_LS_KEY) || 'null');
+    if (d && typeof d.count === 'number') {
+      if (d.until && Date.now() >= d.until) return { count: 0, until: 0 }; // fenêtre expirée
+      return { count: d.count, until: d.until || 0 };
+    }
+  } catch {}
+  return { count: 0, until: 0 };
+}
+function saveQuota(count, until) {
+  try { localStorage.setItem(QUOTA_LS_KEY, JSON.stringify({ count, until: until || 0 })); } catch {}
+}
 
 // ════════════════════════════════════════════════
 // LOCAL DB — sql.js + IndexedDB
@@ -585,6 +601,7 @@ function StoreProvider({ children }) {
   const [nextCallTotal, setNextCallTotal] = React.useState(0);
   const [eta,           setEta]         = React.useState('');
   const [dailyScrapings, setDailyScrapings] = React.useState(0);
+  const [quotaUntil,    setQuotaUntil]  = React.useState(0);     // fenêtre 24h ouverte par les 100 artistes
 
   const [feed,          setFeed]        = React.useState([]);
   React.useEffect(() => { feedRef.current = feed; }, [feed]);
@@ -727,11 +744,9 @@ function StoreProvider({ children }) {
           } catch {}
 
           try {
-            const dailyRaw = localStorage.getItem('spotifyplus_daily_scrapings');
-            if (dailyRaw) {
-              const d = JSON.parse(dailyRaw);
-              if (d?.date === localDay()) setDailyScrapings(d.count || 0);
-            }
+            const q = loadQuota();
+            setDailyScrapings(q.count);
+            if (q.until > Date.now()) setQuotaUntil(q.until);
           } catch {}
 
           // Fenêtre rate-limit persistée (déjà relue dans _rlUntil au chargement du module)
@@ -1099,18 +1114,20 @@ function StoreProvider({ children }) {
     try { localStorage.removeItem(RL_LS_KEY); } catch {}
     setBlockedUntil(0);
 
-    // Quota journalier déjà atteint : refuser avant de dépenser /me + pages d'artistes
-    let curDay = localDay();
-    let dailyCount = 0;
-    try {
-      const d = JSON.parse(localStorage.getItem('spotifyplus_daily_scrapings') || 'null');
-      if (d?.date === curDay) dailyCount = d.count || 0;
-    } catch {}
-    if (dailyCount >= 100) {
-      log('⛔ Limite journalière déjà atteinte (100 artistes/jour) — réessaie demain.', 'error');
-      setStatus('Limite 100/jour atteinte', 'error');
+    // Quota 24h déjà atteint : refuser avant de dépenser /me + pages d'artistes.
+    // loadQuota() remet le compteur à 0 si la fenêtre glissante de 24h est expirée.
+    const q = loadQuota();
+    let dailyCount = q.count;
+    if (q.until && Date.now() < q.until) {
+      setQuotaUntil(q.until);
+      setDailyScrapings(q.count);
+      const mins = Math.ceil((q.until - Date.now()) / 60000);
+      const h = Math.floor(mins / 60), m = mins % 60;
+      log(`⛔ Quota de 100 artistes atteint — prochaine synchro dans ${h > 0 ? h + ' h ' : ''}${m} min.`, 'error');
+      setStatus('Quota 24h atteint', 'error');
       return;
     }
+    setQuotaUntil(0);
 
     const { skipCount = 0, resumeUrl = null, resumeOffset = 0 } = options;
     setResumableSession(null);
@@ -1227,18 +1244,13 @@ function StoreProvider({ children }) {
           if (!resumeUrl && globalArtistIndex <= skipCount) continue;
           await checkpoint();
 
-          // Passage de minuit pendant la synchro → reset du compteur journalier
-          const dNow = localDay();
-          if (dNow !== curDay) {
-            curDay = dNow; dailyCount = 0; setDailyScrapings(0);
-            log('🌅 Nouveau jour — compteur journalier remis à zéro', 'info');
-          }
-
-          if (dailyCount >= 100) {
-            log('⛔ Limite journalière atteinte (100 artistes/jour). Synchro arrêtée — relancer demain.', 'error');
-            setStatus('Limite 100/jour atteinte', 'error');
+          // Quota 24h atteint : la fenêtre glissante a été ouverte au 100e artiste
+          // (dans l'incrément ci-dessous). Synchro arrêtée jusqu'à son expiration.
+          if (dailyCount >= QUOTA_MAX) {
+            log('⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée — réessaie dans 24h.', 'error');
+            setStatus('Quota 24h atteint', 'error');
             if ('Notification' in window) {
-              const send = () => new Notification('Spotify+ — Session terminée', { body: '100 artistes scrapés aujourd\'hui. Relance demain.', icon: './icon-192.png' });
+              const send = () => new Notification('Spotify+ — Session terminée', { body: '100 artistes scrapés. Prochaine synchro dans 24h.', icon: './icon-192.png' });
               if (Notification.permission === 'granted') send();
               else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') send(); });
             }
@@ -1261,10 +1273,17 @@ function StoreProvider({ children }) {
             `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`
           );
 
-          // Quota journalier consommé APRÈS la requête : un throw au-dessus (erreur API,
-          // disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné
+          // Quota consommé APRÈS la requête : un throw au-dessus (erreur API,
+          // disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné.
           dailyCount++;
-          localStorage.setItem('spotifyplus_daily_scrapings', JSON.stringify({ date: curDay, count: dailyCount }));
+          if (dailyCount >= QUOTA_MAX) {
+            // 100e artiste scrapé → ouvre la fenêtre glissante de 24h (gelée à cet instant)
+            const until = Date.now() + QUOTA_MS;
+            saveQuota(dailyCount, until);
+            setQuotaUntil(until);
+          } else {
+            saveQuota(dailyCount, 0);
+          }
           setDailyScrapings(dailyCount);
           if (albumsData?.items) {
             const inRange = albumsData.items.filter(a => { const d = new Date(a.release_date); return d >= cutoff && d <= ceiling; });
@@ -1408,7 +1427,7 @@ function StoreProvider({ children }) {
     authState, user, otherTab,
     syncState, scraping, paused, rlWaiting, blockedUntil, togglePause, startSync, logout,
     stats, progress, currentArtist, statusMsg, statusMode,
-    nextCall, nextCallTotal, eta, dailyScrapings, feed, logs, now,
+    nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs, now,
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
     seek,
@@ -1875,7 +1894,7 @@ function ScrapingStatusPanel({ compact=false }) {
           <div key={lbl} style={{ background:C.surfaceHigh, border: compact?'none':`1px solid ${C.border}`, borderRadius: compact?6:8, padding: compact?'8px 6px':'12px 14px', textAlign: compact?'center':'left' }}>
             <div style={{ fontSize: compact?14:24, fontWeight:700, color, fontFamily:'DM Mono,monospace', lineHeight:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{val}</div>
             <div style={{ fontSize:9, color:C.muted, marginTop: compact?3:6, textTransform:'uppercase', letterSpacing:'0.05em' }}>{lbl}</div>
-            {sub && <div style={{ fontSize:9, color:C.accent, marginTop:2, fontFamily:'DM Mono,monospace', opacity:0.7 }}>{sub} aujourd'hui</div>}
+            {sub && <div style={{ fontSize:9, color:C.accent, marginTop:2, fontFamily:'DM Mono,monospace', opacity:0.7 }}>{sub} sur 24h</div>}
           </div>
         ))}
       </div>
@@ -1894,18 +1913,24 @@ function DateRangePanel({ compact=false }) {
   const s = useStore();
   const hasResume = !s.scraping && s.resumableSession;
 
-  // Blocage après 429 répétés : countdown re-rendu chaque seconde tant qu'il est actif
+  // Blocage 429 (rate limit) OU quota 24h : countdown re-rendu chaque seconde tant qu'actif
   const [, forceTick] = React.useState(0);
   const blocked = s.blockedUntil > Date.now();
+  const quotaBlocked = s.quotaUntil > Date.now();
+  const anyBlock = blocked || quotaBlocked;
   React.useEffect(() => {
-    if (s.blockedUntil <= Date.now()) return;
+    const target = Math.max(s.blockedUntil, s.quotaUntil);
+    if (target <= Date.now()) return;
     const id = setInterval(() => {
       forceTick(v => v + 1);
-      if (Date.now() >= s.blockedUntil) clearInterval(id);
+      if (Date.now() >= target) clearInterval(id);
     }, 1000);
     return () => clearInterval(id);
-  }, [s.blockedUntil]);
+  }, [s.blockedUntil, s.quotaUntil]);
   const blockedMin = blocked ? Math.ceil((s.blockedUntil - Date.now()) / 60000) : 0;
+  const quotaMs = quotaBlocked ? s.quotaUntil - Date.now() : 0;
+  const quotaH = Math.floor(quotaMs / 3600000);
+  const quotaM = Math.ceil((quotaMs % 3600000) / 60000);
 
   const onLancer = () => {
     if (hasResume) {
@@ -1925,10 +1950,17 @@ function DateRangePanel({ compact=false }) {
         </div>
       )}
 
+      {/* Bandeau quota 24h (100 artistes atteints) */}
+      {quotaBlocked && !blocked && (
+        <div style={{ fontSize:10, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'6px 10px', marginBottom:8, textAlign:'center' }}>
+          ⏳ Quota de 100 artistes atteint — prochaine synchro dans {quotaH > 0 ? `${quotaH} h ` : ''}{quotaM} min
+        </div>
+      )}
+
       {/* Bouton Reprendre — affiché EN PREMIER si session en cours */}
       {hasResume && (
-        <button onClick={s.resumeSync} disabled={blocked}
-          style={{ width:'100%', marginBottom:8, background:`${C.accent}18`, border:`1px solid ${C.accent}55`, borderRadius:6, padding: compact?'10px 12px':'12px 14px', cursor: blocked?'default':'pointer', color:C.accent, textAlign:'left', opacity: blocked?0.5:1 }}>
+        <button onClick={s.resumeSync} disabled={anyBlock}
+          style={{ width:'100%', marginBottom:8, background:`${C.accent}18`, border:`1px solid ${C.accent}55`, borderRadius:6, padding: compact?'10px 12px':'12px 14px', cursor: anyBlock?'default':'pointer', color:C.accent, textAlign:'left', opacity: anyBlock?0.5:1 }}>
           <div style={{ fontSize: compact?12:13, fontWeight:700, letterSpacing:'0.02em' }}>↩ Reprendre la synchro en cours</div>
           <div style={{ fontSize:10, color:C.muted, fontWeight:400, marginTop:3, fontFamily:'DM Mono,monospace' }}>
             {s.resumableSession.artists_scanned} / {s.resumableSession.total_artists || '?'} artistes · dernier : {s.resumableSession.last_artist_name || '–'}
@@ -1937,8 +1969,8 @@ function DateRangePanel({ compact=false }) {
       )}
 
       <div style={{ display:'flex', gap: compact?8:6 }}>
-        <button onClick={onLancer} disabled={s.scraping || blocked}
-          style={{ flex:2, background: hasResume ? '#2a1a1a' : C.accent, border: hasResume ? '1px solid #5a2a2a' : 'none', borderRadius:6, padding: compact?'8px 0':'7px 0', cursor: (s.scraping || blocked)?'default':'pointer', color: hasResume ? '#c05050' : '#000', fontSize:11, fontWeight:700, opacity: (s.scraping || blocked)?0.6:1 }}>
+        <button onClick={onLancer} disabled={s.scraping || anyBlock}
+          style={{ flex:2, background: hasResume ? '#2a1a1a' : C.accent, border: hasResume ? '1px solid #5a2a2a' : 'none', borderRadius:6, padding: compact?'8px 0':'7px 0', cursor: (s.scraping || anyBlock)?'default':'pointer', color: hasResume ? '#c05050' : '#000', fontSize:11, fontWeight:700, opacity: (s.scraping || anyBlock)?0.6:1 }}>
           {s.scraping ? '▶ En cours…' : hasResume ? '↺ Recommencer la synchro de 0' : '▶ Lancer la synchronisation'}
         </button>
         {s.scraping && (

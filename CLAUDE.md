@@ -159,7 +159,7 @@ Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à
 - `onTouchEnd` : `swipeDx < -60` → `removeFromFeed` · `swipeDx > 60` → `navigateFeed(-1)`
 
 ### Notification fin de session
-Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notification` du navigateur (permission demandée si `'default'`, silencieuse si `'denied'`).
+Déclenchée quand `dailyCount >= QUOTA_MAX` (100) dans `startSync`. Utilise l'API `Notification` du navigateur (permission demandée si `'default'`, silencieuse si `'denied'`).
 
 ### Découvertes de la semaine (`importDiscoverWeekly`)
 - Appelée dans l'init **avant** le chargement du feed (les tracks DW sont visibles dès le login)
@@ -191,7 +191,7 @@ Déclenchée quand `dailyCount >= 100` dans `startSync`. Utilise l'API `Notifica
 ### Conditions de NON-démarrage — toutes en tête de `startSync`, AVANT toute requête
 1. `syncStateRef.current !== 'idle'` → return (guard par **ref** : insensible au double-clic avant re-render)
 2. `Date.now() < _rlUntil` (fenêtre rate-limit persistée) → log + bandeau, return
-3. **Quota journalier** ≥ 100 (lu depuis `spotifyplus_daily_scrapings`) → log "réessaie demain", return — avant, cliquer Lancer/Reprendre avec le quota consommé dépensait `/me` + les pages d'artistes pour rien
+3. **Quota 24h** : fenêtre glissante encore active (`loadQuota().until > Date.now()`) → log "prochaine synchro dans X h Y min", return — avant, cliquer Lancer/Reprendre avec le quota consommé dépensait `/me` + les pages d'artistes pour rien
 
 ### Arrêts de synchro unifiés — `endSync(reason)` + `checkpoint()`
 **Tous les chemins d'arrêt passent par `endSync(reason)`** (`'completed' | 'daily_limit' | 'error'`) :
@@ -234,11 +234,13 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 6. Après chaque artiste → `saveDB()` (async) + `localStorage.setItem('spotifyplus_sync_progress', { artists_scanned, total_artists, last_artist_name, page_url, page_offset })` — `page_url` = URL de la page `/me/following` en cours, `page_offset` = nombre d'artistes de cette page déjà traités
 7. À la fin → `endSync('completed')` (saveDB final + nettoyage localStorage) + `setProgress(100)`
 
-### Limite journalière (100 artistes/jour)
-- Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**) — et aussi vérifiée **en tête de `startSync`** (refus avant toute requête)
+### Quota 100 artistes / fenêtre GLISSANTE de 24h
+- **Ce n'est PLUS une limite par jour calendaire** (remise à zéro à minuit) mais une **fenêtre glissante de 24h** : atteindre 100 artistes démarre un compteur de 24h, et toute synchro suivante est refusée jusqu'à son expiration. Avant, on pouvait scraper 100 à 23h30 puis 100 de plus à 00h30.
+- Helpers module-level `loadQuota()` / `saveQuota(count, until)` autour de `localStorage` clé `spotifyplus_daily_scrapings` = `{ count, until }` (`until` = timestamp ms de fin de la fenêtre 24h, `0` tant que < 100). `loadQuota()` **remet `count` à 0 si `until` est dépassé** (fenêtre expirée).
+- Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**) — et aussi vérifiée **en tête de `startSync`** via `loadQuota()` (refus avant toute requête tant que `Date.now() < until`)
 - **`dailyCount` est incrémenté APRÈS la requête albums** (pas avant) : un throw (erreur API, stop 429) ne brûle plus le quota d'un artiste qui n'a pas été scanné
-- **Jour LOCAL** via `localDay()` (helper module-level) — `toISOString()` donnait le jour UTC : le compteur se réinitialisait à 2h du matin en France l'été
-- **Passage de minuit pendant une synchro** : la date est revérifiée à chaque artiste — si le jour change, `dailyCount` repart à 0 sans arrêter la synchro
+- **La fenêtre 24h est gelée à l'instant exact du 100e artiste** : `until = Date.now() + 24h` est posé dans l'incrément qui atteint 100 (pas au tour de boucle suivant), `setQuotaUntil(until)` met à jour l'UI
+- `quotaUntil` (state + store) alimente un **bandeau de countdown** dans `DateRangePanel` (« ⏳ Quota de 100 artistes atteint — prochaine synchro dans X h Y min ») et désactive Lancer/Reprendre (`anyBlock = blocked (429) || quotaBlocked`)
 
 ### Reprise de synchro après interruption / redémarrage
 - La progression est sauvegardée dans `localStorage` (`spotifyplus_sync_progress`) après chaque artiste, **avec le curseur de pagination** (`page_url` + `page_offset`)
@@ -331,8 +333,8 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `WebApp` | Layout desktop (sidebar + contenu) |
 | `MobileApp` | Layout mobile — 5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats (barre d'onglets en `flexWrap`) |
 | `CompactPlayer` | **Vue ultra-compacte** affichée à la place de `MobileApp` quand le viewport est très court (`useShortViewport`, `innerHeight < 500` — ex. fenêtre du bas en split-screen sur tel). Affiche titre/artiste + contrôles **précédent / play-pause / suivant / ❤ like**. Le bouton like reprend la logique du `MobilePlayer` (`isLiked` initialisé en local depuis `feed`/`likedTracks`, `libraryContains` seulement si le titre est inconnu ; écritures via `librarySave`/`libraryRemove` + `libraryScopeAlert` + `setTrackLiked`). Sélectionné dans `Shell` : `isMobile && shortViewport → <CompactPlayer/>` |
-| `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause |
-| `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 aujourd'hui` / Sorties / Titres) |
+| `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause. Bandeau countdown si blocage 429 (`blockedUntil`) **ou** quota 24h atteint (`quotaUntil`) — boutons désactivés via `anyBlock` |
+| `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 sur 24h` / Sorties / Titres) |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
 | `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables |
@@ -368,7 +370,8 @@ likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après 
 history          // array d'items (tracks WHERE listened=1, max 200, plus récent en haut), rechargé à chaque écoute / removeFromFeed / purge
 loopEnabled      // boolean — persisté dans localStorage (spotifyplus_loop, '1'/'0') : survit au changement d'onglet / F5
 delayChoice      // 10 | 20 | 30 (secondes)
-dailyScrapings   // number — artistes scrapés aujourd'hui (depuis localStorage spotifyplus_daily_scrapings)
+dailyScrapings   // number — artistes scrapés dans la fenêtre 24h en cours (localStorage spotifyplus_daily_scrapings)
+quotaUntil       // timestamp ms — fin de la fenêtre glissante de 24h ouverte au 100e artiste (0 si inactive)
 filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
 filterType       // 'all' | 'single' | 'album' | 'dw'
 sortBy           // 'default' | 'date_asc' (plus ancien en haut) | 'artist'
@@ -392,13 +395,14 @@ setLoopEnabled(bool)
 setDelayChoice(n)
 ```
 
-### Compteur journalier `dailyScrapings`
-- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ date: 'YYYY-MM-DD' (jour LOCAL via localDay()), count: N }`
-- Chargé au démarrage de l'app (dans l'init useEffect)
+### Compteur `dailyScrapings` + fenêtre 24h `quotaUntil`
+- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ count: N, until: timestamp_ms }` (helpers `loadQuota()` / `saveQuota(count, until)`)
+- `until` = fin de la fenêtre glissante de 24h, posée **uniquement quand `count` atteint 100** (`0` sinon). `loadQuota()` remet `count` à 0 dès que `until` est dépassé (fenêtre expirée → nouvelle session de 100 autorisée)
+- Chargé au démarrage de l'app (dans l'init useEffect) → `setDailyScrapings(q.count)` + `setQuotaUntil(q.until)` si encore actif
 - Incrémenté dans `startSync` **après la requête albums de chaque artiste** (un échec ne consomme pas le quota)
-- Remise à zéro automatique si `date` ≠ aujourd'hui (minuit **local**, pas UTC)
-- Affiché dans la carte **Artistes** de `ScrapingStatusPanel` (`X/100 aujourd'hui`)
-- Utilisé dans `NextCallPanel` pour **"Temps total de la session"** : `(100 - dailyScrapings) × délai moyen (delayChoice + 2s)` — temps restant pour finir les 100 artistes du jour, affiché uniquement pendant une synchro active
+- **Plus de remise à zéro à minuit** : seul l'écoulement des 24h depuis le 100e artiste réinitialise le compteur
+- Affiché dans la carte **Artistes** de `ScrapingStatusPanel` (`X/100 sur 24h`)
+- Utilisé dans `NextCallPanel` pour **"Temps total de la session"** : `(100 - dailyScrapings) × délai moyen (delayChoice + 2s)` — temps restant pour finir les 100 artistes de la fenêtre, affiché uniquement pendant une synchro active
 
 ---
 

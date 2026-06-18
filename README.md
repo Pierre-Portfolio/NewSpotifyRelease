@@ -74,11 +74,13 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
 
-### Compteur journalier de scraping (limite Spotify 100/jour)
-- Compteur de scrapings effectués aujourd'hui affiché dans la carte **Artistes** (`X/100 aujourd'hui`)
-- Persisté dans `localStorage` (`spotifyplus_daily_scrapings`) avec la date du jour — remise à zéro automatique le lendemain
-- **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes d'aujourd'hui (`(100 − scrapés) × délai moyen`)
-- **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/jour)
+### Quota de scraping : 100 artistes par fenêtre glissante de 24h
+- Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
+- Compteur affiché dans la carte **Artistes** (`X/100 sur 24h`)
+- Persisté dans `localStorage` (`spotifyplus_daily_scrapings` = `{ count, until }`) — le compteur repart à 0 dès que les 24h écoulées
+- Bandeau **« ⏳ Quota de 100 artistes atteint — prochaine synchro dans X h Y min »** + boutons Lancer/Reprendre désactivés tant que la fenêtre est active
+- **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes de la fenêtre (`(100 − scrapés) × délai moyen`)
+- **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/24h)
 
 ### Titres likés (onglet ❤ Likés)
 - Onglet **❤ Likés** sur mobile (entre "À écouter" et "Historique")
