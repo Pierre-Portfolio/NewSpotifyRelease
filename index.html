@@ -303,6 +303,31 @@ function loadQuota() {
 function saveQuota(count, until) {
   try { localStorage.setItem(QUOTA_LS_KEY, JSON.stringify({ count, until: until || 0 })); } catch {}
 }
+// Notification cross-plateforme : sur mobile (Android Chrome), `new Notification()`
+// lève "Illegal constructor" quand un service worker est actif → il faut passer par
+// ServiceWorkerRegistration.showNotification(). On tente le SW d'abord, fallback constructeur.
+function notify(title, body) {
+  if (!('Notification' in window)) return;
+  const show = () => {
+    try {
+      if (navigator.serviceWorker?.ready) {
+        navigator.serviceWorker.ready
+          .then(reg => reg.showNotification(title, { body, icon: './icon-192.png' }))
+          .catch(() => { try { new Notification(title, { body, icon: './icon-192.png' }); } catch {} });
+      } else {
+        new Notification(title, { body, icon: './icon-192.png' });
+      }
+    } catch {}
+  };
+  if (Notification.permission === 'granted') show();
+  else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') show(); });
+}
+// "X h Y min" / "Y min" à partir d'une durée restante en ms (countdown quota / blocage)
+function fmtRemaining(ms) {
+  const mins = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return (h > 0 ? `${h} h ` : '') + `${m} min`;
+}
 
 // ════════════════════════════════════════════════
 // LOCAL DB — sql.js + IndexedDB
@@ -1249,11 +1274,7 @@ function StoreProvider({ children }) {
           if (dailyCount >= QUOTA_MAX) {
             log('⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée — réessaie dans 24h.', 'error');
             setStatus('Quota 24h atteint', 'error');
-            if ('Notification' in window) {
-              const send = () => new Notification('Spotify+ — Session terminée', { body: '100 artistes scrapés. Prochaine synchro dans 24h.', icon: './icon-192.png' });
-              if (Notification.permission === 'granted') send();
-              else if (Notification.permission !== 'denied') Notification.requestPermission().then(p => { if (p === 'granted') send(); });
-            }
+            notify('Spotify+ — Session terminée', '100 artistes scrapés. Prochaine synchro dans 24h.');
             await endSync('daily_limit');
             return;
           }
@@ -1879,6 +1900,15 @@ function ScrapingStatusPanel({ compact=false }) {
     ? ((s.paused || s.rlWaiting) ? 'EN PAUSE' : 'EN COURS')
     : (s.stats.artists > 0 ? 'TERMINÉ' : 'EN ATTENTE');
 
+  // Countdown quota 24h re-rendu chaque seconde tant que la fenêtre est active
+  const [, qTick] = React.useState(0);
+  const quotaLeft = s.quotaUntil > Date.now() ? s.quotaUntil - Date.now() : 0;
+  React.useEffect(() => {
+    if (s.quotaUntil <= Date.now()) return;
+    const id = setInterval(() => { qTick(v => v + 1); if (Date.now() >= s.quotaUntil) clearInterval(id); }, 1000);
+    return () => clearInterval(id);
+  }, [s.quotaUntil]);
+
   return (
     <div style={{ borderRadius:10, background:C.surface, border:`1px solid ${C.border}`, padding: compact?'10px 12px':'14px 16px' }}>
       <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom: compact?8:12 }}>
@@ -1899,6 +1929,11 @@ function ScrapingStatusPanel({ compact=false }) {
         ))}
       </div>
       <ProgressBar pct={pct} />
+      {quotaLeft > 0 && (
+        <div style={{ marginTop: compact?8:10, fontSize: compact?10:11, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'7px 10px', textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+          ⏳ Quota de 100 artistes atteint — prochaine synchro dans {fmtRemaining(quotaLeft)}
+        </div>
+      )}
       <div style={{ marginTop: compact?8:10, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
         <span style={{ fontSize: compact?10:11, color:C.dim }}>{s.statusMsg}</span>
         {s.currentArtist && (
@@ -1928,9 +1963,6 @@ function DateRangePanel({ compact=false }) {
     return () => clearInterval(id);
   }, [s.blockedUntil, s.quotaUntil]);
   const blockedMin = blocked ? Math.ceil((s.blockedUntil - Date.now()) / 60000) : 0;
-  const quotaMs = quotaBlocked ? s.quotaUntil - Date.now() : 0;
-  const quotaH = Math.floor(quotaMs / 3600000);
-  const quotaM = Math.ceil((quotaMs % 3600000) / 60000);
 
   const onLancer = () => {
     if (hasResume) {
@@ -1953,7 +1985,7 @@ function DateRangePanel({ compact=false }) {
       {/* Bandeau quota 24h (100 artistes atteints) */}
       {quotaBlocked && !blocked && (
         <div style={{ fontSize:10, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'6px 10px', marginBottom:8, textAlign:'center' }}>
-          ⏳ Quota de 100 artistes atteint — prochaine synchro dans {quotaH > 0 ? `${quotaH} h ` : ''}{quotaM} min
+          ⏳ Quota de 100 artistes atteint — prochaine synchro dans {fmtRemaining(s.quotaUntil - Date.now())}
         </div>
       )}
 

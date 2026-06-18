@@ -159,7 +159,8 @@ Appelée via `useEffect` dès que `dbReady` passe à `true`. Récupère jusqu'à
 - `onTouchEnd` : `swipeDx < -60` → `removeFromFeed` · `swipeDx > 60` → `navigateFeed(-1)`
 
 ### Notification fin de session
-Déclenchée quand `dailyCount >= QUOTA_MAX` (100) dans `startSync`. Utilise l'API `Notification` du navigateur (permission demandée si `'default'`, silencieuse si `'denied'`).
+Déclenchée quand `dailyCount >= QUOTA_MAX` (100) dans `startSync` via le helper module-level `notify(title, body)` (permission demandée si `'default'`, silencieuse si `'denied'`).
+**⚠️ Mobile (Android Chrome)** : `new Notification()` lève `Illegal constructor` quand un service worker est actif. `notify()` passe donc par `navigator.serviceWorker.ready → reg.showNotification()` en priorité, avec fallback `new Notification()` dans un try/catch — ne jamais réintroduire un `new Notification()` direct dans la synchro.
 
 ### Découvertes de la semaine (`importDiscoverWeekly`)
 - Appelée dans l'init **avant** le chargement du feed (les tracks DW sont visibles dès le login)
@@ -240,7 +241,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 - Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**) — et aussi vérifiée **en tête de `startSync`** via `loadQuota()` (refus avant toute requête tant que `Date.now() < until`)
 - **`dailyCount` est incrémenté APRÈS la requête albums** (pas avant) : un throw (erreur API, stop 429) ne brûle plus le quota d'un artiste qui n'a pas été scanné
 - **La fenêtre 24h est gelée à l'instant exact du 100e artiste** : `until = Date.now() + 24h` est posé dans l'incrément qui atteint 100 (pas au tour de boucle suivant), `setQuotaUntil(until)` met à jour l'UI
-- `quotaUntil` (state + store) alimente un **bandeau de countdown** dans `DateRangePanel` (« ⏳ Quota de 100 artistes atteint — prochaine synchro dans X h Y min ») et désactive Lancer/Reprendre (`anyBlock = blocked (429) || quotaBlocked`)
+- `quotaUntil` (state + store) alimente un **bandeau de countdown** affiché à **deux endroits** (chacun avec son propre `setInterval` 1s) : dans `DateRangePanel` (désactive aussi Lancer/Reprendre via `anyBlock = blocked (429) || quotaBlocked`) ET sous la barre de progression de `ScrapingStatusPanel` (là où l'utilisateur lit déjà `X/100 sur 24h`). Texte commun « ⏳ Quota de 100 artistes atteint — prochaine synchro dans X h Y min », formaté par le helper module-level `fmtRemaining(ms)`
 
 ### Reprise de synchro après interruption / redémarrage
 - La progression est sauvegardée dans `localStorage` (`spotifyplus_sync_progress`) après chaque artiste, **avec le curseur de pagination** (`page_url` + `page_offset`)
@@ -334,7 +335,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `MobileApp` | Layout mobile — 5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats (barre d'onglets en `flexWrap`) |
 | `CompactPlayer` | **Vue ultra-compacte** affichée à la place de `MobileApp` quand le viewport est très court (`useShortViewport`, `innerHeight < 500` — ex. fenêtre du bas en split-screen sur tel). Affiche titre/artiste + contrôles **précédent / play-pause / suivant / ❤ like**. Le bouton like reprend la logique du `MobilePlayer` (`isLiked` initialisé en local depuis `feed`/`likedTracks`, `libraryContains` seulement si le titre est inconnu ; écritures via `librarySave`/`libraryRemove` + `libraryScopeAlert` + `setTrackLiked`). Sélectionné dans `Shell` : `isMobile && shortViewport → <CompactPlayer/>` |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause. Bandeau countdown si blocage 429 (`blockedUntil`) **ou** quota 24h atteint (`quotaUntil`) — boutons désactivés via `anyBlock` |
-| `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 sur 24h` / Sorties / Titres) |
+| `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 sur 24h` / Sorties / Titres) + **countdown quota 24h** sous la barre de progression quand `quotaUntil` est actif |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
 | `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables |
