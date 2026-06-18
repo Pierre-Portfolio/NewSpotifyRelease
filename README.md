@@ -78,8 +78,9 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
 - Compteur affiché dans la carte **Artistes** (`X/100 sur 24h`)
 - Persisté dans `localStorage` (`spotifyplus_daily_scrapings` = `{ count, until }`) — le compteur repart à 0 dès que les 24h écoulées
-- **Compte à rebours du temps restant** avant de pouvoir relancer, affiché à deux endroits : directement sous le compteur de la carte **Artistes** (`SCRAPING EN ATTENTE`) et dans le panneau **Synchronisation** — texte « ⏳ Quota de 100 artistes atteint — prochaine synchro dans X h Y min », rafraîchi chaque seconde
+- **Date et compte à rebours** avant de pouvoir relancer, affichés à deux endroits : directement sous le compteur de la carte **Artistes** (`SCRAPING EN ATTENTE`) et dans le panneau **Synchronisation** — texte « ⏳ Quota de 100 artistes atteint — Prochaine synchro le 19 juin à 18:10 (dans X h Y min) », rafraîchi chaque seconde
 - Boutons Lancer/Reprendre désactivés tant que la fenêtre est active
+- **Bouton 🔄 Réinitialiser le quota 24h** dans l'onglet **Stats** (au-dessus de Purger) : remet le compteur à `0/100` et débloque une synchro immédiatement, sans attendre l'expiration des 24h (avec confirmation)
 - Notification navigateur de fin de session (compatible mobile via le service worker)
 - **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes de la fenêtre (`(100 − scrapés) × délai moyen`)
 - **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/24h)

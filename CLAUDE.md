@@ -344,7 +344,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `HistoryPanel` | **Historique** des titres écoutés non purgés (listened=1), trié `listened_at DESC` (plus récent en haut) — horodatage relatif (`formatListenedAt`) + bouton réécouter. Desktop : sidebar droite sous VOS ÉCOUTES · Mobile : onglet **Historique** |
-| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton Purger |
+| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton **🔄 Réinitialiser le quota 24h** (affiche `X/100` + `· bloqué` si fenêtre active, `confirm()` puis `resetQuota()`) + bouton **🗑 Purger les écoutés** |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
 | `MobilePlayer` | Player mobile **25vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles + loop |
 | `SeekBar` | Barre de progression cliquable/draggable — mouse ET touch (`onTouchStart/Move/End`) |
@@ -387,6 +387,7 @@ startSync({ skipCount, resumeUrl, resumeOffset })  // tous les refus (déjà en 
 resumeSync()                   // → startSync({ skipCount, resumeUrl: page_url, resumeOffset: page_offset }) — reprise par curseur
 togglePause()                  // bascule syncState entre 'paused' et 'running' (no-op si 'idle')
 purgeListened()                // DELETE listened=1 AND liked=0 — les likés sont conservés
+resetQuota()                   // remet le quota 24h à 0 (saveQuota(0,0) + setDailyScrapings(0) + setQuotaUntil(0)) — débloque une synchro sans attendre l'expiration. Bouton dans VosEcoutesPanel
 removeFromFeed(uri)            // useCallback([dbReady]) — DELETE de la DB (ou UPDATE listened=1 si liké) + retire du feed (sans compter comme écouté)
 setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + stats.total_liked ±1 + recharge likedTracks/listenStats + met à jour feed array
 syncInitialLikes()             // vérifie /me/library/contains par batch de 40 URIs (max 300 tracks), sleep 400ms entre batchs, TTL 24h
