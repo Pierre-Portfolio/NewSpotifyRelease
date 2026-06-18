@@ -303,6 +303,19 @@ function loadQuota() {
 function saveQuota(count, until) {
   try { localStorage.setItem(QUOTA_LS_KEY, JSON.stringify({ count, until: until || 0 })); } catch {}
 }
+// Garantit qu'une fenêtre 24h existe dès que le quota est atteint. Auto-réparant :
+// un état hérité de l'ancien format ({ date, count:100 } sans `until`) ou un arrêt
+// qui n'aurait pas posé de date laissait le compteur bloqué à 100 SANS countdown ni
+// date affichable. Si count ≥ 100 sans fenêtre valide → ouvre/persiste 24h maintenant.
+// Retourne le timestamp de fin de fenêtre (0 si quota non atteint).
+function ensureQuotaWindow() {
+  const q = loadQuota();
+  if (q.count < QUOTA_MAX) return 0;
+  if (q.until && q.until > Date.now()) return q.until;
+  const until = Date.now() + QUOTA_MS;
+  saveQuota(QUOTA_MAX, until);
+  return until;
+}
 // Notification cross-plateforme : sur mobile (Android Chrome), `new Notification()`
 // lève "Illegal constructor" quand un service worker est actif → il faut passer par
 // ServiceWorkerRegistration.showNotification(). On tente le SW d'abord, fallback constructeur.
@@ -327,6 +340,10 @@ function fmtRemaining(ms) {
   const mins = Math.max(0, Math.ceil(ms / 60000));
   const h = Math.floor(mins / 60), m = mins % 60;
   return (h > 0 ? `${h} h ` : '') + `${m} min`;
+}
+// Date/heure de réouverture du quota — ex. "19 juin à 18:10"
+function fmtQuotaWhen(until) {
+  return new Date(until).toLocaleString('fr-FR', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }).replace(',', ' à');
 }
 
 // ════════════════════════════════════════════════
@@ -769,9 +786,9 @@ function StoreProvider({ children }) {
           } catch {}
 
           try {
-            const q = loadQuota();
-            setDailyScrapings(q.count);
-            if (q.until > Date.now()) setQuotaUntil(q.until);
+            setDailyScrapings(loadQuota().count);
+            const until = ensureQuotaWindow(); // expose/ouvre la fenêtre 24h si quota atteint
+            if (until) setQuotaUntil(until);
           } catch {}
 
           // Fenêtre rate-limit persistée (déjà relue dans _rlUntil au chargement du module)
@@ -1141,14 +1158,14 @@ function StoreProvider({ children }) {
 
     // Quota 24h déjà atteint : refuser avant de dépenser /me + pages d'artistes.
     // loadQuota() remet le compteur à 0 si la fenêtre glissante de 24h est expirée.
-    const q = loadQuota();
-    let dailyCount = q.count;
-    if (q.until && Date.now() < q.until) {
-      setQuotaUntil(q.until);
-      setDailyScrapings(q.count);
-      const mins = Math.ceil((q.until - Date.now()) / 60000);
+    let dailyCount = loadQuota().count;
+    if (dailyCount >= QUOTA_MAX) {
+      const until = ensureQuotaWindow(); // fenêtre active ré-exposée, ou ouverte si état hérité
+      setQuotaUntil(until);
+      setDailyScrapings(dailyCount);
+      const mins = Math.ceil((until - Date.now()) / 60000);
       const h = Math.floor(mins / 60), m = mins % 60;
-      const when = new Date(q.until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
+      const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
       log(`⛔ Quota de 100 artistes atteint — prochaine synchro possible le ${when} (dans ${h > 0 ? h + ' h ' : ''}${m} min).`, 'error');
       setStatus('Quota 24h atteint', 'error');
       return;
@@ -1273,13 +1290,12 @@ function StoreProvider({ children }) {
           // Quota 24h atteint : la fenêtre glissante a été ouverte au 100e artiste
           // (dans l'incrément ci-dessous). Synchro arrêtée jusqu'à son expiration.
           if (dailyCount >= QUOTA_MAX) {
-            const qUntil = loadQuota().until;
-            const whenMsg = qUntil
-              ? ` Prochaine synchro possible le ${new Date(qUntil).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' })}.`
-              : '';
-            log(`⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée.${whenMsg}`, 'error');
+            const until = ensureQuotaWindow(); // posée au 100e scan ; ouverte ici si absente
+            setQuotaUntil(until);
+            const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
+            log(`⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée. Prochaine synchro possible le ${when}.`, 'error');
             setStatus('Quota 24h atteint', 'error');
-            notify('Spotify+ — Session terminée', '100 artistes scrapés. Prochaine synchro dans 24h.');
+            notify('Spotify+ — Session terminée', `100 artistes scrapés. Prochaine synchro le ${when}.`);
             await endSync('daily_limit');
             return;
           }
@@ -1935,8 +1951,8 @@ function ScrapingStatusPanel({ compact=false }) {
       </div>
       <ProgressBar pct={pct} />
       {quotaLeft > 0 && (
-        <div style={{ marginTop: compact?8:10, fontSize: compact?10:11, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'7px 10px', textAlign:'center', fontFamily:'DM Mono,monospace' }}>
-          ⏳ Quota de 100 artistes atteint — prochaine synchro dans {fmtRemaining(quotaLeft)}
+        <div style={{ marginTop: compact?8:10, fontSize: compact?10:11, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'7px 10px', textAlign:'center', fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+          ⏳ Quota de 100 artistes atteint<br/>Prochaine synchro le <b>{fmtQuotaWhen(s.quotaUntil)}</b> (dans {fmtRemaining(quotaLeft)})
         </div>
       )}
       <div style={{ marginTop: compact?8:10, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
@@ -1990,7 +2006,7 @@ function DateRangePanel({ compact=false }) {
       {/* Bandeau quota 24h (100 artistes atteints) */}
       {quotaBlocked && !blocked && (
         <div style={{ fontSize:10, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'6px 10px', marginBottom:8, textAlign:'center' }}>
-          ⏳ Quota de 100 artistes atteint — prochaine synchro dans {fmtRemaining(s.quotaUntil - Date.now())}
+          ⏳ Quota de 100 artistes atteint — prochaine synchro le <b>{fmtQuotaWhen(s.quotaUntil)}</b> (dans {fmtRemaining(s.quotaUntil - Date.now())})
         </div>
       )}
 
