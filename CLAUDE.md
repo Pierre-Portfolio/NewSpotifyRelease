@@ -441,6 +441,10 @@ Sans le guard `if (res.status === 204) return null`, `.json()` lève une excepti
 ### FeedItem — clé React stable
 `key={item.id}` (l'URI, unique) et **jamais** `key={item.id + i}` : avec l'index concaténé, retirer un titre changeait la clé de tous les suivants → remount complet de centaines de lignes, `React.memo` inopérant.
 
+### Curseur de navigation optimiste — `_effUri` (clic suivant rapide)
+Le poll player n'interroge Spotify que **toutes les 5s** → `now.uri` reste périmé jusqu'à 5s après un clic suivant/précédent. Sans correctif, un **2e clic « suivant » dans cette fenêtre** recalculait `currentIndex` sur l'ANCIEN titre (`now.uri` pas encore rafraîchi) et **relançait le même titre** (re-seek à 25%) au lieu de passer au titre d'après.
+**Fix** : module-level `let _navUri/_navAt` ; `playTrack()` les pose à chaque lecture (tout passe par `playTrack` : players, `navigateFeed`, bouton play de FeedItem, auto-avance). `_effUri(pollUri)` renvoie `_navUri` tant que `Date.now() - _navAt < 6500ms` (poll 5s + marge), sinon `pollUri`. **Les 3 players (`MobilePlayer`, `PlayerBar`, `CompactPlayer`) ET `navigateFeed` calculent `currentIndex` via `_effUri(now?.uri)`** — un clic rapide repart donc bien du titre réellement lancé.
+
 ### PlayerBar — tableau cohérent
 `currentIndex` est calculé sur `filteredFeed` → le label doit être lu dans `filteredFeed[currentIndex]`, pas `feed[currentIndex]` (mauvais titre affiché dès qu'un filtre/tri est actif).
 
