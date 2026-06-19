@@ -274,6 +274,11 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 
 **Important** : les items ajoutés pendant la sync courante SONT immédiatement en DB et peuvent être marqués écoutés dans la même session.
 
+**⚠️ Clic « Suivant » manuel (helper `markListened`) :** le retrait du feed quand on **clique** sur Suivant ne doit PAS dépendre uniquement de l'effet « URI a changé ». Le poll player n'interroge Spotify que toutes les 5s : sur un **double-clic rapide** (2 fois en < 3s), `now.uri` saute de trackA → trackC, et le titre **intermédiaire trackB n'apparaît jamais dans `now.uri`** → l'effet URI ne le voit jamais → il restait dans le feed.
+- `markListened(uri)` (`useCallback([dbReady])`, exposé dans l'api du store) : même logique que l'effet URI (UPDATE `tracks`/`stats` + `saveDB` + recharge stats/history + animation de retrait), **idempotent via `listenedUrisRef`** (un titre déjà compté par le poll n'est pas recompté).
+- Les 3 players (`PlayerBar`, `MobilePlayer`, `CompactPlayer`) capturent l'URI du titre quitté (`filteredFeed[currentIndex]`) **avant** de jouer le suivant, puis appellent `markListened(leaving)` après `playTrack`. `navigateFeed(+1)` fait de même. Effet de bord bienvenu : le retrait est désormais **immédiat** (plus d'attente du poll 5s), même sur un clic simple.
+- Ne se déclenche que si `currentIndex !== -1` (titre du feed en cours) → un titre hors feed lancé manuellement n'est jamais marqué.
+
 **⚠️ Ordre critique dans l'effet URI :** l'auto-avance doit être placée **avant** `if (listenedUrisRef.current.has(prevUri)) return` — sinon elle est court-circuitée si le titre a déjà été traité dans la session.
 
 **⚠️ Limitation Spotify :** quand un titre se termine, Spotify retourne `200 + is_playing:false` avec la même URI → `now?.uri` ne change pas ET `now?.current` est gelé → ni l'effet URI ni l'effet current ne se déclenchent.
@@ -391,7 +396,8 @@ resetQuota()                   // remet le quota 24h à 0 (saveQuota(0,0) + setD
 removeFromFeed(uri)            // useCallback([dbReady]) — DELETE de la DB (ou UPDATE listened=1 si liké) + retire du feed (sans compter comme écouté)
 setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + stats.total_liked ±1 + recharge likedTracks/listenStats + met à jour feed array
 syncInitialLikes()             // vérifie /me/library/contains par batch de 40 URIs (max 300 tracks), sleep 400ms entre batchs, TTL 24h
-navigateFeed(dir)              // useCallback([]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed
+navigateFeed(dir)              // useCallback([markListened]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed (+ markListened du titre quitté en dir>0)
+markListened(uri)              // useCallback([dbReady]) — marque un titre du feed écouté (UPDATE tracks/stats + saveDB + recharge stats/history + retrait animé), idempotent via listenedUrisRef. Appelé par le clic « Suivant » des 3 players → corrige le double-clic rapide où l'URI intermédiaire échappe au poll 5s
 resetFilters()                 // remet filterType='all', sortBy='default', artistSearch=''
 logout()
 seek(positionMs)
