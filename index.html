@@ -407,7 +407,17 @@ async function initDB() {
       );
       CREATE TABLE IF NOT EXISTS artists_scraped (
         spotify_id TEXT PRIMARY KEY,
-        last_scraped_at TEXT NOT NULL
+        last_scraped_at TEXT NOT NULL,
+        name TEXT,                            -- nom de l'artiste (depuis /me/following)
+        image_url TEXT,                       -- pochette artiste (images[0].url)
+        popularity INTEGER,                   -- 0-100 (depuis /me/following)
+        followers INTEGER,                    -- nombre d'abonnés (followers.total)
+        genres TEXT,                          -- JSON.stringify(genres[]) — tableau de genres
+        spotify_url TEXT,                     -- external_urls.spotify
+        last_release_count INTEGER DEFAULT 0, -- sorties trouvées au dernier scan
+        total_tracks_added INTEGER DEFAULT 0, -- cumul des titres ajoutés pour cet artiste
+        last_scan_status TEXT,                -- 'ok' | 'error' (albums inaccessibles)
+        scan_count INTEGER DEFAULT 0          -- nombre de scans réussis
       );
       CREATE TABLE IF NOT EXISTS stats (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -425,6 +435,17 @@ async function initDB() {
   try { _db.run("ALTER TABLE tracks ADD COLUMN listened_at TEXT"); } catch {} // horodatage de l'écoute (historique)
   try { _db.run("ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0"); } catch {}
   try { _db.run("ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0"); } catch {}
+  // Métadonnées artiste (gratuites : déjà dans l'objet /me/following) + compteurs de scan
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN name TEXT"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN image_url TEXT"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN popularity INTEGER"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN followers INTEGER"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN genres TEXT"); } catch {}            // JSON array
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN spotify_url TEXT"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN last_release_count INTEGER DEFAULT 0"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN total_tracks_added INTEGER DEFAULT 0"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN last_scan_status TEXT"); } catch {}
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN scan_count INTEGER DEFAULT 0"); } catch {}
   return _db;
 }
 
@@ -1360,6 +1381,7 @@ function StoreProvider({ children }) {
           if (albumsData?.items) {
             const inRange = albumsData.items.filter(a => { const d = new Date(a.release_date); return d >= cutoff && d <= ceiling; });
             if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
+            let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
 
             for (const album of albumsData.items) {
               const rDate = new Date(album.release_date);
@@ -1396,6 +1418,8 @@ function StoreProvider({ children }) {
               const addedCount = album.album_type === 'single' ? 1 : tracksData.items.length;
               totalTracks  += addedCount;
               totalReleases++;
+              artistTracks += addedCount;
+              artistReleases++;
               setStats(s => ({ ...s, releases: totalReleases, tracks: totalTracks }));
 
               const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
@@ -1436,12 +1460,41 @@ function StoreProvider({ children }) {
 
             // Date de scan avancée UNIQUEMENT si la liste d'albums a bien été lue —
             // sinon la fenêtre de scan serait brûlée sans avoir rien scanné (sorties perdues à jamais)
+            // UPSERT (et non INSERT OR REPLACE qui efface la ligne) : total_tracks_added et
+            // scan_count sont CUMULÉS, les métadonnées artiste sont rafraîchies à chaque scan.
             dbRun(
-              "INSERT OR REPLACE INTO artists_scraped (spotify_id, last_scraped_at) VALUES (?, datetime('now'))",
-              [artist.id]
+              `INSERT INTO artists_scraped
+                 (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_release_count, total_tracks_added, last_scan_status, scan_count)
+               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 1)
+               ON CONFLICT(spotify_id) DO UPDATE SET
+                 last_scraped_at    = datetime('now'),
+                 name               = excluded.name,
+                 image_url          = excluded.image_url,
+                 popularity         = excluded.popularity,
+                 followers          = excluded.followers,
+                 genres             = excluded.genres,
+                 spotify_url        = excluded.spotify_url,
+                 last_release_count = excluded.last_release_count,
+                 total_tracks_added = total_tracks_added + excluded.total_tracks_added,
+                 last_scan_status   = 'ok',
+                 scan_count         = scan_count + 1`,
+              [
+                artist.id,
+                artist.name || null,
+                artist.images?.[0]?.url || null,
+                artist.popularity ?? null,
+                artist.followers?.total ?? null,
+                JSON.stringify(artist.genres || []),
+                artist.external_urls?.spotify || null,
+                artistReleases,
+                artistTracks,
+              ]
             );
           } else {
             log(`⚠ ${artist.name} — albums inaccessibles, date de scan non avancée`, 'warn');
+            // Statut d'échec posé UNIQUEMENT si l'artiste a déjà une ligne (UPDATE) —
+            // ne jamais INSÉRER ici : poser last_scraped_at brûlerait la fenêtre de scan
+            dbRun("UPDATE artists_scraped SET last_scan_status = 'error' WHERE spotify_id = ?", [artist.id]);
           }
 
           // Sauvegarder la progression pour reprise après redémarrage —

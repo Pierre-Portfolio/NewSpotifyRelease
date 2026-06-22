@@ -98,7 +98,17 @@ CREATE TABLE IF NOT EXISTS tracks (
 
 CREATE TABLE IF NOT EXISTS artists_scraped (
   spotify_id TEXT PRIMARY KEY,
-  last_scraped_at TEXT NOT NULL
+  last_scraped_at TEXT NOT NULL,
+  name TEXT,                            -- nom de l'artiste (depuis /me/following, colonne migrée)
+  image_url TEXT,                       -- pochette artiste (images[0].url)
+  popularity INTEGER,                   -- 0-100
+  followers INTEGER,                    -- followers.total
+  genres TEXT,                          -- JSON.stringify(genres[])
+  spotify_url TEXT,                     -- external_urls.spotify
+  last_release_count INTEGER DEFAULT 0, -- sorties trouvées au dernier scan (artistReleases)
+  total_tracks_added INTEGER DEFAULT 0, -- cumul des titres ajoutés pour cet artiste
+  last_scan_status TEXT,                -- 'ok' | 'error' (albums inaccessibles)
+  scan_count INTEGER DEFAULT 0          -- nombre de scans réussis
 );
 
 CREATE TABLE IF NOT EXISTS stats (
@@ -135,6 +145,7 @@ function loadHistoryFromDB()           // retourne les tracks WHERE listened=1 (
 - `ALTER TABLE tracks ADD COLUMN listened_at TEXT` — horodatage UTC posé via `datetime('now')` au moment où un titre passe `listened = 1` (marquage auto fin de titre + `removeFromFeed` d'un liké) ; alimente l'Historique
 - `ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0`
 - `ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0` — compteur de likes posés **dans l'app** (via `setTrackLiked` uniquement, PAS par `syncInitialLikes`) ; persistant, non purgeable
+- `ALTER TABLE artists_scraped ADD COLUMN name / image_url / popularity / followers / genres / spotify_url / last_release_count / total_tracks_added / last_scan_status / scan_count` — **métadonnées artiste gratuites** (déjà présentes dans l'objet `/me/following`, aucune requête en plus) + compteurs de scan. Renseignées dans l'`INSERT … ON CONFLICT` (UPSERT) après chaque artiste scrapé avec succès
 
 ### Champs des items feed
 Chaque item du feed contient : `id, spotifyUri, label, artist, title, subtitle, date, rawDate, image, isNew, liked, duration_ms`
@@ -176,7 +187,7 @@ Déclenchée quand `dailyCount >= QUOTA_MAX` (100) dans `startSync` via le helpe
 - `saveDB()` est appelé **après chaque artiste scrapé**, **après chaque écoute marquée**, **après une purge**, **à chaque fin de synchro** (`endSync`) et **quand l'app passe en arrière-plan** (`visibilitychange → hidden`)
 - `saveDB()` est **sérialisé** (`_savePromise` + `_saveQueued`) : jamais deux exports/écritures IndexedDB en parallèle. Pas de debounce temporel — chaque appel garantit une écriture incluant ses données (boucle do/while qui ré-exporte si un appel est arrivé pendant l'écriture). **Ne pas remplacer par un debounce** : risque de perte de données si l'OS tue l'onglet mobile.
 - Toujours utiliser `INSERT OR IGNORE` pour les tracks (UNIQUE sur `spotify_uri`)
-- Toujours utiliser `INSERT OR REPLACE` pour `artists_scraped` — mais **uniquement si le fetch des albums a réussi** (sinon la fenêtre de scan est brûlée sans avoir rien scanné)
+- Utiliser un **UPSERT `INSERT … ON CONFLICT(spotify_id) DO UPDATE`** pour `artists_scraped` (PAS `INSERT OR REPLACE` qui effacerait les cumuls `total_tracks_added`/`scan_count`) — mais **uniquement si le fetch des albums a réussi** (sinon la fenêtre de scan est brûlée sans avoir rien scanné)
 
 ---
 
@@ -231,7 +242,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
    - Dédoublonnage via `seenUris` Set + `knownUrisRef` — skip **seulement si TOUTES les pistes sont connues** (`uris.every`) : un album dont la piste 1 est sortie en single avant n'est plus sauté en entier
    - **Singles** : `INSERT OR IGNORE` d'une seule ligne (`uris[0]`, `title = album.name`, `release_title = null`)
    - **Albums** : `INSERT OR IGNORE` d'une ligne par track (`title = t.name`, `release_title = album.name`)
-5. Après chaque artiste → `INSERT OR REPLACE INTO artists_scraped` **uniquement si la liste d'albums a été lue avec succès** (sinon log ⚠ et date non avancée)
+5. Après chaque artiste → **`INSERT … ON CONFLICT(spotify_id) DO UPDATE` (UPSERT)** dans `artists_scraped` **uniquement si la liste d'albums a été lue avec succès** (sinon log ⚠ + `UPDATE last_scan_status='error'` qui n'affecte qu'une ligne existante — pas d'INSERT, la date n'est pas avancée). L'UPSERT (et non `INSERT OR REPLACE` qui effaçait la ligne) rafraîchit les métadonnées artiste (`name`, `image_url`, `popularity`, `followers`, `genres`, `spotify_url`) et **cumule** `total_tracks_added` + `scan_count` ; `last_release_count` = sorties trouvées à ce scan (`artistReleases`)
 6. Après chaque artiste → `saveDB()` (async) + `localStorage.setItem('spotifyplus_sync_progress', { artists_scanned, total_artists, last_artist_name, page_url, page_offset })` — `page_url` = URL de la page `/me/following` en cours, `page_offset` = nombre d'artistes de cette page déjà traités
 7. À la fin → `endSync('completed')` (saveDB final + nettoyage localStorage) + `setProgress(100)`
 
