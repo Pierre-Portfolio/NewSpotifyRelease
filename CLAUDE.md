@@ -143,7 +143,7 @@ function loadArtistsFromDB()           // retourne tous les artists_scraped (ORD
 ### Migrations DB (idempotentes)
 `initDB()` exécute dans des try/catch après chaque chargement (nouveau ou depuis IndexedDB) — sans effet si la colonne existe déjà :
 - `ALTER TABLE tracks ADD COLUMN liked INTEGER DEFAULT 0`
-- `ALTER TABLE tracks ADD COLUMN listened_at TEXT` — horodatage UTC posé via `datetime('now')` au moment où un titre passe `listened = 1` (marquage auto fin de titre + `removeFromFeed` d'un liké) ; alimente l'Historique
+- `ALTER TABLE tracks ADD COLUMN listened_at TEXT` — horodatage UTC posé via `datetime('now')` au moment où un titre passe `listened = 1` (marquage auto fin de titre + clic croix rouge × via `removeFromFeed`) ; alimente l'Historique
 - `ALTER TABLE stats ADD COLUMN total_listened_ms INTEGER DEFAULT 0`
 - `ALTER TABLE stats ADD COLUMN total_liked INTEGER DEFAULT 0` — compteur de likes posés **dans l'app** (via `setTrackLiked` uniquement, PAS par `syncInitialLikes`) ; persistant, non purgeable
 - `ALTER TABLE artists_scraped ADD COLUMN name / image_url / popularity / followers / genres / spotify_url / last_release_count / total_tracks_added / last_scan_status / scan_count` — **métadonnées artiste gratuites** (déjà présentes dans l'objet `/me/following`, aucune requête en plus) + compteurs de scan. Renseignées dans l'`INSERT … ON CONFLICT` (UPSERT) après chaque artiste scrapé avec succès
@@ -330,7 +330,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 - Bouton **"Purger les écoutés"** dans `VosEcoutesPanel` (desktop sidebar + mobile onglet Stats)
 - Action : `DELETE FROM tracks WHERE listened = 1` (**likés compris**) → `saveDB()` → `setListenStats` + `setLikedTracks`
 - **L'onglet ❤ Likés est aussi vidé** des titres écoutés. Le **% likés** n'est PAS affecté : il vit dans la table `stats` (`total_liked / total_listened`), indépendante des lignes `tracks` supprimées
-- `removeFromFeed` (bouton ×) garde sa logique : un titre liké encore dans le feed est marqué `listened = 1` (sort du feed sans toucher les compteurs `stats`) — il sera ensuite purgé par le bouton Purger
+- `removeFromFeed` (bouton croix rouge × **et** swipe gauche mobile) traite le titre **comme écouté** : `listened = 1` + `listened_at` + **incrément des compteurs `stats`** (`total_listened`, `listened_this_month/year`, `total_listened_ms`) → le titre apparaît dans l'**Historique** et compte dans les **stats d'écoute**. **Plus aucun `DELETE`** : le titre (liké ou non) reste en DB avec `listened = 1` (nécessaire pour l'Historique), il sera ensuite purgé par le bouton Purger. **Idempotent via `listenedUrisRef`** : si le poll player a déjà compté le titre, il n'est pas recompté (on s'assure juste qu'il est marqué via `COALESCE(listened_at, …)`)
 - Affiche une `alert` avec le nombre de titres supprimés
 
 ---
@@ -409,7 +409,7 @@ resumeSync()                   // → startSync({ skipCount, resumeUrl: page_url
 togglePause()                  // bascule syncState entre 'paused' et 'running' (no-op si 'idle')
 purgeListened()                // DELETE listened=1 AND liked=0 — les likés sont conservés
 resetQuota()                   // remet le quota 24h à 0 (saveQuota(0,0) + setDailyScrapings(0) + setQuotaUntil(0)) — débloque une synchro sans attendre l'expiration. Bouton dans VosEcoutesPanel
-removeFromFeed(uri)            // useCallback([dbReady]) — DELETE de la DB (ou UPDATE listened=1 si liké) + retire du feed (sans compter comme écouté)
+removeFromFeed(uri)            // useCallback([dbReady]) — marque le titre écouté (UPDATE listened=1 + listened_at + incrément stats) + retire du feed → apparaît dans l'Historique et compte dans les stats. Idempotent via listenedUrisRef. Plus de DELETE
 setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + stats.total_liked ±1 + recharge likedTracks/listenStats + met à jour feed array
 syncInitialLikes()             // vérifie /me/library/contains par batch de 40 URIs (max 300 tracks), sleep 400ms entre batchs, TTL 24h
 navigateFeed(dir)              // useCallback([markListened]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed (+ markListened du titre quitté en dir>0)

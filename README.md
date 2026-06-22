@@ -49,7 +49,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Marquage automatique comme écouté quand le titre se termine → disparition animée du feed
 - **Auto-avance** : quand un titre se termine, le suivant dans le feed est lancé automatiquement — **sans voler la lecture** : lancer manuellement un autre titre (ou stopper la musique) en plein milieu ne déclenche plus l'auto-avance
 - Navigation dans le feed via les flèches ← → de la barre du bas
-- **Bouton × par titre** : supprime définitivement un titre de la file d'attente sans le compter comme écouté (un titre liké est conservé en base, il sort juste du feed)
+- **Bouton × par titre** : marque le titre **comme écouté** et le retire du feed → il apparaît dans l'**Historique** et compte dans les **stats d'écoute** (même effet que « Suivant »)
 - **Bouton ❤ par titre** : like/unlike directement depuis le feed (synchronisé Spotify + DB locale)
 - **Filtre** par type : Tous / Singles / Albums / Découvertes
 - **Filtre artiste** : champ texte (insensible à la casse) combinable avec le filtre type et le tri
@@ -57,7 +57,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Tri** : ordre d'ajout / date de sortie ↑ (du plus ancien au plus récent) / artiste A→Z
 - **Bannières de date** (mobile) : séparateur "📅 20 juin 2026" entre chaque jour de sortie — repère visuel affiché en tri "Ordre d'ajout" et "Date sortie ↑" (pas en tri artiste)
 - **Navigation filtrée** : next/prev et auto-avance respectent l'ordre du feed filtré
-- **Swipe gauche** (mobile) : supprime le titre · **Swipe droite** : piste précédente
+- **Swipe gauche** (mobile) : marque le titre écouté et le retire (→ Historique + stats) · **Swipe droite** : piste précédente
 
 ### Player
 - Barre de lecture en temps réel (poll toutes les 5s — **suspendu quand l'onglet est caché**, reprise immédiate au retour : économise des centaines de requêtes/heure)
