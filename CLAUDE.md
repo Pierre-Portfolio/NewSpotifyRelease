@@ -389,7 +389,7 @@ stats            // { artists, total, releases, tracks } — compteurs sync
 listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
 history          // array d'items (tracks WHERE listened=1, max 200, plus récent en haut), rechargé à chaque écoute / removeFromFeed / purge
-artists          // array d'artistes scrappés (table artists_scraped + métadonnées), rechargé au login (dbReady) et à chaque fin de synchro (endSync) — alimente la section Artistes
+artists          // array d'artistes scrappés (table artists_scraped + métadonnées), rechargé au login (dbReady), après CHAQUE artiste scanné pendant la synchro (compteur en temps réel) et à chaque fin de synchro (endSync) — alimente la section Artistes
 loopEnabled      // boolean — persisté dans localStorage (spotifyplus_loop, '1'/'0') : survit au changement d'onglet / F5
 delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés dans la fenêtre 24h en cours (localStorage spotifyplus_daily_scrapings)
