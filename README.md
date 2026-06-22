@@ -101,8 +101,9 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Artistes (section / onglet Artistes)
 - **Liste de tous les artistes scannés** lors des synchros, avec leurs métadonnées récupérées de Spotify (sans aucune requête supplémentaire)
-- Chaque artiste affiche : sa **pochette**, son **nom**, son **identifiant Spotify**, la **date du dernier scrapping** (relative), ses **genres**, sa **popularité** (★ 0-100), son nombre d'**abonnés**, son **nombre de scans**, le **total de titres ajoutés** et le **nombre de sorties trouvées au dernier scan** — plus un badge **OK / Erreur** et un lien ↗ vers Spotify
-- **Filtres** comme le feed : recherche par nom ou id, filtre par statut (Tous / OK / Erreur), tri (scan récent, **scan ancien**, nom A→Z, popularité, titres ajoutés, nombre de scans)
+- Chaque artiste affiche : sa **pochette**, son **nom**, son **identifiant Spotify**, la **date du dernier scrapping** (relative), ses **genres**, sa **popularité** (★ 0-100), son nombre d'**abonnés**, son **nombre de scans**, le **total de titres ajoutés** et le **nombre de sorties trouvées au dernier scan** — plus un badge de statut (**✓ OK** / **⏳ Partiel** / **⚠ Erreur**) et un lien ↗ vers Spotify
+- Un artiste apparaît dès que ses albums ont été lus, **même si un rate-limit (429) interrompt le scan ensuite** : il s'affiche alors en **⏳ Partiel** (ses titres déjà trouvés sont ajoutés, et il sera repris au prochain scan sans rien rater)
+- **Filtres** comme le feed : recherche par nom ou id, filtre par statut (Tous / OK / **Partiel** / Erreur), tri (scan récent, **scan ancien**, nom A→Z, popularité, titres ajoutés, nombre de scans)
 - Desktop : bouton **Artistes** dans la barre du haut (à côté de Scrapping) · Mobile : onglet **Artistes**
 
 ### Notifications

@@ -1411,6 +1411,34 @@ function StoreProvider({ children }) {
             if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
             let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
 
+            // Ligne "légère" écrite DÈS que les albums sont lus, AVANT la boucle des pistes :
+            // l'artiste devient visible dans le panneau même si un 429 coupe le scan plus bas.
+            // ⚠ last_scraped_at posé à la valeur de cutoff (= date existante ou défaut), JAMAIS
+            // avancée ici → aucun titre raté. Statut 'partial' tant que le scan n'est pas fini.
+            // ON CONFLICT ne touche QUE les métadonnées (pas last_scraped_at/scan_count/total).
+            const cutoffISO = (scrapedDates[artist.id] || '2026-03-15').slice(0, 10);
+            try {
+              dbRun(
+                `INSERT INTO artists_scraped
+                   (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_scan_status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'partial')
+                 ON CONFLICT(spotify_id) DO UPDATE SET
+                   name        = excluded.name,
+                   image_url   = excluded.image_url,
+                   popularity  = excluded.popularity,
+                   followers   = excluded.followers,
+                   genres      = excluded.genres,
+                   spotify_url = excluded.spotify_url`,
+                [
+                  artist.id, cutoffISO, artist.name || null,
+                  artist.images?.[0]?.url || null, artist.popularity ?? null,
+                  artist.followers?.total ?? null, JSON.stringify(artist.genres || []),
+                  artist.external_urls?.spotify || null,
+                ]
+              );
+              setArtists(loadArtistsFromDB()); // visible immédiatement, avant même la 1re piste
+            } catch {}
+
             for (const album of albumsData.items) {
               const rDate = new Date(album.release_date);
               if (rDate < cutoff || rDate > ceiling) continue;
@@ -2678,8 +2706,9 @@ function ArtistsPanel() {
 
   const view = React.useMemo(() => {
     let r = (artists || []).filter(a => {
-      if (status === 'ok'    && a.lastScanStatus === 'error') return false;
-      if (status === 'error' && a.lastScanStatus !== 'error') return false;
+      if (status === 'ok'      && a.lastScanStatus !== 'ok' && a.lastScanStatus != null) return false;
+      if (status === 'partial' && a.lastScanStatus !== 'partial') return false;
+      if (status === 'error'   && a.lastScanStatus !== 'error') return false;
       const q = search.trim().toLowerCase();
       if (q) return (a.name || '').toLowerCase().includes(q) || (a.id || '').toLowerCase().includes(q);
       return true;
@@ -2714,7 +2743,7 @@ function ArtistsPanel() {
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       {/* Toolbar : statut + tri + reset */}
       <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
-        {[['all','Tous'],['ok','✓ OK'],['error','⚠ Erreur']].map(([k,n]) => (
+        {[['all','Tous'],['ok','✓ OK'],['partial','⏳ Partiel'],['error','⚠ Erreur']].map(([k,n]) => (
           <button key={k} onClick={() => setStatus(k)} style={btnFilter(status===k)}>{n}</button>
         ))}
         <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
@@ -2766,10 +2795,18 @@ function ArtistsPanel() {
 }
 
 function ArtistRow({ a }) {
-  const err = a.lastScanStatus === 'error';
+  const err     = a.lastScanStatus === 'error';
+  const partial = a.lastScanStatus === 'partial';
+  // Couleur + libellé du badge selon le statut (erreur rouge, partiel orange, ok vert)
+  const badge = err
+    ? { txt:'ERREUR',  fg:'#e05050', bg:'#2a0e0e', bd:'#5a2020' }
+    : partial
+      ? { txt:'PARTIEL', fg:'#e0a050', bg:'#2a1c08', bd:'#5a3a18' }
+      : { txt:'OK',      fg:C.accent, bg:`${C.accent}18`, bd:`${C.accent}40` };
+  const artColor = err ? '#e05050' : partial ? '#e0a050' : C.accent;
   return (
     <div style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'9px 10px', borderRadius:8, background:C.surfaceHigh, border:`1px solid ${C.border}` }}>
-      <AlbumArt size={44} letter={(a.name || a.id || '?')[0].toUpperCase()} color={err ? '#e05050' : C.accent} image={a.image} />
+      <AlbumArt size={44} letter={(a.name || a.id || '?')[0].toUpperCase()} color={artColor} image={a.image} />
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ display:'flex', alignItems:'center', gap:6 }}>
           <div style={{ fontSize:13, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>
@@ -2779,9 +2816,10 @@ function ArtistRow({ a }) {
             <a href={a.spotifyUrl} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
               style={{ fontSize:11, color:C.accent, textDecoration:'none', flexShrink:0 }}>↗</a>
           )}
-          <span style={{ marginLeft:'auto', flexShrink:0, fontSize:8, fontWeight:700, letterSpacing:'0.04em', padding:'2px 6px', borderRadius:5,
-            background: err ? '#2a0e0e' : `${C.accent}18`, color: err ? '#e05050' : C.accent, border:`1px solid ${err ? '#5a2020' : C.accent+'40'}` }}>
-            {err ? 'ERREUR' : 'OK'}
+          <span title={partial ? 'Scan interrompu (429) — titres ajoutés mais artiste pas terminé, sera repris à la prochaine synchro' : undefined}
+            style={{ marginLeft:'auto', flexShrink:0, fontSize:8, fontWeight:700, letterSpacing:'0.04em', padding:'2px 6px', borderRadius:5,
+            background: badge.bg, color: badge.fg, border:`1px solid ${badge.bd}` }}>
+            {badge.txt}
           </span>
         </div>
 
