@@ -40,7 +40,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Sauvegardes **sérialisées** : jamais deux écritures IndexedDB en parallèle, aucune donnée perdue en cas d'actions simultanées
 - **Persistance demandée au navigateur** (`navigator.storage.persist()`) — réduit le risque d'éviction des données, surtout sur iOS
 - **Garde multi-onglets** : si l'app est ouverte dans deux onglets, un bandeau d'avertissement s'affiche (les sauvegardes s'écraseraient mutuellement)
-- **Bouton Purger les écoutés** : supprime **tous** les titres écoutés (likés compris, ce qui vide aussi l'Historique et l'onglet Likés des titres écoutés) — libère de la place sur le long terme. Le **% de titres likés** n'est PAS affecté (compteur indépendant dans la table `stats`)
+- **Bouton Purger les écoutes** : supprime **tous** les titres écoutés (likés compris, ce qui vide aussi l'Historique et l'onglet Likés des titres écoutés) — libère de la place sur le long terme. Le **% de titres likés** n'est PAS affecté (compteur indépendant dans la table `stats`)
 
 ### Feed de découverte
 - File d'attente ordonnée par ID (les plus anciens en premier), jusqu'à **1000 titres** affichés
@@ -73,6 +73,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 1.182`) — basé sur le nombre de commits du dépôt
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
@@ -97,7 +98,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Liste des **derniers titres écoutés** non purgés, le **plus récent en haut**
 - Chaque ligne affiche le titre, l'artiste, l'horodatage relatif de l'écoute (« il y a 5 min », « hier »…) et un bouton **réécouter**
 - Desktop : section **Historique** dans la barre latérale droite (sous « Vos écoutes ») · Mobile : onglet **Historique**
-- L'historique est vidé par le bouton **Purger les écoutés**
+- L'historique est vidé par le bouton **Purger les écoutes**
 
 ### Artistes (section / onglet Artistes)
 - **Liste de tous les artistes scannés** lors des synchros, avec leurs métadonnées récupérées de Spotify (sans aucune requête supplémentaire)

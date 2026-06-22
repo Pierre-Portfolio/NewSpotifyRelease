@@ -69,6 +69,10 @@ REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
 SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
+### Version de l'app — `APP_VERSION`
+Constante module-level `APP_VERSION` (ex. `'1.182'`), format `1.<nombre de commits du dépôt>`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 1.182 »).
+**⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le numéro = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit).
+
 ### Délai de scraping
 Le délai entre chaque artiste est configurable via un sélecteur (10 / 20 / 30s) auquel s'ajoute un **jitter aléatoire de 1 à 3 secondes**.
 ```js
@@ -327,7 +331,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 
 ## Purge
 
-- Bouton **"Purger les écoutés"** dans `VosEcoutesPanel` (desktop sidebar + mobile onglet Stats)
+- Bouton **"Purger les écoutes"** dans `VosEcoutesPanel` (desktop sidebar + mobile onglet Stats)
 - Action : `DELETE FROM tracks WHERE listened = 1` (**likés compris**) → `saveDB()` → `setListenStats` + `setLikedTracks`
 - **L'onglet ❤ Likés est aussi vidé** des titres écoutés. Le **% likés** n'est PAS affecté : il vit dans la table `stats` (`total_liked / total_listened`), indépendante des lignes `tracks` supprimées
 - `removeFromFeed` (bouton croix rouge × **et** swipe gauche mobile) traite le titre **comme écouté** : `listened = 1` + `listened_at` + **incrément des compteurs `stats`** (`total_listened`, `listened_this_month/year`, `total_listened_ms`) → le titre apparaît dans l'**Historique** et compte dans les **stats d'écoute**. **Plus aucun `DELETE`** : le titre (liké ou non) reste en DB avec `listened = 1` (nécessaire pour l'Historique), il sera ensuite purgé par le bouton Purger. **Idempotent via `listenedUrisRef`** : si le poll player a déjà compté le titre, il n'est pas recompté (on s'assure juste qu'il est marqué via `COALESCE(listened_at, …)`)
@@ -364,7 +368,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `HistoryPanel` | **Historique** des titres écoutés non purgés (listened=1), trié `listened_at DESC` (plus récent en haut) — horodatage relatif (`formatListenedAt`) + bouton réécouter. Desktop : sidebar droite sous VOS ÉCOUTES · Mobile : onglet **Historique** |
-| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton **🔄 Réinitialiser le quota 24h** (affiche `X/100` + `· bloqué` si fenêtre active, `confirm()` puis `resetQuota()`) + bouton **🗑 Purger les écoutés** |
+| `VosEcoutesPanel` | Stats d'écoute (restantes, temps restant, mois, année, all-time, **temps total écouté**, **% titres likés** via l'app) + bouton **🔄 Réinitialiser le quota 24h** (affiche `X/100` + `· bloqué` si fenêtre active, `confirm()` puis `resetQuota()`) + bouton **🗑 Purger les écoutes** + **texte gris « Version {APP_VERSION} »** centré sous le bouton Purger |
 | `PlayerBar` | Barre du bas desktop — prev/play-pause/next + **bouton loop** + SeekBar + position |
 | `MobilePlayer` | Player mobile **25vh** — pochette + titre + artiste + SeekBar tactile + like + contrôles + loop |
 | `SeekBar` | Barre de progression cliquable/draggable — mouse ET touch (`onTouchStart/Move/End`) |
