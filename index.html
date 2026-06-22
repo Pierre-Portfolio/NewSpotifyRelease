@@ -534,6 +534,31 @@ function loadHistoryFromDB() {
   }));
 }
 
+// Liste des artistes scrappés (table artists_scraped) + métadonnées, le plus
+// récemment scanné en premier. Parse le JSON des genres de façon défensive.
+function loadArtistsFromDB() {
+  return dbAll(
+    "SELECT * FROM artists_scraped ORDER BY last_scraped_at DESC"
+  ).map(r => {
+    let genres = [];
+    try { genres = r.genres ? JSON.parse(r.genres) : []; } catch {}
+    return {
+      id:               r.spotify_id,
+      name:             r.name || null,
+      image:            r.image_url || null,
+      popularity:       (r.popularity ?? null),
+      followers:        (r.followers ?? null),
+      genres:           Array.isArray(genres) ? genres : [],
+      spotifyUrl:       r.spotify_url || null,
+      lastScrapedAt:    r.last_scraped_at,
+      lastReleaseCount: r.last_release_count || 0,
+      totalTracksAdded: r.total_tracks_added || 0,
+      lastScanStatus:   r.last_scan_status || null,
+      scanCount:        r.scan_count || 0,
+    };
+  });
+}
+
 // ════════════════════════════════════════════════
 // DÉCOUVERTES DE LA SEMAINE — import hebdo auto
 // ════════════════════════════════════════════════
@@ -656,6 +681,7 @@ function StoreProvider({ children }) {
   const [listenStats,   setListenStats] = React.useState({ remaining:0, remaining_ms:0, this_month:0, this_year:0, all_time:0 });
   const [likedTracks,   setLikedTracks] = React.useState([]);
   const [history,       setHistory]     = React.useState([]); // titres écoutés non purgés, plus récent en haut
+  const [artists,       setArtists]     = React.useState([]); // artistes scrappés (table artists_scraped) + métadonnées
   const [progress,      setProgress]    = React.useState(0);
   const [currentArtist, setCurrentArtist] = React.useState('');
   const [statusMsg,     setStatusMsg]   = React.useState('Prêt.');
@@ -795,6 +821,7 @@ function StoreProvider({ children }) {
           setListenStats(loadListenStatsFromDB());
           setLikedTracks(loadLikedTracksFromDB());
           setHistory(loadHistoryFromDB());
+          setArtists(loadArtistsFromDB());
           // syncInitialLikes est appelé après setDbReady(true) via useEffect
 
           // Vérifier si une synchro était en cours (reprise possible)
@@ -1188,6 +1215,7 @@ function StoreProvider({ children }) {
       } catch {}
     }
     try { await saveDB(); } catch {}
+    try { setArtists(loadArtistsFromDB()); } catch {} // rafraîchit la section Artistes (métadonnées + compteurs mis à jour pendant le scan)
   };
 
   // ── SYNC ──
@@ -1567,7 +1595,7 @@ function StoreProvider({ children }) {
     seek,
     loopEnabled, setLoopEnabled,
     dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked,
-    likedTracks, setLikedTracks, history, navigateFeed, markListened,
+    likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
     filteredFeed, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, resetFilters,
     resumableSession, resumeSync,
@@ -2624,6 +2652,162 @@ function HistoryPanel() {
   );
 }
 
+// Formatage compact des grands nombres (abonnés) : 1234 → "1,2 k", 2_500_000 → "2,5 M"
+function fmtCompactNum(n) {
+  if (n == null || isNaN(n)) return '—';
+  if (n < 1000) return String(n);
+  if (n < 1e6)  return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace('.', ',') + ' k';
+  return (n / 1e6).toFixed(1).replace('.', ',') + ' M';
+}
+
+// ════════════════════════════════════════════════
+// ARTISTS PANEL — liste des artistes scrappés + filtres
+// (id, dernière date de scrapping + métadonnées gratuites de l'API Spotify)
+// ════════════════════════════════════════════════
+function ArtistsPanel() {
+  const { artists } = useStore();
+  const [search,   setSearch]   = React.useState('');
+  const [sortBy,   setSortBy]   = React.useState('recent');
+  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'error'
+  const filtersOn = search.trim() || sortBy !== 'recent' || status !== 'all';
+  const reset = () => { setSearch(''); setSortBy('recent'); setStatus('all'); };
+
+  const view = React.useMemo(() => {
+    let r = (artists || []).filter(a => {
+      if (status === 'ok'    && a.lastScanStatus === 'error') return false;
+      if (status === 'error' && a.lastScanStatus !== 'error') return false;
+      const q = search.trim().toLowerCase();
+      if (q) return (a.name || '').toLowerCase().includes(q) || (a.id || '').toLowerCase().includes(q);
+      return true;
+    });
+    return [...r].sort((a, b) => {
+      if (sortBy === 'name')       return (a.name || '~').localeCompare(b.name || '~');
+      if (sortBy === 'popularity') return (b.popularity || 0) - (a.popularity || 0);
+      if (sortBy === 'tracks')     return (b.totalTracksAdded || 0) - (a.totalTracksAdded || 0);
+      if (sortBy === 'scans')      return (b.scanCount || 0) - (a.scanCount || 0);
+      return (b.lastScrapedAt || '').localeCompare(a.lastScrapedAt || ''); // recent
+    });
+  }, [artists, search, sortBy, status]);
+
+  const btnFilter = active => ({
+    background: active ? `${C.accent}22` : 'none',
+    border: active ? `1px solid ${C.accent}55` : `1px solid ${C.border}`,
+    borderRadius: 6, padding: '3px 8px', cursor: 'pointer',
+    color: active ? C.accent : C.muted, fontSize: 10, fontWeight: active ? 700 : 400,
+  });
+
+  if ((artists || []).length === 0) {
+    return (
+      <div style={{ fontSize:11, color:C.dim, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+        Aucun artiste scrappé pour l'instant.<br/>
+        <span style={{ fontSize:10, color:C.muted }}>Lancez une synchro : chaque artiste scanné apparaîtra ici.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {/* Toolbar : statut + tri + reset */}
+      <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+        {[['all','Tous'],['ok','✓ OK'],['error','⚠ Erreur']].map(([k,n]) => (
+          <button key={k} onClick={() => setStatus(k)} style={btnFilter(status===k)}>{n}</button>
+        ))}
+        <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)}
+            style={{ background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'3px 7px', fontSize:10, color:C.muted, outline:'none', cursor:'pointer' }}>
+            <option value="recent">Scan récent</option>
+            <option value="name">Nom A→Z</option>
+            <option value="popularity">Popularité ↓</option>
+            <option value="tracks">Titres ajoutés ↓</option>
+            <option value="scans">Nb de scans ↓</option>
+          </select>
+          {filtersOn && (
+            <button onClick={reset} title="Réinitialiser les filtres"
+              style={{ width:22, height:22, borderRadius:6, border:`1px solid #5a2020`, background:'#2a0e0e', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'#e05050', fontSize:12, flexShrink:0 }}>
+              🗑
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Recherche nom / id */}
+      <div style={{ position:'relative' }}>
+        <input type="text" placeholder="Rechercher un artiste (nom ou id)…" value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{ width:'100%', background:'#111', border:`1px solid ${search ? C.accent : C.border}`, borderRadius:6, padding:'5px 28px 5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }}
+        />
+        {search && (
+          <button onClick={() => setSearch('')}
+            style={{ position:'absolute', right:6, top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:C.muted, fontSize:14, lineHeight:1, padding:0 }}>
+            ×
+          </button>
+        )}
+      </div>
+
+      <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', padding:'0 2px' }}>
+        {view.length} / {artists.length} artiste{artists.length > 1 ? 's' : ''}
+      </div>
+
+      {/* Liste */}
+      <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+        {view.map(a => (
+          <ArtistRow key={a.id} a={a} />
+        ))}
+        {view.length === 0 && <div style={{ fontSize:11, color:C.dim, padding:'20px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucun artiste pour ce filtre.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ArtistRow({ a }) {
+  const err = a.lastScanStatus === 'error';
+  return (
+    <div style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'9px 10px', borderRadius:8, background:C.surfaceHigh, border:`1px solid ${C.border}` }}>
+      <AlbumArt size={44} letter={(a.name || a.id || '?')[0].toUpperCase()} color={err ? '#e05050' : C.accent} image={a.image} />
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+          <div style={{ fontSize:13, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>
+            {a.name || <span style={{ color:C.muted, fontStyle:'italic' }}>Artiste inconnu</span>}
+          </div>
+          {a.spotifyUrl && (
+            <a href={a.spotifyUrl} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
+              style={{ fontSize:11, color:C.accent, textDecoration:'none', flexShrink:0 }}>↗</a>
+          )}
+          <span style={{ marginLeft:'auto', flexShrink:0, fontSize:8, fontWeight:700, letterSpacing:'0.04em', padding:'2px 6px', borderRadius:5,
+            background: err ? '#2a0e0e' : `${C.accent}18`, color: err ? '#e05050' : C.accent, border:`1px solid ${err ? '#5a2020' : C.accent+'40'}` }}>
+            {err ? 'ERREUR' : 'OK'}
+          </span>
+        </div>
+
+        {/* id Spotify */}
+        <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', marginTop:1 }} title={a.id}>
+          {a.id}
+        </div>
+
+        {/* genres */}
+        {a.genres.length > 0 && (
+          <div style={{ display:'flex', flexWrap:'wrap', gap:4, marginTop:5 }}>
+            {a.genres.slice(0, 3).map(g => (
+              <span key={g} style={{ fontSize:8, color:C.muted, background:'#111', border:`1px solid ${C.border}`, borderRadius:4, padding:'1px 5px', fontFamily:'DM Mono,monospace' }}>{g}</span>
+            ))}
+            {a.genres.length > 3 && <span style={{ fontSize:8, color:C.dim, fontFamily:'DM Mono,monospace' }}>+{a.genres.length - 3}</span>}
+          </div>
+        )}
+
+        {/* métriques */}
+        <div style={{ display:'flex', flexWrap:'wrap', gap:'4px 12px', marginTop:6, fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+          <span title="Dernier scrapping">📅 {formatListenedAt(a.lastScrapedAt) || '—'}</span>
+          {a.popularity != null && <span title="Popularité Spotify (0-100)">★ {a.popularity}</span>}
+          {a.followers != null && <span title="Abonnés">👥 {fmtCompactNum(a.followers)}</span>}
+          <span title="Nombre de scans réussis">🔁 {a.scanCount}×</span>
+          <span title="Titres ajoutés au total pour cet artiste">🎵 {a.totalTracksAdded}</span>
+          <span title="Sorties trouvées au dernier scan">🆕 {a.lastReleaseCount}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ════════════════════════════════════════════════
 // COMPACT PLAYER — vue ultra-compacte (split-screen / fenêtre du bas sur tel)
 // N'affiche QUE les contrôles : précédent / play-pause / suivant
@@ -2737,7 +2921,7 @@ function MobileApp() {
           <span style={{ color:C.accent }}>Spotify</span><span style={{ color:C.text }}>+</span>
         </div>
         <div style={{ display:'flex', gap:4, flexWrap:'wrap', justifyContent:'flex-end' }}>
-          {[['scrapping','Scrapping'],['ecouter',`En attente`],['liker','❤ Likés'],['historique','Histo'],['stats','Stats']].map(([k,n]) => {
+          {[['scrapping','Scrapping'],['ecouter',`En attente`],['liker','❤ Likés'],['historique','Histo'],['artistes','Artistes'],['stats','Stats']].map(([k,n]) => {
             const active = tab === k;
             return <button key={k} onClick={() => setTab(k)} style={{ background: active?`${C.accent}18`:'none', border: active?`1px solid ${C.accent}40`:'1px solid transparent', color: active?C.accent:C.muted, borderRadius:6, padding:'3px 8px', cursor:'pointer', fontSize:10, fontWeight: active?700:400 }}>{n}</button>;
           })}
@@ -2782,6 +2966,12 @@ function MobileApp() {
             <HistoryPanel />
           </div>
         )}
+        {tab === 'artistes' && (
+          <div style={{ padding:'12px 14px' }}>
+            <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:'0.07em', marginBottom:10 }}>ARTISTES SUIVIS · <span style={{ color:C.accent }}>{s.artists.length}</span></div>
+            <ArtistsPanel />
+          </div>
+        )}
         {tab === 'stats' && (
           <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
             <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:'0.07em' }}>VOS ÉCOUTES</div>
@@ -2799,14 +2989,24 @@ function MobileApp() {
 // ════════════════════════════════════════════════
 function WebApp() {
   const s = useStore();
+  const [view, setView] = React.useState('scrapping'); // 'scrapping' | 'artistes'
+  const navBtn = active => ({
+    background: active ? `${C.accent}18` : 'none',
+    border: active ? `1px solid ${C.accent}40` : `1px solid transparent`,
+    color: active ? C.accent : C.muted, borderRadius:6, padding:'4px 12px',
+    cursor:'pointer', fontSize:12, fontWeight: active ? 700 : 500,
+  });
   return (
     <div style={{ width:'100%', height:'100%', background:C.bg, color:C.text, display:'flex', flexDirection:'column', fontSize:13, overflow:'hidden' }}>
       <div style={{ height:50, borderBottom:`1px solid ${C.border}`, background:C.surface, display:'flex', alignItems:'center', padding:'0 22px', gap:20, flexShrink:0 }}>
         <div style={{ fontWeight:800, fontSize:17, letterSpacing:'-0.03em' }}>
           <span style={{ color:C.accent }}>Spotify</span><span style={{ color:C.text }}>+</span>
         </div>
-        <div style={{ flex:1 }}>
-          <button style={{ background:`${C.accent}18`, border:`1px solid ${C.accent}40`, color:C.accent, borderRadius:6, padding:'4px 12px', cursor:'pointer', fontSize:12, fontWeight:700 }}>Scrapping</button>
+        <div style={{ flex:1, display:'flex', gap:8 }}>
+          <button onClick={() => setView('scrapping')} style={navBtn(view==='scrapping')}>Scrapping</button>
+          <button onClick={() => setView('artistes')} style={navBtn(view==='artistes')}>
+            Artistes{s.artists.length > 0 ? ` · ${s.artists.length}` : ''}
+          </button>
         </div>
         <div style={{ display:'flex', alignItems:'center', gap:10 }}>
           <StatusDot active={true} />
@@ -2827,21 +3027,36 @@ function WebApp() {
         </div>
 
         <div style={{ flex:1, overflowY:'auto', padding:'22px 24px', minWidth:0 }}>
-          <div style={{ marginBottom:20 }}>
-            <ScrapingStatusPanel />
-          </div>
-          <div>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, flexWrap:'wrap', gap:10 }}>
+          {view === 'scrapping' ? (
+            <>
+              <div style={{ marginBottom:20 }}>
+                <ScrapingStatusPanel />
+              </div>
               <div>
-                <h1 style={{ fontSize:16, fontWeight:700, letterSpacing:'-0.02em', marginBottom:2 }}>Nouveautés pour vous</h1>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, flexWrap:'wrap', gap:10 }}>
+                  <div>
+                    <h1 style={{ fontSize:16, fontWeight:700, letterSpacing:'-0.02em', marginBottom:2 }}>Nouveautés pour vous</h1>
+                    <p style={{ fontSize:11, color:C.muted }}>
+                      Basées sur vos abonnements
+                      {s.feed.length > 0 && ` · ${s.feed.length} sortie(s)`}
+                    </p>
+                  </div>
+                </div>
+                <FeedList />
+              </div>
+            </>
+          ) : (
+            <div>
+              <div style={{ marginBottom:14 }}>
+                <h1 style={{ fontSize:16, fontWeight:700, letterSpacing:'-0.02em', marginBottom:2 }}>Artistes suivis</h1>
                 <p style={{ fontSize:11, color:C.muted }}>
-                  Basées sur vos abonnements
-                  {s.feed.length > 0 && ` · ${s.feed.length} sortie(s)`}
+                  Artistes scannés et métadonnées
+                  {s.artists.length > 0 && ` · ${s.artists.length} artiste(s)`}
                 </p>
               </div>
+              <ArtistsPanel />
             </div>
-            <FeedList />
-          </div>
+          )}
         </div>
 
         <div style={{ width:240, borderLeft:`1px solid ${C.border}`, background:C.surface, padding:'22px 16px', display:'flex', flexDirection:'column', gap:10, overflowY:'auto', flexShrink:0 }}>

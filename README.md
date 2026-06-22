@@ -99,6 +99,12 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Desktop : section **Historique** dans la barre latérale droite (sous « Vos écoutes ») · Mobile : onglet **Historique**
 - L'historique est vidé par le bouton **Purger les écoutés**
 
+### Artistes (section / onglet Artistes)
+- **Liste de tous les artistes scannés** lors des synchros, avec leurs métadonnées récupérées de Spotify (sans aucune requête supplémentaire)
+- Chaque artiste affiche : sa **pochette**, son **nom**, son **identifiant Spotify**, la **date du dernier scrapping** (relative), ses **genres**, sa **popularité** (★ 0-100), son nombre d'**abonnés**, son **nombre de scans**, le **total de titres ajoutés** et le **nombre de sorties trouvées au dernier scan** — plus un badge **OK / Erreur** et un lien ↗ vers Spotify
+- **Filtres** comme le feed : recherche par nom ou id, filtre par statut (Tous / OK / Erreur), tri (scan récent, nom A→Z, popularité, titres ajoutés, nombre de scans)
+- Desktop : bouton **Artistes** dans la barre du haut (à côté de Scrapping) · Mobile : onglet **Artistes**
+
 ### Notifications
 - **Fin de session** (100 artistes/jour atteints) : notification navigateur envoyée automatiquement (permission demandée si nécessaire)
 
@@ -116,7 +122,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
 
 ### Interface
-- Responsive — desktop (sidebar) et mobile (5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats)
+- Responsive — desktop (sidebar) et mobile (6 onglets : Scrapping / En attente / ❤ Likés / Historique / Artistes / Stats)
 - **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant / ❤ like**
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
@@ -164,8 +170,10 @@ tracks (id, spotify_uri UNIQUE, artist_name, title, release_title,
         listened DEFAULT 0, liked DEFAULT 0, listened_at,
         added_at DEFAULT datetime('now'))
 
--- Dates de dernier scraping par artiste
-artists_scraped (spotify_id PRIMARY KEY, last_scraped_at)
+-- Artistes scrappés : date de dernier scan + métadonnées Spotify + compteurs
+artists_scraped (spotify_id PRIMARY KEY, last_scraped_at,
+                 name, image_url, popularity, followers, genres, spotify_url,
+                 last_release_count, total_tracks_added, last_scan_status, scan_count)
 
 -- Compteurs d'écoute (ligne unique id=1)
 stats (id=1, total_listened, listened_this_month, listened_this_year,

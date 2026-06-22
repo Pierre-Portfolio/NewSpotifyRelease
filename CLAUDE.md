@@ -137,6 +137,7 @@ function dbGet(sql, params=[])         // retourne le premier objet ou null
 function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max 500) mappées en items feed
 function loadHistoryFromDB()           // retourne les tracks WHERE listened=1 (max 200) ORDER BY listened_at DESC — plus récent en haut (Historique)
+function loadArtistsFromDB()           // retourne tous les artists_scraped (ORDER BY last_scraped_at DESC) mappés : { id, name, image, popularity, followers, genres[], spotifyUrl, lastScrapedAt, lastReleaseCount, totalTracksAdded, lastScanStatus, scanCount } — alimente la section Artistes
 ```
 
 ### Migrations DB (idempotentes)
@@ -349,8 +350,9 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 |---|---|
 | `StoreProvider` | Context global — auth, dbReady, syncState (+ scraping/paused/rlWaiting dérivés), stats, feed, rate-limit, player, loopEnabled, otherTab |
 | `Home` | Page de login (mobile + desktop) |
-| `WebApp` | Layout desktop (sidebar + contenu) |
-| `MobileApp` | Layout mobile — 5 onglets : Scrapping / À écouter / ❤ Likés / Historique / Stats (barre d'onglets en `flexWrap`) |
+| `WebApp` | Layout desktop (sidebar + contenu) — barre du haut avec **sélecteur de vue** `view` ('scrapping' / 'artistes') : le contenu central bascule entre le feed (`ScrapingStatusPanel` + `FeedList`) et `ArtistsPanel`, les sidebars (player, stats, historique) restent visibles |
+| `ArtistsPanel` | **Section Artistes** — liste des artistes scrappés (`store.artists` ← `loadArtistsFromDB`) avec **filtres** (recherche nom/id, statut Tous/OK/Erreur, tri : scan récent / nom A→Z / popularité / titres ajoutés / nb de scans) + compteur `X/total`. Chaque ligne via `ArtistRow` : pochette artiste, nom (ou « Artiste inconnu »), **id Spotify** (mono), badge statut, lien ↗ Spotify, chips genres (max 3), métriques (📅 dernier scrap relatif, ★ popularité, 👥 abonnés via `fmtCompactNum`, 🔁 nb scans, 🎵 titres ajoutés, 🆕 sorties au dernier scan). Affiché en onglet sur mobile, en vue centrale sur desktop |
+| `MobileApp` | Layout mobile — 6 onglets : Scrapping / En attente / ❤ Likés / Histo / **Artistes** / Stats (barre d'onglets en `flexWrap`) |
 | `CompactPlayer` | **Vue ultra-compacte** affichée à la place de `MobileApp` quand le viewport est très court (`useShortViewport`, `innerHeight < 500` — ex. fenêtre du bas en split-screen sur tel). Affiche titre/artiste + contrôles **précédent / play-pause / suivant / ❤ like**. Le bouton like reprend la logique du `MobilePlayer` (`isLiked` initialisé en local depuis `feed`/`likedTracks`, `libraryContains` seulement si le titre est inconnu ; écritures via `librarySave`/`libraryRemove` + `libraryScopeAlert` + `setTrackLiked`). Sélectionné dans `Shell` : `isMobile && shortViewport → <CompactPlayer/>` |
 | `DateRangePanel` | Bouton Reprendre (si session en cours) / Lancer ou Recommencer de 0 / Pause. Bandeau countdown si blocage 429 (`blockedUntil`) **ou** quota 24h atteint (`quotaUntil`) — boutons désactivés via `anyBlock` |
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 sur 24h` / Sorties / Titres) + **countdown quota 24h** sous la barre de progression quand `quotaUntil` est actif |
@@ -387,6 +389,7 @@ stats            // { artists, total, releases, tracks } — compteurs sync
 listenStats      // { remaining, remaining_ms, this_month, this_year, all_time, listened_ms, total_liked }
 likedTracks      // array d'items feed (tracks WHERE liked=1), rechargé après chaque like/unlike
 history          // array d'items (tracks WHERE listened=1, max 200, plus récent en haut), rechargé à chaque écoute / removeFromFeed / purge
+artists          // array d'artistes scrappés (table artists_scraped + métadonnées), rechargé au login (dbReady) et à chaque fin de synchro (endSync) — alimente la section Artistes
 loopEnabled      // boolean — persisté dans localStorage (spotifyplus_loop, '1'/'0') : survit au changement d'onglet / F5
 delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés dans la fenêtre 24h en cours (localStorage spotifyplus_daily_scrapings)
