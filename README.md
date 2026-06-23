@@ -74,7 +74,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 1.182`) — basé sur le nombre de commits du dépôt
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 1.18.5`) — basé sur le nombre de commits du dépôt (format `1.MM.U`)
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
