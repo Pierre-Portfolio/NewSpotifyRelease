@@ -63,7 +63,7 @@ const SCOPES       = 'user-follow-read user-read-private user-read-currently-pla
 const ESTIMATED_TOTAL = 1400;
 // Version de l'app : 1.<nombre de commits du dépôt>. À incrémenter manuellement à chaque commit
 // (pas de build tool pour l'injecter automatiquement). Affichée sous le bouton « Purger » de VosEcoutesPanel.
-const APP_VERSION = '1.183';
+const APP_VERSION = '1.184';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -556,16 +556,27 @@ function mapFeedRow(t) {
   };
 }
 
-// Charge les titres non écoutés du feed depuis la DB.
-// - Sans recherche : les 1000 plus anciens (cap de rendu).
-// - Avec recherche artiste : TOUS les titres de l'artiste (LIKE), même au-delà du cap des
-//   1000 → corrige le filtre qui ne voyait que les 1000 premiers titres chargés en mémoire.
-function loadFeedFromDB(artistSearch) {
+// Charge les titres non écoutés du feed depuis la DB, en appliquant les filtres/tri EN SQL
+// (pas seulement sur les 1000 titres chargés en mémoire) → tout filtre/tri actif balaie
+// TOUTE la base, hors du cap des 1000 :
+// - filterType : 'single' | 'album' | 'dw' | 'all'  → WHERE sur release_type
+// - sortBy     : 'date_asc' | 'artist' | 'default'  → ORDER BY release_date / artist_name / id
+// - artistSearch : LIKE sur artist_name
+// Le cap LIMIT 1000 reste (rendu), mais il s'applique APRÈS filtre/tri : on voit donc bien
+// les Singles / les plus anciens / l'artiste recherché même au-delà de la 1000e ligne.
+function loadFeedFromDB({ artistSearch = '', filterType = 'all', sortBy = 'default' } = {}) {
+  const where = ['listened = 0'];
+  const params = [];
   const s = (artistSearch || '').trim();
-  const rows = s
-    ? dbAll("SELECT * FROM tracks WHERE listened = 0 AND LOWER(artist_name) LIKE '%' || LOWER(?) || '%' ORDER BY id ASC LIMIT 1000", [s])
-    : dbAll("SELECT * FROM tracks WHERE listened = 0 ORDER BY id ASC LIMIT 1000");
-  return rows.map(mapFeedRow);
+  if (s) { where.push("LOWER(artist_name) LIKE '%' || LOWER(?) || '%'"); params.push(s); }
+  if (filterType === 'single')     where.push("release_type = 'single'");
+  else if (filterType === 'dw')    where.push("release_type = 'discover_weekly'");
+  else if (filterType === 'album') where.push("(release_type IS NULL OR release_type NOT IN ('single','discover_weekly'))");
+  let order = 'id ASC';
+  if (sortBy === 'date_asc')    order = 'release_date ASC, id ASC';
+  else if (sortBy === 'artist') order = 'artist_name COLLATE NOCASE ASC, id ASC';
+  const sql = `SELECT * FROM tracks WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 1000`;
+  return dbAll(sql, params).map(mapFeedRow);
 }
 
 // Liste des artistes scrappés (table artists_scraped) + métadonnées, le plus
@@ -755,22 +766,24 @@ function StoreProvider({ children }) {
   const filteredFeedRef = React.useRef([]);
   React.useEffect(() => { filteredFeedRef.current = filteredFeed; }, [filteredFeed]);
 
-  // Recherche artiste = re-query la DB (pas seulement les 1000 titres chargés en mémoire) :
-  // un artiste dont les titres sont au-delà du cap de 1000 apparaît quand même. Au vidage du
-  // champ, on recharge le feed de base (1000 plus anciens). Debounce 150ms pour ne pas
-  // re-query à chaque frappe. On remplace `feed` directement → toute la machinerie existante
+  // Tout filtre/tri actif (type, recherche artiste, tri date/artiste) re-query la DB
+  // (loadFeedFromDB applique filtre+tri EN SQL) → on voit les titres même au-delà du cap des
+  // 1000 chargés en mémoire. Retour à 'all'/'default'/'' → recharge le feed de base. Debounce
+  // 150ms (lisse la frappe). On remplace `feed` directement → toute la machinerie existante
   // (auto-avance, marquage écouté, players via feedRef/filteredFeed) fonctionne sur ces titres.
-  const lastSearchRef = React.useRef('');
+  const DEFAULT_QUERY_KEY = JSON.stringify(['', 'all', 'default']);
+  const lastQueryRef = React.useRef(DEFAULT_QUERY_KEY); // skip le 1er run (défauts = chargement init)
   React.useEffect(() => {
     if (!dbReady) return;
     const s = artistSearch.trim();
-    if (s === lastSearchRef.current) return; // évite un reload inutile (ex. re-render)
+    const key = JSON.stringify([s, filterType, sortBy]);
+    if (key === lastQueryRef.current) return; // évite un reload inutile (ex. re-render)
     const t = setTimeout(() => {
-      lastSearchRef.current = s;
-      setFeed(loadFeedFromDB(s));
+      lastQueryRef.current = key;
+      setFeed(loadFeedFromDB({ artistSearch: s, filterType, sortBy }));
     }, 150);
     return () => clearTimeout(t);
-  }, [artistSearch, dbReady]);
+  }, [artistSearch, filterType, sortBy, dbReady]);
 
   const [logs,          setLogs]        = React.useState([]);
   const [now,           setNow]         = React.useState(null);
@@ -849,8 +862,8 @@ function StoreProvider({ children }) {
           const uriRows = dbAll("SELECT spotify_uri FROM tracks");
           uriRows.forEach(r => knownUrisRef.current.add(r.spotify_uri));
 
-          // Load feed (not listened) — voir loadFeedFromDB (la recherche artiste re-query la DB, hors cap 1000)
-          setFeed(loadFeedFromDB(''));
+          // Load feed (not listened) — voir loadFeedFromDB (les filtres/tri re-query la DB, hors cap 1000)
+          setFeed(loadFeedFromDB());
 
           // Load listen stats
           setListenStats(loadListenStatsFromDB());
@@ -2596,9 +2609,9 @@ function FeedList({ isMobile=false }) {
         )}
       </div>
 
-      {/* Bannière titres masqués — masquée pendant une recherche artiste (la recherche
-          balaie toute la DB, le cap des 1000 ne s'applique plus) */}
-      {hidden > 0 && !artistSearch.trim() && (
+      {/* Bannière titres masqués — masquée dès qu'un filtre/tri est actif (la requête balaie
+          alors toute la DB, le cap des 1000 ne masque plus de résultats correspondants) */}
+      {hidden > 0 && !filtersOn && (
         <div style={{ fontSize:10, color:'#c8956c', background:'#1a1208', border:'1px solid #3a2a10', borderRadius:6, padding:'6px 10px', textAlign:'center' }}>
           ⚠ {hidden} titre{hidden > 1 ? 's' : ''} masqué{hidden > 1 ? 's' : ''} — purge pour les afficher
         </div>
