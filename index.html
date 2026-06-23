@@ -63,7 +63,7 @@ const SCOPES       = 'user-follow-read user-read-private user-read-currently-pla
 const ESTIMATED_TOTAL = 1400;
 // Version de l'app : 1.<nombre de commits du dépôt>. À incrémenter manuellement à chaque commit
 // (pas de build tool pour l'injecter automatiquement). Affichée sous le bouton « Purger » de VosEcoutesPanel.
-const APP_VERSION = '1.182';
+const APP_VERSION = '1.183';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -537,6 +537,37 @@ function loadHistoryFromDB() {
   }));
 }
 
+// Mappe une ligne DB `tracks` → item du feed (forme attendue par FeedList/les players)
+function mapFeedRow(t) {
+  return {
+    id:         t.spotify_uri,
+    spotifyUri: t.spotify_uri,
+    label:      t.release_type === 'single' ? 'Single' : t.release_type === 'discover_weekly' ? 'Découvertes' : 'Album',
+    artist:     t.artist_name,
+    title:      t.title,
+    subtitle:   t.release_type === 'discover_weekly' ? 'Découvertes de la semaine' : t.release_type !== 'single' ? t.release_title : null,
+    date:       t.release_date ? new Date(t.release_date).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : '',
+    scraped_at: t.added_at ? new Date(t.added_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : null,
+    image:      t.cover_url,
+    isNew:       false,
+    liked:       t.liked || 0,
+    rawDate:     t.release_date || '',
+    duration_ms: t.duration_ms || 0,
+  };
+}
+
+// Charge les titres non écoutés du feed depuis la DB.
+// - Sans recherche : les 1000 plus anciens (cap de rendu).
+// - Avec recherche artiste : TOUS les titres de l'artiste (LIKE), même au-delà du cap des
+//   1000 → corrige le filtre qui ne voyait que les 1000 premiers titres chargés en mémoire.
+function loadFeedFromDB(artistSearch) {
+  const s = (artistSearch || '').trim();
+  const rows = s
+    ? dbAll("SELECT * FROM tracks WHERE listened = 0 AND LOWER(artist_name) LIKE '%' || LOWER(?) || '%' ORDER BY id ASC LIMIT 1000", [s])
+    : dbAll("SELECT * FROM tracks WHERE listened = 0 ORDER BY id ASC LIMIT 1000");
+  return rows.map(mapFeedRow);
+}
+
 // Liste des artistes scrappés (table artists_scraped) + métadonnées, le plus
 // récemment scanné en premier. Parse le JSON des genres de façon défensive.
 function loadArtistsFromDB() {
@@ -723,6 +754,24 @@ function StoreProvider({ children }) {
 
   const filteredFeedRef = React.useRef([]);
   React.useEffect(() => { filteredFeedRef.current = filteredFeed; }, [filteredFeed]);
+
+  // Recherche artiste = re-query la DB (pas seulement les 1000 titres chargés en mémoire) :
+  // un artiste dont les titres sont au-delà du cap de 1000 apparaît quand même. Au vidage du
+  // champ, on recharge le feed de base (1000 plus anciens). Debounce 150ms pour ne pas
+  // re-query à chaque frappe. On remplace `feed` directement → toute la machinerie existante
+  // (auto-avance, marquage écouté, players via feedRef/filteredFeed) fonctionne sur ces titres.
+  const lastSearchRef = React.useRef('');
+  React.useEffect(() => {
+    if (!dbReady) return;
+    const s = artistSearch.trim();
+    if (s === lastSearchRef.current) return; // évite un reload inutile (ex. re-render)
+    const t = setTimeout(() => {
+      lastSearchRef.current = s;
+      setFeed(loadFeedFromDB(s));
+    }, 150);
+    return () => clearTimeout(t);
+  }, [artistSearch, dbReady]);
+
   const [logs,          setLogs]        = React.useState([]);
   const [now,           setNow]         = React.useState(null);
   const [delayChoice,   setDelayChoice] = React.useState(30);
@@ -800,25 +849,8 @@ function StoreProvider({ children }) {
           const uriRows = dbAll("SELECT spotify_uri FROM tracks");
           uriRows.forEach(r => knownUrisRef.current.add(r.spotify_uri));
 
-          // Load feed (not listened)
-          const trackRows = dbAll("SELECT * FROM tracks WHERE listened = 0 ORDER BY id ASC LIMIT 1000");
-          if (trackRows.length > 0) {
-            setFeed(trackRows.map(t => ({
-              id:         t.spotify_uri,
-              spotifyUri: t.spotify_uri,
-              label:      t.release_type === 'single' ? 'Single' : t.release_type === 'discover_weekly' ? 'Découvertes' : 'Album',
-              artist:     t.artist_name,
-              title:      t.title,
-              subtitle:   t.release_type === 'discover_weekly' ? 'Découvertes de la semaine' : t.release_type !== 'single' ? t.release_title : null,
-              date:       t.release_date ? new Date(t.release_date).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : '',
-              scraped_at: t.added_at ? new Date(t.added_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : null,
-              image:      t.cover_url,
-              isNew:       false,
-              liked:       t.liked || 0,
-              rawDate:     t.release_date || '',
-              duration_ms: t.duration_ms || 0,
-            })));
-          }
+          // Load feed (not listened) — voir loadFeedFromDB (la recherche artiste re-query la DB, hors cap 1000)
+          setFeed(loadFeedFromDB(''));
 
           // Load listen stats
           setListenStats(loadListenStatsFromDB());
@@ -2521,7 +2553,9 @@ function FeedList({ isMobile=false }) {
     color: active ? C.accent : C.muted, fontSize: 10, fontWeight: active ? 700 : 400,
   });
 
-  if (feed.length === 0) {
+  // Si une recherche/filtre est active, garder la toolbar visible même quand 0 résultat
+  // (sinon le champ de recherche disparaîtrait et on ne pourrait plus l'effacer)
+  if (feed.length === 0 && !filtersOn) {
     return <div style={{ fontSize:11, color:C.dim, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucune musique en attente.</div>;
   }
 
@@ -2562,8 +2596,9 @@ function FeedList({ isMobile=false }) {
         )}
       </div>
 
-      {/* Bannière titres masqués */}
-      {hidden > 0 && (
+      {/* Bannière titres masqués — masquée pendant une recherche artiste (la recherche
+          balaie toute la DB, le cap des 1000 ne s'applique plus) */}
+      {hidden > 0 && !artistSearch.trim() && (
         <div style={{ fontSize:10, color:'#c8956c', background:'#1a1208', border:'1px solid #3a2a10', borderRadius:6, padding:'6px 10px', textAlign:'center' }}>
           ⚠ {hidden} titre{hidden > 1 ? 's' : ''} masqué{hidden > 1 ? 's' : ''} — purge pour les afficher
         </div>

@@ -70,7 +70,7 @@ SCOPES       = 'user-follow-read user-read-private user-read-currently-playing u
 ```
 
 ### Version de l'app — `APP_VERSION`
-Constante module-level `APP_VERSION` (ex. `'1.182'`), format `1.<nombre de commits du dépôt>`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 1.182 »).
+Constante module-level `APP_VERSION` (ex. `'1.183'`), format `1.<nombre de commits du dépôt>`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 1.183 »).
 **⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le numéro = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit).
 
 ### Délai de scraping
@@ -142,6 +142,8 @@ function loadListenStatsFromDB()       // retourne { remaining, remaining_ms, th
 function loadLikedTracksFromDB()       // retourne les tracks WHERE liked=1 (max 500) mappées en items feed
 function loadHistoryFromDB()           // retourne les tracks WHERE listened=1 (max 200) ORDER BY listened_at DESC — plus récent en haut (Historique)
 function loadArtistsFromDB()           // retourne tous les artists_scraped (ORDER BY last_scraped_at DESC) mappés : { id, name, image, popularity, followers, genres[], spotifyUrl, lastScrapedAt, lastReleaseCount, totalTracksAdded, lastScanStatus, scanCount } — alimente la section Artistes
+function mapFeedRow(t)                  // mappe une ligne DB `tracks` → item du feed (id, spotifyUri, label, artist, title, subtitle, date, image, isNew, liked, rawDate, duration_ms)
+function loadFeedFromDB(artistSearch)   // titres WHERE listened=0 ORDER BY id ASC LIMIT 1000. **Si `artistSearch` non vide** : ajoute `AND LOWER(artist_name) LIKE '%…%'` → ramène TOUS les titres de l'artiste, **même au-delà du cap des 1000** (corrige le filtre artiste qui ne voyait que les 1000 titres chargés en mémoire). Utilisé par le chargement initial (`''`) et par l'effet de recherche
 ```
 
 ### Migrations DB (idempotentes)
@@ -364,7 +366,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 sur 24h` / Sorties / Titres) + **countdown quota 24h** sous la barre de progression quand `quotaUntil` est actif |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables |
+| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables. **Empty-state** : « Aucune musique en attente » seulement si `feed.length === 0 && !filtersOn` — sinon (filtre/recherche actif) la toolbar reste visible (sinon impossible d'effacer une recherche à 0 résultat). **Bannière titres masqués masquée pendant une recherche artiste** (la recherche balaie toute la DB, le cap des 1000 ne s'applique plus) |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `HistoryPanel` | **Historique** des titres écoutés non purgés (listened=1), trié `listened_at DESC` (plus récent en haut) — horodatage relatif (`formatListenedAt`) + bouton réécouter. Desktop : sidebar droite sous VOS ÉCOUTES · Mobile : onglet **Historique** |
@@ -403,7 +405,7 @@ quotaUntil       // timestamp ms — fin de la fenêtre glissante de 24h ouverte
 filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
 filterType       // 'all' | 'single' | 'album' | 'dw'
 sortBy           // 'default' | 'date_asc' (plus ancien en haut) | 'artist'
-artistSearch     // string — filtre texte sur artist_name
+artistSearch     // string — filtre texte sur artist_name. **Non vide → re-query la DB** (loadFeedFromDB) via un effet debouncé 150ms qui remplace `feed` par TOUS les titres de l'artiste (LIKE), même au-delà du cap des 1000 ; vidage du champ → recharge le feed de base. Pas de re-query pendant la synchro (deps [artistSearch, dbReady] uniquement)
 
 resumableSession // { artists_scanned, total_artists, last_artist_name, page_url, page_offset } | null
 
