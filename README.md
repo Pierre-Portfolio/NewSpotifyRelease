@@ -78,9 +78,10 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — barre latérale droite sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile (avant Historique)
-- Prévisions sur **3 jours** (aujourd'hui + 2) pour **3 lieux** : **Voisins-le-Bretonneux**, **Boulogne-Billancourt**, puis **Ma position** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
+- Prévisions sur **3 jours** (aujourd'hui + 2) pour **3 lieux** : **Voisins-le-Bretonneux**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
+- Le 3e lieu affiche le **nom de la ville** détecté à partir des coordonnées GPS (reverse-geocoding via [BigDataCloud](https://www.bigdatacloud.com/), gratuit sans clé — repli sur « Ma position » si indisponible)
 - Chaque jour : icône météo + température max (en bleu) et min
-- Données via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
+- Données météo via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
 
 ### Finance
 - Section **Finance** dédiée (titre en bleu) — **vide pour le moment** (placeholder « bientôt disponible »)
