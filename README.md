@@ -74,7 +74,13 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 1.18.5`) — basé sur le nombre de commits du dépôt (format `1.MM.U`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 1.18.6`) — basé sur le nombre de commits du dépôt (format `1.MM.U`)
+
+### Météo
+- Section **Météo** (titre en bleu) affichée **sous Vos écoutes** — barre latérale droite sur desktop, onglet **Stats** sur mobile
+- Prévisions sur **3 jours** (aujourd'hui + 2) pour **3 lieux** : **Voisins-le-Bretonneux**, **Boulogne-Billancourt**, puis **Ma position** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
+- Chaque jour : icône météo + température max (en bleu) et min
+- Données via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
