@@ -84,8 +84,10 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Données météo via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
 
 ### Finance
-- Section **Finance** dédiée (titre en bleu) — **vide pour le moment** (placeholder « bientôt disponible »)
-- Disponible sur desktop (sidebar droite, sous Météo) et dans le menu « ⋯ » sur mobile
+- Section **Finance** dédiée (titre en bleu) — desktop (sidebar droite, sous Météo) et menu « ⋯ » sur mobile
+- Données live via **APIs gratuites sans clé** ; chaque sous-section affiche le taux **EUR/USD** ([Frankfurter](https://www.frankfurter.app/), données BCE)
+- **Crypto** : Bitcoin, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
+- _(à venir : Matières premières, ETF/indices, actions)_
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
