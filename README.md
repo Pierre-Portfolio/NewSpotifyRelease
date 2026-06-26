@@ -91,7 +91,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, NASDAQ, NVIDIA**) ; le mode **Full** affiche tout. Choix mémorisé.
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
-- **ETF / indices** : S&P 500, NASDAQ, CAC 40 via **[Stooq](https://stooq.com/)** (même réserve CORS)
+- **ETF / indices** : S&P 500 (ETF **SPY**), NASDAQ-100 (ETF **QQQ**), France (ETF **EWQ**) via **Twelve Data** (le tier gratuit ne couvrant pas les indices, on affiche les ETF répliquants — variation 24h quasi identique) + repli **[Stooq](https://stooq.com/)**
 - **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
 
 ### To do
