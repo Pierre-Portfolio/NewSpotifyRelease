@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.1.9';
+const APP_VERSION = '2.2.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3132,24 +3132,19 @@ function FinancePanel() {
       } catch (e) { if (!cancelled) setCrypto('error'); }
       // Or (gold-api, CORS natif) — pas besoin de proxy
       fetchGold().then(d => { if (!cancelled) setGold(d); });
-      // Cours boursiers (Stooq via proxy) — chargés SÉQUENTIELLEMENT, 1 requête à la
-      // fois avec une petite pause : tirer 6 requêtes d'un coup sature le proxy CORS
-      // (rate-limit) et fait échouer la plupart. Les valeurs visibles en mode Light
-      // (NASDAQ, pétrole, NVIDIA) sont chargées en premier.
+      // Cours (Twelve Data / repli Stooq) — chargés SÉQUENTIELLEMENT, 1 requête à la
+      // fois avec une petite pause : tirer trop de requêtes d'un coup sature le proxy
+      // CORS (rate-limit) et fait échouer la plupart. ⚠ Au montage on ne charge QUE
+      // les valeurs visibles en mode Light (NASDAQ-100, pétrole, NVIDIA, Take-Two) —
+      // les valeurs Full sont chargées à la demande au 1er passage en mode Full.
       // [symbole Twelve Data, symbole Stooq (repli), setter]
-      const quotes = [
-        ['QQQ',     '^ndq',    d => setEtf(p => ({ ...p, ndq:d }))],   // ETF NASDAQ-100 (tier gratuit TD ; indice IXIC = payant)
-        ['WTI/USD', 'cl.f',    d => setOil(d)],
+      const lightQuotes = [
+        ['NDX',     '^ndx',    d => setEtf(p => ({ ...p, ndq:d }))],   // NASDAQ-100
+        ['WTI/USD', 'cl.f',    d => setOil(d)],                         // Pétrole WTI
         ['NVDA',    'nvda.us', d => setStocks(p => ({ ...p, nvda:d }))],
-        ['SPY',     '^spx',    d => setEtf(p => ({ ...p, spx:d }))],   // ETF S&P 500 (indice SPX = payant)
-        ['EWQ',     '^cac',    d => setEtf(p => ({ ...p, cac:d }))],   // ETF iShares MSCI France (CAC 40 / FCHI = payant)
         ['TTWO',    'ttwo.us', d => setStocks(p => ({ ...p, ttwo:d }))],
-        ['GOOGL',   'googl.us',d => setStocks(p => ({ ...p, googl:d }))],
-        ['MSFT',    'msft.us', d => setStocks(p => ({ ...p, msft:d }))],
-        ['AMZN',    'amzn.us', d => setStocks(p => ({ ...p, amzn:d }))],
-        ['TSLA',    'tsla.us', d => setStocks(p => ({ ...p, tsla:d }))],
       ];
-      for (const [td, stq, set] of quotes) {
+      for (const [td, stq, set] of lightQuotes) {
         if (cancelled) return;
         const d = await fetchQuote(td, stq);
         if (!cancelled) set(d);
@@ -3161,8 +3156,8 @@ function FinancePanel() {
 
   const cg = (crypto && crypto !== 'error') ? crypto : null;
 
-  // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, NASDAQ, NVIDIA).
-  // Mode Full : tout. Persisté en localStorage.
+  // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, NASDAQ-100,
+  // NVIDIA, Take-Two, EUR/USD). Mode Full : tout. Persisté en localStorage.
   const [full, setFull] = React.useState(() => localStorage.getItem('spotifyplus_finance_full') === '1');
   const toggleMode = () => setFull(f => { const nv = !f; localStorage.setItem('spotifyplus_finance_full', nv ? '1' : '0'); return nv; });
   const modeBtn = active => ({
@@ -3171,6 +3166,33 @@ function FinancePanel() {
     color: active ? FINANCE_BLUE : C.muted, borderRadius:6, padding:'3px 12px',
     cursor:'pointer', fontSize:10, fontWeight: active ? 700 : 500,
   });
+
+  // Valeurs Full chargées À LA DEMANDE : seulement au 1er passage en mode Full
+  // (économise des requêtes proxy quand l'utilisateur reste en Light). `fetchedFull`
+  // garantit qu'on ne refetch pas en re-basculant Light↔Full.
+  const fetchedFull = React.useRef(false);
+  React.useEffect(() => {
+    if (!full || fetchedFull.current) return;
+    fetchedFull.current = true;
+    let cancelled = false;
+    (async () => {
+      const fullQuotes = [
+        ['.INX',  '^spx',     d => setEtf(p => ({ ...p, spx:d }))],   // S&P 500
+        ['PX1',   '^cac',     d => setEtf(p => ({ ...p, cac:d }))],   // CAC 40
+        ['GOOGL', 'googl.us', d => setStocks(p => ({ ...p, googl:d }))],
+        ['MSFT',  'msft.us',  d => setStocks(p => ({ ...p, msft:d }))],
+        ['AMZN',  'amzn.us',  d => setStocks(p => ({ ...p, amzn:d }))],
+        ['TSLA',  'tsla.us',  d => setStocks(p => ({ ...p, tsla:d }))],
+      ];
+      for (const [td, stq, set] of fullQuotes) {
+        if (cancelled) return;
+        const d = await fetchQuote(td, stq);
+        if (!cancelled) set(d);
+        await new Promise(r => setTimeout(r, 350));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [full]);
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -3194,9 +3216,9 @@ function FinancePanel() {
       </FinanceSection>
 
       <FinanceSection title="ETF / INDICES" eurusd={eurusd}>
-        {full && <FinanceRow icon="🇺🇸" name="S&P 500 (SPY)" value={fmtPrice(etf.spx && etf.spx.price)} pct={etf.spx && etf.spx.pct} />}
-        <FinanceRow icon="💻" name="NASDAQ-100 (QQQ)"  value={fmtPrice(etf.ndq && etf.ndq.price)} pct={etf.ndq && etf.ndq.pct} />
-        {full && <FinanceRow icon="🇫🇷" name="France (EWQ)"  value={fmtPrice(etf.cac && etf.cac.price)} pct={etf.cac && etf.cac.pct} />}
+        {full && <FinanceRow icon="🇺🇸" name="S&P 500" value={fmtPrice(etf.spx && etf.spx.price)} pct={etf.spx && etf.spx.pct} />}
+        <FinanceRow icon="💻" name="NASDAQ-100"  value={fmtPrice(etf.ndq && etf.ndq.price)} pct={etf.ndq && etf.ndq.pct} />
+        {full && <FinanceRow icon="🇫🇷" name="CAC 40"  value={fmtPrice(etf.cac && etf.cac.price)} pct={etf.cac && etf.cac.pct} />}
       </FinanceSection>
 
       <FinanceSection title="STOCK PICKING" eurusd={eurusd}>
