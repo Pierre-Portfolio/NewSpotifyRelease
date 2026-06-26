@@ -92,7 +92,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
 - **ETF / indices** : S&P 500, NASDAQ, CAC 40 via **[Stooq](https://stooq.com/)** (même réserve CORS)
-- **Stock picking** : NVIDIA, Take-Two (TTWO) via **[Stooq](https://stooq.com/)** (même réserve CORS)
+- **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
 
 ### To do
 - Section **To do** dédiée (titre en violet) — desktop (sidebar droite, sous Finance) et onglet propre dans le menu « ⋯ » sur mobile
