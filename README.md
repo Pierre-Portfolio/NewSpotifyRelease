@@ -93,6 +93,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
 - **ETF / indices** : S&P 500 (**.INX**), NASDAQ-100 (**NDX**), CAC 40 (**PX1**) via **Twelve Data** + repli **[Stooq](https://stooq.com/)** (`^spx`/`^ndx`/`^cac`)
 - **Chargement à la demande** : en mode Light seules les valeurs Light sont récupérées ; les valeurs Full ne sont chargées qu'au premier passage en mode Full
+- **Démarrage au login** : les cours commencent à se charger dès la connexion (valeurs Light en priorité) — un **indicateur de chargement** clair s'affiche sur la page Finance pendant la récupération (les appels boursiers sont espacés de ~8 s pour respecter la limite gratuite de Twelve Data)
 - **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
 
 ### To do

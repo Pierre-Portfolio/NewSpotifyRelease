@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.2.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -876,6 +876,10 @@ function StoreProvider({ children }) {
         if (me?.id || me?.rate_limited) {
           if (me?.id) setUser(me);
           setAuthState('connected');
+
+          // Lance le chargement Finance dès le login (valeurs Light prioritaires) —
+          // les cours sont prêts quand l'utilisateur ouvre l'onglet Finance. Idempotent.
+          try { startFinanceLight(); } catch {}
 
           // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
           try { navigator.storage?.persist?.(); } catch {}
@@ -3100,60 +3104,113 @@ async function fetchGold() {
   } catch (e) { return null; }
 }
 
-function FinancePanel() {
-  const [eurusd, setEurusd] = React.useState(null);
-  const [crypto, setCrypto] = React.useState(null); // objet CoinGecko | 'error' | null(chargement)
-  const [oil, setOil]   = React.useState(null);     // { price, pct } | null
-  const [gold, setGold] = React.useState(null);     // { price } | null
-  const [etf, setEtf]   = React.useState({});       // { spx, ndq, cac } chacun { price, pct } | null
-  const [stocks, setStocks] = React.useState({});   // { nvda, ttwo, googl, msft, amzn, tsla } chacun { price, pct } | null
+// ════════════════════════════════════════════════
+// Gestionnaire Finance MODULE-LEVEL — lance le fetch UNE seule fois (dès le login),
+// met en cache et notifie les abonnés (FinancePanel). Survit au démontage de l'onglet
+// mobile : les valeurs sont prêtes quand l'utilisateur ouvre Finance.
+// ════════════════════════════════════════════════
+// ⚠ Twelve Data plan "Basic 8" = 8 requêtes/MINUTE. Pour ne JAMAIS dépasser
+// "Minutely maximum" (8), TOUS les appels TD (fetchTD / fetchQuote) passent par une
+// file globale qui garantit ≥ TD_GAP_MS entre deux appels. Crypto (CoinGecko), or
+// (gold-api) et le repli Stooq ne comptent PAS pour TD → lancés en parallèle, immédiats.
+const TD_GAP_MS = 8000; // ≥7,5s entre 2 appels TD = max 8/min, marge de sécurité incluse
+let _tdChain = Promise.resolve();
+let _tdLastAt = 0;
+function tdSpaced(fn) {
+  const run = _tdChain.then(async () => {
+    const wait = TD_GAP_MS - (Date.now() - _tdLastAt);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _tdLastAt = Date.now();
+    return fn();
+  });
+  _tdChain = run.then(() => {}, () => {}); // ne jamais casser la chaîne sur erreur
+  return run;
+}
 
-  React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      // Taux EUR/USD — Twelve Data (forex, tier gratuit, CORS natif) puis repli
-      // Frankfurter (BCE, sans clé) si la clé TD est absente/épuisée
+const _finance = {
+  eurusd: null, crypto: null, gold: null, oil: null, etf: {}, stocks: {},
+  loadingLight: true,   // true tant que les valeurs Light ne sont pas toutes chargées
+  loadingFull: false,   // true pendant le chargement des valeurs Full
+  startedLight: false, startedFull: false,
+  subs: new Set(),
+};
+function _finNotify() { _finance.subs.forEach(fn => { try { fn(); } catch (e) {} }); }
+
+// Valeurs LIGHT — lancées dès le login (prioritaires). Crypto/or immédiats ;
+// EUR/USD + cours espacés de 8s via la file TD.
+async function startFinanceLight() {
+  if (_finance.startedLight) return;
+  _finance.startedLight = true;
+  // Non-TD (immédiat, en parallèle) : crypto + or
+  (async () => {
+    try {
+      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,bittensor,ripple,pepe&vs_currencies=usd&include_24hr_change=true');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      _finance.crypto = await r.json();
+    } catch (e) { _finance.crypto = 'error'; }
+    _finNotify();
+  })();
+  fetchGold().then(d => { _finance.gold = d; _finNotify(); });
+  // EUR/USD via TD (espacé) puis repli Frankfurter
+  await tdSpaced(async () => {
+    const td = await fetchTD('EUR/USD');
+    let rate = td && td.price != null ? td.price : null;
+    if (rate == null) {
       try {
-        const td = await fetchTD('EUR/USD');
-        let rate = td && td.price != null ? td.price : null;
-        if (rate == null) {
-          const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
-          const j = await r.json();
-          rate = j.rates && j.rates.USD != null ? j.rates.USD : null;
-        }
-        if (!cancelled) setEurusd(rate);
-      } catch (e) { if (!cancelled) setEurusd(null); }
-      // Crypto — CoinGecko (gratuit, sans clé)
-      try {
-        const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,bittensor,ripple,pepe&vs_currencies=usd&include_24hr_change=true');
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
         const j = await r.json();
-        if (!cancelled) setCrypto(j);
-      } catch (e) { if (!cancelled) setCrypto('error'); }
-      // Or (gold-api, CORS natif) — pas besoin de proxy
-      fetchGold().then(d => { if (!cancelled) setGold(d); });
-      // Cours (Twelve Data / repli Stooq) — chargés SÉQUENTIELLEMENT, 1 requête à la
-      // fois avec une petite pause : tirer trop de requêtes d'un coup sature le proxy
-      // CORS (rate-limit) et fait échouer la plupart. ⚠ Au montage on ne charge QUE
-      // les valeurs visibles en mode Light (NASDAQ-100, pétrole, NVIDIA, Take-Two) —
-      // les valeurs Full sont chargées à la demande au 1er passage en mode Full.
-      // [symbole Twelve Data, symbole Stooq (repli), setter]
-      const lightQuotes = [
-        ['NDX',     '^ndx',    d => setEtf(p => ({ ...p, ndq:d }))],   // NASDAQ-100
-        ['WTI/USD', 'cl.f',    d => setOil(d)],                         // Pétrole WTI
-        ['NVDA',    'nvda.us', d => setStocks(p => ({ ...p, nvda:d }))],
-        ['TTWO',    'ttwo.us', d => setStocks(p => ({ ...p, ttwo:d }))],
-      ];
-      for (const [td, stq, set] of lightQuotes) {
-        if (cancelled) return;
-        const d = await fetchQuote(td, stq);
-        if (!cancelled) set(d);
-        await new Promise(r => setTimeout(r, 350));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
+        rate = j.rates && j.rates.USD != null ? j.rates.USD : null;
+      } catch (e) {}
+    }
+    _finance.eurusd = rate; _finNotify();
+  });
+  // Cours Light — espacés de 8s [symbole TD, symbole Stooq (repli), setter]
+  const light = [
+    ['NDX',     '^ndx',    d => { _finance.etf = { ..._finance.etf, ndq: d }; }],   // NASDAQ-100
+    ['WTI/USD', 'cl.f',    d => { _finance.oil = d; }],                              // Pétrole WTI
+    ['NVDA',    'nvda.us', d => { _finance.stocks = { ..._finance.stocks, nvda: d }; }],
+    ['TTWO',    'ttwo.us', d => { _finance.stocks = { ..._finance.stocks, ttwo: d }; }],
+  ];
+  for (const [td, stq, set] of light) {
+    const d = await tdSpaced(() => fetchQuote(td, stq));
+    set(d); _finNotify();
+  }
+  _finance.loadingLight = false; _finNotify();
+}
 
+// Valeurs FULL — chargées à la demande au 1er passage en mode Full. Partagent la
+// MÊME file TD que Light : si Light n'a pas fini, elles s'enchaînent derrière (jamais
+// >8/min).
+async function startFinanceFull() {
+  if (_finance.startedFull) return;
+  _finance.startedFull = true;
+  _finance.loadingFull = true; _finNotify();
+  const full = [
+    ['.INX',  '^spx',     d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500
+    ['PX1',   '^cac',     d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40
+    ['GOOGL', 'googl.us', d => { _finance.stocks = { ..._finance.stocks, googl: d }; }],
+    ['MSFT',  'msft.us',  d => { _finance.stocks = { ..._finance.stocks, msft: d }; }],
+    ['AMZN',  'amzn.us',  d => { _finance.stocks = { ..._finance.stocks, amzn: d }; }],
+    ['TSLA',  'tsla.us',  d => { _finance.stocks = { ..._finance.stocks, tsla: d }; }],
+  ];
+  for (const [td, stq, set] of full) {
+    const d = await tdSpaced(() => fetchQuote(td, stq));
+    set(d); _finNotify();
+  }
+  _finance.loadingFull = false; _finNotify();
+}
+
+function FinancePanel() {
+  // Lit l'état depuis le gestionnaire module-level `_finance` (lancé dès le login) et
+  // se ré-rend à chaque notification. `startFinanceLight()` est idempotent : sur
+  // desktop il a déjà tourné au login, mais on le rappelle au cas où (ouverture directe).
+  const [, forceRender] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => {
+    _finance.subs.add(forceRender);
+    startFinanceLight();
+    return () => { _finance.subs.delete(forceRender); };
+  }, []);
+  const { eurusd, crypto, gold, oil, etf, stocks, loadingLight, loadingFull } = _finance;
   const cg = (crypto && crypto !== 'error') ? crypto : null;
 
   // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, NASDAQ-100,
@@ -3167,32 +3224,15 @@ function FinancePanel() {
     cursor:'pointer', fontSize:10, fontWeight: active ? 700 : 500,
   });
 
-  // Valeurs Full chargées À LA DEMANDE : seulement au 1er passage en mode Full
-  // (économise des requêtes proxy quand l'utilisateur reste en Light). `fetchedFull`
-  // garantit qu'on ne refetch pas en re-basculant Light↔Full.
-  const fetchedFull = React.useRef(false);
-  React.useEffect(() => {
-    if (!full || fetchedFull.current) return;
-    fetchedFull.current = true;
-    let cancelled = false;
-    (async () => {
-      const fullQuotes = [
-        ['.INX',  '^spx',     d => setEtf(p => ({ ...p, spx:d }))],   // S&P 500
-        ['PX1',   '^cac',     d => setEtf(p => ({ ...p, cac:d }))],   // CAC 40
-        ['GOOGL', 'googl.us', d => setStocks(p => ({ ...p, googl:d }))],
-        ['MSFT',  'msft.us',  d => setStocks(p => ({ ...p, msft:d }))],
-        ['AMZN',  'amzn.us',  d => setStocks(p => ({ ...p, amzn:d }))],
-        ['TSLA',  'tsla.us',  d => setStocks(p => ({ ...p, tsla:d }))],
-      ];
-      for (const [td, stq, set] of fullQuotes) {
-        if (cancelled) return;
-        const d = await fetchQuote(td, stq);
-        if (!cancelled) set(d);
-        await new Promise(r => setTimeout(r, 350));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [full]);
+  // Valeurs Full chargées À LA DEMANDE au 1er passage en mode Full (idempotent côté
+  // gestionnaire via `_finance.startedFull`).
+  React.useEffect(() => { if (full) startFinanceFull(); }, [full]);
+
+  // Loading clair : Light en cours, ou Full demandé et en cours
+  const loading = loadingLight || (full && loadingFull);
+  const loadingLabel = loadingLight
+    ? 'Chargement des cours…'
+    : 'Chargement des valeurs Full…';
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -3200,6 +3240,20 @@ function FinancePanel() {
         <button onClick={() => full && toggleMode()} style={modeBtn(!full)}>Light</button>
         <button onClick={() => !full && toggleMode()} style={modeBtn(full)}>Full</button>
       </div>
+
+      {loading && (
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 10px',
+          background:`${FINANCE_BLUE}14`, border:`1px solid ${FINANCE_BLUE}44`,
+          borderRadius:8, fontSize:11, color:FINANCE_BLUE, fontWeight:600 }}>
+          <span style={{ width:12, height:12, border:`2px solid ${FINANCE_BLUE}55`,
+            borderTopColor:FINANCE_BLUE, borderRadius:'50%', display:'inline-block',
+            animation:'finspin 0.8s linear infinite' }} />
+          {loadingLabel}
+          <span style={{ marginLeft:'auto', fontFamily:'DM Mono,monospace', fontWeight:500,
+            color:C.muted, fontSize:10 }}>≈8s/valeur (limite Twelve Data)</span>
+        </div>
+      )}
+      <style>{'@keyframes finspin{to{transform:rotate(360deg)}}'}</style>
 
       <FinanceSection title="CRYPTO" eurusd={eurusd}>
         <FinanceRow icon="₿"  name="Bitcoin"  value={fmtPrice(cg && cg.bitcoin && cg.bitcoin.usd)}     pct={cg && cg.bitcoin && cg.bitcoin.usd_24h_change} />
