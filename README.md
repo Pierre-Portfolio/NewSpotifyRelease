@@ -89,7 +89,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Crypto** : Bitcoin, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
 - **ETF / indices** : S&P 500, NASDAQ, CAC 40 via **[Stooq](https://stooq.com/)** (même réserve CORS)
-- _(à venir : actions)_
+- **Stock picking** : NVIDIA, Take-Two (TTWO) via **[Stooq](https://stooq.com/)** (même réserve CORS)
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
