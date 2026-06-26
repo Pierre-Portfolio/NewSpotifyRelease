@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- CSP : même en cas d'XSS, connect-src empêche d'exfiltrer le token (localStorage) vers un domaine attaquant.
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.1.2';
+const APP_VERSION = '2.1.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3063,6 +3063,33 @@ async function fetchStooq(symbol) {
   } catch (e) { return null; }
 }
 
+// ── Twelve Data : API boursière qui autorise le CORS nativement (plus besoin de
+// proxy). Clé GRATUITE lecture seule (cf. README). ⚠ Clé publique par nature sur
+// une app statique : ne mettre QUE des clés gratuites/lecture seule sans carte.
+const TWELVE_DATA_KEY = ''; // ← COLLER LA CLÉ ICI (32 caractères hex)
+
+async function fetchTD(symbol) {
+  if (!TWELVE_DATA_KEY) return null;
+  try {
+    const r = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${TWELVE_DATA_KEY}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j || j.status === 'error' || j.code) return null;
+    const price = parseFloat(j.close != null ? j.close : j.price);
+    if (isNaN(price)) return null;
+    const pct = j.percent_change != null ? parseFloat(j.percent_change) : undefined;
+    return { price, pct: isNaN(pct) ? undefined : pct };
+  } catch (e) { return null; }
+}
+
+// Cours unifié : Twelve Data (clé, CORS natif) en priorité, repli Stooq (via proxy)
+// si le symbole n'est pas couvert par le tier gratuit ou si la clé est absente.
+async function fetchQuote(tdSymbol, stooqSymbol) {
+  const a = await fetchTD(tdSymbol);
+  if (a) return a;
+  return await fetchStooq(stooqSymbol);
+}
+
 // Or (XAU, USD/once) — gold-api.com, gratuit sans clé
 async function fetchGold() {
   try {
@@ -3103,17 +3130,18 @@ function FinancePanel() {
       // fois avec une petite pause : tirer 6 requêtes d'un coup sature le proxy CORS
       // (rate-limit) et fait échouer la plupart. Les valeurs visibles en mode Light
       // (NASDAQ, pétrole, NVIDIA) sont chargées en premier.
+      // [symbole Twelve Data, symbole Stooq (repli), setter]
       const quotes = [
-        ['^ndq',    d => setEtf(p => ({ ...p, ndq:d }))],
-        ['cl.f',    d => setOil(d)],
-        ['nvda.us', d => setStocks(p => ({ ...p, nvda:d }))],
-        ['^spx',    d => setEtf(p => ({ ...p, spx:d }))],
-        ['^cac',    d => setEtf(p => ({ ...p, cac:d }))],
-        ['ttwo.us', d => setStocks(p => ({ ...p, ttwo:d }))],
+        ['IXIC',    '^ndq',    d => setEtf(p => ({ ...p, ndq:d }))],
+        ['WTI/USD', 'cl.f',    d => setOil(d)],
+        ['NVDA',    'nvda.us', d => setStocks(p => ({ ...p, nvda:d }))],
+        ['SPX',     '^spx',    d => setEtf(p => ({ ...p, spx:d }))],
+        ['FCHI',    '^cac',    d => setEtf(p => ({ ...p, cac:d }))],
+        ['TTWO',    'ttwo.us', d => setStocks(p => ({ ...p, ttwo:d }))],
       ];
-      for (const [sym, set] of quotes) {
+      for (const [td, stq, set] of quotes) {
         if (cancelled) return;
-        const d = await fetchStooq(sym);
+        const d = await fetchQuote(td, stq);
         if (!cancelled) set(d);
         await new Promise(r => setTimeout(r, 350));
       }
