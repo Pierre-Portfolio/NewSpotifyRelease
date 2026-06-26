@@ -87,8 +87,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Finance
 - Section **Finance** dédiée (titre en bleu) — desktop (sidebar droite, sous Météo) et menu « ⋯ » sur mobile
-- Données live via **APIs gratuites sans clé** ; chaque sous-section affiche le taux **EUR/USD** ([Frankfurter](https://www.frankfurter.app/), données BCE)
-- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, NASDAQ, NVIDIA**) ; le mode **Full** affiche tout. Choix mémorisé.
+- Données live ; chaque sous-section affiche le taux **EUR/USD** (via **Twelve Data**, repli [Frankfurter](https://www.frankfurter.app/) / BCE)
+- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. Choix mémorisé.
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
 - **ETF / indices** : S&P 500 (ETF **SPY**), NASDAQ-100 (ETF **QQQ**), France (ETF **EWQ**) via **Twelve Data** (le tier gratuit ne couvrant pas les indices, on affiche les ETF répliquants — variation 24h quasi identique) + repli **[Stooq](https://stooq.com/)**
