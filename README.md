@@ -87,7 +87,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Section **Finance** dédiée (titre en bleu) — desktop (sidebar droite, sous Météo) et menu « ⋯ » sur mobile
 - Données live via **APIs gratuites sans clé** ; chaque sous-section affiche le taux **EUR/USD** ([Frankfurter](https://www.frankfurter.app/), données BCE)
 - **Crypto** : Bitcoin, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
-- _(à venir : Matières premières, ETF/indices, actions)_
+- **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
+- _(à venir : ETF/indices, actions)_
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration

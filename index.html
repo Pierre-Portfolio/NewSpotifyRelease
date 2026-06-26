@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- CSP : même en cas d'XSS, connect-src empêche d'exfiltrer le token (localStorage) vers un domaine attaquant.
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://api.coingecko.com https://api.frankfurter.app; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://stooq.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '1.18.9';
+const APP_VERSION = '1.19.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2720,9 +2720,39 @@ function FinanceSection({ title, eurusd, children }) {
   );
 }
 
+// Cours via Stooq (CSV léger, gratuit sans clé) — variation = (close - open)/open du jour.
+// CORS non garanti : fallback null silencieux (la ligne affiche alors '—').
+async function fetchStooq(symbol) {
+  try {
+    const r = await fetch(`https://stooq.com/q/l/?s=${encodeURIComponent(symbol)}&f=sd2t2ohlcv&h&e=csv`);
+    if (!r.ok) return null;
+    const txt = await r.text();
+    const lines = txt.trim().split('\n');
+    if (lines.length < 2) return null;
+    const cols = lines[1].split(',');           // Symbol,Date,Time,Open,High,Low,Close,Volume
+    const open = parseFloat(cols[3]);
+    const close = parseFloat(cols[6]);
+    if (isNaN(close)) return null;
+    const pct = (!isNaN(open) && open) ? ((close - open) / open) * 100 : undefined;
+    return { price: close, pct };
+  } catch (e) { return null; }
+}
+
+// Or (XAU, USD/once) — gold-api.com, gratuit sans clé
+async function fetchGold() {
+  try {
+    const r = await fetch('https://api.gold-api.com/price/XAU');
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.price != null ? { price: j.price } : null;
+  } catch (e) { return null; }
+}
+
 function FinancePanel() {
   const [eurusd, setEurusd] = React.useState(null);
   const [crypto, setCrypto] = React.useState(null); // objet CoinGecko | 'error' | null(chargement)
+  const [oil, setOil]   = React.useState(null);     // { price, pct } | null
+  const [gold, setGold] = React.useState(null);     // { price } | null
 
   React.useEffect(() => {
     let cancelled = false;
@@ -2740,6 +2770,9 @@ function FinancePanel() {
         const j = await r.json();
         if (!cancelled) setCrypto(j);
       } catch (e) { if (!cancelled) setCrypto('error'); }
+      // Matières premières — Oil (Stooq cl.f) + Gold (gold-api)
+      fetchStooq('cl.f').then(d => { if (!cancelled) setOil(d); });
+      fetchGold().then(d => { if (!cancelled) setGold(d); });
     })();
     return () => { cancelled = true; };
   }, []);
@@ -2752,6 +2785,11 @@ function FinancePanel() {
         <FinanceRow icon="₿"  name="Bitcoin" value={fmtPrice(cg && cg.bitcoin && cg.bitcoin.usd)} pct={cg && cg.bitcoin && cg.bitcoin.usd_24h_change} />
         <FinanceRow icon="✕"  name="XRP"     value={fmtPrice(cg && cg.ripple && cg.ripple.usd)}   pct={cg && cg.ripple && cg.ripple.usd_24h_change} />
         <FinanceRow icon="🐸" name="PEPE"    value={fmtPrice(cg && cg.pepe && cg.pepe.usd)}       pct={cg && cg.pepe && cg.pepe.usd_24h_change} />
+      </FinanceSection>
+
+      <FinanceSection title="MATIÈRES PREMIÈRES" eurusd={eurusd}>
+        <FinanceRow icon="🛢" name="Pétrole (WTI)" value={fmtPrice(oil && oil.price)}  pct={oil && oil.pct} />
+        <FinanceRow icon="🥇" name="Or (once)"     value={fmtPrice(gold && gold.price)} />
       </FinanceSection>
     </div>
   );
