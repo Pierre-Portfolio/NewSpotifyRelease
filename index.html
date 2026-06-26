@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- CSP : même en cas d'XSS, connect-src empêche d'exfiltrer le token (localStorage) vers un domaine attaquant.
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://query1.finance.yahoo.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.2';
+const APP_VERSION = '2.2.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3104,6 +3104,34 @@ async function fetchGold() {
   } catch (e) { return null; }
 }
 
+// Yahoo Finance — endpoint `chart` (JSON), GRATUIT et SANS clé, couvre indices
+// (^NDX, ^GSPC, ^FCHI) ET matières premières (CL=F = WTI) que Twelve Data gratuit ne
+// donne pas. ⚠ Yahoo n'envoie pas d'en-tête CORS → on passe par `corsFetchText`
+// (proxy) : le proxy fetche côté serveur (IP US) donc contourne aussi le mur de
+// consentement RGPD. Variation 24h = (cours − clôture précédente) / clôture précédente.
+async function fetchYahooQuote(symbol) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1d`;
+    const txt = await corsFetchText(url);
+    if (!txt) return null;
+    const j = JSON.parse(txt);
+    const m = j && j.chart && j.chart.result && j.chart.result[0] && j.chart.result[0].meta;
+    if (!m || m.regularMarketPrice == null) return null;
+    const price = m.regularMarketPrice;
+    const prev  = m.chartPreviousClose != null ? m.chartPreviousClose : m.previousClose;
+    const pct   = (prev != null && prev) ? ((price - prev) / prev) * 100 : undefined;
+    return { price, pct };
+  } catch (e) { return null; }
+}
+
+// Indice / matière première : Yahoo (vrai niveau d'indice) en priorité, repli Stooq.
+// Aucun de ces deux n'est un appel Twelve Data → pas de file 8s, chargement rapide.
+async function fetchIndexQuote(yahooSymbol, stooqSymbol) {
+  const a = await fetchYahooQuote(yahooSymbol);
+  if (a) return a;
+  return await fetchStooq(stooqSymbol);
+}
+
 // ════════════════════════════════════════════════
 // Gestionnaire Finance MODULE-LEVEL — lance le fetch UNE seule fois (dès le login),
 // met en cache et notifie les abonnés (FinancePanel). Survit au démontage de l'onglet
@@ -3141,12 +3169,25 @@ const _finance = {
 };
 function _finNotify() { _finance.subs.forEach(fn => { try { fn(); } catch (e) {} }); }
 
-// Valeurs LIGHT — lancées dès le login (prioritaires). Crypto/or immédiats ;
-// EUR/USD + cours espacés de 8s via la file TD.
+// Helper : exécute une liste d'indices/matières (Yahoo→Stooq) en SÉQUENCE avec une
+// petite pause (350ms) — hors file TD (ne compte pas pour Twelve Data).
+async function _runIndexTrack(list) {
+  for (const [yh, stq, set] of list) {
+    const d = await fetchIndexQuote(yh, stq);
+    set(d); _finNotify();
+    await new Promise(r => setTimeout(r, 350));
+  }
+}
+
+// Valeurs LIGHT — lancées dès le login (prioritaires). DEUX pistes en PARALLÈLE :
+//  • piste Yahoo (NASDAQ-100 + pétrole) : rapide, hors file TD
+//  • piste TD (EUR/USD + actions) : espacée de 8s (limite Basic 8)
+// Crypto + or partent en parallèle immédiatement. `loadingLight` ne passe à false
+// que quand LES DEUX pistes sont finies.
 async function startFinanceLight() {
   if (_finance.startedLight) return;
   _finance.startedLight = true;
-  // Non-TD (immédiat, en parallèle) : crypto + or
+  // Non-TD immédiats : crypto + or
   (async () => {
     try {
       const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,bittensor,ripple,pepe&vs_currencies=usd&include_24hr_change=true');
@@ -3156,52 +3197,62 @@ async function startFinanceLight() {
     _finNotify();
   })();
   fetchGold().then(d => { _finance.gold = d; _finNotify(); });
-  // EUR/USD via TD (espacé) puis repli Frankfurter
-  await tdSpaced(async () => {
-    const td = await fetchTD('EUR/USD');
-    let rate = td && td.price != null ? td.price : null;
-    if (rate == null) {
-      try {
-        const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
-        const j = await r.json();
-        rate = j.rates && j.rates.USD != null ? j.rates.USD : null;
-      } catch (e) {}
+  // Piste Yahoo (indices + pétrole) [symbole Yahoo, symbole Stooq (repli), setter]
+  const yahooTrack = _runIndexTrack([
+    ['^NDX', '^ndx', d => { _finance.etf = { ..._finance.etf, ndq: d }; }],   // NASDAQ-100
+    ['CL=F', 'cl.f', d => { _finance.oil = d; }],                             // Pétrole WTI
+  ]);
+  // Piste TD (EUR/USD + actions), espacée 8s — pilote le libellé `nextLabel`
+  const tdTrack = (async () => {
+    await tdSpaced(async () => {
+      const td = await fetchTD('EUR/USD');
+      let rate = td && td.price != null ? td.price : null;
+      if (rate == null) {
+        try {
+          const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
+          const j = await r.json();
+          rate = j.rates && j.rates.USD != null ? j.rates.USD : null;
+        } catch (e) {}
+      }
+      _finance.eurusd = rate; _finNotify();
+    }, 'EUR/USD');
+    const stocks = [
+      ['NVDA', 'nvda.us', d => { _finance.stocks = { ..._finance.stocks, nvda: d }; }, 'NVIDIA'],
+      ['TTWO', 'ttwo.us', d => { _finance.stocks = { ..._finance.stocks, ttwo: d }; }, 'Take-Two'],
+    ];
+    for (const [td, stq, set, label] of stocks) {
+      const d = await tdSpaced(() => fetchQuote(td, stq), label);
+      set(d); _finNotify();
     }
-    _finance.eurusd = rate; _finNotify();
-  }, 'EUR/USD');
-  // Cours Light — espacés de 8s [symbole TD, symbole Stooq (repli), setter, libellé]
-  const light = [
-    ['NDX',     '^ndx',    d => { _finance.etf = { ..._finance.etf, ndq: d }; },    'NASDAQ-100'],
-    ['WTI/USD', 'cl.f',    d => { _finance.oil = d; },                              'Pétrole (WTI)'],
-    ['NVDA',    'nvda.us', d => { _finance.stocks = { ..._finance.stocks, nvda: d }; }, 'NVIDIA'],
-    ['TTWO',    'ttwo.us', d => { _finance.stocks = { ..._finance.stocks, ttwo: d }; }, 'Take-Two'],
-  ];
-  for (const [td, stq, set, label] of light) {
-    const d = await tdSpaced(() => fetchQuote(td, stq), label);
-    set(d); _finNotify();
-  }
+  })();
+  await Promise.all([yahooTrack, tdTrack]);
   _finance.loadingLight = false; _finance.nextLabel = null; _finNotify();
 }
 
-// Valeurs FULL — chargées à la demande au 1er passage en mode Full. Partagent la
-// MÊME file TD que Light : si Light n'a pas fini, elles s'enchaînent derrière (jamais
-// >8/min).
+// Valeurs FULL — chargées à la demande au 1er passage en mode Full. Même découpage :
+// piste Yahoo (S&P 500 + CAC 40) en parallèle de la piste TD (actions, espacée 8s,
+// partage la file de Light).
 async function startFinanceFull() {
   if (_finance.startedFull) return;
   _finance.startedFull = true;
   _finance.loadingFull = true; _finNotify();
-  const full = [
-    ['.INX',  '^spx',     d => { _finance.etf = { ..._finance.etf, spx: d }; },     'S&P 500'],
-    ['PX1',   '^cac',     d => { _finance.etf = { ..._finance.etf, cac: d }; },     'CAC 40'],
-    ['GOOGL', 'googl.us', d => { _finance.stocks = { ..._finance.stocks, googl: d }; }, 'Google'],
-    ['MSFT',  'msft.us',  d => { _finance.stocks = { ..._finance.stocks, msft: d }; },  'Microsoft'],
-    ['AMZN',  'amzn.us',  d => { _finance.stocks = { ..._finance.stocks, amzn: d }; },  'Amazon'],
-    ['TSLA',  'tsla.us',  d => { _finance.stocks = { ..._finance.stocks, tsla: d }; },  'Tesla'],
-  ];
-  for (const [td, stq, set, label] of full) {
-    const d = await tdSpaced(() => fetchQuote(td, stq), label);
-    set(d); _finNotify();
-  }
+  const yahooTrack = _runIndexTrack([
+    ['^GSPC', '^spx', d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500
+    ['^FCHI', '^cac', d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40
+  ]);
+  const tdTrack = (async () => {
+    const stocks = [
+      ['GOOGL', 'googl.us', d => { _finance.stocks = { ..._finance.stocks, googl: d }; }, 'Google'],
+      ['MSFT',  'msft.us',  d => { _finance.stocks = { ..._finance.stocks, msft: d }; },  'Microsoft'],
+      ['AMZN',  'amzn.us',  d => { _finance.stocks = { ..._finance.stocks, amzn: d }; },  'Amazon'],
+      ['TSLA',  'tsla.us',  d => { _finance.stocks = { ..._finance.stocks, tsla: d }; },  'Tesla'],
+    ];
+    for (const [td, stq, set, label] of stocks) {
+      const d = await tdSpaced(() => fetchQuote(td, stq), label);
+      set(d); _finNotify();
+    }
+  })();
+  await Promise.all([yahooTrack, tdTrack]);
   _finance.loadingFull = false; _finance.nextLabel = null; _finNotify();
 }
 
