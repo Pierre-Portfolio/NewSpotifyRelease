@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '1.19.4';
+const APP_VERSION = '1.19.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2583,6 +2583,49 @@ async function fetchMeteo(lat, lon) {
   }));
 }
 
+// Prévision détaillée (clic sur un jour) — Open-Meteo, beaucoup plus de champs :
+// ressenti, précipitations, proba pluie, vent + rafales + direction, UV, humidité,
+// lever/coucher du soleil + détail heure par heure de la journée.
+async function fetchMeteoDetail(lat, lon) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
+    + `&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,`
+    + `sunrise,sunset,uv_index_max,precipitation_sum,precipitation_probability_max,precipitation_hours,`
+    + `wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant`
+    + `&hourly=temperature_2m,precipitation_probability,relative_humidity_2m,weather_code`
+    + `&timezone=Europe%2FParis&forecast_days=3`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const j = await res.json();
+  const d = j.daily, h = j.hourly;
+  const days = d.time.map((t, i) => ({
+    date: t, code: d.weather_code[i],
+    tmax: Math.round(d.temperature_2m_max[i]), tmin: Math.round(d.temperature_2m_min[i]),
+    feelMax: Math.round(d.apparent_temperature_max[i]), feelMin: Math.round(d.apparent_temperature_min[i]),
+    sunrise: d.sunrise[i], sunset: d.sunset[i],
+    uv: d.uv_index_max[i], precip: d.precipitation_sum[i], precipProb: d.precipitation_probability_max[i],
+    precipHours: d.precipitation_hours[i],
+    wind: Math.round(d.wind_speed_10m_max[i]), gusts: Math.round(d.wind_gusts_10m_max[i]),
+    windDir: d.wind_direction_10m_dominant[i],
+  }));
+  // Index horaire groupé par date
+  const hourly = {};
+  (h?.time || []).forEach((t, i) => {
+    const day = t.slice(0, 10);
+    (hourly[day] = hourly[day] || []).push({
+      hour: t.slice(11, 16), temp: Math.round(h.temperature_2m[i]),
+      precipProb: h.precipitation_probability[i], humidity: h.relative_humidity_2m[i], code: h.weather_code[i],
+    });
+  });
+  return { days, hourly };
+}
+
+// Direction du vent (degrés) → rose des vents FR
+function windCardinal(deg) {
+  if (deg == null || isNaN(deg)) return '—';
+  const dirs = ['N','NE','E','SE','S','SO','O','NO'];
+  return dirs[Math.round(deg / 45) % 8];
+}
+
 // Reverse-geocoding coords → nom de ville (BigDataCloud, gratuit sans clé · public-apis)
 async function reverseGeocode(lat, lon) {
   try {
@@ -2600,7 +2643,96 @@ function meteoDayLabel(iso, i) {
   return s.charAt(0).toUpperCase() + s.slice(1).replace('.', '');
 }
 
+// Date longue FR — "vendredi 26 juin"
+function meteoFullDate(iso) {
+  const d = new Date(iso + 'T12:00:00');
+  const s = d.toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long' });
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+const fmtHM = iso => { try { return new Date(iso).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }); } catch { return '—'; } };
+
+// Modal détaillé d'un jour : ressenti, précipitations, vent, UV, humidité, soleil + heure par heure
+function MeteoDetailModal({ locName, dayIndex, detail, loading, onClose }) {
+  const day  = detail?.days?.[dayIndex];
+  const hours = (day && detail?.hourly?.[day.date]) || [];
+  const [emoji, label] = day ? wmoMeteo(day.code) : ['⏳', ''];
+  const Stat = ({ ic, lbl, val }) => (
+    <div style={{ background:C.surfaceHigh, borderRadius:8, padding:'8px 10px', flex:'1 1 calc(50% - 4px)', minWidth:0 }}>
+      <div style={{ fontSize:9, color:C.muted, fontWeight:700, letterSpacing:'0.03em', marginBottom:3 }}>{ic} {lbl}</div>
+      <div style={{ fontSize:13, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text }}>{val}</div>
+    </div>
+  );
+  return (
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:200, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:'16px 18px', width:'100%', maxWidth:420, maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.6)' }}>
+        <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:10, marginBottom:12 }}>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:11, color:METEO_BLUE, fontWeight:700, letterSpacing:'0.03em', marginBottom:2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>📍 {locName}</div>
+            <div style={{ fontSize:15, fontWeight:800, color:C.text }}>{day ? meteoFullDate(day.date) : '…'}</div>
+          </div>
+          <button onClick={onClose} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, fontSize:16, lineHeight:1, padding:'3px 9px', cursor:'pointer', flexShrink:0 }}>×</button>
+        </div>
+        {loading || !day ? (
+          <div style={{ fontSize:11, color:C.muted, padding:'24px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>{loading ? 'Chargement des détails…' : 'Données indisponibles'}</div>
+        ) : (
+          <>
+            <div style={{ display:'flex', alignItems:'center', gap:14, background:C.surfaceHigh, borderRadius:10, padding:'12px 14px', marginBottom:12 }}>
+              <div style={{ fontSize:46, lineHeight:1 }}>{emoji}</div>
+              <div style={{ minWidth:0 }}>
+                <div style={{ fontSize:13, color:C.text, fontWeight:700, marginBottom:2 }}>{label}</div>
+                <div style={{ fontSize:22, fontWeight:900, fontFamily:'DM Mono,monospace', color:METEO_BLUE }}>{day.tmax}° <span style={{ fontSize:14, color:C.muted, fontWeight:700 }}>/ {day.tmin}°</span></div>
+              </div>
+            </div>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:8, marginBottom:12 }}>
+              <Stat ic="🌡" lbl="RESSENTI" val={`${day.feelMax}° / ${day.feelMin}°`} />
+              <Stat ic="💧" lbl="PLUIE (PROBA)" val={`${day.precipProb ?? 0}%`} />
+              <Stat ic="🌧" lbl="PRÉCIP. CUMUL" val={`${day.precip ?? 0} mm`} />
+              <Stat ic="⏱" lbl="HEURES DE PLUIE" val={`${day.precipHours ?? 0} h`} />
+              <Stat ic="💨" lbl="VENT MAX" val={`${day.wind} km/h ${windCardinal(day.windDir)}`} />
+              <Stat ic="🌬" lbl="RAFALES" val={`${day.gusts} km/h`} />
+              <Stat ic="☀️" lbl="INDICE UV" val={day.uv != null ? day.uv.toFixed(1) : '—'} />
+              <Stat ic="🌅" lbl="LEVER / COUCHER" val={`${fmtHM(day.sunrise)} · ${fmtHM(day.sunset)}`} />
+            </div>
+            {hours.length > 0 && (
+              <>
+                <div style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:'0.06em', marginBottom:6 }}>HEURE PAR HEURE</div>
+                <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:4 }}>
+                  {hours.map(hr => {
+                    const [hem] = wmoMeteo(hr.code);
+                    return (
+                      <div key={hr.hour} style={{ flex:'0 0 auto', background:C.surfaceHigh, borderRadius:8, padding:'7px 8px', textAlign:'center', minWidth:48 }}>
+                        <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>{hr.hour}</div>
+                        <div style={{ fontSize:16, margin:'3px 0', lineHeight:1 }}>{hem}</div>
+                        <div style={{ fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace', color:METEO_BLUE }}>{hr.temp}°</div>
+                        <div style={{ fontSize:8, color:'#6aa9e0', fontFamily:'DM Mono,monospace' }}>💧{hr.precipProb ?? 0}%</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MeteoLoc({ loc }) {
+  const [sel, setSel] = React.useState(null);     // index du jour sélectionné | null
+  const [detail, setDetail] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+
+  const openDay = async (i) => {
+    setSel(i);
+    if (loc.lat == null) return;
+    if (detail) return;                            // déjà chargé pour ce lieu
+    setLoading(true);
+    try { setDetail(await fetchMeteoDetail(loc.lat, loc.lon)); }
+    catch (e) { setDetail({ days: [], hourly: {} }); }
+    finally { setLoading(false); }
+  };
+
   if (!loc) return (
     <div style={{ fontSize:11, color:C.muted, padding:'4px 0' }}>Chargement…</div>
   );
@@ -2618,8 +2750,10 @@ function MeteoLoc({ loc }) {
           {loc.days.map((day, i) => {
             const [emoji, label] = wmoMeteo(day.code);
             return (
-              <div key={day.date} title={label}
-                style={{ flex:1, background:C.surfaceHigh, borderRadius:8, padding:'8px 2px', textAlign:'center' }}>
+              <div key={day.date} title={`${label} — clic pour le détail`} onClick={() => openDay(i)}
+                style={{ flex:1, background:C.surfaceHigh, borderRadius:8, padding:'8px 2px', textAlign:'center', cursor:'pointer', transition:'background 0.15s' }}
+                onMouseEnter={e => e.currentTarget.style.background = C.border}
+                onMouseLeave={e => e.currentTarget.style.background = C.surfaceHigh}>
                 <div style={{ fontSize:9, color:C.muted, fontWeight:700, letterSpacing:'0.03em' }}>{meteoDayLabel(day.date, i)}</div>
                 <div style={{ fontSize:20, margin:'4px 0', lineHeight:1 }}>{emoji}</div>
                 <div style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:METEO_BLUE, lineHeight:1.1 }}>{day.tmax}°</div>
@@ -2628,6 +2762,9 @@ function MeteoLoc({ loc }) {
             );
           })}
         </div>
+      )}
+      {sel !== null && (
+        <MeteoDetailModal locName={loc.name} dayIndex={sel} detail={detail} loading={loading} onClose={() => setSel(null)} />
       )}
     </div>
   );
@@ -2641,9 +2778,9 @@ function MeteoPanel() {
     const load = async (key, name, lat, lon) => {
       try {
         const days = await fetchMeteo(lat, lon);
-        if (!cancelled) setData(prev => ({ ...prev, [key]: { name, days } }));
+        if (!cancelled) setData(prev => ({ ...prev, [key]: { name, days, lat, lon } }));
       } catch (e) {
-        if (!cancelled) setData(prev => ({ ...prev, [key]: { name, error:true } }));
+        if (!cancelled) setData(prev => ({ ...prev, [key]: { name, error:true, lat, lon } }));
       }
     };
     METEO_LOCS.forEach(l => load(l.key, l.name, l.lat, l.lon));
