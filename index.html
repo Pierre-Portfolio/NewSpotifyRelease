@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.7';
+const APP_VERSION = '2.2.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3004,14 +3004,14 @@ function SolIcon() {
   );
 }
 
-function FinanceRow({ icon, name, value, pct }) {
+function FinanceRow({ icon, name, value, pct, loading }) {
   return (
     <div style={{ display:'flex', alignItems:'center', gap:10, padding:'5px 0', borderTop:`1px solid ${C.border}` }}>
       <div style={{ fontSize:15, width:22, textAlign:'center', flexShrink:0 }}>{icon}</div>
       <div style={{ flex:1, minWidth:0, fontSize:12, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{name}</div>
       <div style={{ textAlign:'right', flexShrink:0 }}>
-        <div style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text, lineHeight:1.2 }}>{value}</div>
-        {pct !== undefined && <FinancePct v={pct} />}
+        <div style={{ fontSize: loading ? 10 : 12, fontWeight: loading ? 600 : 800, fontFamily:'DM Mono,monospace', color: loading ? FINANCE_BLUE : C.text, lineHeight:1.2, fontStyle: loading ? 'italic' : 'normal' }}>{loading ? 'Loading…' : value}</div>
+        {!loading && pct !== undefined && <FinancePct v={pct} />}
       </div>
     </div>
   );
@@ -3135,6 +3135,25 @@ async function fetchAlphaOil() {
   } catch (e) { return null; }
 }
 
+// Cours d'un titre/ETF via Alpha Vantage GLOBAL_QUOTE (CORS natif). AV n'a PAS d'indices
+// bruts → on interroge les ETF répliquants (QQQ=NASDAQ-100, SPY=S&P 500, EWQ=CAC/France).
+// Renvoie { price, pct }. En cas de rate-limit, AV renvoie un objet sans 'Global Quote' → null.
+async function fetchAlphaQuote(symbol) {
+  if (!ALPHA_VANTAGE_KEY) return null;
+  try {
+    const r = await fetch(`https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(symbol)}&apikey=${ALPHA_VANTAGE_KEY}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const q = j && j['Global Quote'];
+    if (!q) return null;
+    const price = parseFloat(q['05. price']);
+    if (isNaN(price)) return null;
+    const rawPct = q['10. change percent'];
+    const pct = rawPct != null ? parseFloat(String(rawPct).replace('%', '')) : undefined;
+    return { price, pct: isNaN(pct) ? undefined : pct };
+  } catch (e) { return null; }
+}
+
 // Yahoo Finance — endpoint `chart` (JSON), GRATUIT et SANS clé, couvre indices
 // (^NDX, ^GSPC, ^FCHI) ET matières premières (CL=F = WTI) que Twelve Data gratuit ne
 // donne pas. ⚠ Yahoo n'envoie pas d'en-tête CORS → on passe par `corsFetchText`
@@ -3211,6 +3230,15 @@ async function _runIndexTrack(list) {
   }
 }
 
+// Piste Alpha Vantage : appels SÉQUENTIELS avec une pause (400ms) pour ne pas burster
+// la limite par minute d'AV. `jobs` = [ [() => Promise<{price,pct}>, setter], ... ].
+async function _runAlphaTrack(jobs) {
+  for (const [fn, set] of jobs) {
+    set(await fn()); _finNotify();
+    await new Promise(r => setTimeout(r, 400));
+  }
+}
+
 // Valeurs LIGHT — lancées dès le login (prioritaires). DEUX pistes en PARALLÈLE :
 //  • piste Yahoo (NASDAQ-100 + pétrole) : rapide, hors file TD
 //  • piste TD (EUR/USD + actions) : espacée de 8s (limite Basic 8)
@@ -3229,11 +3257,11 @@ async function startFinanceLight() {
     _finNotify();
   })();
   fetchGold().then(d => { _finance.gold = d; _finNotify(); });
-  // Pétrole WTI via Alpha Vantage (CORS natif, vrai prix) — immédiat, en parallèle.
-  const oilTrack = fetchAlphaOil().then(d => { _finance.oil = d; _finNotify(); });
-  // Piste Yahoo (indices) [symbole Yahoo, symbole Stooq (repli), setter]
-  const yahooTrack = _runIndexTrack([
-    ['^NDX', '^ndx', d => { _finance.etf = { ..._finance.etf, ndq: d }; }],   // NASDAQ-100
+  // Piste Alpha Vantage (CORS natif) : pétrole WTI (vrai prix) + NASDAQ-100 (ETF QQQ),
+  // séquentielle pour ne pas burster la limite AV par minute.
+  const alphaTrack = _runAlphaTrack([
+    [fetchAlphaOil,                 d => { _finance.oil = d; }],                            // Pétrole WTI
+    [() => fetchAlphaQuote('QQQ'),  d => { _finance.etf = { ..._finance.etf, ndq: d }; }],  // NASDAQ-100 (QQQ)
   ]);
   // Piste TD (EUR/USD + actions), espacée 8s — pilote le libellé `nextLabel`
   const tdTrack = (async () => {
@@ -3259,7 +3287,7 @@ async function startFinanceLight() {
       set(d); _finNotify();
     }
   })();
-  await Promise.all([yahooTrack, oilTrack, tdTrack]);
+  await Promise.all([alphaTrack, tdTrack]);
   _finance.loadingLight = false; _finance.nextLabel = null; _finNotify();
 }
 
@@ -3270,9 +3298,10 @@ async function startFinanceFull() {
   if (_finance.startedFull) return;
   _finance.startedFull = true;
   _finance.loadingFull = true; _finNotify();
-  const yahooTrack = _runIndexTrack([
-    ['^GSPC', '^spx', d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500
-    ['^FCHI', '^cac', d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40
+  // Piste Alpha Vantage (CORS natif) : S&P 500 (ETF SPY) + CAC 40 (ETF EWQ), séquentielle.
+  const alphaTrack = _runAlphaTrack([
+    [() => fetchAlphaQuote('SPY'), d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500 (SPY)
+    [() => fetchAlphaQuote('EWQ'), d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40 (EWQ)
   ]);
   // Piste métaux/matières via gold-api (CORS natif, sans clé) — parallèle, immédiate.
   // ⚠ Sucre/blé = symboles tentés (gold-api est surtout métaux) → afficheront — si non couverts.
@@ -3294,7 +3323,7 @@ async function startFinanceFull() {
       set(d); _finNotify();
     }
   })();
-  await Promise.all([yahooTrack, tdTrack, metalsTrack]);
+  await Promise.all([alphaTrack, tdTrack, metalsTrack]);
   _finance.loadingFull = false; _finance.nextLabel = null; _finNotify();
 }
 
@@ -3332,6 +3361,12 @@ function FinancePanel() {
   const loadingLabel = nextLabel
     ? `Chargement de ${nextLabel}…`
     : (loadingLight ? 'Chargement des cours…' : 'Chargement des valeurs Full…');
+
+  // Une valeur Twelve Data est « en cours » (→ afficher « Loading… » au lieu de « — »)
+  // tant que la phase de chargement TD tourne et qu'elle n'a pas encore été posée
+  // (=== undefined). Une valeur posée puis nulle (=== null) reste « — » (échec réel).
+  // Gardé par TD_ENABLED : si TD est coupé, on ne montre jamais « Loading » (→ « — »).
+  const tdPending = (phaseLoading, v) => TD_ENABLED && phaseLoading && v === undefined;
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -3372,18 +3407,18 @@ function FinancePanel() {
       </FinanceSection>
 
       <FinanceSection title="ETF / INDICES" eurusd={eurusd}>
-        {full && <FinanceRow icon="🇺🇸" name="S&P 500" value={fmtPrice(etf.spx && etf.spx.price)} pct={etf.spx && etf.spx.pct} />}
-        <FinanceRow icon="💻" name="NASDAQ-100"  value={fmtPrice(etf.ndq && etf.ndq.price)} pct={etf.ndq && etf.ndq.pct} />
-        {full && <FinanceRow icon="🇫🇷" name="CAC 40"  value={fmtPrice(etf.cac && etf.cac.price)} pct={etf.cac && etf.cac.pct} />}
+        {full && <FinanceRow icon="🇺🇸" name="S&P 500 (SPY)" value={fmtPrice(etf.spx && etf.spx.price)} pct={etf.spx && etf.spx.pct} />}
+        <FinanceRow icon="💻" name="NASDAQ-100 (QQQ)"  value={fmtPrice(etf.ndq && etf.ndq.price)} pct={etf.ndq && etf.ndq.pct} />
+        {full && <FinanceRow icon="🇫🇷" name="CAC 40 (EWQ)"  value={fmtPrice(etf.cac && etf.cac.price)} pct={etf.cac && etf.cac.pct} />}
       </FinanceSection>
 
       <FinanceSection title="STOCK PICKING" eurusd={eurusd}>
-        <FinanceRow icon="🟢" name="NVIDIA"   value={fmtPrice(stocks.nvda && stocks.nvda.price)} pct={stocks.nvda && stocks.nvda.pct} />
-        <FinanceRow icon="🎮" name="Take-Two" value={fmtPrice(stocks.ttwo && stocks.ttwo.price)} pct={stocks.ttwo && stocks.ttwo.pct} />
-        {full && <FinanceRow icon="🔍" name="Google"   value={fmtPrice(stocks.googl && stocks.googl.price)} pct={stocks.googl && stocks.googl.pct} />}
-        {full && <FinanceRow icon="🪟" name="Microsoft" value={fmtPrice(stocks.msft && stocks.msft.price)} pct={stocks.msft && stocks.msft.pct} />}
-        {full && <FinanceRow icon="📦" name="Amazon"   value={fmtPrice(stocks.amzn && stocks.amzn.price)} pct={stocks.amzn && stocks.amzn.pct} />}
-        {full && <FinanceRow icon="🚗" name="Tesla"    value={fmtPrice(stocks.tsla && stocks.tsla.price)} pct={stocks.tsla && stocks.tsla.pct} />}
+        <FinanceRow icon="🟢" name="NVIDIA"   value={fmtPrice(stocks.nvda && stocks.nvda.price)} pct={stocks.nvda && stocks.nvda.pct} loading={tdPending(loadingLight, stocks.nvda)} />
+        <FinanceRow icon="🎮" name="Take-Two" value={fmtPrice(stocks.ttwo && stocks.ttwo.price)} pct={stocks.ttwo && stocks.ttwo.pct} loading={tdPending(loadingLight, stocks.ttwo)} />
+        {full && <FinanceRow icon="🔍" name="Google"   value={fmtPrice(stocks.googl && stocks.googl.price)} pct={stocks.googl && stocks.googl.pct} loading={tdPending(loadingFull, stocks.googl)} />}
+        {full && <FinanceRow icon="🪟" name="Microsoft" value={fmtPrice(stocks.msft && stocks.msft.price)} pct={stocks.msft && stocks.msft.pct} loading={tdPending(loadingFull, stocks.msft)} />}
+        {full && <FinanceRow icon="📦" name="Amazon"   value={fmtPrice(stocks.amzn && stocks.amzn.price)} pct={stocks.amzn && stocks.amzn.pct} loading={tdPending(loadingFull, stocks.amzn)} />}
+        {full && <FinanceRow icon="🚗" name="Tesla"    value={fmtPrice(stocks.tsla && stocks.tsla.price)} pct={stocks.tsla && stocks.tsla.pct} loading={tdPending(loadingFull, stocks.tsla)} />}
       </FinanceSection>
 
       <FinanceSection title="MONNAIE" eurusd={eurusd}>
