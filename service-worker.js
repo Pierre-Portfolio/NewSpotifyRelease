@@ -1,9 +1,11 @@
-// v3 : network-first pour l'app shell (v2) + clé de cache NORMALISÉE : on stocke toujours
+// v4 : bump de cache (force la maj des PWA installées) — sinon l'ancien index.html
+// pouvait persister et le code Finance/Twelve Data n'arrivait jamais à l'appareil.
+// network-first pour l'app shell (v2) + clé de cache NORMALISÉE : on stocke toujours
 // sous './index.html', jamais sous l'URL réelle de navigation — sinon le retour OAuth
 // (?code=...&state=...) écrivait le code d'autorisation dans Cache Storage.
 // L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
 // → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
-const CACHE  = 'spotifyplus-v3';
+const CACHE  = 'spotifyplus-v4';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm'];
 
 self.addEventListener('install', e => {

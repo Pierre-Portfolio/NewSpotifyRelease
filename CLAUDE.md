@@ -38,7 +38,7 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 |---|---|
 | `index.html` | **App complète** — React 18 CDN + Babel + sql.js, tout en un seul fichier |
 | `manifest.json` | Config PWA (nom, icônes, display standalone) |
-| `service-worker.js` | Cache app shell + vendor pour usage offline (v3, clé de cache normalisée) |
+| `service-worker.js` | Cache app shell + vendor pour usage offline (v4, clé de cache normalisée) |
 | `vendor/sql-wasm.js` | sql.js 1.10.2 **auto-hébergé** (hash sha384 vérifié = ancien SRI cdnjs) |
 | `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
 | `icon-192.png` | Icône PWA 192×192 (à ajouter au repo) |
@@ -347,7 +347,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## PWA
 
 - `manifest.json` à la racine — `start_url: /NewSpotifyRelease/`, `display: standalone`
-- `service-worker.js` (cache `spotifyplus-v3`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne ; cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
+- `service-worker.js` (cache `spotifyplus-v4`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne ; cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
 - **⚠️ Clé de cache NORMALISÉE** : l'app shell est toujours stocké sous `'./index.html'` (`c.put('./index.html', copy)`), jamais sous l'URL réelle de navigation — sinon le retour OAuth (`?code=...&state=...`) écrivait le code d'autorisation dans Cache Storage
 - **⚠️ L'ancienne stratégie cache-first servait l'index.html du cache pour toujours** → les PWA installées ne recevaient jamais les mises à jour. Ne pas revenir en cache-first pour l'app shell.
 - Enregistrement dans `<head>` : `navigator.serviceWorker.register('./service-worker.js')`
