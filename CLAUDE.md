@@ -70,8 +70,8 @@ SCOPES       = 'user-follow-read user-read-private user-read-currently-playing u
 ```
 
 ### Version de l'app — `APP_VERSION`
-Constante module-level `APP_VERSION` (ex. `'1.18.7'`), format `1.MM.U` où `MM.U` = **nombre de commits du dépôt avec un point inséré avant le dernier chiffre** (187 commits → `1.18.7`, 190 → `1.19.0`, 200 → `1.20.0`). Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 1.18.5 »).
-**⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le compteur = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit puis insérer le point avant le dernier chiffre).
+Constante module-level `APP_VERSION` (ex. `'2.0.4'`), format `MAJ.MIN.U` = **le nombre de commits du dépôt avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 204 commits → `2.0.4`, 210 → `2.1.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. (Ancien format `1.MM.U` abandonné à partir de 204 commits / `2.0.4`.) Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 2.0.4 »).
+**⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le compteur = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit puis appliquer le découpage ci-dessus).
 
 ### Délai de scraping
 Le délai entre chaque artiste est configurable via un sélecteur (10 / 20 / 30s) auquel s'ajoute un **jitter aléatoire de 1 à 3 secondes**.

@@ -75,7 +75,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 1.18.7`) — basé sur le nombre de commits du dépôt (format `1.MM.U`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 2.0.4`) — basé sur le nombre de commits du dépôt (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 204 commits → `2.0.4`, 1001 → `10.0.1`)
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — barre latérale droite sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile (avant Historique)
