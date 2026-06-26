@@ -88,7 +88,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Finance
 - Section **Finance** dédiée (titre en bleu) — desktop (sidebar droite, sous Météo) et menu « ⋯ » sur mobile
 - Données live ; chaque sous-section affiche le taux **EUR/USD** (via **Twelve Data**, repli [Frankfurter](https://www.frankfurter.app/) / BCE)
-- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. Choix mémorisé.
+- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. **Revient toujours en Light à chaque reconnexion** (choix non mémorisé).
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) via **Yahoo Finance** (`CL=F`) + repli **[Stooq](https://stooq.com/)**, et Or via **[gold-api.com](https://gold-api.com/)**
 - **ETF / indices** : S&P 500, NASDAQ-100, CAC 40 via **Yahoo Finance** (`^GSPC`/`^NDX`/`^FCHI`, vrais niveaux d'indice) + repli **[Stooq](https://stooq.com/)** — indices et pétrole n'étant pas couverts par le tier gratuit de Twelve Data
