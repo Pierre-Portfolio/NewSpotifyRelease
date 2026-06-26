@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.3';
+const APP_VERSION = '2.2.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3072,8 +3072,12 @@ async function fetchStooq(symbol) {
 // une app statique : ne mettre QUE des clés gratuites/lecture seule sans carte.
 const TWELVE_DATA_KEY = '72fa4e8760a3481483f6e39ef6c9c3a1'; // clé gratuite lecture seule
 
+// ⚠⚠ TEMPORAIRE — PHASE DE TEST : false = DÉSACTIVE tous les appels Twelve Data
+// (EUR/USD repli Frankfurter, actions vides). REMETTRE À true après le test gold-api.
+const TD_ENABLED = false;
+
 async function fetchTD(symbol) {
-  if (!TWELVE_DATA_KEY) return null;
+  if (!TD_ENABLED || !TWELVE_DATA_KEY) return null;
   try {
     const r = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${TWELVE_DATA_KEY}`);
     if (!r.ok) return null;
@@ -3094,15 +3098,18 @@ async function fetchQuote(tdSymbol, stooqSymbol) {
   return await fetchStooq(stooqSymbol);
 }
 
-// Or (XAU, USD/once) — gold-api.com, gratuit sans clé
-async function fetchGold() {
+// gold-api.com — prix spot, GRATUIT et SANS clé, CORS natif (pas de proxy). Renvoie
+// { price } (pas de variation 24h). Symboles métaux sûrs : XAU (or), XAG (argent),
+// XPT (platine), XPD (palladium). ⚠ Sucre/blé = symboles tentés à confirmer en test.
+async function fetchMetal(symbol) {
   try {
-    const r = await fetch('https://api.gold-api.com/price/XAU');
+    const r = await fetch('https://api.gold-api.com/price/' + encodeURIComponent(symbol));
     if (!r.ok) return null;
     const j = await r.json();
     return j && j.price != null ? { price: j.price } : null;
   } catch (e) { return null; }
 }
+async function fetchGold() { return fetchMetal('XAU'); }
 
 // Yahoo Finance — endpoint `chart` (JSON), GRATUIT et SANS clé, couvre indices
 // (^NDX, ^GSPC, ^FCHI) ET matières premières (CL=F = WTI) que Twelve Data gratuit ne
@@ -3161,6 +3168,7 @@ function tdSpaced(fn, label) {
 
 const _finance = {
   eurusd: null, crypto: null, gold: null, oil: null, etf: {}, stocks: {},
+  silver: null, sugar: null, wheat: null,   // matières via gold-api (Full)
   loadingLight: true,   // true tant que les valeurs Light ne sont pas toutes chargées
   loadingFull: false,   // true pendant le chargement des valeurs Full
   nextLabel: null,      // nom de la valeur en cours/à charger (affiché dans le loading)
@@ -3216,6 +3224,7 @@ async function startFinanceLight() {
       }
       _finance.eurusd = rate; _finNotify();
     }, 'EUR/USD');
+    if (!TD_ENABLED) return;   // phase de test : pas d'actions TD
     const stocks = [
       ['NVDA', 'nvda.us', d => { _finance.stocks = { ..._finance.stocks, nvda: d }; }, 'NVIDIA'],
       ['TTWO', 'ttwo.us', d => { _finance.stocks = { ..._finance.stocks, ttwo: d }; }, 'Take-Two'],
@@ -3240,7 +3249,15 @@ async function startFinanceFull() {
     ['^GSPC', '^spx', d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500
     ['^FCHI', '^cac', d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40
   ]);
+  // Piste métaux/matières via gold-api (CORS natif, sans clé) — parallèle, immédiate.
+  // ⚠ Sucre/blé = symboles tentés (gold-api est surtout métaux) → afficheront — si non couverts.
+  const metalsTrack = Promise.all([
+    fetchMetal('XAG').then(d => { _finance.silver = d; _finNotify(); }),   // Argent
+    fetchMetal('SUGAR').then(d => { _finance.sugar = d; _finNotify(); }),  // Sucre (à confirmer)
+    fetchMetal('WHEAT').then(d => { _finance.wheat = d; _finNotify(); }),  // Blé (à confirmer)
+  ]);
   const tdTrack = (async () => {
+    if (!TD_ENABLED) return;   // phase de test : pas d'actions TD
     const stocks = [
       ['GOOGL', 'googl.us', d => { _finance.stocks = { ..._finance.stocks, googl: d }; }, 'Google'],
       ['MSFT',  'msft.us',  d => { _finance.stocks = { ..._finance.stocks, msft: d }; },  'Microsoft'],
@@ -3252,7 +3269,7 @@ async function startFinanceFull() {
       set(d); _finNotify();
     }
   })();
-  await Promise.all([yahooTrack, tdTrack]);
+  await Promise.all([yahooTrack, tdTrack, metalsTrack]);
   _finance.loadingFull = false; _finance.nextLabel = null; _finNotify();
 }
 
@@ -3266,7 +3283,7 @@ function FinancePanel() {
     startFinanceLight();
     return () => { _finance.subs.delete(forceRender); };
   }, []);
-  const { eurusd, crypto, gold, oil, etf, stocks, loadingLight, loadingFull, nextLabel } = _finance;
+  const { eurusd, crypto, gold, oil, etf, stocks, silver, sugar, wheat, loadingLight, loadingFull, nextLabel } = _finance;
   const cg = (crypto && crypto !== 'error') ? crypto : null;
 
   // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, NASDAQ-100,
@@ -3323,6 +3340,9 @@ function FinancePanel() {
       <FinanceSection title="MATIÈRES PREMIÈRES" eurusd={eurusd}>
         <FinanceRow icon="🛢" name="Pétrole (WTI)" value={fmtPrice(oil && oil.price)}  pct={oil && oil.pct} />
         <FinanceRow icon="🥇" name="Or (once)"     value={fmtPrice(gold && gold.price)} />
+        {full && <FinanceRow icon="🥈" name="Argent (once)" value={fmtPrice(silver && silver.price)} />}
+        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} />}
+        {full && <FinanceRow icon="🌾" name="Blé"            value={fmtPrice(wheat && wheat.price)} />}
       </FinanceSection>
 
       <FinanceSection title="ETF / INDICES" eurusd={eurusd}>
