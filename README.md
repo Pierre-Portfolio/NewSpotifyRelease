@@ -30,8 +30,9 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Découvertes de la semaine (auto-import hebdo)
 - Au login, si la playlist Spotify **"Découvertes de la semaine"** n'a pas été importée depuis 7 jours → import automatique dans le feed
 - Les titres apparaissent avec le tag **Découvertes** (violet) et le sous-titre "Découvertes de la semaine"
-- La date du dernier import est sauvegardée dans `localStorage` (`spotifyplus_dw_last_import`)
-- **⚠ Probablement inopérant depuis la migration Spotify de février 2026** : le contenu des playlists éditoriales Spotify n'est plus lisible par les apps tierces. L'app le détecte, l'explique dans les logs et réessaie automatiquement chaque semaine (auto-réparant si Spotify rouvre l'accès)
+- La playlist est recherchée sur **toutes les pages** de tes playlists, et son contenu est lu en essayant **les deux endpoints** Spotify (`/items` puis `/tracks`) pour maximiser les chances de succès
+- Après un import réussi : nouvel essai dans 7 jours. **En cas d'échec** (playlist introuvable ou contenu refusé) : nouvel essai automatique dans **6 h** seulement (au lieu d'être bloqué une semaine)
+- **⚠ Dépend de l'accès accordé par Spotify** : depuis la migration de février 2026, le contenu des playlists éditoriales Spotify n'est pas toujours lisible par les apps tierces. L'app le détecte, l'explique dans les logs et réessaie automatiquement (auto-réparant si Spotify rouvre l'accès)
 
 ### Stockage local (sql.js + IndexedDB)
 - Base SQLite WebAssembly chargée au démarrage depuis IndexedDB (clé `spotifyplus_db`)
@@ -78,18 +79,26 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — barre latérale droite sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile (avant Historique)
-- Prévisions sur **3 jours** (aujourd'hui + 2) pour **3 lieux** : **Voisins-le-Bretonneux**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
-- Le 3e lieu affiche le **nom de la ville** détecté à partir des coordonnées GPS (reverse-geocoding via [BigDataCloud](https://www.bigdatacloud.com/), gratuit sans clé — repli sur « Ma position » si indisponible)
+- Prévisions sur **3 jours** (aujourd'hui + 2) pour **4 lieux** : **Voisins-le-Bretonneux**, **Massy**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
+- Le dernier lieu s'affiche **« Ma position (ville) »**, la ville étant détectée à partir des coordonnées GPS (reverse-geocoding via [BigDataCloud](https://www.bigdatacloud.com/), gratuit sans clé — repli sur « Ma position » si indisponible)
 - Chaque jour : icône météo + température max (en bleu) et min
+- **Clic sur un jour** → fiche détaillée : température ressentie, probabilité et cumul de pluie, heures de pluie, vent max + rafales + direction, indice UV, lever/coucher du soleil, et le **détail heure par heure** (température, proba de pluie, météo)
 - Données météo via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
 
 ### Finance
 - Section **Finance** dédiée (titre en bleu) — desktop (sidebar droite, sous Météo) et menu « ⋯ » sur mobile
 - Données live via **APIs gratuites sans clé** ; chaque sous-section affiche le taux **EUR/USD** ([Frankfurter](https://www.frankfurter.app/), données BCE)
-- **Crypto** : Bitcoin, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
+- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, NASDAQ, NVIDIA**) ; le mode **Full** affiche tout. Choix mémorisé.
+- **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) via **[Stooq](https://stooq.com/)** (sans clé ; peut afficher « — » si l'accès CORS est bloqué) et Or via **[gold-api.com](https://gold-api.com/)**
 - **ETF / indices** : S&P 500, NASDAQ, CAC 40 via **[Stooq](https://stooq.com/)** (même réserve CORS)
 - **Stock picking** : NVIDIA, Take-Two (TTWO) via **[Stooq](https://stooq.com/)** (même réserve CORS)
+
+### To do
+- Section **To do** dédiée (titre en violet) — desktop (sidebar droite, sous Finance) et onglet propre dans le menu « ⋯ » sur mobile
+- Ajout / suppression de tâches, classées par échéance via un **carrousel** : **Aujourd'hui**, **Dans la semaine**, **Dans le mois**, **Dans l'année**, **À faire un jour**
+- Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance ou **supprimée**
+- Tâches mémorisées localement (aucun backend)
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
@@ -125,6 +134,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Notifications
 - **Fin de session** (100 artistes/jour atteints) : notification navigateur envoyée automatiquement (permission demandée si nécessaire)
+- **Scraping de nouveau disponible** : quand le quota 24h ou un blocage rate-limit (429) expire, une notification Chrome prévient que tu peux relancer une synchro
 
 ### PWA
 - Installable sur écran d'accueil Android (Chrome) — bouton "Ajouter à l'écran d'accueil"
