@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.9';
+const APP_VERSION = '2.3.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -877,9 +877,9 @@ function StoreProvider({ children }) {
           if (me?.id) setUser(me);
           setAuthState('connected');
 
-          // Lance le chargement Finance dès le login (valeurs Light prioritaires) —
-          // les cours sont prêts quand l'utilisateur ouvre l'onglet Finance. Idempotent.
-          try { startFinanceLight(); } catch {}
+          // ⚠ Le chargement Finance n'est PLUS lancé au login : les APIs dédiées (Alpha
+          // Vantage, Twelve Data, CoinGecko, gold-api) ne sont appelées QUE lorsque
+          // l'utilisateur ouvre l'onglet/section Finance (FinancePanel monte → startFinanceLight).
 
           // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
           try { navigator.storage?.persist?.(); } catch {}
@@ -3116,12 +3116,13 @@ async function fetchGold() { return fetchMetal('XAU'); }
 // par nature sur une app statique, comme TWELVE_DATA_KEY).
 const ALPHA_VANTAGE_KEY = 'OW6MAHXBO075AHI7';
 
-// Pétrole WTI ($/baril) via Alpha Vantage. La série `data` est triée du plus récent au
-// plus ancien ; AV met "." pour les valeurs manquantes → on filtre. Variation = j vs j-1.
-async function fetchAlphaOil() {
+// Matière première via un endpoint dédié Alpha Vantage (WTI, SUGAR, WHEAT, …) → VRAI prix
+// (pas un ETF). La série `data` est triée du plus récent au plus ancien ; AV met "." pour
+// les valeurs manquantes → on filtre. Variation = dernière période vs précédente.
+async function fetchAlphaCommodity(func, interval = 'monthly') {
   if (!ALPHA_VANTAGE_KEY) return null;
   try {
-    const r = await fetch(`https://www.alphavantage.co/query?function=WTI&interval=daily&apikey=${ALPHA_VANTAGE_KEY}`);
+    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval}&apikey=${ALPHA_VANTAGE_KEY}`);
     if (!r.ok) return null;
     const j = await r.json();
     const data = j && j.data;
@@ -3134,6 +3135,8 @@ async function fetchAlphaOil() {
     return { price, pct };
   } catch (e) { return null; }
 }
+// Pétrole WTI ($/baril) : endpoint dédié, granularité quotidienne.
+async function fetchAlphaOil() { return fetchAlphaCommodity('WTI', 'daily'); }
 
 // Cours d'un titre/ETF via Alpha Vantage GLOBAL_QUOTE (CORS natif). AV n'a PAS d'indices
 // bruts → on interroge les ETF répliquants (QQQ=NASDAQ-100, SPY=S&P 500, EWQ=CAC/France).
@@ -3298,18 +3301,17 @@ async function startFinanceFull() {
   if (_finance.startedFull) return;
   _finance.startedFull = true;
   _finance.loadingFull = true; _finNotify();
-  // Piste Alpha Vantage (CORS natif) : S&P 500 (ETF SPY) + CAC 40 (ETF EWQ), séquentielle.
+  // Piste Alpha Vantage (CORS natif) : S&P 500 (ETF SPY) + CAC 40 (ETF EWQ) + Sucre + Blé,
+  // séquentielle (pause 400ms) pour ne pas burster la limite AV par minute. Sucre/blé ont
+  // un endpoint matière première DÉDIÉ (vrai prix mondial) → plus de symboles "tentés".
   const alphaTrack = _runAlphaTrack([
-    [() => fetchAlphaQuote('SPY'), d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500 (SPY)
-    [() => fetchAlphaQuote('EWQ'), d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40 (EWQ)
+    [() => fetchAlphaQuote('SPY'),     d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500 (SPY)
+    [() => fetchAlphaQuote('EWQ'),     d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40 (EWQ)
+    [() => fetchAlphaCommodity('SUGAR'), d => { _finance.sugar = d; }],                          // Sucre (mensuel)
+    [() => fetchAlphaCommodity('WHEAT'), d => { _finance.wheat = d; }],                          // Blé (mensuel)
   ]);
-  // Piste métaux/matières via gold-api (CORS natif, sans clé) — parallèle, immédiate.
-  // ⚠ Sucre/blé = symboles tentés (gold-api est surtout métaux) → afficheront — si non couverts.
-  const metalsTrack = Promise.all([
-    fetchMetal('XAG').then(d => { _finance.silver = d; _finNotify(); }),   // Argent
-    fetchMetal('SUGAR').then(d => { _finance.sugar = d; _finNotify(); }),  // Sucre (à confirmer)
-    fetchMetal('WHEAT').then(d => { _finance.wheat = d; _finNotify(); }),  // Blé (à confirmer)
-  ]);
+  // Argent via gold-api (CORS natif, sans clé) — parallèle, immédiate.
+  const metalsTrack = fetchMetal('XAG').then(d => { _finance.silver = d; _finNotify(); });
   const tdTrack = (async () => {
     if (!TD_ENABLED) return;   // phase de test : pas d'actions TD
     const stocks = [
@@ -3328,9 +3330,10 @@ async function startFinanceFull() {
 }
 
 function FinancePanel() {
-  // Lit l'état depuis le gestionnaire module-level `_finance` (lancé dès le login) et
-  // se ré-rend à chaque notification. `startFinanceLight()` est idempotent : sur
-  // desktop il a déjà tourné au login, mais on le rappelle au cas où (ouverture directe).
+  // Lit l'état depuis le gestionnaire module-level `_finance` et se ré-rend à chaque
+  // notification. `startFinanceLight()` (idempotent) est déclenché ICI au montage du
+  // panneau : c'est l'UNIQUE point d'entrée du chargement Finance (plus rien au login),
+  // donc les APIs dédiées ne partent que quand l'utilisateur ouvre Finance.
   const [, forceRender] = React.useReducer(x => x + 1, 0);
   React.useEffect(() => {
     _finance.subs.add(forceRender);
@@ -3402,8 +3405,8 @@ function FinancePanel() {
         <FinanceRow icon="🛢" name="Pétrole (WTI)" value={fmtPrice(oil && oil.price)}  pct={oil && oil.pct} />
         <FinanceRow icon="🥇" name="Or (once)"     value={fmtPrice(gold && gold.price)} />
         {full && <FinanceRow icon="🥈" name="Argent (once)" value={fmtPrice(silver && silver.price)} />}
-        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} />}
-        {full && <FinanceRow icon="🌾" name="Blé"            value={fmtPrice(wheat && wheat.price)} />}
+        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} pct={sugar && sugar.pct} />}
+        {full && <FinanceRow icon="🌾" name="Blé"            value={fmtPrice(wheat && wheat.price)} pct={wheat && wheat.pct} />}
       </FinanceSection>
 
       <FinanceSection title="ETF / INDICES" eurusd={eurusd}>
