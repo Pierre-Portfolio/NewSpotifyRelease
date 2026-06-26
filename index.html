@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '1.20.0';
+const APP_VERSION = '1.20.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -609,43 +609,68 @@ function loadArtistsFromDB() {
 // DÉCOUVERTES DE LA SEMAINE — import hebdo auto
 // ════════════════════════════════════════════════
 const DW_LS_KEY      = 'spotifyplus_dw_last_import';
-const DW_MAX_AGE_MS  = 7 * 24 * 60 * 60 * 1000; // 7 jours
+const DW_MAX_AGE_MS  = 7 * 24 * 60 * 60 * 1000; // 7 jours (cooldown après un import réussi)
+const DW_FAIL_KEY    = 'spotifyplus_dw_last_fail';
+const DW_FAIL_AGE_MS = 6 * 60 * 60 * 1000;      // 6 h (cooldown après un échec — auto-réparant)
+
+// Lit le contenu d'une playlist en tolérant l'état de migration de l'app Spotify :
+// essaie le nouvel endpoint /items PUIS l'ancien /tracks (certaines apps ont encore l'un
+// ou l'autre). additional_types=track force le retour des pistes. Retourne { items } | { rate_limited }.
+async function fetchPlaylistItems(playlistId) {
+  const urls = [
+    `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50&additional_types=track`,
+    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&additional_types=track`,
+  ];
+  for (const url of urls) {
+    const data = await apiGet(url);
+    if (data?.rate_limited) return { rate_limited: true };
+    if (Array.isArray(data?.items) && data.items.length) return { items: data.items };
+  }
+  return { items: [] };
+}
 
 async function importDiscoverWeekly(addLog) {
-  const last = localStorage.getItem(DW_LS_KEY);
-  if (last && Date.now() - parseInt(last) < DW_MAX_AGE_MS) return;
+  const lastOk   = localStorage.getItem(DW_LS_KEY);
+  if (lastOk && Date.now() - parseInt(lastOk) < DW_MAX_AGE_MS) return;       // déjà importé récemment
+  const lastFail = localStorage.getItem(DW_FAIL_KEY);
+  if (lastFail && Date.now() - parseInt(lastFail) < DW_FAIL_AGE_MS) return;  // échec récent — petit cooldown
   if (Date.now() < _rlUntil) return; // fenêtre rate-limit active — ne pas insister, retentera au prochain login
 
   addLog('── Import Découvertes de la semaine ──', 'info');
 
-  // Chercher la playlist parmi les playlists de l'utilisateur
+  // Chercher la playlist parmi les playlists de l'utilisateur (toutes pages)
   let playlistId = null;
   let nextUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
   while (nextUrl && !playlistId) {
     const data = await apiGet(nextUrl);
+    if (data?.rate_limited) return; // fenêtre 429 — retentera au prochain login
     if (!data?.items) break;
-    const pl = data.items.find(p =>
-      p.owner?.id === 'spotify' &&
-      (p.name?.toLowerCase().includes('découvertes') || p.name?.toLowerCase().includes('discover weekly'))
-    );
+    const pl = data.items.find(p => {
+      const n = (p.name || '').toLowerCase();
+      // Discover Weekly est éditée par Spotify (owner 'spotify'), mais on tolère aussi un
+      // owner différent au cas où le nom correspond (playlist clonée/renommée par l'utilisateur).
+      return n.includes('découvertes de la semaine') || n.includes('discover weekly')
+        || (p.owner?.id === 'spotify' && (n.includes('découvertes') || n.includes('discover')));
+    });
     if (pl) playlistId = pl.id;
     nextUrl = data.next || null;
   }
 
   if (!playlistId) {
-    addLog('⚠ Playlist "Découvertes de la semaine" introuvable — abonne-toi à elle sur Spotify', 'warn');
+    addLog('⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
+    localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // re-tentera dans 6 h
     return;
   }
 
-  const today      = new Date().toISOString().slice(0, 10);
-  // Migration Spotify fév. 2026 : /playlists/{id}/tracks → /playlists/{id}/items, et le
-  // contenu n'est renvoyé QUE pour les playlists possédées/collaboratives. "Découvertes de
-  // la semaine" appartient à Spotify → l'API peut refuser (403) ou renvoyer sans items.
-  const tracksData = await apiGet(`https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50`);
-  if (tracksData?.rate_limited) return; // fenêtre 429 — retentera au prochain login
-  if (tracksData?.error || !tracksData?.items?.length) {
-    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible — depuis la migration Spotify de février 2026, les playlists éditoriales Spotify ne sont plus lisibles par les apps tierces. Import désactivé, nouvel essai dans 7 jours.', 'warn');
-    localStorage.setItem(DW_LS_KEY, Date.now().toString()); // ne pas réessayer à chaque login
+  const today = new Date().toISOString().slice(0, 10);
+  // Migration Spotify fév. 2026 : /tracks → /items, et le contenu n'est renvoyé QUE pour les
+  // playlists possédées/collaboratives. "Découvertes de la semaine" appartient à Spotify → l'API
+  // peut refuser (403) ou renvoyer sans items. On essaie /items ET /tracks (fetchPlaylistItems).
+  const tracksData = await fetchPlaylistItems(playlistId);
+  if (tracksData.rate_limited) return; // fenêtre 429 — retentera au prochain login
+  if (!tracksData.items.length) {
+    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible (403/vide). Depuis la migration Spotify de février 2026, les playlists éditoriales Spotify ne sont plus toujours lisibles par les apps tierces. Nouvel essai dans 6 h.', 'warn');
+    localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // cooldown court, auto-réparant
     return;
   }
 
@@ -662,13 +687,14 @@ async function importDiscoverWeekly(addLog) {
     } catch {}
   }
 
+  // Succès (contenu lu) : cooldown 7 j + on efface le marqueur d'échec
+  localStorage.setItem(DW_LS_KEY, Date.now().toString());
+  localStorage.removeItem(DW_FAIL_KEY);
   if (added > 0) {
     await saveDB();
-    localStorage.setItem(DW_LS_KEY, Date.now().toString());
     addLog(`✓ ${added} titre(s) de "Découvertes de la semaine" ajoutés au feed`, 'ok');
   } else {
     addLog('Découvertes de la semaine : tous les titres sont déjà dans le feed', 'info');
-    localStorage.setItem(DW_LS_KEY, Date.now().toString());
   }
 }
 
