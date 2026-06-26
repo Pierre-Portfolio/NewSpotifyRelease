@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- CSP : même en cas d'XSS, connect-src empêche d'exfiltrer le token (localStorage) vers un domaine attaquant.
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://query1.finance.yahoo.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://query1.finance.yahoo.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.5';
+const APP_VERSION = '2.2.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3111,6 +3111,30 @@ async function fetchMetal(symbol) {
 }
 async function fetchGold() { return fetchMetal('XAU'); }
 
+// ── Alpha Vantage : CORS natif (pas de proxy), clé gratuite (~25 req/jour). Endpoint
+// WTI dédié → VRAI prix du pétrole (pas un ETF). ⚠ REMPLACER 'demo' par ta clé gratuite
+// (alphavantage.co/support/#api-key) : 'demo' ne marche que sur quelques URLs d'exemple.
+const ALPHA_VANTAGE_KEY = 'demo';
+
+// Pétrole WTI ($/baril) via Alpha Vantage. La série `data` est triée du plus récent au
+// plus ancien ; AV met "." pour les valeurs manquantes → on filtre. Variation = j vs j-1.
+async function fetchAlphaOil() {
+  if (!ALPHA_VANTAGE_KEY) return null;
+  try {
+    const r = await fetch(`https://www.alphavantage.co/query?function=WTI&interval=daily&apikey=${ALPHA_VANTAGE_KEY}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const data = j && j.data;
+    if (!Array.isArray(data)) return null;
+    const pts = data.filter(d => d && d.value && d.value !== '.' && !isNaN(parseFloat(d.value)));
+    if (!pts.length) return null;
+    const price = parseFloat(pts[0].value);
+    const prev  = pts[1] ? parseFloat(pts[1].value) : null;
+    const pct   = (prev != null && prev) ? ((price - prev) / prev) * 100 : undefined;
+    return { price, pct };
+  } catch (e) { return null; }
+}
+
 // Yahoo Finance — endpoint `chart` (JSON), GRATUIT et SANS clé, couvre indices
 // (^NDX, ^GSPC, ^FCHI) ET matières premières (CL=F = WTI) que Twelve Data gratuit ne
 // donne pas. ⚠ Yahoo n'envoie pas d'en-tête CORS → on passe par `corsFetchText`
@@ -3205,10 +3229,11 @@ async function startFinanceLight() {
     _finNotify();
   })();
   fetchGold().then(d => { _finance.gold = d; _finNotify(); });
-  // Piste Yahoo (indices + pétrole) [symbole Yahoo, symbole Stooq (repli), setter]
+  // Pétrole WTI via Alpha Vantage (CORS natif, vrai prix) — immédiat, en parallèle.
+  const oilTrack = fetchAlphaOil().then(d => { _finance.oil = d; _finNotify(); });
+  // Piste Yahoo (indices) [symbole Yahoo, symbole Stooq (repli), setter]
   const yahooTrack = _runIndexTrack([
     ['^NDX', '^ndx', d => { _finance.etf = { ..._finance.etf, ndq: d }; }],   // NASDAQ-100
-    ['CL=F', 'cl.f', d => { _finance.oil = d; }],                             // Pétrole WTI
   ]);
   // Piste TD (EUR/USD + actions), espacée 8s — pilote le libellé `nextLabel`
   const tdTrack = (async () => {
@@ -3234,7 +3259,7 @@ async function startFinanceLight() {
       set(d); _finNotify();
     }
   })();
-  await Promise.all([yahooTrack, tdTrack]);
+  await Promise.all([yahooTrack, oilTrack, tdTrack]);
   _finance.loadingLight = false; _finance.nextLabel = null; _finNotify();
 }
 
