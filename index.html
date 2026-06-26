@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.2.9';
+const APP_VERSION = '2.3.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -877,9 +877,11 @@ function StoreProvider({ children }) {
           if (me?.id) setUser(me);
           setAuthState('connected');
 
-          // Lance le chargement Finance dès le login (valeurs Light prioritaires) —
-          // les cours sont prêts quand l'utilisateur ouvre l'onglet Finance. Idempotent.
-          try { startFinanceLight(); } catch {}
+          // ⚠ Le chargement Finance N'EST PLUS lancé au login : les APIs dédiées
+          // (Alpha Vantage ~25 req/jour, Twelve Data 8 req/min) ne sont appelées que
+          // lorsque l'utilisateur clique sur l'onglet/section « Finance » (déclenché par
+          // le montage de `FinancePanel` → `startFinanceLight()`). Évite de brûler le
+          // quota AV à chaque login si l'utilisateur n'ouvre jamais Finance.
 
           // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
           try { navigator.storage?.persist?.(); } catch {}
@@ -3116,12 +3118,14 @@ async function fetchGold() { return fetchMetal('XAU'); }
 // par nature sur une app statique, comme TWELVE_DATA_KEY).
 const ALPHA_VANTAGE_KEY = 'OW6MAHXBO075AHI7';
 
-// Pétrole WTI ($/baril) via Alpha Vantage. La série `data` est triée du plus récent au
-// plus ancien ; AV met "." pour les valeurs manquantes → on filtre. Variation = j vs j-1.
-async function fetchAlphaOil() {
+// Matière première via Alpha Vantage (endpoints dédiés : WTI, SUGAR, WHEAT…). La série
+// `data` est triée du plus récent au plus ancien ; AV met "." pour les valeurs manquantes
+// → on filtre. Variation = dernier point vs précédent (jour pour WTI, mois pour SUGAR/WHEAT
+// dont l'intervalle minimal AV est `monthly`). Renvoie { price, pct } (vrai prix, pas un ETF).
+async function fetchAlphaCommodity(func, interval) {
   if (!ALPHA_VANTAGE_KEY) return null;
   try {
-    const r = await fetch(`https://www.alphavantage.co/query?function=WTI&interval=daily&apikey=${ALPHA_VANTAGE_KEY}`);
+    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval || 'monthly'}&apikey=${ALPHA_VANTAGE_KEY}`);
     if (!r.ok) return null;
     const j = await r.json();
     const data = j && j.data;
@@ -3134,6 +3138,8 @@ async function fetchAlphaOil() {
     return { price, pct };
   } catch (e) { return null; }
 }
+// Pétrole WTI ($/baril) via l'endpoint dédié AV (intervalle quotidien).
+function fetchAlphaOil() { return fetchAlphaCommodity('WTI', 'daily'); }
 
 // Cours d'un titre/ETF via Alpha Vantage GLOBAL_QUOTE (CORS natif). AV n'a PAS d'indices
 // bruts → on interroge les ETF répliquants (QQQ=NASDAQ-100, SPY=S&P 500, EWQ=CAC/France).
@@ -3211,7 +3217,7 @@ function tdSpaced(fn, label) {
 
 const _finance = {
   eurusd: null, crypto: null, gold: null, oil: null, etf: {}, stocks: {},
-  silver: null, sugar: null, wheat: null,   // matières via gold-api (Full)
+  silver: null, sugar: null, wheat: null,   // argent (gold-api), sucre/blé (Alpha Vantage) — Full
   loadingLight: true,   // true tant que les valeurs Light ne sont pas toutes chargées
   loadingFull: false,   // true pendant le chargement des valeurs Full
   nextLabel: null,      // nom de la valeur en cours/à charger (affiché dans le loading)
@@ -3298,18 +3304,17 @@ async function startFinanceFull() {
   if (_finance.startedFull) return;
   _finance.startedFull = true;
   _finance.loadingFull = true; _finNotify();
-  // Piste Alpha Vantage (CORS natif) : S&P 500 (ETF SPY) + CAC 40 (ETF EWQ), séquentielle.
+  // Piste Alpha Vantage (CORS natif) : S&P 500 (ETF SPY) + CAC 40 (ETF EWQ) + Sucre + Blé
+  // (endpoints commodités dédiés AV → vrais prix), séquentielle pour ne pas burster la
+  // limite AV par minute.
   const alphaTrack = _runAlphaTrack([
     [() => fetchAlphaQuote('SPY'), d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500 (SPY)
     [() => fetchAlphaQuote('EWQ'), d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40 (EWQ)
+    [() => fetchAlphaCommodity('SUGAR'), d => { _finance.sugar = d; }],                     // Sucre ($/livre, mensuel)
+    [() => fetchAlphaCommodity('WHEAT'), d => { _finance.wheat = d; }],                     // Blé ($/boisseau, mensuel)
   ]);
-  // Piste métaux/matières via gold-api (CORS natif, sans clé) — parallèle, immédiate.
-  // ⚠ Sucre/blé = symboles tentés (gold-api est surtout métaux) → afficheront — si non couverts.
-  const metalsTrack = Promise.all([
-    fetchMetal('XAG').then(d => { _finance.silver = d; _finNotify(); }),   // Argent
-    fetchMetal('SUGAR').then(d => { _finance.sugar = d; _finNotify(); }),  // Sucre (à confirmer)
-    fetchMetal('WHEAT').then(d => { _finance.wheat = d; _finNotify(); }),  // Blé (à confirmer)
-  ]);
+  // Argent via gold-api (CORS natif, sans clé) — parallèle, immédiat.
+  const metalsTrack = fetchMetal('XAG').then(d => { _finance.silver = d; _finNotify(); });
   const tdTrack = (async () => {
     if (!TD_ENABLED) return;   // phase de test : pas d'actions TD
     const stocks = [
@@ -3328,9 +3333,9 @@ async function startFinanceFull() {
 }
 
 function FinancePanel() {
-  // Lit l'état depuis le gestionnaire module-level `_finance` (lancé dès le login) et
-  // se ré-rend à chaque notification. `startFinanceLight()` est idempotent : sur
-  // desktop il a déjà tourné au login, mais on le rappelle au cas où (ouverture directe).
+  // Lit l'état depuis le gestionnaire module-level `_finance` et se ré-rend à chaque
+  // notification. `startFinanceLight()` n'est PLUS lancé au login : c'est CE montage
+  // (clic sur Finance) qui déclenche le 1er appel des APIs dédiées. Idempotent.
   const [, forceRender] = React.useReducer(x => x + 1, 0);
   React.useEffect(() => {
     _finance.subs.add(forceRender);
@@ -3402,8 +3407,8 @@ function FinancePanel() {
         <FinanceRow icon="🛢" name="Pétrole (WTI)" value={fmtPrice(oil && oil.price)}  pct={oil && oil.pct} />
         <FinanceRow icon="🥇" name="Or (once)"     value={fmtPrice(gold && gold.price)} />
         {full && <FinanceRow icon="🥈" name="Argent (once)" value={fmtPrice(silver && silver.price)} />}
-        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} />}
-        {full && <FinanceRow icon="🌾" name="Blé"            value={fmtPrice(wheat && wheat.price)} />}
+        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} pct={sugar && sugar.pct} />}
+        {full && <FinanceRow icon="🌾" name="Blé"            value={fmtPrice(wheat && wheat.price)} pct={wheat && wheat.pct} />}
       </FinanceSection>
 
       <FinanceSection title="ETF / INDICES" eurusd={eurusd}>
