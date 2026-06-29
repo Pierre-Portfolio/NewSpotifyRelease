@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.3.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -289,23 +289,28 @@ function libraryScopeAlert(result) {
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
 // puis 100 de plus à 00h30 (1h plus tard). Désormais, atteindre 100 démarre un
 // compteur de 24h ; la prochaine session est refusée jusqu'à expiration de cette
-// fenêtre. Stockage : localStorage spotifyplus_daily_scrapings = { count, until }.
+// fenêtre. Stockage : localStorage spotifyplus_daily_scrapings = { count, until, last }.
+// `last` = timestamp ms du DERNIER artiste scrapé : le compteur repart à 0 dès que
+// 24h se sont écoulées depuis ce dernier scrap, MÊME si on n'a pas atteint 100
+// (avant, scraper 95 puis revenir 3 jours plus tard affichait encore 95).
 const QUOTA_LS_KEY = 'spotifyplus_daily_scrapings';
 const QUOTA_MAX = 100;
 const QUOTA_MS = 24 * 60 * 60 * 1000;
-// Lit le quota persisté ; si la fenêtre 24h est expirée, le compteur repart à 0.
+// Lit le quota persisté ; le compteur repart à 0 si la fenêtre 100-atteint est
+// expirée OU si plus de 24h se sont écoulées depuis le dernier scrap (inactivité).
 function loadQuota() {
   try {
     const d = JSON.parse(localStorage.getItem(QUOTA_LS_KEY) || 'null');
     if (d && typeof d.count === 'number') {
-      if (d.until && Date.now() >= d.until) return { count: 0, until: 0 }; // fenêtre expirée
-      return { count: d.count, until: d.until || 0 };
+      if (d.until && Date.now() >= d.until) return { count: 0, until: 0, last: 0 }; // fenêtre 100 expirée
+      if (d.last && Date.now() - d.last >= QUOTA_MS) return { count: 0, until: 0, last: 0 }; // ≥ 24h sans scrap
+      return { count: d.count, until: d.until || 0, last: d.last || 0 };
     }
   } catch {}
-  return { count: 0, until: 0 };
+  return { count: 0, until: 0, last: 0 };
 }
-function saveQuota(count, until) {
-  try { localStorage.setItem(QUOTA_LS_KEY, JSON.stringify({ count, until: until || 0 })); } catch {}
+function saveQuota(count, until, last) {
+  try { localStorage.setItem(QUOTA_LS_KEY, JSON.stringify({ count, until: until || 0, last: last || 0 })); } catch {}
 }
 // Garantit qu'une fenêtre 24h existe dès que le quota est atteint. Auto-réparant :
 // un état hérité de l'ancien format ({ date, count:100 } sans `until`) ou un arrêt
@@ -317,7 +322,7 @@ function ensureQuotaWindow() {
   if (q.count < QUOTA_MAX) return 0;
   if (q.until && q.until > Date.now()) return q.until;
   const until = Date.now() + QUOTA_MS;
-  saveQuota(QUOTA_MAX, until);
+  saveQuota(QUOTA_MAX, until, q.last);
   return until;
 }
 // Notification cross-plateforme : sur mobile (Android Chrome), `new Notification()`
@@ -1506,13 +1511,16 @@ function StoreProvider({ children }) {
           // Quota consommé APRÈS la requête : un throw au-dessus (erreur API,
           // disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné.
           dailyCount++;
+          // `last` = instant de ce scrap : sert au reset d'inactivité (compteur remis
+          // à 0 si 24h passent sans nouveau scrap, même en dessous de 100).
+          const scrapAt = Date.now();
           if (dailyCount >= QUOTA_MAX) {
             // 100e artiste scrapé → ouvre la fenêtre glissante de 24h (gelée à cet instant)
-            const until = Date.now() + QUOTA_MS;
-            saveQuota(dailyCount, until);
+            const until = scrapAt + QUOTA_MS;
+            saveQuota(dailyCount, until, scrapAt);
             setQuotaUntil(until);
           } else {
-            saveQuota(dailyCount, 0);
+            saveQuota(dailyCount, 0, scrapAt);
           }
           setDailyScrapings(dailyCount);
           if (albumsData?.items) {

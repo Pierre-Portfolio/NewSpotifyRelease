@@ -260,7 +260,8 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 
 ### Quota 100 artistes / fenêtre GLISSANTE de 24h
 - **Ce n'est PLUS une limite par jour calendaire** (remise à zéro à minuit) mais une **fenêtre glissante de 24h** : atteindre 100 artistes démarre un compteur de 24h, et toute synchro suivante est refusée jusqu'à son expiration. Avant, on pouvait scraper 100 à 23h30 puis 100 de plus à 00h30.
-- Helpers module-level `loadQuota()` / `saveQuota(count, until)` autour de `localStorage` clé `spotifyplus_daily_scrapings` = `{ count, until }` (`until` = timestamp ms de fin de la fenêtre 24h, `0` tant que < 100). `loadQuota()` **remet `count` à 0 si `until` est dépassé** (fenêtre expirée).
+- **Reset d'inactivité (24h depuis le dernier scrap)** : le compteur repart à 0 **24h après le dernier artiste scrapé**, MÊME si on n'a pas atteint 100. Avant, scraper 95 puis revenir 3 jours plus tard affichait encore 95 (le compteur ne baissait jamais tant que 100 n'était pas atteint, car seule la fenêtre `until` posée au 100e remettait à 0).
+- Helpers module-level `loadQuota()` / `saveQuota(count, until, last)` autour de `localStorage` clé `spotifyplus_daily_scrapings` = `{ count, until, last }` (`until` = timestamp ms de fin de la fenêtre 24h, `0` tant que < 100 ; `last` = timestamp ms du **dernier artiste scrapé**, posé à `Date.now()` après chaque scrap dans `startSync`). `loadQuota()` **remet `count` à 0** dans **deux** cas : (1) `until` dépassé (fenêtre 100-atteint expirée) **OU** (2) **`Date.now() - last ≥ 24h`** (inactivité).
 - **`ensureQuotaWindow()` (helper module-level, AUTO-RÉPARANT)** : si `count ≥ 100` sans fenêtre valide (`until` absent/expiré), ouvre et persiste une fenêtre de 24h **maintenant**, et retourne le timestamp de fin (`0` si quota non atteint). Corrige un **état hérité de l'ancien format `{ date, count:100 }`** (pré-fenêtre-glissante) qui laissait le compteur bloqué à 100 **sans `until`** : le garde `startSync` ne bloquait pas (until=0), la synchro démarrait, atteignait le quota en tête de boucle et s'arrêtait **sans jamais poser de date** → bloqué en boucle, aucun countdown affichable. Appelé aux **3 endroits** : init (expose la fenêtre au chargement), garde `startSync`, garde de boucle.
 - Vérifiée en tête de boucle artiste ; à l'atteinte : log + notification navigateur + `endSync('daily_limit')` (le bouton Reprendre apparaît **immédiatement**) — et aussi vérifiée **en tête de `startSync`** via `loadQuota().count >= QUOTA_MAX` (refus avant toute requête)
 - **Les deux logs de refus quota + la notification affichent la date/heure absolue de réouverture** (`toLocaleString('fr-FR', { dateStyle:'long', timeStyle:'short' })`) en plus de la durée relative
@@ -441,11 +442,11 @@ setDelayChoice(n)
 ```
 
 ### Compteur `dailyScrapings` + fenêtre 24h `quotaUntil`
-- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ count: N, until: timestamp_ms }` (helpers `loadQuota()` / `saveQuota(count, until)`)
-- `until` = fin de la fenêtre glissante de 24h, posée **uniquement quand `count` atteint 100** (`0` sinon). `loadQuota()` remet `count` à 0 dès que `until` est dépassé (fenêtre expirée → nouvelle session de 100 autorisée)
+- Persisté dans `localStorage` clé `spotifyplus_daily_scrapings` : `{ count: N, until: timestamp_ms, last: timestamp_ms }` (helpers `loadQuota()` / `saveQuota(count, until, last)`)
+- `until` = fin de la fenêtre glissante de 24h, posée **uniquement quand `count` atteint 100** (`0` sinon). `last` = instant du **dernier scrap**. `loadQuota()` remet `count` à 0 si `until` est dépassé (fenêtre 100 expirée) **OU** si `Date.now() - last ≥ 24h` (inactivité — reset même en dessous de 100)
 - Chargé au démarrage de l'app (dans l'init useEffect) → `setDailyScrapings(q.count)` + `setQuotaUntil(q.until)` si encore actif
-- Incrémenté dans `startSync` **après la requête albums de chaque artiste** (un échec ne consomme pas le quota)
-- **Plus de remise à zéro à minuit** : seul l'écoulement des 24h depuis le 100e artiste réinitialise le compteur
+- Incrémenté dans `startSync` **après la requête albums de chaque artiste** (un échec ne consomme pas le quota) ; `last = Date.now()` est posé au même moment
+- **Plus de remise à zéro à minuit** : le compteur est réinitialisé soit 24h après le 100e artiste (fenêtre bloquante), soit **24h après le dernier scrap** s'il y a eu de l'inactivité sans atteindre 100
 - Affiché dans la carte **Artistes** de `ScrapingStatusPanel` (`X/100 sur 24h`)
 - Utilisé dans `NextCallPanel` pour **"Temps total de la session"** : `(100 - dailyScrapings) × délai moyen (delayChoice + 2s)` — temps restant pour finir les 100 artistes de la fenêtre, affiché uniquement pendant une synchro active
 
