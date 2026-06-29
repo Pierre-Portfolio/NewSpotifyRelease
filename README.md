@@ -102,18 +102,21 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance ou **supprimée**
 - Tâches mémorisées localement (aucun backend)
 
-### Gestion MDP
-- Section **Gestion MDP** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
+### Mot de Passe
+- Section **Mot de Passe** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
 - **Coffre chiffré par un mot de passe maître** (AES-GCM 256 + PBKDF2 via la Web Crypto API native) : le localStorage ne contient que des données chiffrées, le mot de passe maître n'est jamais stocké
-- **Ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire** ; mot de passe **masqué par défaut** (afficher/masquer) + bouton **copier**, lien direct vers l'URL
+- **Ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire** ; le formulaire d'ajout est **repliable**, et un **champ de recherche** filtre les entrées (identifiant / URL / commentaire)
+- Mot de passe **masqué par défaut** (afficher/masquer) + bouton **copier**, lien direct vers l'URL
 - **Verrouillage automatique** au rechargement de l'app + bouton « Verrouiller »
 - **Export / Import** d'une **sauvegarde chiffrée** (fichier `.json`) pour ne pas tout perdre en cas de perte de l'appareil et restaurer sur un autre
 - ⚠️ Le chiffrement protège contre une **fuite passive** du stockage (sauvegarde/dump volé), **pas** contre un logiciel malveillant déjà actif sur l'appareil. **Mot de passe maître oublié = données irrécupérables** (aucun backend, aucune réinitialisation possible)
 
-### Rappel
-- Section **Rappel** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
-- **Widget fixe** organisé en sections : **Véhicule** (Prochain contrôle technique), **Médecin** (Dentiste, ORL, Généraliste), **Sport** (Licence, Course à pied)
-- Pour chaque élément, on saisit la **date du prochain rappel** ; un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
+### Remember
+- Section **Remember** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
+- Sections fixes : **Véhicule** (Prochain contrôle technique), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL), **Sport** (Licence Course à pied)
+- **Rappels personnalisés** : ajoute ton propre rappel (libellé + date)
+- Pour chaque rappel, un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
+- **Notification à l'ouverture de l'app** quand un rappel arrive à échéance (une fois par jour) + bandeau des rappels échus
 - Dates mémorisées localement (aucun backend)
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h

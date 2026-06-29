@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.4.5';
+const APP_VERSION = '2.4.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -889,6 +889,9 @@ function StoreProvider({ children }) {
 
           // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
           try { navigator.storage?.persist?.(); } catch {}
+
+          // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
+          try { notifyDueReminders(); } catch {}
 
           // Init local DB
           await initDB();
@@ -3604,6 +3607,8 @@ function GestionMdpPanel() {
   const [form, setForm]       = React.useState({ identifiant:'', mdp:'', url:'', comment:'' });
   const [shown, setShown]     = React.useState({});
   const [msg, setMsg]         = React.useState('');
+  const [showAdd, setShowAdd] = React.useState(false);  // formulaire d'ajout repliable
+  const [query, setQuery]     = React.useState('');      // recherche
   const masterRef = React.useRef(_mdpSession.pw);       // mot de passe maître courant (mémoire only)
   const fileRef   = React.useRef(null);
 
@@ -3736,18 +3741,41 @@ function GestionMdpPanel() {
         <button onClick={lock} title="Verrouiller" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9.5, padding:'3px 7px', cursor:'pointer' }}>🔒 Verrouiller</button>
       </div>
       {msg && <div style={{ fontSize:9.5, color:MDP_PURPLE }}>{msg}</div>}
-      <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
-        {field('identifiant', 'Identifiant / login')}
-        {field('mdp', 'Mot de passe')}
-        {field('url', 'URL (https://…)')}
-        {field('comment', 'Commentaire')}
-        <button onClick={add} style={bigBtn}>+ Ajouter</button>
-      </div>
-      {entries.length === 0 ? (
-        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun identifiant enregistré</div>
-      ) : (
+      {/* Formulaire d'ajout repliable */}
+      <button onClick={() => setShowAdd(v => !v)} style={{ ...bigBtn, display:'flex', alignItems:'center', justifyContent:'center', gap:6 }}>
+        {showAdd ? '▾ Masquer le formulaire' : '+ Ajouter un identifiant'}
+      </button>
+      {showAdd && (
+        <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+          {field('identifiant', 'Identifiant / login')}
+          {field('mdp', 'Mot de passe')}
+          {field('url', 'URL (https://…)')}
+          {field('comment', 'Commentaire')}
+          <button onClick={add} style={bigBtn}>✓ Enregistrer</button>
+        </div>
+      )}
+      {/* Recherche */}
+      {entries.length > 0 && (
+        <input type="text" value={query} placeholder="🔍 Rechercher…"
+          onChange={e => setQuery(e.target.value)}
+          style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${query ? MDP_PURPLE : C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+      )}
+      {(() => {
+        const q = query.trim().toLowerCase();
+        const list = q ? entries.filter(e => (
+          (e.identifiant || '').toLowerCase().includes(q) ||
+          (e.url || '').toLowerCase().includes(q) ||
+          (e.comment || '').toLowerCase().includes(q)
+        )) : entries;
+        if (entries.length === 0) return (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun identifiant enregistré</div>
+        );
+        if (list.length === 0) return (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun résultat</div>
+        );
+        return (
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {entries.map(e => (
+          {list.map(e => (
             <div key={e.id} style={{ background:C.surfaceHigh, borderRadius:8, padding:'7px 9px', display:'flex', flexDirection:'column', gap:3 }}>
               <div style={{ display:'flex', alignItems:'center', gap:6 }}>
                 <div style={{ flex:1, minWidth:0, fontSize:12, fontWeight:700, color:C.text, wordBreak:'break-word' }}>{e.identifiant || '—'}</div>
@@ -3765,24 +3793,29 @@ function GestionMdpPanel() {
             </div>
           ))}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
 
 // ════════════════════════════════════════════════
-// RAPPEL — widget FIXE : sections/items prédéfinis, on saisit la date du prochain
-// rappel pour chacun (contrôle technique, médecins, sport…). Persistance localStorage.
+// REMEMBER — sections fixes (Véhicule/Médecin/Sport) avec date du prochain rappel +
+// rappels PERSONNALISÉS (libellé + date). Une notification est émise À L'OUVERTURE de
+// l'app (notifyDueReminders, throttlée 1×/jour) pour tout rappel échu. localStorage.
 // ════════════════════════════════════════════════
 const RAPPEL_PURPLE = '#c792ea';
-const RAPPEL_LS_KEY = 'spotifyplus_rappels';
+const RAPPEL_LS_KEY = 'spotifyplus_rappels';            // dates des items fixes : { "<section>.<item>": date }
+const REMEMBER_CUSTOM_KEY = 'spotifyplus_remember_custom'; // rappels persos : [{ id, label, date }]
 const RAPPEL_SECTIONS = [
   { key:'vehicule', label:'Véhicule', icon:'🚗', items:[['ct', 'Prochain contrôle technique']] },
-  { key:'medecin',  label:'Médecin',  icon:'🩺', items:[['dentiste','Dentiste'], ['orl','ORL'], ['generaliste','Généraliste']] },
-  { key:'sport',    label:'Sport',    icon:'🏃', items:[['licence','Licence'], ['course','Course à pied']] },
+  { key:'medecin',  label:'Médecin',  icon:'🩺', items:[['generaliste','Généraliste'], ['dentiste','Dentiste'], ['depistage','Dépistage'], ['checkup','Check Up complet'], ['orl','ORL']] },
+  { key:'sport',    label:'Sport',    icon:'🏃', items:[['licence_course','Licence Course à pied']] },
 ];
 function loadRappels() { try { return JSON.parse(localStorage.getItem(RAPPEL_LS_KEY)) || {}; } catch { return {}; } }
 function saveRappels(v) { try { localStorage.setItem(RAPPEL_LS_KEY, JSON.stringify(v)); } catch {} }
+function loadRemembers() { try { return JSON.parse(localStorage.getItem(REMEMBER_CUSTOM_KEY)) || []; } catch { return []; } }
+function saveRemembers(v) { try { localStorage.setItem(REMEMBER_CUSTOM_KEY, JSON.stringify(v)); } catch {} }
 // Jours restants jusqu'à la date (négatif = en retard), ou null si pas de date.
 function rappelDelta(dateStr) {
   if (!dateStr) return null;
@@ -3798,16 +3831,66 @@ function rappelBadge(days) {
   if (days <= 30)    return { txt:`dans ${days} j`,       color:'#f5a623' };
   return { txt:`dans ${days} j`, color:'#46c46a' };
 }
+// Liste des rappels ÉCHUS (date ≤ aujourd'hui) — items fixes + persos.
+function rememberDueList() {
+  const due = [];
+  const dates = loadRappels();
+  RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
+    const d = rappelDelta(dates[sec.key + '.' + ik]);
+    if (d != null && d <= 0) due.push(label);
+  }));
+  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null && d <= 0) due.push(r.label); });
+  return due;
+}
+// Notification à l'ouverture de l'app si un rappel est échu — throttlée 1×/jour.
+function notifyDueReminders() {
+  const due = rememberDueList();
+  if (!due.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const KEY = 'spotifyplus_remember_notified';
+  try { if (localStorage.getItem(KEY) === today) return; localStorage.setItem(KEY, today); } catch {}
+  const names = due.join(', ');
+  notify('Spotify+ — Remember', due.length === 1 ? `Rappel : ${names}` : `${due.length} rappels : ${names}`);
+}
 
 function RappelPanel() {
-  const [dates, setDates] = React.useState(loadRappels);
+  const [dates, setDates]   = React.useState(loadRappels);
+  const [customs, setCustoms] = React.useState(loadRemembers);
+  const [cLabel, setCLabel] = React.useState('');
+  const [cDate, setCDate]   = React.useState('');
+
   const setDate = (key, val) => {
     const next = { ...dates };
     if (val) next[key] = val; else delete next[key];
     setDates(next); saveRappels(next);
   };
+  const updateCustoms = next => { setCustoms(next); saveRemembers(next); };
+  const addCustom = () => {
+    const label = cLabel.trim();
+    if (!label || !cDate) return;
+    updateCustoms([...customs, { id: Date.now() + '_' + Math.random().toString(36).slice(2), label, date: cDate }]);
+    setCLabel(''); setCDate('');
+  };
+  const removeCustom = id => updateCustoms(customs.filter(c => c.id !== id));
+  const setCustomDate = (id, val) => updateCustoms(customs.map(c => c.id === id ? { ...c, date: val } : c));
+
+  // Rappels échus (pour le bandeau) — fixes + persos
+  const due = [];
+  RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => { const d = rappelDelta(dates[sec.key + '.' + ik]); if (d != null && d <= 0) due.push(label); }));
+  customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d <= 0) due.push(c.label); });
+
+  const dateInput = (val, onChange) => (
+    <input type="date" value={val} onChange={onChange}
+      style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 6px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
+  );
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      {due.length > 0 && (
+        <div style={{ background:'#e0505022', border:'1px solid #e0505066', borderRadius:10, padding:'8px 11px', fontSize:11, color:'#ff8a8a', fontWeight:700, lineHeight:1.4 }}>
+          🔔 {due.length} rappel{due.length > 1 ? 's' : ''} à traiter : {due.join(', ')}
+        </div>
+      )}
       {RAPPEL_SECTIONS.map(sec => (
         <div key={sec.key} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 11px', display:'flex', flexDirection:'column', gap:7 }}>
           <div style={{ fontSize:11, fontWeight:800, color:RAPPEL_PURPLE, letterSpacing:'0.04em' }}>{sec.icon} {sec.label}</div>
@@ -3819,13 +3902,37 @@ function RappelPanel() {
               <div key={ik} style={{ display:'flex', alignItems:'center', gap:8 }}>
                 <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{label}</div>
                 <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
-                <input type="date" value={val} onChange={e => setDate(key, e.target.value)}
-                  style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 6px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
+                {dateInput(val, e => setDate(key, e.target.value))}
               </div>
             );
           })}
         </div>
       ))}
+      {/* Rappels personnalisés — notif à l'ouverture de l'app quand la date est atteinte */}
+      <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 11px', display:'flex', flexDirection:'column', gap:7 }}>
+        <div style={{ fontSize:11, fontWeight:800, color:RAPPEL_PURPLE, letterSpacing:'0.04em' }}>🔔 Mes rappels</div>
+        <div style={{ fontSize:8.5, color:C.muted, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>Notification à l'ouverture de l'app quand la date arrive.</div>
+        {customs.length === 0
+          ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', fontFamily:'DM Mono,monospace' }}>Aucun rappel personnalisé</div>
+          : customs.map(c => {
+              const b = rappelBadge(rappelDelta(c.date));
+              return (
+                <div key={c.id} style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{c.label}</div>
+                  <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
+                  {dateInput(c.date || '', e => setCustomDate(c.id, e.target.value))}
+                  <button onClick={() => removeCustom(c.id)} title="Supprimer" style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+                </div>
+              );
+            })}
+        <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+          <input type="text" value={cLabel} placeholder="Nouveau rappel…"
+            onChange={e => setCLabel(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addCustom(); }}
+            style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${cLabel ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }} />
+          {dateInput(cDate, e => setCDate(e.target.value))}
+          <button onClick={addCustom} title="Ajouter" style={{ background:`${RAPPEL_PURPLE}22`, border:`1px solid ${RAPPEL_PURPLE}66`, borderRadius:6, color:RAPPEL_PURPLE, fontSize:16, lineHeight:1, padding:'0 10px', cursor:'pointer', flexShrink:0 }}>+</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4319,7 +4426,7 @@ function MobileApp() {
   const [menuOpen, setMenuOpen] = React.useState(false);
   const primaryTabs  = [['scrapping','Scrapping'],['ecouter','En attente'],['liker','❤ Likés']];
   // 3e élément optionnel = couleur du libellé (Météo/Finance en bleu)
-  const overflowTabs = [['meteo','Météo',METEO_BLUE],['finance','Finance',FINANCE_BLUE],['todo','To do',TODO_PURPLE],['mdp','Gestion MDP',MDP_PURPLE],['rappel','Rappel',RAPPEL_PURPLE],['historique','Histo'],['artistes','Artistes'],['stats','Stats']];
+  const overflowTabs = [['meteo','Météo',METEO_BLUE],['finance','Finance',FINANCE_BLUE],['todo','To Do',TODO_PURPLE],['mdp','Mot de Passe',MDP_PURPLE],['rappel','Remember',RAPPEL_PURPLE],['historique','Histo'],['artistes','Artistes'],['stats','Stats']];
   const tabInOverflow = overflowTabs.some(([k]) => k === tab);
   const selectTab = k => { setTab(k); setMenuOpen(false); };
   return (
@@ -4427,13 +4534,13 @@ function MobileApp() {
         )}
         {tab === 'mdp' && (
           <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
-            <div style={{ fontSize:10, fontWeight:700, color:MDP_PURPLE, letterSpacing:'0.07em' }}>GESTION MDP</div>
+            <div style={{ fontSize:10, fontWeight:700, color:MDP_PURPLE, letterSpacing:'0.07em' }}>MOT DE PASSE</div>
             <GestionMdpPanel />
           </div>
         )}
         {tab === 'rappel' && (
           <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
-            <div style={{ fontSize:10, fontWeight:700, color:RAPPEL_PURPLE, letterSpacing:'0.07em' }}>RAPPEL</div>
+            <div style={{ fontSize:10, fontWeight:700, color:RAPPEL_PURPLE, letterSpacing:'0.07em' }}>REMEMBER</div>
             <RappelPanel />
           </div>
         )}
@@ -4527,9 +4634,9 @@ function WebApp() {
           <FinancePanel />
           <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:TODO_PURPLE, marginTop:14, marginBottom:4 }}>TO DO</div>
           <TodoPanel />
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:MDP_PURPLE, marginTop:14, marginBottom:4 }}>GESTION MDP</div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:MDP_PURPLE, marginTop:14, marginBottom:4 }}>MOT DE PASSE</div>
           <GestionMdpPanel />
-          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:RAPPEL_PURPLE, marginTop:14, marginBottom:4 }}>RAPPEL</div>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:RAPPEL_PURPLE, marginTop:14, marginBottom:4 }}>REMEMBER</div>
           <RappelPanel />
           <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', color:C.dim, marginTop:14, marginBottom:4 }}>HISTORIQUE · <span style={{ color:C.accent }}>{s.history.length}</span></div>
           <HistoryPanel />
