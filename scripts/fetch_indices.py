@@ -43,12 +43,16 @@ def _get(url, timeout=TIMEOUT):
         return r.read()
 
 
-def fetch_yahoo(symbol):
-    """Récupère le chart Yahoo du symbole via les proxies ; renvoie {price, pct} ou None."""
+def fetch_yahoo(symbol, start=0):
+    """Récupère le chart Yahoo du symbole via les proxies ; renvoie {price, pct} ou None.
+    `start` décale l'ordre des proxies (rotation par symbole) pour ne pas toujours taper
+    codetabs en premier → évite que le symbole du milieu se fasse rate-limiter."""
     target = ("https://query1.finance.yahoo.com/v8/finance/chart/"
               + urllib.parse.quote(symbol) + "?range=5d&interval=1d")
     enc = urllib.parse.quote(target, safe="")
-    for tmpl, do_enc in PROXIES:
+    n = len(PROXIES)
+    for i in range(n):
+        tmpl, do_enc = PROXIES[(start + i) % n]
         url = tmpl.format(u=enc if do_enc else target)
         try:
             data = json.loads(_get(url))
@@ -73,18 +77,31 @@ def main():
         existing = {}
     indices = existing.get("indices", {})
 
+    # Jusqu'à 3 passes : à chaque passe on ne retente que les symboles encore manquants,
+    # avec une rotation de proxy différente et une pause croissante (les proxies keyless
+    # rate-limitent les appels rapprochés → c'est souvent le symbole du milieu qui rate).
+    pending = list(enumerate(SYMBOLS))  # [(idx, (key, sym, name)), ...]
     ok = 0
-    for key, sym, name in SYMBOLS:
-        q = fetch_yahoo(sym)
-        if q:
-            q["name"] = name
-            q["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            indices[key] = q
-            ok += 1
-            print(f"{name}: {q['price']} ({q['pct']}%)")
-        else:
-            print(f"!! {name}: indisponible — valeur précédente conservée", file=sys.stderr)
-        time.sleep(1)  # espace les appels (limite de débit des proxies)
+    for attempt in range(3):
+        if not pending:
+            break
+        if attempt:
+            time.sleep(4)  # laisse retomber le rate-limit des proxies entre deux passes
+        still = []
+        for idx, (key, sym, name) in pending:
+            q = fetch_yahoo(sym, start=idx + attempt)  # rotation par symbole ET par passe
+            if q:
+                q["name"] = name
+                q["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                indices[key] = q
+                ok += 1
+                print(f"{name}: {q['price']} ({q['pct']}%)")
+            else:
+                still.append((idx, (key, sym, name)))
+            time.sleep(2)  # espace les appels (limite de débit des proxies)
+        pending = still
+    for idx, (key, sym, name) in pending:
+        print(f"!! {name}: indisponible — valeur précédente conservée", file=sys.stderr)
 
     out = {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
