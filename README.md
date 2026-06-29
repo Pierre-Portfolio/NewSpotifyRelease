@@ -91,7 +91,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. **Revient toujours en Light à chaque reconnexion** (choix non mémorisé).
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI), **Sucre** et **Blé** via **[Alpha Vantage](https://www.alphavantage.co/)** (endpoints matière première dédiés `WTI`/`SUGAR`/`WHEAT`, CORS natif, vrais prix mondiaux avec variation) ; Or et Argent via **[gold-api.com](https://gold-api.com/)**
-- **ETF / indices** : NASDAQ-100 (**QQQ**), S&P 500 (**SPY**), CAC 40 (**EWQ**) via **[Alpha Vantage](https://www.alphavantage.co/)** `GLOBAL_QUOTE` (CORS natif). Alpha Vantage n'ayant pas d'indices bruts, on affiche les ETF répliquants (variation 24h ≈ indice) — Twelve Data gratuit ne couvrant pas les indices et les proxys CORS étant bloqués
+- **Indices** : **NASDAQ-100, S&P 500, CAC 40** — désormais les **vrais indices** (plus d'ETF). Aucune API gratuite à CORS natif ne les expose au navigateur ; une **GitHub Action** planifiée interroge [Yahoo Finance](https://finance.yahoo.com/) **côté serveur** (toutes les 2 h, jours ouvrés) et publie un fichier `data/indices.json` que l'app lit en *same-origin* (donc sans proxy CORS ni clé). Données de fin de journée / différé, rafraîchies plusieurs fois par jour
 - **Chargement à la demande** : en mode Light seules les valeurs Light sont récupérées ; les valeurs Full ne sont chargées qu'au premier passage en mode Full
 - **Chargement à l'ouverture de Finance** : les APIs boursières ne sont appelées **que lorsqu'on ouvre la section/onglet Finance** (plus au login) — les cours commencent alors à se charger (valeurs Light en priorité) avec un **indicateur de chargement** clair pendant la récupération (les appels boursiers sont espacés de ~8 s pour respecter la limite gratuite de Twelve Data)
 - **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
@@ -187,6 +187,12 @@ NewSpotifyRelease/
   icon-192.png        → Icône PWA 192×192 (à ajouter)
   icon-512.png        → Icône PWA 512×512 (à ajouter)
   CLAUDE.md           → Documentation technique pour Claude
+  data/
+    indices.json      → Vrais indices (NASDAQ-100/S&P 500/CAC 40), généré par la GitHub Action
+  scripts/
+    fetch_indices.py  → Récupère les indices depuis Yahoo Finance (lancé par l'Action)
+  .github/workflows/
+    update-indices.yml → Action cron qui met à jour data/indices.json
   assets/
     images/github/    → Images README
 ```

@@ -64,7 +64,7 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : format 1.MM.U où MM.U = nombre de commits du dépôt avec un point inséré
 // avant le dernier chiffre (ex. 185 commits → 1.18.5, 190 → 1.19.0). À incrémenter manuellement
 // à chaque commit (= git rev-list --count HEAD après le commit).
-const APP_VERSION = '2.3.1';
+const APP_VERSION = '2.3.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3146,9 +3146,9 @@ async function fetchAlphaCommodity(func, interval = 'monthly') {
 // Pétrole WTI ($/baril) : endpoint dédié, granularité quotidienne.
 async function fetchAlphaOil() { return fetchAlphaCommodity('WTI', 'daily'); }
 
-// Cours d'un titre/ETF via Alpha Vantage GLOBAL_QUOTE (CORS natif). AV n'a PAS d'indices
-// bruts → on interroge les ETF répliquants (QQQ=NASDAQ-100, SPY=S&P 500, EWQ=CAC/France).
-// Renvoie { price, pct }. En cas de rate-limit, AV renvoie un objet sans 'Global Quote' → null.
+// Cours d'un titre/ETF via Alpha Vantage GLOBAL_QUOTE (CORS natif). Renvoie { price, pct }.
+// ⚠ Plus appelé : les indices passent désormais par data/indices.json (vrais indices via
+// la GitHub Action Yahoo). Helper conservé comme repli potentiel (ETF QQQ/SPY/EWQ).
 async function fetchAlphaQuote(symbol) {
   if (!ALPHA_VANTAGE_KEY) return null;
   try {
@@ -3193,6 +3193,23 @@ async function fetchIndexQuote(yahooSymbol, stooqSymbol) {
   return await fetchStooq(stooqSymbol);
 }
 
+// VRAIS indices (NASDAQ-100, S&P 500, CAC 40) via un JSON same-origin (`data/indices.json`)
+// généré PÉRIODIQUEMENT par une GitHub Action (cron) qui interroge Yahoo Finance CÔTÉ
+// SERVEUR — voir .github/workflows/update-indices.yml + scripts/fetch_indices.py. Comme
+// le fichier est servi par la même origine (GitHub Pages = 'self'), aucun proxy CORS ni
+// clé n'est nécessaire, et on contourne le mur de consentement RGPD que Yahoo impose aux
+// navigateurs UE. Données EOD/différé rafraîchies plusieurs fois par jour ouvré.
+// Cache-buster + no-store : on veut toujours la dernière version commitée (le service
+// worker ne met de toute façon pas en cache cette ressource hors app-shell).
+async function fetchIndicesJSON() {
+  try {
+    const r = await fetch('./data/indices.json?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j.indices ? j.indices : null;
+  } catch (e) { return null; }
+}
+
 // ════════════════════════════════════════════════
 // Gestionnaire Finance MODULE-LEVEL — lance le fetch UNE seule fois (dès le login),
 // met en cache et notifie les abonnés (FinancePanel). Survit au démontage de l'onglet
@@ -3221,7 +3238,7 @@ function tdSpaced(fn, label) {
 }
 
 const _finance = {
-  eurusd: null, crypto: null, gold: null, oil: null, etf: {}, stocks: {},
+  eurusd: null, crypto: null, gold: null, oil: null, idx: null, stocks: {},
   silver: null, sugar: null, wheat: null,   // matières via gold-api (Full)
   loadingLight: true,   // true tant que les valeurs Light ne sont pas toutes chargées
   loadingFull: false,   // true pendant le chargement des valeurs Full
@@ -3268,11 +3285,14 @@ async function startFinanceLight() {
     _finNotify();
   })();
   fetchGold().then(d => { _finance.gold = d; _finNotify(); });
-  // Piste Alpha Vantage (CORS natif) : pétrole WTI (vrai prix) + NASDAQ-100 (ETF QQQ),
-  // séquentielle pour ne pas burster la limite AV par minute.
+  // VRAIS indices (NASDAQ-100 + S&P 500 + CAC 40) en UN SEUL fetch same-origin (JSON
+  // généré par la GitHub Action). Immédiat, hors file TD et hors quota AV. Les 3 sont
+  // chargés d'un coup (S&P/CAC ne sont affichés qu'en mode Full mais déjà en mémoire).
+  fetchIndicesJSON().then(idx => { if (idx) _finance.idx = idx; _finNotify(); });
+  // Piste Alpha Vantage (CORS natif) : pétrole WTI (vrai prix). Les indices ne passent
+  // plus par AV (ETF) → quota AV réservé au pétrole + sucre/blé (Full).
   const alphaTrack = _runAlphaTrack([
-    [fetchAlphaOil,                 d => { _finance.oil = d; }],                            // Pétrole WTI
-    [() => fetchAlphaQuote('QQQ'),  d => { _finance.etf = { ..._finance.etf, ndq: d }; }],  // NASDAQ-100 (QQQ)
+    [fetchAlphaOil, d => { _finance.oil = d; }],   // Pétrole WTI
   ]);
   // Piste TD (EUR/USD + actions), espacée 8s — pilote le libellé `nextLabel`
   const tdTrack = (async () => {
@@ -3309,14 +3329,13 @@ async function startFinanceFull() {
   if (_finance.startedFull) return;
   _finance.startedFull = true;
   _finance.loadingFull = true; _finNotify();
-  // Piste Alpha Vantage (CORS natif) : S&P 500 (ETF SPY) + CAC 40 (ETF EWQ) + Sucre + Blé,
-  // séquentielle (pause 400ms) pour ne pas burster la limite AV par minute. Sucre/blé ont
-  // un endpoint matière première DÉDIÉ (vrai prix mondial) → plus de symboles "tentés".
+  // Piste Alpha Vantage (CORS natif) : Sucre + Blé (endpoint matière première DÉDIÉ, vrai
+  // prix mondial), séquentielle (pause 400ms) pour ne pas burster la limite AV par minute.
+  // Les indices S&P 500 / CAC 40 ne passent plus par AV : ils sont déjà chargés en mode
+  // Light via fetchIndicesJSON (data/indices.json) avec NASDAQ-100.
   const alphaTrack = _runAlphaTrack([
-    [() => fetchAlphaQuote('SPY'),     d => { _finance.etf = { ..._finance.etf, spx: d }; }],   // S&P 500 (SPY)
-    [() => fetchAlphaQuote('EWQ'),     d => { _finance.etf = { ..._finance.etf, cac: d }; }],   // CAC 40 (EWQ)
-    [() => fetchAlphaCommodity('SUGAR'), d => { _finance.sugar = d; }],                          // Sucre (mensuel)
-    [() => fetchAlphaCommodity('WHEAT'), d => { _finance.wheat = d; }],                          // Blé (mensuel)
+    [() => fetchAlphaCommodity('SUGAR'), d => { _finance.sugar = d; }],   // Sucre (mensuel)
+    [() => fetchAlphaCommodity('WHEAT'), d => { _finance.wheat = d; }],   // Blé (mensuel)
   ]);
   // Argent via gold-api (CORS natif, sans clé) — parallèle, immédiate.
   const metalsTrack = fetchMetal('XAG').then(d => { _finance.silver = d; _finNotify(); });
@@ -3348,7 +3367,7 @@ function FinancePanel() {
     startFinanceLight();
     return () => { _finance.subs.delete(forceRender); };
   }, []);
-  const { eurusd, crypto, gold, oil, etf, stocks, silver, sugar, wheat, loadingLight, loadingFull, nextLabel } = _finance;
+  const { eurusd, crypto, gold, oil, idx, stocks, silver, sugar, wheat, loadingLight, loadingFull, nextLabel } = _finance;
   const cg = (crypto && crypto !== 'error') ? crypto : null;
 
   // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, NASDAQ-100,
@@ -3417,10 +3436,10 @@ function FinancePanel() {
         {full && <FinanceRow icon="🌾" name="Blé"            value={fmtPrice(wheat && wheat.price)} pct={wheat && wheat.pct} />}
       </FinanceSection>
 
-      <FinanceSection title="ETF / INDICES" eurusd={eurusd}>
-        {full && <FinanceRow icon="🇺🇸" name="S&P 500 (SPY)" value={fmtPrice(etf.spx && etf.spx.price)} pct={etf.spx && etf.spx.pct} />}
-        <FinanceRow icon="💻" name="NASDAQ-100 (QQQ)"  value={fmtPrice(etf.ndq && etf.ndq.price)} pct={etf.ndq && etf.ndq.pct} />
-        {full && <FinanceRow icon="🇫🇷" name="CAC 40 (EWQ)"  value={fmtPrice(etf.cac && etf.cac.price)} pct={etf.cac && etf.cac.pct} />}
+      <FinanceSection title="INDICES" eurusd={eurusd}>
+        {full && <FinanceRow icon="🇺🇸" name="S&P 500" value={fmtPrice(idx && idx.spx && idx.spx.price)} pct={idx && idx.spx && idx.spx.pct} />}
+        <FinanceRow icon="💻" name="NASDAQ-100"  value={fmtPrice(idx && idx.ndq && idx.ndq.price)} pct={idx && idx.ndq && idx.ndq.pct} />
+        {full && <FinanceRow icon="🇫🇷" name="CAC 40"  value={fmtPrice(idx && idx.cac && idx.cac.price)} pct={idx && idx.cac && idx.cac.pct} />}
       </FinanceSection>
 
       <FinanceSection title="STOCK PICKING" eurusd={eurusd}>
