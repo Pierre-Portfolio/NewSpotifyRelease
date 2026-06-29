@@ -113,8 +113,13 @@ def main():
         f.write("\n")
     print(f"{ok}/{len(SYMBOLS)} symboles mis à jour.")
 
+    # ⚠ On NE fait PAS échouer le job si ok == 0 : un échec de fetch est NON FATAL
+    # (les valeurs précédentes du JSON sont conservées) et c'est un proxy public
+    # transitoirement throttlé, pas un bug. Faire échouer enverrait un mail "Run failed"
+    # inutile à chaque run malchanceux. On log juste un avertissement (visible dans l'Action).
     if ok == 0:
-        sys.exit(1)
+        print("::warning::Aucun indice récupéré ce run (proxies throttlés) — "
+              "valeurs précédentes conservées, nouvel essai au prochain run.", file=sys.stderr)
 
 
 if __name__ == "__main__":
