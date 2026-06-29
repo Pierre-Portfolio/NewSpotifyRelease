@@ -102,6 +102,18 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance ou **supprimée**
 - Tâches mémorisées localement (aucun backend)
 
+### Gestion MDP
+- Section **Gestion MDP** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
+- Petit gestionnaire d'identifiants : **ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire**
+- Mot de passe **masqué par défaut** (bouton afficher/masquer) + bouton **copier**, lien direct vers l'URL
+- ⚠️ **Stocké en clair sur l'appareil** (localStorage, aucun chiffrement ni backend) — usage personnel, à éviter sur un poste partagé
+
+### Rappel
+- Section **Rappel** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
+- **Widget fixe** organisé en sections : **Véhicule** (Prochain contrôle technique), **Médecin** (Dentiste, ORL, Généraliste), **Sport** (Licence, Course à pied)
+- Pour chaque élément, on saisit la **date du prochain rappel** ; un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
+- Dates mémorisées localement (aucun backend)
+
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
 - Limité à **100 artistes toutes les 24 heures** (et non par jour calendaire) : atteindre 100 démarre un compteur de 24h, et la prochaine synchro est refusée jusqu'à son expiration
 - Compteur affiché dans la carte **Artistes** (`X/100 sur 24h`)
