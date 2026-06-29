@@ -104,9 +104,11 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Gestion MDP
 - Section **Gestion MDP** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
-- Petit gestionnaire d'identifiants : **ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire**
-- Mot de passe **masqué par défaut** (bouton afficher/masquer) + bouton **copier**, lien direct vers l'URL
-- ⚠️ **Stocké en clair sur l'appareil** (localStorage, aucun chiffrement ni backend) — usage personnel, à éviter sur un poste partagé
+- **Coffre chiffré par un mot de passe maître** (AES-GCM 256 + PBKDF2 via la Web Crypto API native) : le localStorage ne contient que des données chiffrées, le mot de passe maître n'est jamais stocké
+- **Ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire** ; mot de passe **masqué par défaut** (afficher/masquer) + bouton **copier**, lien direct vers l'URL
+- **Verrouillage automatique** au rechargement de l'app + bouton « Verrouiller »
+- **Export / Import** d'une **sauvegarde chiffrée** (fichier `.json`) pour ne pas tout perdre en cas de perte de l'appareil et restaurer sur un autre
+- ⚠️ Le chiffrement protège contre une **fuite passive** du stockage (sauvegarde/dump volé), **pas** contre un logiciel malveillant déjà actif sur l'appareil. **Mot de passe maître oublié = données irrécupérables** (aucun backend, aucune réinitialisation possible)
 
 ### Rappel
 - Section **Rappel** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile

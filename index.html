@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.4.4';
+const APP_VERSION = '2.4.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3551,44 +3551,198 @@ function TodoPanel() {
 }
 
 // ════════════════════════════════════════════════
-// GESTION MDP — petit gestionnaire d'identifiants/mots de passe (localStorage).
-// ⚠ Stocké EN CLAIR sur l'appareil (pas de backend, pas de chiffrement) → usage perso.
+// GESTION MDP — coffre d'identifiants CHIFFRÉ par un mot de passe maître.
+// Chiffrement AES-GCM 256, clé dérivée par PBKDF2 (300k itérations, SHA-256) via la
+// Web Crypto API native (aucune lib, aucune origine réseau → rien à ajouter à la CSP).
+// Le localStorage ne contient QUE { salt, iv, ct } chiffrés ; le mot de passe maître
+// n'est JAMAIS stocké (demandé à l'ouverture). L'export = ce blob chiffré (sauvegarde).
+// ⚠ Ne protège PAS contre un malware actif sur l'appareil (qui peut lire la mémoire /
+// keylogger le mot de passe maître) — seulement contre une fuite passive du stockage.
+// ⚠ Mot de passe maître oublié = données irrécupérables (pas de backend, pas de reset).
 // ════════════════════════════════════════════════
 const MDP_PURPLE = '#a78bfa';
-const MDP_LS_KEY = 'spotifyplus_mdp';
-function loadMdp() { try { return JSON.parse(localStorage.getItem(MDP_LS_KEY)) || []; } catch { return []; } }
-function saveMdp(v) { try { localStorage.setItem(MDP_LS_KEY, JSON.stringify(v)); } catch {} }
+const MDP_VAULT_KEY = 'spotifyplus_mdp_vault';   // blob chiffré { v, salt, iv, ct }
+const MDP_LEGACY_KEY = 'spotifyplus_mdp';        // ancien stockage EN CLAIR (migré au 1er déverrouillage/création)
+const _mdpTextEnc = new TextEncoder();
+const _mdpTextDec = new TextDecoder();
+// base64 ⇄ bytes (boucle pour éviter le débordement de pile sur String.fromCharCode(...))
+function _mdpB64(buf) { const b = new Uint8Array(buf); let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); }
+function _mdpUnb64(s) { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+async function _mdpDeriveKey(password, salt) {
+  const base = await crypto.subtle.importKey('raw', _mdpTextEnc.encode(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name:'PBKDF2', salt, iterations:300000, hash:'SHA-256' },
+    base, { name:'AES-GCM', length:256 }, false, ['encrypt', 'decrypt']);
+}
+async function mdpEncrypt(password, dataObj) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const key  = await _mdpDeriveKey(password, salt);
+  const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, _mdpTextEnc.encode(JSON.stringify(dataObj)));
+  return { v:1, salt:_mdpB64(salt), iv:_mdpB64(iv), ct:_mdpB64(ct) };
+}
+async function mdpDecrypt(password, blob) {
+  const key = await _mdpDeriveKey(password, _mdpUnb64(blob.salt));
+  const pt  = await crypto.subtle.decrypt({ name:'AES-GCM', iv:_mdpUnb64(blob.iv) }, key, _mdpUnb64(blob.ct));
+  return JSON.parse(_mdpTextDec.decode(pt));
+}
+function loadVaultBlob() { try { return JSON.parse(localStorage.getItem(MDP_VAULT_KEY)) || null; } catch { return null; } }
+function saveVaultBlob(b) { try { localStorage.setItem(MDP_VAULT_KEY, JSON.stringify(b)); } catch {} }
+function isVaultBlob(b) { return b && b.v && typeof b.salt === 'string' && typeof b.iv === 'string' && typeof b.ct === 'string'; }
+// Session en mémoire : conserve le mot de passe maître + entrées déchiffrées tant que
+// l'app vit (survit au changement d'onglet mobile), effacée au reload (verrouillage auto).
+let _mdpSession = { unlocked:false, pw:null, entries:null };
 
 function GestionMdpPanel() {
-  const [entries, setEntries] = React.useState(loadMdp);
+  const [phase, setPhase] = React.useState(
+    () => _mdpSession.unlocked ? 'unlocked' : (loadVaultBlob() ? 'locked' : 'setup'));
+  const [entries, setEntries] = React.useState(() => _mdpSession.entries || []);
+  const [pw, setPw]           = React.useState('');     // saisie mot de passe maître (setup/unlock)
+  const [pw2, setPw2]         = React.useState('');     // confirmation (setup)
+  const [err, setErr]         = React.useState('');
+  const [busy, setBusy]       = React.useState(false);
   const [form, setForm]       = React.useState({ identifiant:'', mdp:'', url:'', comment:'' });
-  const [shown, setShown]     = React.useState({});   // id → mot de passe révélé ?
+  const [shown, setShown]     = React.useState({});
+  const [msg, setMsg]         = React.useState('');
+  const masterRef = React.useRef(_mdpSession.pw);       // mot de passe maître courant (mémoire only)
+  const fileRef   = React.useRef(null);
 
-  const update = next => { setEntries(next); saveMdp(next); };
+  // Persiste les entrées : (re)chiffre avec le mot de passe maître courant et écrit le blob.
+  const persist = async (next) => {
+    setEntries(next);
+    _mdpSession.entries = next;
+    try { saveVaultBlob(await mdpEncrypt(masterRef.current, next)); } catch (e) { setErr('Échec du chiffrement'); }
+  };
+
+  const createVault = async () => {
+    setErr('');
+    if (pw.length < 6) { setErr('Mot de passe maître : 6 caractères minimum'); return; }
+    if (pw !== pw2)    { setErr('Les deux mots de passe ne correspondent pas'); return; }
+    setBusy(true);
+    try {
+      let initial = [];
+      try { initial = JSON.parse(localStorage.getItem(MDP_LEGACY_KEY)) || []; } catch {}
+      saveVaultBlob(await mdpEncrypt(pw, initial));
+      try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}  // efface l'ancien clair migré
+      masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:initial };
+      setEntries(initial); setPhase('unlocked'); setPw(''); setPw2('');
+    } catch (e) { setErr('Erreur de création du coffre'); }
+    setBusy(false);
+  };
+
+  const unlock = async () => {
+    setErr(''); setBusy(true);
+    try {
+      const data = await mdpDecrypt(pw, loadVaultBlob());
+      masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:data };
+      setEntries(data); setPhase('unlocked'); setPw('');
+    } catch (e) { setErr('Mot de passe maître incorrect'); }
+    setBusy(false);
+  };
+
+  const lock = () => {
+    _mdpSession = { unlocked:false, pw:null, entries:null };
+    masterRef.current = null;
+    setEntries([]); setShown({}); setPw(''); setPhase('locked'); setMsg('');
+  };
+
   const add = () => {
     const f = { identifiant: form.identifiant.trim(), mdp: form.mdp, url: form.url.trim(), comment: form.comment.trim() };
     if (!f.identifiant && !f.mdp && !f.url) return;
-    update([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), ...f }, ...entries]);
+    persist([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), ...f }, ...entries]);
     setForm({ identifiant:'', mdp:'', url:'', comment:'' });
   };
-  const remove = id => update(entries.filter(e => e.id !== id));
-  const field = (k, ph, type='text') => (
-    <input type={type} value={form[k]} placeholder={ph}
+  const remove = id => persist(entries.filter(e => e.id !== id));
+
+  // Export = télécharge le blob chiffré (sauvegarde de secours, déchiffrable avec le mot de passe maître).
+  const exportVault = () => {
+    const blob = loadVaultBlob(); if (!blob) return;
+    const file = new Blob([JSON.stringify(blob)], { type:'application/json' });
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'gestion-mdp-sauvegarde.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    setMsg('Sauvegarde chiffrée exportée.');
+  };
+  const importVault = (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const blob = JSON.parse(r.result);
+        if (!isVaultBlob(blob)) { setErr('Fichier invalide (pas une sauvegarde de coffre)'); return; }
+        saveVaultBlob(blob);
+        _mdpSession = { unlocked:false, pw:null, entries:null }; masterRef.current = null;
+        setEntries([]); setPw(''); setErr(''); setMsg('Sauvegarde importée — déverrouille avec son mot de passe maître.');
+        setPhase('locked');
+      } catch (e) { setErr('Fichier illisible'); }
+    };
+    r.readAsText(f);
+    ev.target.value = '';
+  };
+
+  const pwInput = (val, setVal, ph) => (
+    <input type="password" value={val} placeholder={ph} autoComplete="new-password"
+      onChange={e => setVal(e.target.value)}
+      onKeyDown={e => { if (e.key === 'Enter') (phase === 'setup' ? createVault() : unlock()); }}
+      style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${val ? MDP_PURPLE : C.border}`, borderRadius:6, padding:'6px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+  );
+  const card = { background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 };
+  const bigBtn = { background:`${MDP_PURPLE}22`, border:`1px solid ${MDP_PURPLE}66`, borderRadius:6, color:MDP_PURPLE, fontSize:11, fontWeight:700, padding:'7px 0', cursor:'pointer' };
+
+  // ─ Création du mot de passe maître ─
+  if (phase === 'setup') {
+    return (
+      <div style={card}>
+        <div style={{ fontSize:11, color:C.text, fontWeight:700 }}>🔒 Créer le coffre chiffré</div>
+        <div style={{ fontSize:9.5, color:C.muted, lineHeight:1.4 }}>Choisis un mot de passe maître. Il chiffre tous tes identifiants et n'est jamais stocké. <b style={{ color:'#e0a050' }}>S'il est oublié, les données sont irrécupérables.</b></div>
+        {pwInput(pw, setPw, 'Mot de passe maître (min. 6)')}
+        {pwInput(pw2, setPw2, 'Confirmer')}
+        {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
+        <button onClick={createVault} disabled={busy} style={bigBtn}>{busy ? '…' : '🔐 Créer le coffre'}</button>
+      </div>
+    );
+  }
+
+  // ─ Coffre verrouillé ─
+  if (phase === 'locked') {
+    return (
+      <div style={card}>
+        <div style={{ fontSize:11, color:C.text, fontWeight:700 }}>🔒 Coffre verrouillé</div>
+        {pwInput(pw, setPw, 'Mot de passe maître')}
+        {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
+        {msg && <div style={{ fontSize:10, color:MDP_PURPLE }}>{msg}</div>}
+        <button onClick={unlock} disabled={busy} style={bigBtn}>{busy ? '…' : '🔓 Déverrouiller'}</button>
+        <div style={{ height:1, background:C.border, margin:'2px 0' }} />
+        <button onClick={() => fileRef.current && fileRef.current.click()} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'5px 0', cursor:'pointer' }}>↥ Importer une sauvegarde</button>
+        <input ref={fileRef} type="file" accept="application/json,.json" onChange={importVault} style={{ display:'none' }} />
+      </div>
+    );
+  }
+
+  // ─ Coffre déverrouillé ─
+  const field = (k, ph) => (
+    <input type="text" value={form[k]} placeholder={ph}
       onChange={e => setForm(f => ({ ...f, [k]: e.target.value }))}
       onKeyDown={e => { if (e.key === 'Enter') add(); }}
       style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${form[k] ? MDP_PURPLE : C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
   );
-
   return (
-    <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+    <div style={card}>
+      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+        <div style={{ flex:1, fontSize:9.5, color:MDP_PURPLE, fontFamily:'DM Mono,monospace' }}>🔓 Coffre chiffré déverrouillé</div>
+        <button onClick={exportVault} title="Exporter une sauvegarde chiffrée" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9.5, padding:'3px 7px', cursor:'pointer' }}>↧ Exporter</button>
+        <button onClick={lock} title="Verrouiller" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9.5, padding:'3px 7px', cursor:'pointer' }}>🔒 Verrouiller</button>
+      </div>
+      {msg && <div style={{ fontSize:9.5, color:MDP_PURPLE }}>{msg}</div>}
       <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
         {field('identifiant', 'Identifiant / login')}
         {field('mdp', 'Mot de passe')}
         {field('url', 'URL (https://…)')}
         {field('comment', 'Commentaire')}
-        <button onClick={add} style={{ background:`${MDP_PURPLE}22`, border:`1px solid ${MDP_PURPLE}66`, borderRadius:6, color:MDP_PURPLE, fontSize:11, fontWeight:700, padding:'6px 0', cursor:'pointer' }}>+ Ajouter</button>
+        <button onClick={add} style={bigBtn}>+ Ajouter</button>
       </div>
-      <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>⚠ Stocké en clair sur cet appareil (localStorage). Usage perso, ne pas utiliser sur un poste partagé.</div>
       {entries.length === 0 ? (
         <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun identifiant enregistré</div>
       ) : (
