@@ -102,7 +102,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Section **To do** dédiée (titre en violet) — desktop (sidebar droite, sous Finance) et onglet propre dans le menu « ⋯ » sur mobile
 - Ajout / suppression de tâches, classées par échéance via un **carrousel** : **Quotidien**, **Aujourd'hui**, **Dans la semaine**, **Dans le mois**, **Dans l'année**, **À faire un jour**
 - **⭐ Étoile** sur chaque tâche pour la marquer comme **favorite** (« compliquée ») — les favorites effectuées alimentent la stat **Tâches compliquées**
-- **Quotidien** : liste de tâches récurrentes qui **repartent chaque jour à 00h**. Le bouton passe de × à **✓ Valider pour aujourd'hui** : la tâche est comptée comme terminée et grisée jusqu'à minuit, puis redevient active le lendemain. Pour la sortir du Quotidien, la **déplacer** avec les flèches ‹ › vers Aujourd'hui
+- **Quotidien** : liste de tâches récurrentes qui **repartent chaque jour à 00h**. Le bouton **× vaut « valider pour aujourd'hui »** (il devient ✓) : la tâche est comptée comme terminée et grisée jusqu'à minuit, puis redevient active le lendemain. Pour la sortir du Quotidien, la **déplacer** avec les flèches ‹ › vers Aujourd'hui
 - Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance, marquée **favorite** ou **supprimée** (× = terminée)
 - Tâches mémorisées localement (aucun backend)
 
