@@ -70,9 +70,11 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Compteur de position dans le feed (ex: `3 / 25`)
 
 ### Stats
-- Compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
+- Deux sections **repliables** (collapse) : **🎵 Musiques** (ouverte par défaut) et **✅ To do**
+- **🎵 Musiques** — compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
+- **✅ To do** — nombre de **tâches terminées** (validées) : tâches de la journée / du mois / de l'année, plus **⭐ Tâches compliquées** = total des tâches **favorites** effectuées. Une tâche compte comme terminée quand on la supprime (×) ou qu'on valide (✓) une tâche Quotidien
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
 - Accessible sur mobile via l'onglet **Stats**
 - **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 2.0.4`) — basé sur le nombre de commits du dépôt (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 204 commits → `2.0.4`, 1001 → `10.0.1`)
@@ -98,8 +100,10 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### To do
 - Section **To do** dédiée (titre en violet) — desktop (sidebar droite, sous Finance) et onglet propre dans le menu « ⋯ » sur mobile
-- Ajout / suppression de tâches, classées par échéance via un **carrousel** : **Aujourd'hui**, **Dans la semaine**, **Dans le mois**, **Dans l'année**, **À faire un jour**
-- Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance ou **supprimée**
+- Ajout / suppression de tâches, classées par échéance via un **carrousel** : **Quotidien**, **Aujourd'hui**, **Dans la semaine**, **Dans le mois**, **Dans l'année**, **À faire un jour**
+- **⭐ Étoile** sur chaque tâche pour la marquer comme **favorite** (« compliquée ») — les favorites effectuées alimentent la stat **Tâches compliquées**
+- **Quotidien** : liste de tâches récurrentes qui **repartent chaque jour à 00h**. Le bouton passe de × à **✓ Valider pour aujourd'hui** : la tâche est comptée comme terminée et grisée jusqu'à minuit, puis redevient active le lendemain. Pour la sortir du Quotidien, la **déplacer** avec les flèches ‹ › vers Aujourd'hui
+- Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance, marquée **favorite** ou **supprimée** (× = terminée)
 - Tâches mémorisées localement (aucun backend)
 
 ### Mot de Passe
