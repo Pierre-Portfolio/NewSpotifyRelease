@@ -492,6 +492,9 @@ Le reset de `listened_this_month` compare `last_reset_month` à `curMonth`. `cur
 ### Service worker — ne cache que les réponses OK (v5)
 Le handler network-first de l'app shell met en cache le `fetch` réseau **uniquement si `res.ok`** : sinon une page 404/5xx (GitHub Pages en maintenance) écrasait `./index.html` en cache et était servie hors-ligne à la place de l'app. Cache bumpé `spotifyplus-v4` → `spotifyplus-v5`.
 
+### Coffre MDP — URL assainie avant rendu (`safeHref`)
+Le champ `url` d'une entrée est rendu en `<a href>`. Comme la CSP autorise `'unsafe-inline'`, une URL `javascript:` s'exécuterait au clic dans l'origine de l'app (vecteur : import d'un backup malveillant, `importVault` ne validait que la structure du blob). `safeHref(url)` n'autorise QUE `http:`/`https:` (ajoute `https://` si aucun schéma) et retourne `null` sinon → le lien devient un simple `<span>` non cliquable. Bloque `javascript:`/`data:`/`vbscript:`.
+
 ### apiGet — HTTP 204 No Content
 `/me/player/currently-playing` retourne 204 quand rien ne joue (pas de body).
 Sans le guard `if (res.status === 204) return null`, `.json()` lève une exception → catch silencieux → `setNow(null)` jamais appelé → `now?.uri` ne change pas → auto-avance ne se déclenche jamais.
