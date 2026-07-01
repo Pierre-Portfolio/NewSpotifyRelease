@@ -82,7 +82,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la même donnée dans ton Dropbox, accessible depuis plusieurs appareils. Nécessite de renseigner une clé d'app Dropbox (sinon la section reste « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
 - Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.7.7`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 277 commits → `2.7.7`, 1001 → `10.0.1`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.7.8`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
@@ -127,7 +127,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Remember
 - Section **Remember** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
-- Sections fixes : **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné), **Véhicule** (Contrôle technique, Assurance auto), **Logement** (AG, Assurance habitation), **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile), **Autres** (Détecteur de fumée), **Sport** (Licence Course à pied)
+- Sections fixes (repliables) : **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Logement** (AG, Assurance habitation, Détecteur de fumée, Nettoyer hotte cuisine, Nettoyer VMC, Nettoyer aérations fenêtres), **Véhicule** (Contrôle technique, Assurance auto), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Sport** (Licence Course à pied), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile)
 - **Rappels personnalisés** : ajoute ton propre rappel (libellé + date)
 - Pour chaque rappel, un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
 - **Notification à l'ouverture de l'app** quand un rappel arrive à échéance (une fois par jour) + bandeau des rappels échus
