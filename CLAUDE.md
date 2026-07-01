@@ -497,6 +497,12 @@ Le reset de `listened_this_month` compare `last_reset_month` à `curMonth`. `cur
 ### Service worker — ne cache que les réponses OK (v5)
 Le handler network-first de l'app shell met en cache le `fetch` réseau **uniquement si `res.ok`** : sinon une page 404/5xx (GitHub Pages en maintenance) écrasait `./index.html` en cache et était servie hors-ligne à la place de l'app. Cache bumpé `spotifyplus-v4` → `spotifyplus-v5`.
 
+### Optimisations sync + countdowns
+- **Feed batché par artiste** : dans `startSync`, les items d'un artiste sont accumulés dans `artistFeedItems` puis insérés en **un seul `setFeed`** en fin d'artiste (au lieu d'une recopie du tableau `feed` par album).
+- **Refresh Artistes throttlé** : `loadArtistsFromDB()` relit toute la table → helper `refreshArtists()` (throttle 1×/1.5 s) remplace les `setArtists(loadArtistsFromDB())` intra-boucle. `endSync` garde un refresh final inconditionnel.
+- **Horloge partagée** : `useSharedTick(active)` (+ `_clock` module-level) = **un seul `setInterval` 1 s** pour tous les countdowns (quota 24h, blocage 429) au lieu d'un intervalle par composant. Utilisé par `ScrapingStatusPanel` et `DateRangePanel`.
+- **Non appliqués volontairement** : précompiler le JSX (casserait l'architecture mono-fichier `type="text/babel"` sans build) ; debounce temporel de `saveDB` (interdit — risque de perte de données si l'OS tue l'onglet mobile).
+
 ### Coffre MDP — URL assainie avant rendu (`safeHref`)
 Le champ `url` d'une entrée est rendu en `<a href>`. Comme la CSP autorise `'unsafe-inline'`, une URL `javascript:` s'exécuterait au clic dans l'origine de l'app (vecteur : import d'un backup malveillant, `importVault` ne validait que la structure du blob). `safeHref(url)` n'autorise QUE `http:`/`https:` (ajoute `https://` si aucun schéma) et retourne `null` sinon → le lien devient un simple `<span>` non cliquable. Bloque `javascript:`/`data:`/`vbscript:`.
 

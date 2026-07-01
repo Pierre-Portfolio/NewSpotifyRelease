@@ -1597,6 +1597,15 @@ function StoreProvider({ children }) {
 
       const seenUris = new Set(knownUrisRef.current);
       let totalTracks = 0, totalReleases = 0, artistsScanned = skipCount, totalArtists = ESTIMATED_TOTAL;
+      // #opt : loadArtistsFromDB() relit toute la table → throttle à 1×/1.5s pendant la
+      // sync (endSync fait un refresh final inconditionnel). Évite un coût O(n²) sur N artistes.
+      let _lastArtistsRefresh = 0;
+      const refreshArtists = () => {
+        const t = Date.now();
+        if (t - _lastArtistsRefresh < 1500) return;
+        _lastArtistsRefresh = t;
+        try { setArtists(loadArtistsFromDB()); } catch {}
+      };
       let globalArtistIndex = 0;
       // Reprise par curseur : repartir directement sur la page sauvegardée au lieu de
       // re-paginer depuis le début (burst de fetchs sans délai = pire scénario post-429)
@@ -1676,6 +1685,7 @@ function StoreProvider({ children }) {
             const inRange = albumsData.items.filter(a => releaseInRange(a.release_date, cutoff, ceiling));
             if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
             let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
+            const artistFeedItems = []; // #opt : on batche les items de l'artiste → UN seul setFeed
 
             // Ligne "légère" écrite DÈS que les albums sont lus, AVANT la boucle des pistes :
             // l'artiste devient visible dans le panneau même si un 429 coupe le scan plus bas.
@@ -1702,7 +1712,7 @@ function StoreProvider({ children }) {
                   artist.external_urls?.spotify || null,
                 ]
               );
-              setArtists(loadArtistsFromDB()); // visible immédiatement, avant même la 1re piste
+              refreshArtists(); // visible rapidement (throttlé), avant même la 1re piste
             } catch {}
 
             for (const album of albumsData.items) {
@@ -1746,7 +1756,7 @@ function StoreProvider({ children }) {
 
               const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
               if (album.album_type === 'single') {
-                setFeed(F => [...F, {
+                artistFeedItems.push({
                   id:          uris[0],
                   spotifyUri:  uris[0],
                   label:       'Single',
@@ -1759,9 +1769,9 @@ function StoreProvider({ children }) {
                   isNew:       true,
                   liked:       0,
                   duration_ms: tracksData.items[0]?.duration_ms || 0,
-                }].slice(0, 1000)); // même cap que le chargement initial (sinon les nouveaux titres restent invisibles jusqu'au reload)
+                });
               } else {
-                const trackItems = tracksData.items.map(t => ({
+                tracksData.items.forEach(t => artistFeedItems.push({
                   id:          t.uri,
                   spotifyUri:  t.uri,
                   label:       'Album',
@@ -1775,10 +1785,11 @@ function StoreProvider({ children }) {
                   liked:       0,
                   duration_ms: t.duration_ms || 0,
                 }));
-                setFeed(F => [...F, ...trackItems].slice(0, 1000));
               }
               log(`✓ ${artist.name} — ${album.name} · ${addedCount} titre(s) sauvegardé(s)`, 'ok');
             }
+            // #opt : un seul setFeed par artiste (au lieu d'une recopie du tableau par album)
+            if (artistFeedItems.length) setFeed(F => [...F, ...artistFeedItems].slice(0, 1000));
 
             // Date de scan avancée UNIQUEMENT si la liste d'albums a bien été lue —
             // sinon la fenêtre de scan serait brûlée sans avoir rien scanné (sorties perdues à jamais)
@@ -1820,8 +1831,8 @@ function StoreProvider({ children }) {
           }
 
           // Rafraîchit la section Artistes en direct (ligne créée/maj ou statut d'erreur posé) —
-          // le compteur et les métadonnées montent en temps réel, sans attendre endSync
-          try { setArtists(loadArtistsFromDB()); } catch {}
+          // le compteur et les métadonnées montent en temps réel (throttlé), sans attendre endSync
+          refreshArtists();
 
           // Sauvegarder la progression pour reprise après redémarrage —
           // avec le curseur de page : la reprise ne re-paginera plus depuis le début
@@ -1926,6 +1937,23 @@ function useShortViewport(maxH = 500) {
     return () => window.removeEventListener('resize', h);
   }, [maxH]);
   return s;
+}
+
+// Horloge partagée 1s : UN SEUL setInterval global pour tous les countdowns (quota 24h,
+// blocage 429…) au lieu d'un intervalle par composant. Les abonnés sont re-rendus chaque
+// seconde ; l'intervalle démarre au 1er abonné et s'arrête quand il n'y en a plus.
+const _clock = { subs: new Set(), id: null };
+function _clockSync() {
+  if (_clock.subs.size > 0 && !_clock.id) _clock.id = setInterval(() => _clock.subs.forEach(fn => fn()), 1000);
+  else if (_clock.subs.size === 0 && _clock.id) { clearInterval(_clock.id); _clock.id = null; }
+}
+function useSharedTick(active) {
+  const [, force] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => {
+    if (!active) return;
+    _clock.subs.add(force); _clockSync();
+    return () => { _clock.subs.delete(force); _clockSync(); };
+  }, [active]);
 }
 
 // ════════════════════════════════════════════════
@@ -2349,14 +2377,9 @@ function ScrapingStatusPanel({ compact=false }) {
     ? ((s.paused || s.rlWaiting) ? 'EN PAUSE' : 'EN COURS')
     : (s.stats.artists > 0 ? 'TERMINÉ' : 'EN ATTENTE');
 
-  // Countdown quota 24h re-rendu chaque seconde tant que la fenêtre est active
-  const [, qTick] = React.useState(0);
+  // Countdown quota 24h re-rendu chaque seconde tant que la fenêtre est active (horloge partagée)
+  useSharedTick(s.quotaUntil > Date.now());
   const quotaLeft = s.quotaUntil > Date.now() ? s.quotaUntil - Date.now() : 0;
-  React.useEffect(() => {
-    if (s.quotaUntil <= Date.now()) return;
-    const id = setInterval(() => { qTick(v => v + 1); if (Date.now() >= s.quotaUntil) clearInterval(id); }, 1000);
-    return () => clearInterval(id);
-  }, [s.quotaUntil]);
 
   return (
     <div style={{ borderRadius:10, background:C.surface, border:`1px solid ${C.border}`, padding: compact?'10px 12px':'14px 16px' }}>
@@ -2397,20 +2420,11 @@ function DateRangePanel({ compact=false }) {
   const s = useStore();
   const hasResume = !s.scraping && s.resumableSession;
 
-  // Blocage 429 (rate limit) OU quota 24h : countdown re-rendu chaque seconde tant qu'actif
-  const [, forceTick] = React.useState(0);
+  // Blocage 429 (rate limit) OU quota 24h : countdown re-rendu chaque seconde tant qu'actif (horloge partagée)
   const blocked = s.blockedUntil > Date.now();
   const quotaBlocked = s.quotaUntil > Date.now();
   const anyBlock = blocked || quotaBlocked;
-  React.useEffect(() => {
-    const target = Math.max(s.blockedUntil, s.quotaUntil);
-    if (target <= Date.now()) return;
-    const id = setInterval(() => {
-      forceTick(v => v + 1);
-      if (Date.now() >= target) clearInterval(id);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [s.blockedUntil, s.quotaUntil]);
+  useSharedTick(Math.max(s.blockedUntil, s.quotaUntil) > Date.now());
   const blockedMin = blocked ? Math.ceil((s.blockedUntil - Date.now()) / 60000) : 0;
 
   const onLancer = () => {
