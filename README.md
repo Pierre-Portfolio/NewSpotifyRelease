@@ -51,6 +51,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Auto-avance** : quand un titre se termine, le suivant dans le feed est lancé automatiquement — **sans voler la lecture** : lancer manuellement un autre titre (ou stopper la musique) en plein milieu ne déclenche plus l'auto-avance
 - Navigation dans le feed via les flèches ← → de la barre du bas
 - **Bouton × par titre** : marque le titre **comme écouté** et le retire du feed → il apparaît dans l'**Historique** et compte dans les **stats d'écoute** (même effet que « Suivant »)
+- **↩ Annuler (undo)** : après un retrait (croix rouge ou swipe gauche), un **toast « Annuler » s'affiche 5 secondes** pour rattraper un clic accidentel — le titre revient dans le feed et les stats sont ré-ajustées
 - **Bouton ❤ par titre** : like/unlike directement depuis le feed (synchronisé Spotify + DB locale)
 - **Filtre** par type : Tous / Singles / Albums / Découvertes
 - **Filtre artiste** : champ texte (insensible à la casse) combinable avec le filtre type et le tri
@@ -69,18 +70,22 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Barre de progression cliquable et draggable** — clic ou glissement pour se déplacer dans le titre
 - Compteur de position dans le feed (ex: `3 / 25`)
 
-### Stats
-- Deux sections **repliables** (collapse) : **🎵 Musiques** (ouverte par défaut) et **✅ To do**
+### À propos (ex-Stats)
+- Sections **repliables** (collapse) : **🎵 Musiques**, **✅ To do** et **📈 Graphique**
 - **🎵 Musiques** — compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - **✅ To do** — nombre de **tâches terminées** (validées) : tâches de la journée / du mois / de l'année, plus **⭐ Tâches compliquées** = total des tâches **favorites** effectuées. Une tâche compte comme terminée quand on la supprime (×) ou qu'on valide (✓) une tâche Quotidien
-- Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé
-- Accessible sur mobile via l'onglet **Stats**
+- **📈 Graphique** — deux histogrammes sur **14 jours** (dessinés sans librairie externe) : **écoutes par jour** et **tâches terminées par jour**
+- **↧ Exporter mes données** : télécharge une sauvegarde **JSON** (stats d'écoute, dernières dates de scrapping des artistes, to do) — pour ne rien perdre (les données ne vivent que sur cet appareil)
+- **💾 Proposition de sauvegarde hebdomadaire** : une fois par semaine, au lancement, l'app propose (via une alerte) de télécharger une sauvegarde — uniquement si tu as des données et qu'aucune sauvegarde n'a eu lieu depuis 7 jours
+- **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la même donnée dans ton Dropbox, accessible depuis plusieurs appareils. Nécessite de renseigner une clé d'app Dropbox (sinon la section reste « non configurée »)
+- Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
+- Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
 - **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (ex. `Version 2.0.4`) — basé sur le nombre de commits du dépôt (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 204 commits → `2.0.4`, 1001 → `10.0.1`)
 
 ### Météo
-- Section **Météo** dédiée (titre en bleu) — barre latérale droite sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile (avant Historique)
+- Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
 - Prévisions sur **3 jours** (aujourd'hui + 2) pour **4 lieux** : **Voisins-le-Bretonneux**, **Massy**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
 - Le dernier lieu s'affiche **« Ma position (ville) »**, la ville étant détectée à partir des coordonnées GPS (reverse-geocoding via [BigDataCloud](https://www.bigdatacloud.com/), gratuit sans clé — repli sur « Ma position » si indisponible)
 - Chaque jour : icône météo + température max (en bleu) et min
@@ -88,9 +93,9 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Données météo via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
 
 ### Finance
-- Section **Finance** dédiée (titre en bleu) — desktop (sidebar droite, sous Météo) et menu « ⋯ » sur mobile
+- Section **Finance** dédiée (titre en bleu) — desktop (onglet en haut) et menu « ⋯ » sur mobile
 - Données live ; chaque sous-section affiche le taux **EUR/USD** (via **Twelve Data**, repli [Frankfurter](https://www.frankfurter.app/) / BCE)
-- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. **Revient toujours en Light à chaque reconnexion** (choix non mémorisé).
+- **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, S&P 500, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. **Revient toujours en Light à chaque reconnexion** (choix non mémorisé).
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
 - **Matières premières** : Pétrole (WTI) et **Sucre** via **[Alpha Vantage](https://www.alphavantage.co/)** (endpoints matière première dédiés `WTI`/`SUGAR`, CORS natif, vrais prix mondiaux avec variation) ; Or et Argent via **[gold-api.com](https://gold-api.com/)**. Section affichée en bas, entre Stock picking et Monnaie
 - **Indices** : **NASDAQ-100, S&P 500, CAC 40** — désormais les **vrais indices** (plus d'ETF). Aucune API gratuite à CORS natif ne les expose au navigateur ; une **GitHub Action** planifiée récupère les cours **côté serveur** (toutes les 2 h, jours ouvrés) via [Stooq](https://stooq.com/) (repli [Yahoo Finance](https://finance.yahoo.com/)) et publie un fichier `data/indices.json` que l'app lit en *same-origin* (donc sans proxy CORS ni clé). Données de fin de journée / différé, rafraîchies plusieurs fois par jour
@@ -99,15 +104,20 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
 
 ### To do
-- Section **To do** dédiée (titre en violet) — desktop (sidebar droite, sous Finance) et onglet propre dans le menu « ⋯ » sur mobile
+- Section **To do** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
 - Ajout / suppression de tâches, classées par échéance via un **carrousel** : **Quotidien**, **Aujourd'hui**, **Dans la semaine**, **Dans le mois**, **Dans l'année**, **À faire un jour**
 - **⭐ Étoile** sur chaque tâche pour la marquer comme **favorite** (« compliquée ») — les favorites effectuées alimentent la stat **Tâches compliquées**
 - **Quotidien** : liste de tâches récurrentes qui **repartent chaque jour à 00h**. Le bouton **× vaut « valider pour aujourd'hui »** (il devient ✓) : la tâche est comptée comme terminée et grisée jusqu'à minuit, puis redevient active le lendemain. Pour la sortir du Quotidien, la **déplacer** avec les flèches ‹ › vers Aujourd'hui
 - Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance, marquée **favorite** ou **supprimée** (× = terminée)
 - Tâches mémorisées localement (aucun backend)
 
+### Maps
+- Section **Maps** dédiée (titre en jaune) — onglet sous To do (desktop et menu « ⋯ » mobile)
+- **Vide pour le moment** (placeholder « 🗺️ Section Maps — à venir »)
+
 ### Mot de Passe
-- Section **Mot de Passe** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
+- Section **Mot de Passe** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
+- **Les URL sont assainies avant affichage** : seuls les liens `http(s)` sont cliquables — un lien `javascript:` d'une sauvegarde importée ne peut pas exécuter de code (protection contre le self-XSS)
 - **Coffre chiffré par un mot de passe maître** (AES-GCM 256 + PBKDF2 via la Web Crypto API native) : le localStorage ne contient que des données chiffrées, le mot de passe maître n'est jamais stocké
 - **Ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire** ; le formulaire d'ajout est **repliable**, et un **champ de recherche** filtre les entrées (identifiant / URL / commentaire)
 - Mot de passe **masqué par défaut** (afficher/masquer) + bouton **copier**, lien direct vers l'URL
@@ -116,7 +126,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - ⚠️ Le chiffrement protège contre une **fuite passive** du stockage (sauvegarde/dump volé), **pas** contre un logiciel malveillant déjà actif sur l'appareil. **Mot de passe maître oublié = données irrécupérables** (aucun backend, aucune réinitialisation possible)
 
 ### Remember
-- Section **Remember** dédiée (titre en violet) — desktop (sidebar droite) et onglet propre dans le menu « ⋯ » sur mobile
+- Section **Remember** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
 - Sections fixes : **Véhicule** (Prochain contrôle technique), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL), **Sport** (Licence Course à pied)
 - **Rappels personnalisés** : ajoute ton propre rappel (libellé + date)
 - Pour chaque rappel, un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
@@ -129,7 +139,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Persisté dans `localStorage` (`spotifyplus_daily_scrapings` = `{ count, until }`) — le compteur repart à 0 dès que les 24h écoulées
 - **Date et compte à rebours** avant de pouvoir relancer, affichés à deux endroits : directement sous le compteur de la carte **Artistes** (`SCRAPING EN ATTENTE`) et dans le panneau **Synchronisation** — texte « ⏳ Quota de 100 artistes atteint — Prochaine synchro le 19 juin à 18:10 (dans X h Y min) », rafraîchi chaque seconde
 - Boutons Lancer/Reprendre désactivés tant que la fenêtre est active
-- **Bouton 🔄 Réinitialiser le quota 24h** dans l'onglet **Stats** (au-dessus de Purger) : remet le compteur à `0/100` et débloque une synchro immédiatement, sans attendre l'expiration des 24h (avec confirmation)
+- **Bouton 🔄 Réinitialiser le quota 24h** dans l'onglet **À propos** (au-dessus de Purger) : remet le compteur à `0/100` et débloque une synchro immédiatement, sans attendre l'expiration des 24h (avec confirmation)
 - Notification navigateur de fin de session (compatible mobile via le service worker)
 - **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes de la fenêtre (`(100 − scrapés) × délai moyen`)
 - **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/24h)
@@ -145,7 +155,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Historique (onglet Historique)
 - Liste des **derniers titres écoutés** non purgés, le **plus récent en haut**
 - Chaque ligne affiche le titre, l'artiste, l'horodatage relatif de l'écoute (« il y a 5 min », « hier »…) et un bouton **réécouter**
-- Desktop : section **Historique** dans la barre latérale droite (sous « Vos écoutes ») · Mobile : onglet **Historique**
+- Desktop : **onglet Historique** en haut · Mobile : onglet **Historique**
 - L'historique est vidé par le bouton **Purger les écoutes**
 
 ### Artistes (section / onglet Artistes)
@@ -161,7 +171,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### PWA
 - Installable sur écran d'accueil Android (Chrome) — bouton "Ajouter à l'écran d'accueil"
-- `manifest.json` + `service-worker.js` — **network-first** : les mises à jour de l'app sont reçues dès qu'on est en ligne, le cache ne sert qu'en mode hors-ligne
+- `manifest.json` + `service-worker.js` — **network-first** : les mises à jour de l'app sont reçues dès qu'on est en ligne, le cache ne sert qu'en mode hors-ligne (et **seules les réponses valides sont mises en cache** — une page d'erreur ne remplace plus l'app hors-ligne)
 
 ### Player mobile (50vh)
 - Quand une musique joue, le bas de l'écran affiche un **player plein format (50% de hauteur)**
@@ -173,14 +183,17 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
 
 ### Interface
-- Responsive — desktop (sidebar) et mobile : 3 onglets principaux (Scrapping / En attente / ❤ Likés) + un menu **« ⋯ »** regroupant Historique / Artistes / Stats pour gagner de la place en haut
+- **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (À propos, Historique, Météo, Finance, To do, Maps, Mot de passe, Remember) — une seule section affichée à la fois (plus de colonne de droite)
+- **Mobile** : 3 onglets principaux (Scrapping / En attente / ❤ Likés) + un menu **« ⋯ »** regroupant les autres sections. Les libellés du menu suivent un **dégradé arc-en-ciel** (violet → indigo → bleu → cyan → vert → jaune → ambre → orange → rouge), le rouge final rejoignant le bouton **Déconnecter**
 - **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant / ❤ like**
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
 
 ## Technologies
 - React 18.3.1 (CDN) + Babel Standalone 7.29.7 — **versions épinglées + SRI** (un CDN compromis ne peut plus injecter de code)
-- **Content-Security-Policy** : même en cas de faille XSS, le token Spotify ne peut pas être exfiltré vers un domaine tiers (`connect-src` verrouillé sur l'API Spotify)
+- **Content-Security-Policy** : même en cas de faille XSS, le token Spotify ne peut pas être exfiltré vers un domaine tiers (`connect-src` verrouillé sur l'API Spotify et les quelques APIs utilisées, dont Dropbox pour la sauvegarde optionnelle)
+- **Sauvegarde Dropbox optionnelle** : OAuth 2.0 PKCE (offline / refresh token local), aucune clé secrète dans le code
+- **Coffre Mot de passe** : URL assainies avant rendu (seuls les liens `http(s)` sont cliquables) — pas d'exécution de `javascript:` via une sauvegarde importée
 - **sql.js 1.10.2** (SQLite WebAssembly) **auto-hébergé** dans `vendor/` — le `.wasm` ne pouvant pas avoir de SRI, l'auto-hébergement ferme le dernier vecteur d'attaque CDN
 - `apiDel()` — helper DELETE pour l'API Spotify (unlike)
 - **IndexedDB** (persistance locale du binaire SQLite, connexion unique réutilisée)
@@ -201,7 +214,7 @@ Au premier lancement, la base de données est créée vide dans le navigateur. L
 NewSpotifyRelease/
   index.html          → App complète (React 18 CDN + sql.js)
   manifest.json       → Config PWA (nom, icônes, display standalone)
-  service-worker.js   → Cache app shell + vendor pour offline (v3)
+  service-worker.js   → Cache app shell + vendor pour offline (v5, ne cache que les réponses OK)
   vendor/
     sql-wasm.js       → sql.js auto-hébergé
     sql-wasm.wasm     → Binaire SQLite WebAssembly auto-hébergé
