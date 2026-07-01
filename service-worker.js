@@ -5,7 +5,7 @@
 // (?code=...&state=...) écrivait le code d'autorisation dans Cache Storage.
 // L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
 // → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
-const CACHE  = 'spotifyplus-v4';
+const CACHE  = 'spotifyplus-v5';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm'];
 
 self.addEventListener('install', e => {
@@ -32,8 +32,10 @@ self.addEventListener('fetch', e => {
     e.respondWith(
       fetch(e.request)
         .then(res => {
-          const copy = res.clone();
-          caches.open(CACHE).then(c => c.put('./index.html', copy));
+          // Ne mettre en cache QUE les réponses OK : sinon une page 404/5xx (GitHub Pages
+          // en maintenance, erreur transitoire) écraserait './index.html' en cache et serait
+          // servie hors-ligne à la place de l'app.
+          if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put('./index.html', copy)); }
           return res;
         })
         .catch(() => caches.match('./index.html'))

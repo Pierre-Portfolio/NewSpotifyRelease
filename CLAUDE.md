@@ -38,7 +38,7 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 |---|---|
 | `index.html` | **App complète** — React 18 CDN + Babel + sql.js, tout en un seul fichier |
 | `manifest.json` | Config PWA (nom, icônes, display standalone) |
-| `service-worker.js` | Cache app shell + vendor pour usage offline (v4, clé de cache normalisée) |
+| `service-worker.js` | Cache app shell + vendor pour usage offline (v5, clé de cache normalisée, ne cache que les réponses `res.ok`) |
 | `vendor/sql-wasm.js` | sql.js 1.10.2 **auto-hébergé** (hash sha384 vérifié = ancien SRI cdnjs) |
 | `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
 | `icon-192.png` | Icône PWA 192×192 (à ajouter au repo) |
@@ -351,7 +351,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## PWA
 
 - `manifest.json` à la racine — `start_url: /NewSpotifyRelease/`, `display: standalone`
-- `service-worker.js` (cache `spotifyplus-v4`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne ; cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
+- `service-worker.js` (cache `spotifyplus-v5`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne (**mise en cache uniquement si `res.ok`** — une 404/5xx ne remplace plus l'app en cache) ; cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
 - **⚠️ Clé de cache NORMALISÉE** : l'app shell est toujours stocké sous `'./index.html'` (`c.put('./index.html', copy)`), jamais sous l'URL réelle de navigation — sinon le retour OAuth (`?code=...&state=...`) écrivait le code d'autorisation dans Cache Storage
 - **⚠️ L'ancienne stratégie cache-first servait l'index.html du cache pour toujours** → les PWA installées ne recevaient jamais les mises à jour. Ne pas revenir en cache-first pour l'app shell.
 - Enregistrement dans `<head>` : `navigator.serviceWorker.register('./service-worker.js')`
@@ -479,6 +479,18 @@ Sur 429 → `_rlSet(retryMs)` **persiste la fenêtre en localStorage** et bloque
 ---
 
 ## Bugs connus / fixes appliqués
+
+### releaseInRange — précision variable de `release_date`
+Une `release_date` Spotify peut avoir la précision `day` (`"2026-05-10"`), `month` (`"2026-05"`) ou `year` (`"2026"`). `new Date("2026")` → **1er janvier** : une nouveauté datée à l'année seule passait sous le `cutoff` (ex. `2026-03-15`) et était **ratée**. Le helper module-level `releaseInRange(dateStr, cutoff, ceiling)` traite la date comme une **période `[début, fin]`** (année → 1er janv.→31 déc., mois → 1er→dernier jour) et garde la sortie si la période **chevauche** `[cutoff, ceiling]`. Utilisé aux **deux** sites de filtrage de `startSync` (comptage « aucune sortie » + boucle des albums). `rDate` (= `new Date(release_date)`) reste calculé uniquement pour le **libellé** affiché.
+
+### Auto-avance « restart » — garde anti-vol de lecture
+L'effet 2 (redémarrage du même titre : `now.current < 5` après avoir été proche de la fin) exige désormais `prevNowRef.current.uri === now.uri` (**même URI** au tick précédent). Sans cette garde, un **changement de titre** ou un **seek manuel au début** d'un titre du feed était pris pour un rebouclage → `playTrack` écrasait le choix de l'utilisateur. (Même logique que la garde `nearEnd` de l'effet 1.)
+
+### Reset mensuel — mois LOCAL, pas UTC
+Le reset de `listened_this_month` compare `last_reset_month` à `curMonth`. `curMonth` est désormais calculé en **local** (`getFullYear()`/`getMonth()`) et non via `toISOString().slice(0,7)` (UTC) — sinon le compteur mensuel bascule à minuit UTC (≈ 01h/02h en France) au lieu de minuit local.
+
+### Service worker — ne cache que les réponses OK (v5)
+Le handler network-first de l'app shell met en cache le `fetch` réseau **uniquement si `res.ok`** : sinon une page 404/5xx (GitHub Pages en maintenance) écrasait `./index.html` en cache et était servie hors-ligne à la place de l'app. Cache bumpé `spotifyplus-v4` → `spotifyplus-v5`.
 
 ### apiGet — HTTP 204 No Content
 `/me/player/currently-playing` retourne 204 quand rien ne joue (pas de body).

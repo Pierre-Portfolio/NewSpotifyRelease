@@ -704,6 +704,23 @@ async function importDiscoverWeekly(addLog) {
   }
 }
 
+// Une release_date Spotify a une précision variable : 'day' ("2026-05-10"), 'month'
+// ("2026-05") ou 'year' ("2026"). new Date("2026") → 1er janvier : une nouveauté datée à
+// l'année seule passait alors SOUS le cutoff (ex. 2026-03-15) et était ratée. On considère
+// la date comme une PÉRIODE [début, fin] et on garde la sortie si cette période CHEVAUCHE
+// [cutoff, ceiling] — les doublons éventuels sont absorbés par INSERT OR IGNORE.
+function releaseInRange(dateStr, cutoff, ceiling) {
+  if (!dateStr) return false;
+  const p = String(dateStr).split('-');
+  const y = parseInt(p[0]);
+  if (!Number.isFinite(y)) return false;
+  let start, end;
+  if (p.length >= 3)      { start = new Date(Date.UTC(y, (parseInt(p[1])||1) - 1, parseInt(p[2])||1)); end = start; }
+  else if (p.length === 2){ const m = (parseInt(p[1])||1) - 1; start = new Date(Date.UTC(y, m, 1)); end = new Date(Date.UTC(y, m + 1, 0)); }
+  else                    { start = new Date(Date.UTC(y, 0, 1)); end = new Date(Date.UTC(y, 11, 31)); }
+  return end >= cutoff && start <= ceiling;
+}
+
 // ════════════════════════════════════════════════
 // DESIGN TOKENS
 // ════════════════════════════════════════════════
@@ -898,7 +915,9 @@ function StoreProvider({ children }) {
 
           // Check month/year reset
           const now2      = new Date();
-          const curMonth  = now2.toISOString().slice(0, 7);
+          // Mois/année LOCAUX (pas toISOString() qui est en UTC) : sinon le compteur mensuel
+          // bascule à minuit UTC (≈ 01h/02h en France) au lieu de minuit local.
+          const curMonth  = `${now2.getFullYear()}-${String(now2.getMonth() + 1).padStart(2, '0')}`;
           const curYear   = now2.getFullYear().toString();
           const statsRow  = dbGet("SELECT last_reset_month, last_reset_year FROM stats WHERE id = 1");
           if (statsRow?.last_reset_month !== curMonth) {
@@ -1078,8 +1097,12 @@ function StoreProvider({ children }) {
 
     if (loopEnabledRef.current) return;
 
-    // Restart detection (même titre qui repart du début)
-    if (now.duration > 15 && now.current < 5 && prevPos > prevDur - 10 && prevDur > 0) {
+    // Restart detection (même titre qui repart du début).
+    // ⚠ Garde anti-vol de lecture : n'avancer QUE si le tick précédent portait déjà la
+    // MÊME URI (vrai rebouclage Spotify). Sans ça, un changement de titre ou un seek manuel
+    // au début d'un titre déclenchait playTrack et écrasait le choix de l'utilisateur.
+    const sameUriRestart = prevNowRef.current.uri === now.uri;
+    if (sameUriRestart && now.duration > 15 && now.current < 5 && prevPos > prevDur - 10 && prevDur > 0) {
       const f = filteredFeedRef.current;
       const idx = f.findIndex(item => item.spotifyUri === now.uri);
       if (idx !== -1) {
@@ -1528,7 +1551,7 @@ function StoreProvider({ children }) {
           }
           setDailyScrapings(dailyCount);
           if (albumsData?.items) {
-            const inRange = albumsData.items.filter(a => { const d = new Date(a.release_date); return d >= cutoff && d <= ceiling; });
+            const inRange = albumsData.items.filter(a => releaseInRange(a.release_date, cutoff, ceiling));
             if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
             let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
 
@@ -1561,8 +1584,8 @@ function StoreProvider({ children }) {
             } catch {}
 
             for (const album of albumsData.items) {
+              if (!releaseInRange(album.release_date, cutoff, ceiling)) continue;
               const rDate = new Date(album.release_date);
-              if (rDate < cutoff || rDate > ceiling) continue;
 
               const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
               if (!tracksData?.items?.length) continue;
