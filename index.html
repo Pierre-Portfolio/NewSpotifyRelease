@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- CSP : même en cas d'XSS, connect-src empêche d'exfiltrer le token (localStorage) vers un domaine attaquant.
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://query1.finance.yahoo.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://query1.finance.yahoo.com https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://api.dropboxapi.com https://content.dropboxapi.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -151,6 +151,87 @@ async function getToken() {
 }
 function logoutClear() {
   ['spotify_token','spotify_token_expiry','spotify_refresh','pkce_verifier','pkce_state'].forEach(k => localStorage.removeItem(k));
+}
+
+// ════════════════════════════════════════════════
+// DROPBOX — sauvegarde optionnelle multi-appareils (OAuth 2.0 PKCE, offline access)
+// ⚠ CONFIG REQUISE : créer une app sur https://www.dropbox.com/developers/apps
+//   (type "Scoped access" · "App folder" · permission files.content.write/read),
+//   coller son "App key" ci-dessous, et enregistrer REDIRECT_URI dans l'onglet
+//   OAuth 2 → "Redirect URIs" de l'app. Tant que DROPBOX_APP_KEY est vide, l'UI
+//   affiche un état "non configuré" (aucun appel réseau).
+// La clé (App key) est PUBLIQUE par nature (comme le CLIENT_ID Spotify) : PKCE + offline
+// donnent un refresh token stocké en localStorage — pas de secret client dans le code.
+// ════════════════════════════════════════════════
+const DROPBOX_APP_KEY = '';
+const DBX_BACKUP_PATH = '/spotifyplus-sauvegarde.json';
+function dropboxConfigured() { return !!DROPBOX_APP_KEY; }
+function dropboxConnected() { return !!localStorage.getItem('dropbox_refresh') || !!localStorage.getItem('dropbox_access'); }
+function dropboxLogout() { ['dropbox_access','dropbox_expiry','dropbox_refresh','dropbox_pkce_verifier'].forEach(k => localStorage.removeItem(k)); }
+async function dropboxLogin() {
+  if (!DROPBOX_APP_KEY) return;
+  const verifier  = generateRandomString(64);
+  const challenge = await generateCodeChallenge(verifier);
+  localStorage.setItem('dropbox_pkce_verifier', verifier);
+  const params = new URLSearchParams({
+    client_id: DROPBOX_APP_KEY, response_type: 'code', redirect_uri: REDIRECT_URI,
+    code_challenge: challenge, code_challenge_method: 'S256',
+    token_access_type: 'offline', state: 'dropbox', // state='dropbox' distingue le retour de celui de Spotify
+  });
+  window.location = `https://www.dropbox.com/oauth2/authorize?${params}`;
+}
+async function dropboxExchange(code) {
+  const verifier = localStorage.getItem('dropbox_pkce_verifier');
+  const body = new URLSearchParams({
+    code, grant_type: 'authorization_code', redirect_uri: REDIRECT_URI,
+    client_id: DROPBOX_APP_KEY, code_verifier: verifier || '',
+  });
+  const res = await fetch('https://api.dropboxapi.com/oauth2/token', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+  });
+  const d = await res.json();
+  localStorage.removeItem('dropbox_pkce_verifier');
+  if (d.access_token) {
+    localStorage.setItem('dropbox_access', d.access_token);
+    localStorage.setItem('dropbox_expiry', String(Date.now() + (d.expires_in || 14400) * 1000));
+    if (d.refresh_token) localStorage.setItem('dropbox_refresh', d.refresh_token);
+    return true;
+  }
+  return false;
+}
+async function dropboxToken() {
+  const exp = parseInt(localStorage.getItem('dropbox_expiry') || '0') || 0;
+  if (Date.now() < exp - 60000) return localStorage.getItem('dropbox_access');
+  const refresh = localStorage.getItem('dropbox_refresh');
+  if (refresh && DROPBOX_APP_KEY) {
+    const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh, client_id: DROPBOX_APP_KEY });
+    const res  = await fetch('https://api.dropboxapi.com/oauth2/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+    const d = await res.json();
+    if (d.access_token) {
+      localStorage.setItem('dropbox_access', d.access_token);
+      localStorage.setItem('dropbox_expiry', String(Date.now() + (d.expires_in || 14400) * 1000));
+      return d.access_token;
+    }
+  }
+  return localStorage.getItem('dropbox_access'); // dernier token connu (peut être expiré → l'upload renverra 401)
+}
+// Upload (overwrite) de la sauvegarde JSON dans le dossier de l'app Dropbox
+async function dropboxUpload(dataObj) {
+  const token = await dropboxToken();
+  if (!token) throw new Error('Dropbox non connecté');
+  const res = await fetch('https://content.dropboxapi.com/2/files/upload', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Dropbox-API-Arg': JSON.stringify({ path: DBX_BACKUP_PATH, mode: 'overwrite', mute: true }),
+      'Content-Type': 'application/octet-stream',
+    },
+    body: JSON.stringify(dataObj),
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
 }
 
 // ════════════════════════════════════════════════
@@ -882,9 +963,14 @@ function StoreProvider({ children }) {
     (async () => {
       const params = new URLSearchParams(window.location.search);
       const code   = params.get('code');
-      if (code) {
+      const returnedState = params.get('state');
+      if (code && returnedState === 'dropbox') {
+        // Retour du consentement Dropbox (state='dropbox') : échange le code, puis reprend
+        // l'init Spotify normale (le token Spotify est déjà en localStorage)
+        await dropboxExchange(code).catch(() => {});
+        window.history.replaceState({}, '', window.location.pathname);
+      } else if (code) {
         // Anti-CSRF : le state retourné doit correspondre à celui généré au départ
-        const returnedState = params.get('state');
         const stateOk = returnedState && returnedState === localStorage.getItem('pkce_state');
         const ok = stateOk && await exchangeCode(code);
         window.history.replaceState({}, '', window.location.pathname);
@@ -2630,6 +2716,43 @@ function StatsCollapse({ title, color, defaultOpen, children }) {
   );
 }
 
+// Sync Dropbox optionnelle (upload de la sauvegarde). Affiche un état "non configuré"
+// tant que DROPBOX_APP_KEY est vide (aucun appel réseau).
+function DropboxSync() {
+  const [connected, setConnected] = React.useState(dropboxConnected());
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg]   = React.useState('');
+  const DBX = '#0061ff';
+  const btn = { background:`${DBX}15`, border:`1px solid ${DBX}55`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#5a9bff', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
+  if (!dropboxConfigured()) {
+    return (
+      <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', fontSize:10, color:C.muted, lineHeight:1.55 }}>
+        ☁︎ <b style={{ color:C.text }}>Sync Dropbox</b> — non configurée. Crée une app sur <span style={{ color:'#5a9bff' }}>dropbox.com/developers/apps</span> (Scoped · App folder · <i>files.content.write</i>), colle son <i>App key</i> dans <code style={{ color:MDP_PURPLE }}>DROPBOX_APP_KEY</code> et enregistre l'URL de redirection de l'app.
+      </div>
+    );
+  }
+  const save = async () => {
+    setBusy(true); setMsg('');
+    try { await dropboxUpload(buildBackup()); try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {} setMsg('✓ Sauvegardé sur Dropbox'); }
+    catch (e) { setMsg('✗ Échec : ' + (e.message || 'erreur')); }
+    setBusy(false);
+  };
+  const disconnect = () => { dropboxLogout(); setConnected(false); setMsg(''); };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      {connected ? (
+        <>
+          <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>☁︎ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Dropbox'}</button>
+          <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Dropbox</button>
+        </>
+      ) : (
+        <button onClick={dropboxLogin} style={btn}>☁︎ Connecter Dropbox <span style={{ fontWeight:400, opacity:0.7 }}>(sauvegarde multi-appareils)</span></button>
+      )}
+      {msg && <div style={{ fontSize:10, color: msg.startsWith('✓') ? C.accent : '#e0708a' }}>{msg}</div>}
+    </div>
+  );
+}
+
 function VosEcoutesPanel() {
   const { listenStats: ls, purgeListened, resetQuota, dailyScrapings, quotaUntil, dbReady, now } = useStore();
   const quotaActive = quotaUntil > Date.now();
@@ -2702,6 +2825,7 @@ function VosEcoutesPanel() {
         style={{ background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
         ↧ Exporter mes données <span style={{ fontWeight:400, opacity:0.7 }}>(stats, artistes, to do)</span>
       </button>
+      <DropboxSync />
       <button onClick={onResetQuota}
         style={{ background:`${C.accent}12`, border:`1px solid ${C.accent}40`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color:C.accent, fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
         🔄 Réinitialiser le quota 24h <span style={{ fontWeight:400, opacity:0.7 }}>({dailyScrapings}/100{quotaActive ? ' · bloqué' : ''})</span>
