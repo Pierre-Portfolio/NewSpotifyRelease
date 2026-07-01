@@ -824,6 +824,10 @@ function StoreProvider({ children }) {
 
   const [dbReady,  setDbReady]          = React.useState(false);
   const [resumableSession, setResumableSession] = React.useState(null);
+  // Undo du retrait d'un titre (croix rouge / swipe) — { uri, item, durMs, counted }
+  const [undoToast, setUndoToast] = React.useState(null);
+  const undoToastRef              = React.useRef(null);
+  const setUndo = (v) => { undoToastRef.current = v; setUndoToast(v); };
 
   // ── État de synchro unifié — UNE seule source de vérité au lieu de 3 booléens ──
   // 'idle' | 'running' | 'paused' (pause manuelle) | 'rl_waiting' (attente 429)
@@ -1304,10 +1308,13 @@ function StoreProvider({ children }) {
     // marqué listened = 1 + listened_at + incrément des compteurs de la table stats, pour
     // qu'il apparaisse dans l'Historique ET compte dans les stats d'écoute.
     // Idempotent via listenedUrisRef : si le poll player l'a déjà compté, on ne recompte pas.
-    if (!listenedUrisRef.current.has(uri)) {
+    const item = feedRef.current.find(f => f.spotifyUri === uri) || null; // snapshot pour l'undo
+    const counted = !listenedUrisRef.current.has(uri); // a-t-on incrémenté les stats dans cet appel ?
+    let durMs = 0;
+    if (counted) {
       listenedUrisRef.current.add(uri);
       const trackRow = dbGet("SELECT duration_ms FROM tracks WHERE spotify_uri = ?", [uri]);
-      const durMs = trackRow?.duration_ms || 0;
+      durMs = trackRow?.duration_ms || 0;
       dbRun("UPDATE tracks SET listened = 1, listened_at = datetime('now') WHERE spotify_uri = ?", [uri]);
       dbRun(
         "UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1, total_listened_ms = total_listened_ms + ? WHERE id = 1",
@@ -1321,7 +1328,32 @@ function StoreProvider({ children }) {
     setFeed(f => f.filter(item => item.spotifyUri !== uri));
     setListenStats(loadListenStatsFromDB());
     setHistory(loadHistoryFromDB());
+    setUndo({ uri, item, durMs, counted }); // affiche le toast "↩ Annuler" (5 s, cf. UndoToast)
   }, [dbReady]);
+
+  // Annule le dernier retrait : remet le titre non écouté, ré-décrémente les stats (si
+  // ce retrait les avait comptées) et le réinsère dans le feed. Idempotent.
+  const undoRemove = React.useCallback(async () => {
+    const t = undoToastRef.current;
+    if (!t || !dbReady) return;
+    const { uri, item, durMs, counted } = t;
+    try {
+      dbRun("UPDATE tracks SET listened = 0, listened_at = NULL WHERE spotify_uri = ?", [uri]);
+      if (counted) {
+        dbRun(
+          "UPDATE stats SET total_listened = MAX(total_listened - 1, 0), listened_this_month = MAX(listened_this_month - 1, 0), listened_this_year = MAX(listened_this_year - 1, 0), total_listened_ms = MAX(total_listened_ms - ?, 0) WHERE id = 1",
+          [durMs]
+        );
+        listenedUrisRef.current.delete(uri);
+      }
+      await saveDB();
+      if (item) setFeed(f => f.some(x => x.spotifyUri === uri) ? f : [item, ...f].slice(0, 1000));
+      setListenStats(loadListenStatsFromDB());
+      setHistory(loadHistoryFromDB());
+    } catch {}
+    setUndo(null);
+  }, [dbReady]);
+  const clearUndo = React.useCallback(() => setUndo(null), []);
 
   const setTrackLiked = React.useCallback(async (uri, bool) => {
     if (!dbReady) return;
@@ -1861,6 +1893,7 @@ function StoreProvider({ children }) {
     seek,
     loopEnabled, setLoopEnabled,
     dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked,
+    undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
     filteredFeed, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, resetFilters,
@@ -5054,6 +5087,27 @@ function WebApp() {
 // ════════════════════════════════════════════════
 // ROOT
 // ════════════════════════════════════════════════
+// Toast "↩ Annuler" affiché 5 s après un retrait de titre (croix rouge / swipe gauche)
+function UndoToast() {
+  const { undoToast, undoRemove, clearUndo } = useStore();
+  React.useEffect(() => {
+    if (!undoToast) return;
+    const id = setTimeout(() => clearUndo(), 5000);
+    return () => clearTimeout(id);
+  }, [undoToast]);
+  if (!undoToast) return null;
+  const it = undoToast.item || {};
+  return (
+    <div style={{ position:'fixed', left:'50%', bottom:96, transform:'translateX(-50%)', zIndex:9998, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 10px 9px 14px', display:'flex', alignItems:'center', gap:12, boxShadow:'0 8px 24px rgba(0,0,0,0.55)', maxWidth:'92vw' }}>
+      <div style={{ minWidth:0 }}>
+        <div style={{ fontSize:11, color:C.text, fontWeight:700 }}>Titre retiré</div>
+        <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:200 }}>{[it.artist, it.title].filter(Boolean).join(' — ') || '—'}</div>
+      </div>
+      <button onClick={undoRemove} style={{ background:`${C.accent}18`, border:`1px solid ${C.accent}55`, color:C.accent, borderRadius:8, padding:'6px 12px', fontSize:11, fontWeight:700, cursor:'pointer', whiteSpace:'nowrap', flexShrink:0 }}>↩ Annuler</button>
+    </div>
+  );
+}
+
 function Shell() {
   const { authState, otherTab } = useStore();
   const isMobile      = useIsMobile();
@@ -5078,6 +5132,7 @@ function Shell() {
         </div>
       )}
       {content}
+      {authState === 'connected' && <UndoToast />}
     </>
   );
 }

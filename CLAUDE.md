@@ -346,6 +346,9 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 - `removeFromFeed` (bouton croix rouge × **et** swipe gauche mobile) traite le titre **comme écouté** : `listened = 1` + `listened_at` + **incrément des compteurs `stats`** (`total_listened`, `listened_this_month/year`, `total_listened_ms`) → le titre apparaît dans l'**Historique** et compte dans les **stats d'écoute**. **Plus aucun `DELETE`** : le titre (liké ou non) reste en DB avec `listened = 1` (nécessaire pour l'Historique), il sera ensuite purgé par le bouton Purger. **Idempotent via `listenedUrisRef`** : si le poll player a déjà compté le titre, il n'est pas recompté (on s'assure juste qu'il est marqué via `COALESCE(listened_at, …)`)
 - Affiche une `alert` avec le nombre de titres supprimés
 
+### Undo du retrait (`UndoToast`)
+`removeFromFeed` pose un **snapshot** `{ uri, item, durMs, counted }` dans `undoToast` (state + `undoToastRef`). Le composant `UndoToast` (rendu dans `Shell` quand `connected`) affiche un toast **« ↩ Annuler » pendant 5 s** (auto-fermé via `clearUndo`). `undoRemove()` remet `listened = 0` + `listened_at = NULL`, **ré-décrémente les stats uniquement si `counted`** (le retrait avait bien compté l'écoute, plancher `MAX(...,0)`), retire l'URI de `listenedUrisRef`, et réinsère l'item en tête du feed. Exposés dans l'api du store : `undoToast`, `undoRemove`, `clearUndo`.
+
 ---
 
 ## PWA
