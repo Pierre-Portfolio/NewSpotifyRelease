@@ -77,12 +77,12 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - **✅ To do** — nombre de **tâches terminées** (validées) : tâches de la journée / du mois / de l'année, plus **⭐ Tâches compliquées** = total des tâches **favorites** effectuées. Une tâche compte comme terminée quand on la supprime (×) ou qu'on valide (✓) une tâche Quotidien
 - **📈 Graphique** — deux histogrammes sur **14 jours** (dessinés sans librairie externe) : **écoutes par jour** et **tâches terminées par jour**
-- **↧ Exporter mes données** : télécharge une sauvegarde **JSON** (stats d'écoute, dernières dates de scrapping des artistes, to do) — pour ne rien perdre (les données ne vivent que sur cet appareil)
+- **↧ Exporter mes données** : télécharge une sauvegarde **JSON** (stats d'écoute, dernières dates de scrapping des artistes, to do, **rappels Remember**) — pour ne rien perdre (les données ne vivent que sur cet appareil). La **sync Dropbox** sauvegarde exactement les mêmes informations
 - **💾 Proposition de sauvegarde hebdomadaire** : une fois par semaine, au lancement, l'app propose (via une alerte) de télécharger une sauvegarde — uniquement si tu as des données et qu'aucune sauvegarde n'a eu lieu depuis 7 jours
 - **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la même donnée dans ton Dropbox, accessible depuis plusieurs appareils. Nécessite de renseigner une clé d'app Dropbox (sinon la section reste « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
 - Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.6.6`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 265 commits → `2.6.6`, 1001 → `10.0.1`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.7.6`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 276 commits → `2.7.6`, 1001 → `10.0.1`)
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
