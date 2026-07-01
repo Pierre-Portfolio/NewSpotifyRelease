@@ -43,6 +43,7 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 | `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
 | `icon-192.png` | Icône PWA 192×192 (à ajouter au repo) |
 | `icon-512.png` | Icône PWA 512×512 (à ajouter au repo) |
+| `data/maps.json` | **Placeholder** du futur module Maps (`{ updated_at, maps:{} }`) — sync séparée, vide pour le moment (gros projet à venir). Pas encore lu par l'app |
 | `data/indices.json` | **Vrais indices** (NASDAQ-100/S&P 500/CAC 40) générés par la GitHub Action — lu par l'app en same-origin (CORS natif, zéro proxy) |
 | `scripts/fetch_indices.py` | Script Python (stdlib only) qui récupère les indices côté serveur (Stooq en priorité, repli Yahoo cookie+crumb) et écrit `data/indices.json` |
 | `.github/workflows/update-indices.yml` | GitHub Action cron (toutes les 2 h, lun–ven, 06–22 UTC) + `workflow_dispatch` qui lance le script et commit le JSON si changé |
