@@ -82,7 +82,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la même donnée dans ton Dropbox, accessible depuis plusieurs appareils. Nécessite de renseigner une clé d'app Dropbox (sinon la section reste « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
 - Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.6.5`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 265 commits → `2.6.5`, 1001 → `10.0.1`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.6.6`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 265 commits → `2.6.6`, 1001 → `10.0.1`)
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
