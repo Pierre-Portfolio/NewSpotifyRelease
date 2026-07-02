@@ -85,7 +85,7 @@ const delay = delayChoice * 1000 + Math.random() * 2000 + 1000;
 
 ---
 
-## Schéma SQL local (3 tables)
+## Schéma SQL local (4 tables)
 
 ```sql
 CREATE TABLE IF NOT EXISTS tracks (
@@ -126,6 +126,10 @@ CREATE TABLE IF NOT EXISTS stats (
   listened_this_year INTEGER DEFAULT 0,
   last_reset_month TEXT,    -- format 'YYYY-MM'
   last_reset_year TEXT      -- format 'YYYY'
+);
+
+CREATE TABLE IF NOT EXISTS purged_uris (
+  spotify_uri TEXT PRIMARY KEY   -- URIs des titres purgés : jamais réinsérés par un re-scan
 );
 ```
 
@@ -342,7 +346,8 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## Purge
 
 - Bouton **"Purger les écoutes"** dans `VosEcoutesPanel` (desktop sidebar + mobile onglet Stats)
-- Action : `DELETE FROM tracks WHERE listened = 1` (**likés compris**) → `saveDB()` → `setListenStats` + `setLikedTracks`
+- Action : les URIs sont d'abord mémorisées dans `purged_uris` (`INSERT OR IGNORE … SELECT`), puis `DELETE FROM tracks WHERE listened = 1` (**likés compris**) → `saveDB()` → `setListenStats` + `setLikedTracks`
+- **`purged_uris`** est chargée dans `knownUris` au boot et consultée par le scan (`newTracks = pistes ∉ seenUris`) et par `importDiscoverWeekly` : **un titre purgé ne réapparaît jamais** dans le feed, même si son album retombe dans une fenêtre de scan (cutoff tronqué au jour, scan `partial`)
 - **L'onglet ❤ Likés est aussi vidé** des titres écoutés. Le **% likés** n'est PAS affecté : il vit dans la table `stats` (`total_liked / total_listened`), indépendante des lignes `tracks` supprimées
 - `removeFromFeed` (bouton croix rouge × **et** swipe gauche mobile) traite le titre **comme écouté** : `listened = 1` + `listened_at` + **incrément des compteurs `stats`** (`total_listened`, `listened_this_month/year`, `total_listened_ms`) → le titre apparaît dans l'**Historique** et compte dans les **stats d'écoute**. **Plus aucun `DELETE`** : le titre (liké ou non) reste en DB avec `listened = 1` (nécessaire pour l'Historique), il sera ensuite purgé par le bouton Purger. **Idempotent via `listenedUrisRef`** : si le poll player a déjà compté le titre, il n'est pas recompté (on s'assure juste qu'il est marqué via `COALESCE(listened_at, …)`)
 - Affiche une `alert` avec le nombre de titres supprimés

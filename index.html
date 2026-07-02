@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.8.1';
+const APP_VERSION = '2.8.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -537,6 +537,11 @@ async function initDB() {
   try { _db.run("ALTER TABLE artists_scraped ADD COLUMN total_tracks_added INTEGER DEFAULT 0"); } catch {}
   try { _db.run("ALTER TABLE artists_scraped ADD COLUMN last_scan_status TEXT"); } catch {}
   try { _db.run("ALTER TABLE artists_scraped ADD COLUMN scan_count INTEGER DEFAULT 0"); } catch {}
+  // Mémoire des titres purgés : le DELETE de la purge fait sortir l'URI de `tracks`, et un
+  // re-scan du même album (cutoff tronqué au jour, scan partiel non terminé…) réinsérait le
+  // titre comme NON écouté. Table minuscule (une URI par ligne), alimentée par purgeListened
+  // et chargée dans knownUris au boot — jamais purgée.
+  _db.run("CREATE TABLE IF NOT EXISTS purged_uris (spotify_uri TEXT PRIMARY KEY)");
   return _db;
 }
 
@@ -767,9 +772,13 @@ async function importDiscoverWeekly(addLog) {
   }
 
   let added = 0;
+  // Titres écoutés puis purgés : leur URI n'est plus dans `tracks`, ne pas les réimporter
+  let dwPurged = new Set();
+  try { dwPurged = new Set(dbAll("SELECT spotify_uri FROM purged_uris").map(r => r.spotify_uri)); } catch {}
   for (const entry of tracksData.items) {
     const t = entry.item || entry.track; // champ renommé track → item par la migration 2026
     if (!t?.uri || t.is_local) continue;
+    if (dwPurged.has(t.uri)) continue;
     try {
       dbRun(
         "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1033,6 +1042,9 @@ function StoreProvider({ children }) {
           // Load known URIs for dedup (inclut les DW tracks fraîchement importées)
           const uriRows = dbAll("SELECT spotify_uri FROM tracks");
           uriRows.forEach(r => knownUrisRef.current.add(r.spotify_uri));
+          // + les titres purgés : sortis de `tracks` par la purge, ils ne doivent jamais
+          // être réinsérés par un re-scan (cf. purged_uris)
+          try { dbAll("SELECT spotify_uri FROM purged_uris").forEach(r => knownUrisRef.current.add(r.spotify_uri)); } catch {}
 
           // Load feed (not listened) — voir loadFeedFromDB (les filtres/tri re-query la DB, hors cap 1000)
           setFeed(loadFeedFromDB());
@@ -1298,6 +1310,9 @@ function StoreProvider({ children }) {
     // des lignes `tracks` : il n'est donc PAS affecté par cette suppression.
     const row   = dbGet("SELECT COUNT(*) as c FROM tracks WHERE listened = 1");
     const count = row?.c || 0;
+    // Mémorise les URIs avant suppression : un titre purgé ne doit jamais réapparaître
+    // dans le feed si son album retombe dans une fenêtre de scan (cf. table purged_uris)
+    dbRun("INSERT OR IGNORE INTO purged_uris (spotify_uri) SELECT spotify_uri FROM tracks WHERE listened = 1");
     dbRun("DELETE FROM tracks WHERE listened = 1");
     await saveDB();
     setListenStats(loadListenStatsFromDB());
@@ -1727,9 +1742,13 @@ function StoreProvider({ children }) {
               const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
               if (!tracksData?.items?.length) continue;
               const uris = tracksData.items.map(t => t.uri);
-              // Skip seulement si TOUTES les pistes sont connues : un album dont la piste 1
-              // est sortie en single auparavant ne doit pas être sauté en entier
-              if (uris.every(u => seenUris.has(u))) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
+              // Ne traiter que les pistes NOUVELLES : ni déjà en base, ni purgées (seenUris
+              // inclut purged_uris via knownUris). Un titre écouté puis purgé ne réapparaît
+              // donc plus au re-scan, et un album dont la piste 1 est sortie en single avant
+              // n'est pas sauté en entier (ses autres pistes restent nouvelles).
+              const newTracks = (album.album_type === 'single' ? tracksData.items.slice(0, 1) : tracksData.items)
+                .filter(t => !seenUris.has(t.uri));
+              if (newTracks.length === 0) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
 
               // Sauvegarder en DB locale
               const coverUrl = album.images?.[0]?.url || null;
@@ -1737,11 +1756,11 @@ function StoreProvider({ children }) {
                 try {
                   dbRun(
                     "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [uris[0], artist.name, album.name, null, 'single', album.release_date || null, coverUrl, tracksData.items[0]?.duration_ms || null]
+                    [newTracks[0].uri, artist.name, album.name, null, 'single', album.release_date || null, coverUrl, newTracks[0].duration_ms || null]
                   );
                 } catch {}
               } else {
-                for (const t of tracksData.items) {
+                for (const t of newTracks) {
                   try {
                     dbRun(
                       "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1752,7 +1771,7 @@ function StoreProvider({ children }) {
               }
 
               uris.forEach(u => { seenUris.add(u); knownUrisRef.current.add(u); });
-              const addedCount = album.album_type === 'single' ? 1 : tracksData.items.length;
+              const addedCount = newTracks.length;
               totalTracks  += addedCount;
               totalReleases++;
               artistTracks += addedCount;
@@ -1762,8 +1781,8 @@ function StoreProvider({ children }) {
               const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
               if (album.album_type === 'single') {
                 artistFeedItems.push({
-                  id:          uris[0],
-                  spotifyUri:  uris[0],
+                  id:          newTracks[0].uri,
+                  spotifyUri:  newTracks[0].uri,
                   label:       'Single',
                   artist:      artist.name,
                   title:       album.name,
@@ -1773,10 +1792,10 @@ function StoreProvider({ children }) {
                   image:       coverUrl,
                   isNew:       true,
                   liked:       0,
-                  duration_ms: tracksData.items[0]?.duration_ms || 0,
+                  duration_ms: newTracks[0].duration_ms || 0,
                 });
               } else {
-                tracksData.items.forEach(t => artistFeedItems.push({
+                newTracks.forEach(t => artistFeedItems.push({
                   id:          t.uri,
                   spotifyUri:  t.uri,
                   label:       'Album',
