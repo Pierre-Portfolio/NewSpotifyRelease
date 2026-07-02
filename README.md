@@ -131,7 +131,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Remember
 - Section **Remember** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
-- Sections fixes (repliables) : **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Logement** (AG, Assurance habitation, Détecteur de fumée, Nettoyer hotte cuisine, Nettoyer VMC, Nettoyer aérations fenêtres), **Véhicule** (Contrôle technique, Assurance auto, Carte navigo), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Sport** (Licence Course à pied), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile)
+- Sections fixes (repliables) : **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Logement** (AG, Détecteur de fumée, Nettoyer hotte cuisine, Nettoyer VMC, Nettoyer aérations fenêtres), **Véhicule** (Contrôle technique, Assurance auto, Carte navigo), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Sport** (Licence Course à pied), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile)
 - **Rappels personnalisés** : ajoute ton propre rappel (libellé + date)
 - Pour chaque rappel, un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
 - **Notification à l'ouverture de l'app** quand un rappel arrive à échéance (une fois par jour) + bandeau des rappels échus
