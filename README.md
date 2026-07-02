@@ -218,8 +218,8 @@ NewSpotifyRelease/
   vendor/
     sql-wasm.js       → sql.js auto-hébergé
     sql-wasm.wasm     → Binaire SQLite WebAssembly auto-hébergé
-  icon-192.png        → Icône PWA 192×192 (à ajouter)
-  icon-512.png        → Icône PWA 512×512 (à ajouter)
+  icon-192.png        → Icône PWA 192×192
+  icon-512.png        → Icône PWA 512×512
   CLAUDE.md           → Documentation technique pour Claude
   data/
     indices.json      → Vrais indices (NASDAQ-100/S&P 500/CAC 40), généré par la GitHub Action

@@ -41,8 +41,8 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 | `service-worker.js` | Cache app shell + vendor pour usage offline (v5, clé de cache normalisée, ne cache que les réponses `res.ok`) |
 | `vendor/sql-wasm.js` | sql.js 1.10.2 **auto-hébergé** (hash sha384 vérifié = ancien SRI cdnjs) |
 | `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
-| `icon-192.png` | Icône PWA 192×192 (à ajouter au repo) |
-| `icon-512.png` | Icône PWA 512×512 (à ajouter au repo) |
+| `icon-192.png` | Icône PWA 192×192 (présente à la racine, utilisée aussi par les notifications) |
+| `icon-512.png` | Icône PWA 512×512 (présente à la racine) |
 | `data/maps.json` | **Placeholder** du futur module Maps (`{ updated_at, maps:{} }`) — sync séparée, vide pour le moment (gros projet à venir). Pas encore lu par l'app |
 | `data/indices.json` | **Vrais indices** (NASDAQ-100/S&P 500/CAC 40) générés par la GitHub Action — lu par l'app en same-origin (CORS natif, zéro proxy) |
 | `scripts/fetch_indices.py` | Script Python (stdlib only) qui récupère les indices côté serveur (Stooq en priorité, repli Yahoo cookie+crumb) et écrit `data/indices.json` |
@@ -359,7 +359,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 - **⚠️ Clé de cache NORMALISÉE** : l'app shell est toujours stocké sous `'./index.html'` (`c.put('./index.html', copy)`), jamais sous l'URL réelle de navigation — sinon le retour OAuth (`?code=...&state=...`) écrivait le code d'autorisation dans Cache Storage
 - **⚠️ L'ancienne stratégie cache-first servait l'index.html du cache pour toujours** → les PWA installées ne recevaient jamais les mises à jour. Ne pas revenir en cache-first pour l'app shell.
 - Enregistrement dans `<head>` : `navigator.serviceWorker.register('./service-worker.js')`
-- Icônes manquantes : `icon-192.png` et `icon-512.png` à ajouter à la racine du repo
+- Icônes PWA : `icon-192.png` et `icon-512.png` présentes à la racine du repo (référencées par `manifest.json` et `notify()`)
 
 ---
 
