@@ -70,7 +70,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.9.7';
+const APP_VERSION = '2.9.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4178,21 +4178,27 @@ const _mdpTextDec = new TextDecoder();
 // base64 ⇄ bytes (boucle pour éviter le débordement de pile sur String.fromCharCode(...))
 function _mdpB64(buf) { const b = new Uint8Array(buf); let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s); }
 function _mdpUnb64(s) { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
-async function _mdpDeriveKey(password, salt) {
+// Versionnage du blob : v1 = 300k itérations PBKDF2, v2 = 600k (recommandation OWASP
+// pour PBKDF2-SHA-256). Un coffre v1 est re-chiffré en v2 au déverrouillage (upgrade
+// transparent dans unlock) — le déchiffrement lit les itérations selon blob.v.
+const MDP_VAULT_V  = 2;
+const MDP_KDF_ITER = { 1: 300000, 2: 600000 };
+async function _mdpDeriveKey(password, salt, iterations) {
   const base = await crypto.subtle.importKey('raw', _mdpTextEnc.encode(password), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name:'PBKDF2', salt, iterations:300000, hash:'SHA-256' },
+    { name:'PBKDF2', salt, iterations, hash:'SHA-256' },
     base, { name:'AES-GCM', length:256 }, false, ['encrypt', 'decrypt']);
 }
 async function mdpEncrypt(password, dataObj) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv   = crypto.getRandomValues(new Uint8Array(12));
-  const key  = await _mdpDeriveKey(password, salt);
+  const key  = await _mdpDeriveKey(password, salt, MDP_KDF_ITER[MDP_VAULT_V]);
   const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, _mdpTextEnc.encode(JSON.stringify(dataObj)));
-  return { v:1, salt:_mdpB64(salt), iv:_mdpB64(iv), ct:_mdpB64(ct) };
+  return { v:MDP_VAULT_V, salt:_mdpB64(salt), iv:_mdpB64(iv), ct:_mdpB64(ct) };
 }
 async function mdpDecrypt(password, blob) {
-  const key = await _mdpDeriveKey(password, _mdpUnb64(blob.salt));
+  const iter = MDP_KDF_ITER[blob.v] || MDP_KDF_ITER[1];
+  const key = await _mdpDeriveKey(password, _mdpUnb64(blob.salt), iter);
   const pt  = await crypto.subtle.decrypt({ name:'AES-GCM', iv:_mdpUnb64(blob.iv) }, key, _mdpUnb64(blob.ct));
   return JSON.parse(_mdpTextDec.decode(pt));
 }
@@ -4270,7 +4276,10 @@ function GestionMdpPanel() {
   const unlock = async () => {
     setErr(''); setBusy(true);
     try {
-      const data = await mdpDecrypt(pw, loadVaultBlob());
+      const blob = loadVaultBlob();
+      const data = await mdpDecrypt(pw, blob);
+      // Upgrade transparent : un coffre v1 (300k itér.) est re-chiffré en v2 (600k)
+      if ((blob.v || 1) < MDP_VAULT_V) { try { saveVaultBlob(await mdpEncrypt(pw, data)); } catch {} }
       masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:data };
       setEntries(data); setPhase('unlocked'); setPw('');
     } catch (e) { setErr('Mot de passe maître incorrect'); }
