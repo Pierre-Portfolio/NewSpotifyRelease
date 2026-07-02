@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS artists_scraped (
   spotify_id TEXT PRIMARY KEY,
   last_scraped_at TEXT NOT NULL,
   name TEXT,                            -- nom de l'artiste (depuis /me/following, colonne migrée)
-  image_url TEXT,                       -- pochette artiste (images[0].url)
+  image_url TEXT,                       -- pochette artiste (images[1].url = 300px, repli images[0])
   popularity INTEGER,                   -- 0-100
   followers INTEGER,                    -- followers.total
   genres TEXT,                          -- JSON.stringify(genres[])
