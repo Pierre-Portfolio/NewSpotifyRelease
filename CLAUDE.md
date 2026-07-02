@@ -444,7 +444,7 @@ resumableSession // { artists_scanned, total_artists, last_artist_name, page_url
 startSync({ skipCount, resumeUrl, resumeOffset })  // tous les refus (déjà en cours / fenêtre 429 / quota jour) sont en tête, AVANT toute requête
 resumeSync()                   // → startSync({ skipCount, resumeUrl: page_url, resumeOffset: page_offset }) — reprise par curseur
 togglePause()                  // bascule syncState entre 'paused' et 'running' (no-op si 'idle')
-purgeListened()                // DELETE listened=1 AND liked=0 — les likés sont conservés
+purgeListened()                // mémorise les URIs dans purged_uris puis DELETE listened=1 (LIKÉS COMPRIS — l'onglet ❤ est vidé des titres écoutés ; le % likés vit dans stats et n'est pas affecté)
 resetQuota()                   // remet le quota 24h à 0 (saveQuota(0,0) + setDailyScrapings(0) + setQuotaUntil(0)) — débloque une synchro sans attendre l'expiration. Bouton dans VosEcoutesPanel
 removeFromFeed(uri)            // useCallback([dbReady]) — marque le titre écouté (UPDATE listened=1 + listened_at + incrément stats) + retire du feed → apparaît dans l'Historique et compte dans les stats. Idempotent via listenedUrisRef. Plus de DELETE
 setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB + stats.total_liked ±1 + recharge likedTracks/listenStats + met à jour feed array
