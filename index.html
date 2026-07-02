@@ -70,7 +70,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.0.2';
+const APP_VERSION = '3.0.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4463,7 +4463,8 @@ function GestionMdpPanel() {
 // ════════════════════════════════════════════════
 // REMEMBER — sections fixes (Véhicule/Médecin/Sport) avec date du prochain rappel +
 // rappels PERSONNALISÉS (libellé + date). Une notification est émise À L'OUVERTURE de
-// l'app (notifyDueReminders, throttlée 1×/jour) pour tout rappel échu. localStorage.
+// l'app (notifyDueReminders, throttlée 1×/jour) aux jalons J-30/J-7/J-1/jour J + rappels
+// en retard. localStorage.
 // ════════════════════════════════════════════════
 const RAPPEL_PURPLE = '#c792ea';
 const RAPPEL_LS_KEY = 'spotifyplus_rappels';            // dates des items fixes : { "<section>.<item>": date }
@@ -4471,12 +4472,12 @@ const REMEMBER_CUSTOM_KEY = 'spotifyplus_remember_custom'; // rappels persos : [
 const RAPPEL_SECTIONS = [
   { key:'administratif',label:'Administratif',icon:'📄', items:[['impots',"Déclaration d'impôts"], ['cni',"Carte d'identité"], ['passeport','Passeport'], ['carte_europeenne','Carte européenne']] },
   { key:'logement',     label:'Logement',     icon:'🏠', items:[['ag','AG'], ['detecteur_fumee','Détecteur de fumée'], ['hotte','Nettoyer hotte cuisine'], ['vmc','Nettoyer VMC'], ['aerations_fenetres','Nettoyer aérations fenêtres']] },
-  { key:'vehicule',     label:'Véhicule',     icon:'🚗', items:[['ct','Contrôle technique'], ['assurance_auto','Assurance auto'], ['carte_navigo','Carte navigo']] },
+  { key:'vehicule',     label:'Véhicule',     icon:'🚗', items:[['ct','Contrôle technique'], ['assurance_auto','Assurance auto'], ['carte_navigo','Carte navigo'], ['permis_conduire','Permis de conduire']] },
   { key:'medecin',      label:'Médecin',      icon:'🩺', items:[['generaliste','Généraliste'], ['dentiste','Dentiste'], ['depistage','Dépistage'], ['checkup','Check Up complet'], ['orl','ORL'], ['ophtalmo','Ophtalmologiste'], ['dermato','Dermatologue'], ['osteo','Ostéopathe'], ['kine','Kiné']] },
   { key:'travail',      label:'Travail',      icon:'💼', items:[['entretien',"Entretien annuel d'évaluation"], ['visite_medicale','Visite médicale du travail']] },
   { key:'sport',        label:'Sport',        icon:'🏃', items:[['licence_course','Licence Course à pied']] },
   { key:'anniversaire', label:'Anniversaire', icon:'🎂', items:[['anniv_papa','Anniversaire Papa'], ['anniv_maman','Anniv Maman'], ['fete_peres','Fête des pères'], ['fete_meres','Fête des mères'], ['anniv_cecile','Anniversaire Cécile']] },
-  { key:'autre',        label:'Autre',        icon:'📌', items:[['lunettes','Lunettes']] },
+  { key:'autre',        label:'Autre',        icon:'📌', items:[['lunettes','Lunettes'], ['carte_restaurant','Carte restaurant expiration']] },
 ];
 function loadRappels() { try { return JSON.parse(localStorage.getItem(RAPPEL_LS_KEY)) || {}; } catch { return {}; } }
 function saveRappels(v) { try { localStorage.setItem(RAPPEL_LS_KEY, JSON.stringify(v)); } catch {} }
@@ -4497,26 +4498,32 @@ function rappelBadge(days) {
   if (days <= 30)    return { txt:`dans ${days} j`,       color:'#f5a623' };
   return { txt:`dans ${days} j`, color:'#46c46a' };
 }
-// Liste des rappels ÉCHUS (date ≤ aujourd'hui) — items fixes + persos.
-function rememberDueList() {
-  const due = [];
+// Tous les rappels datés (fixes + persos) avec leur nb de jours restants { label, days }.
+function rememberAllWithDelta() {
+  const out = [];
   const dates = loadRappels();
   RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
     const d = rappelDelta(dates[sec.key + '.' + ik]);
-    if (d != null && d <= 0) due.push(label);
+    if (d != null) out.push({ label, days: d });
   }));
-  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null && d <= 0) due.push(r.label); });
-  return due;
+  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ label: r.label, days: d }); });
+  return out;
 }
-// Notification à l'ouverture de l'app si un rappel est échu — throttlée 1×/jour.
+// Liste des rappels ÉCHUS (date ≤ aujourd'hui) — items fixes + persos.
+function rememberDueList() {
+  return rememberAllWithDelta().filter(r => r.days <= 0).map(r => r.label);
+}
+// Notification à l'ouverture de l'app aux JALONS J-30 (1 mois), J-7, J-1 et le jour J
+// (+ rappels en retard) — throttlée 1×/jour.
 function notifyDueReminders() {
-  const due = rememberDueList();
-  if (!due.length) return;
+  const alerts = rememberAllWithDelta().filter(r => r.days === 30 || r.days === 7 || r.days === 1 || r.days <= 0);
+  if (!alerts.length) return;
   const today = new Date().toISOString().slice(0, 10);
   const KEY = 'spotifyplus_remember_notified';
   try { if (localStorage.getItem(KEY) === today) return; localStorage.setItem(KEY, today); } catch {}
-  const names = due.join(', ');
-  notify('Spotify+ — Remember', due.length === 1 ? `Rappel : ${names}` : `${due.length} rappels : ${names}`);
+  const when = d => d < 0 ? `en retard de ${-d} j` : d === 0 ? "aujourd'hui" : d === 1 ? 'demain' : `dans ${d} j`;
+  const names = alerts.map(a => `${a.label} (${when(a.days)})`).join(', ');
+  notify('Spotify+ — Remember', alerts.length === 1 ? `Rappel : ${names}` : `${alerts.length} rappels : ${names}`);
 }
 
 function RappelPanel() {
