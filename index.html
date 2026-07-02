@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '2.9.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1922,6 +1922,17 @@ function StoreProvider({ children }) {
     }
   };
 
+  // Restaure une sauvegarde (applyBackup) puis rafraîchit les états dérivés de la DB.
+  // Les panneaux To do / Remember relisent le localStorage à leur montage (reload/onglet).
+  const restoreBackup = React.useCallback(async (data) => {
+    if (!dbReady) throw new Error('DB non prête');
+    const res = applyBackup(data);
+    await saveDB();
+    setListenStats(loadListenStatsFromDB());
+    setArtists(loadArtistsFromDB());
+    return res;
+  }, [dbReady]);
+
   const logout = () => { logoutClear(); window.location.reload(); };
 
   // Réinitialise manuellement le quota 24h (compteur + fenêtre) — débloque une
@@ -1942,7 +1953,7 @@ function StoreProvider({ children }) {
     listenStats, setListenStats,
     seek,
     loopEnabled, setLoopEnabled,
-    dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked,
+    dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked, restoreBackup,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
@@ -2787,6 +2798,62 @@ function maybeWeeklyBackupPrompt() {
   if (ok) { try { downloadBackup(); } catch {} }
 }
 
+// Restaure une sauvegarde produite par buildBackup() (export local ou Dropbox).
+// - artists_scraped : UPSERT prudent — la date de scan locale n'est JAMAIS régressée
+//   (MAX des deux), les cumuls scan_count/total_tracks_added sont fusionnés au MAX.
+// - stats : appareil vierge (total_listened = 0) → reprise intégrale ; sinon fusion
+//   prudente des compteurs cumulés uniquement (pas les compteurs mois/année, liés aux
+//   marqueurs de reset locaux).
+// - todos / todos_done / rappels / remembers : REMPLACÉS par la sauvegarde (si présents).
+// La table `tracks` n'est pas dans la sauvegarde : le feed n'est pas touché.
+function applyBackup(data) {
+  if (!data || data.app !== 'spotifyplus') throw new Error('format invalide');
+  let artistsRestored = 0, statsRestored = false;
+  for (const a of (Array.isArray(data.artists) ? data.artists : [])) {
+    if (!a?.spotify_id || !a?.last_scraped_at) continue;
+    try {
+      dbRun(
+        `INSERT INTO artists_scraped (spotify_id, last_scraped_at, name, last_release_count, total_tracks_added, last_scan_status, scan_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(spotify_id) DO UPDATE SET
+           last_scraped_at    = MAX(last_scraped_at, excluded.last_scraped_at),
+           name               = COALESCE(name, excluded.name),
+           last_release_count = MAX(last_release_count, excluded.last_release_count),
+           total_tracks_added = MAX(total_tracks_added, excluded.total_tracks_added),
+           scan_count         = MAX(scan_count, excluded.scan_count)`,
+        [a.spotify_id, a.last_scraped_at, a.name || null, a.last_release_count || 0,
+         a.total_tracks_added || 0, a.last_scan_status || null, a.scan_count || 0]
+      );
+      artistsRestored++;
+    } catch {}
+  }
+  const b = data.stats;
+  if (b && typeof b === 'object') {
+    try {
+      const local = dbGet("SELECT total_listened FROM stats WHERE id = 1");
+      if (!local?.total_listened) {
+        dbRun(
+          "UPDATE stats SET total_listened = ?, listened_this_month = ?, listened_this_year = ?, last_reset_month = ?, last_reset_year = ?, total_listened_ms = ?, total_liked = ? WHERE id = 1",
+          [b.total_listened || 0, b.listened_this_month || 0, b.listened_this_year || 0,
+           b.last_reset_month || null, b.last_reset_year || null, b.total_listened_ms || 0, b.total_liked || 0]
+        );
+      } else {
+        dbRun(
+          "UPDATE stats SET total_listened = MAX(total_listened, ?), total_listened_ms = MAX(total_listened_ms, ?), total_liked = MAX(total_liked, ?) WHERE id = 1",
+          [b.total_listened || 0, b.total_listened_ms || 0, b.total_liked || 0]
+        );
+      }
+      statsRestored = true;
+    } catch {}
+  }
+  const put = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  if (Array.isArray(data.todos))      put('spotifyplus_todos', data.todos);
+  if (Array.isArray(data.todos_done)) put('spotifyplus_todos_done', data.todos_done);
+  if (data.rappels && typeof data.rappels === 'object') put('spotifyplus_rappels', data.rappels);
+  if (Array.isArray(data.remembers))  put('spotifyplus_remember_custom', data.remembers);
+  return { artistsRestored, statsRestored };
+}
+
 // Section repliable (collapse) réutilisable pour VosEcoutesPanel
 function StatsCollapse({ title, color, defaultOpen, children }) {
   const [open, setOpen] = React.useState(!!defaultOpen);
@@ -2917,8 +2984,28 @@ function DropboxSync() {
 }
 
 function VosEcoutesPanel() {
-  const { listenStats: ls, purgeListened, resetQuota, dailyScrapings, quotaUntil, dbReady, now } = useStore();
+  const { listenStats: ls, purgeListened, resetQuota, restoreBackup, dailyScrapings, quotaUntil, dbReady, now } = useStore();
   const quotaActive = quotaUntil > Date.now();
+  const restoreRef = React.useRef(null);
+  // Restauration d'une sauvegarde exportée (fichier JSON de buildBackup)
+  const onRestoreFile = (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = async () => {
+      try {
+        const data = JSON.parse(r.result);
+        if (!data || data.app !== 'spotifyplus') { alert('Fichier invalide : ce n\'est pas une sauvegarde Spotify+.'); return; }
+        const n = Array.isArray(data.artists) ? data.artists.length : 0;
+        const when = data.exported_at ? new Date(data.exported_at).toLocaleDateString('fr-FR') : '?';
+        if (!confirm(`Restaurer la sauvegarde du ${when} ?\n\n· ${n} artiste(s) — dates de scan fusionnées (jamais régressées)\n· Stats d'écoute — fusion prudente\n· To do / Remember — REMPLACÉS par la sauvegarde`)) return;
+        const res = await restoreBackup(data);
+        alert(`✓ Sauvegarde restaurée : ${res.artistsRestored} artiste(s)${res.statsRestored ? ' + stats' : ''} + to do / remember.\nRecharge la page pour voir les to do / rappels restaurés.`);
+      } catch (e) { alert('Fichier illisible ou invalide.'); }
+    };
+    r.readAsText(f);
+  };
   const onResetQuota = () => {
     if (confirm('Réinitialiser le quota 24h ?\nLe compteur repart à 0/100 et tu pourras relancer une synchro immédiatement.')) resetQuota();
   };
@@ -2991,6 +3078,11 @@ function VosEcoutesPanel() {
         style={{ background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
         ↧ Exporter mes données <span style={{ fontWeight:400, opacity:0.7 }}>(stats, artistes, to do, remember)</span>
       </button>
+      <button onClick={() => restoreRef.current && restoreRef.current.click()} disabled={!dbReady}
+        style={{ background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor: dbReady ? 'pointer' : 'default', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left', opacity: dbReady ? 1 : 0.4 }}>
+        ↥ Restaurer mes données <span style={{ fontWeight:400, opacity:0.7 }}>(depuis un export JSON)</span>
+      </button>
+      <input ref={restoreRef} type="file" accept="application/json,.json" onChange={onRestoreFile} style={{ display:'none' }} />
       <DropboxSync />
       <button onClick={onResetQuota}
         style={{ background:`${C.accent}12`, border:`1px solid ${C.accent}40`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color:C.accent, fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
