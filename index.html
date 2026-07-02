@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.9.1';
+const APP_VERSION = '2.9.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -641,7 +641,7 @@ function mapFeedRow(t) {
 // - artistSearch : LIKE sur artist_name
 // Le cap LIMIT 1000 reste (rendu), mais il s'applique APRÈS filtre/tri : on voit donc bien
 // les Singles / les plus anciens / l'artiste recherché même au-delà de la 1000e ligne.
-function loadFeedFromDB({ artistSearch = '', filterType = 'all', sortBy = 'default' } = {}) {
+function loadFeedFromDB({ artistSearch = '', filterType = 'all', sortBy = 'default', genre = '' } = {}) {
   const where = ['listened = 0'];
   const params = [];
   const s = (artistSearch || '').trim();
@@ -650,6 +650,14 @@ function loadFeedFromDB({ artistSearch = '', filterType = 'all', sortBy = 'defau
     // ces caractères littéralement, pas se comporter comme un joker LIKE
     where.push("LOWER(artist_name) LIKE '%' || LOWER(?) || '%' ESCAPE '\\'");
     params.push(s.replace(/[\\%_]/g, m => '\\' + m));
+  }
+  if (genre) {
+    // Filtre par genre via les métadonnées artiste (genres = JSON.stringify(genres[])) :
+    // le motif '"<genre>"' matche l'entrée JSON exacte. Ne couvre que les titres dont
+    // l'artist_name correspond à un artiste scanné (les tracks Découvertes multi-artistes
+    // "A, B" ne matchent pas — assumé).
+    where.push("artist_name IN (SELECT name FROM artists_scraped WHERE genres LIKE '%' || ? || '%')");
+    params.push('"' + genre + '"');
   }
   if (filterType === 'single')     where.push("release_type = 'single'");
   else if (filterType === 'dw')    where.push("release_type = 'discover_weekly'");
@@ -897,7 +905,8 @@ function StoreProvider({ children }) {
   const [filterType,   setFilterType]   = React.useState('all');
   const [sortBy,       setSortBy]       = React.useState('default');
   const [artistSearch, setArtistSearch] = React.useState('');
-  const resetFilters = () => { setFilterType('all'); setSortBy('default'); setArtistSearch(''); };
+  const [genreFilter,  setGenreFilter]  = React.useState(''); // '' = tous — filtre SQL uniquement (via artists_scraped.genres)
+  const resetFilters = () => { setFilterType('all'); setSortBy('default'); setArtistSearch(''); setGenreFilter(''); };
 
   const filteredFeed = React.useMemo(() => {
     // #opt : sans filtre/tri actif (cas courant, notamment pendant la synchro où le feed
@@ -939,19 +948,19 @@ function StoreProvider({ children }) {
   // 1000 chargés en mémoire. Retour à 'all'/'default'/'' → recharge le feed de base. Debounce
   // 150ms (lisse la frappe). On remplace `feed` directement → toute la machinerie existante
   // (auto-avance, marquage écouté, players via feedRef/filteredFeed) fonctionne sur ces titres.
-  const DEFAULT_QUERY_KEY = JSON.stringify(['', 'all', 'default']);
+  const DEFAULT_QUERY_KEY = JSON.stringify(['', 'all', 'default', '']);
   const lastQueryRef = React.useRef(DEFAULT_QUERY_KEY); // skip le 1er run (défauts = chargement init)
   React.useEffect(() => {
     if (!dbReady) return;
     const s = artistSearch.trim();
-    const key = JSON.stringify([s, filterType, sortBy]);
+    const key = JSON.stringify([s, filterType, sortBy, genreFilter]);
     if (key === lastQueryRef.current) return; // évite un reload inutile (ex. re-render)
     const t = setTimeout(() => {
       lastQueryRef.current = key;
-      setFeed(loadFeedFromDB({ artistSearch: s, filterType, sortBy }));
+      setFeed(loadFeedFromDB({ artistSearch: s, filterType, sortBy, genre: genreFilter }));
     }, 150);
     return () => clearTimeout(t);
-  }, [artistSearch, filterType, sortBy, dbReady]);
+  }, [artistSearch, filterType, sortBy, genreFilter, dbReady]);
 
   const [logs,          setLogs]        = React.useState([]);
   const [now,           setNow]         = React.useState(null);
@@ -1957,7 +1966,7 @@ function StoreProvider({ children }) {
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
-    artistSearch, setArtistSearch, resetFilters,
+    artistSearch, setArtistSearch, genreFilter, setGenreFilter, resetFilters,
     resumableSession, resumeSync,
   };
   return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
@@ -4466,13 +4475,22 @@ function RappelPanel() {
 }
 
 function FeedList({ isMobile=false }) {
-  const { feed, listenStats, filteredFeed, now,
+  const { feed, listenStats, filteredFeed, now, artists,
           filterType, setFilterType, sortBy, setSortBy,
-          artistSearch, setArtistSearch, resetFilters,
+          artistSearch, setArtistSearch, genreFilter, setGenreFilter, resetFilters,
           removeFromFeed, setTrackLiked, navigateFeed } = useStore();
 
   const hidden      = Math.max(0, (listenStats.remaining || 0) - feed.length);
-  const filtersOn   = filterType !== 'all' || sortBy !== 'default' || artistSearch.trim();
+  const filtersOn   = filterType !== 'all' || sortBy !== 'default' || artistSearch.trim() || genreFilter;
+
+  // Genres proposés : agrégés depuis les artistes scannés, triés par fréquence (top 30)
+  const genreOptions = React.useMemo(() => {
+    const counts = new Map();
+    (artists || []).forEach(a => (a.genres || []).forEach(g => counts.set(g, (counts.get(g) || 0) + 1)));
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30).map(([g]) => g);
+    if (genreFilter && !top.includes(genreFilter)) top.unshift(genreFilter); // garder la sélection visible
+    return top;
+  }, [artists, genreFilter]);
 
   // Bannières de date (mobile) : repère visuel inséré à chaque changement de jour de sortie
   // entre deux items consécutifs — uniquement en tri "Ordre d'ajout" / "Date sortie ↑"
@@ -4507,6 +4525,13 @@ function FeedList({ isMobile=false }) {
           <button key={k} onClick={() => setFilterType(k)} style={btnFilter(filterType===k)}>{n}</button>
         ))}
         <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
+          {genreOptions.length > 0 && (
+            <select value={genreFilter} onChange={e => setGenreFilter(e.target.value)}
+              style={{ background:'#111', border:`1px solid ${genreFilter ? C.accent : C.border}`, borderRadius:6, padding:'3px 7px', fontSize:10, color: genreFilter ? C.accent : C.muted, outline:'none', cursor:'pointer', maxWidth:120 }}>
+              <option value="">Genre : tous</option>
+              {genreOptions.map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          )}
           <select value={sortBy} onChange={e => setSortBy(e.target.value)}
             style={{ background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'3px 7px', fontSize:10, color:C.muted, outline:'none', cursor:'pointer' }}>
             <option value="default">Ordre d'ajout</option>

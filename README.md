@@ -55,6 +55,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Bouton ❤ par titre** : like/unlike directement depuis le feed (synchronisé Spotify + DB locale)
 - **Filtre** par type : Tous / Singles / Albums / Découvertes
 - **Filtre artiste** : champ texte (insensible à la casse) combinable avec le filtre type et le tri
+- **Filtre genre** : sélecteur alimenté par les genres des artistes scannés (top 30 par fréquence) — filtre les titres via les métadonnées artiste
 - **🔎 Filtres et tris sur toute la base** : le filtre type, le filtre artiste et les tris **balaient l'intégralité des titres en attente, pas seulement les 1000 affichés** — un Single, un titre ancien ou un artiste situé au-delà du cap de 1000 apparaît bien dans les résultats (filtrage + tri effectués en base de données)
 - **Bouton 🗑 reset** : réinitialise tous les filtres en un clic (visible uniquement si un filtre est actif)
 - **Tri** : ordre d'ajout / date de sortie ↑ (du plus ancien au plus récent) / artiste A→Z

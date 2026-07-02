@@ -383,7 +383,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 | `ScrapingStatusPanel` | Stats temps réel (3 boîtes : Artistes `X/Y` + `X/100 sur 24h` / Sorties / Titres) + **countdown quota 24h** sous la barre de progression quand `quotaUntil` est actif |
 | `NextCallPanel` | Countdown + "Temps total restant" (ETA sur **tous** les artistes restant à scraper, PAS plafonnée aux 100/jour) + "Temps total de la session" (temps pour finir les 100/jour) + sélecteur délai |
 | `LogsPanel` | Journal en temps réel |
-| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables. **Empty-state** : « Aucune musique en attente » seulement si `feed.length === 0 && !filtersOn` — sinon (filtre/recherche actif) la toolbar reste visible (sinon impossible d'effacer une recherche à 0 résultat). **Bannière titres masqués masquée dès qu'un filtre/tri est actif** (`filtersOn`) : la requête balaie alors toute la DB (filtre+tri en SQL), le cap des 1000 ne masque plus de résultats correspondants |
+| `FeedList` | Feed avec filtre type (Tous/Singles/Albums/Découvertes), filtre **genre** (sélecteur alimenté par les genres des artistes scannés), filtre artiste (texte), tri (ajout/date/artiste), bannière titres masqués. **Bannières de date (mobile uniquement)** : séparateur "📅 20 juin 2026" inséré à chaque changement de jour de sortie (`rawDate`) entre deux items consécutifs — actif en tri "Ordre d'ajout" et "Date sortie ↑", désactivé en tri "Artiste A→Z". La clé React est portée par un `<React.Fragment key={item.id}>` (bannière + FeedItem), les clés restent stables. **Empty-state** : « Aucune musique en attente » seulement si `feed.length === 0 && !filtersOn` — sinon (filtre/recherche actif) la toolbar reste visible (sinon impossible d'effacer une recherche à 0 résultat). **Bannière titres masqués masquée dès qu'un filtre/tri est actif** (`filtersOn`) : la requête balaie alors toute la DB (filtre+tri en SQL), le cap des 1000 ne masque plus de résultats correspondants |
 | `FeedItem` | Ligne du feed : égaliseur animé, bouton × supprimer, bouton ❤ like, swipe gauche=suppr / droite=prev. **`React.memo` + props explicites** (`isNowPlaying`, `removeFromFeed`, `setTrackLiked`, `navigateFeed`) — ne consomme PAS `useStore` (sinon les ~1000 lignes re-rendent à chaque tick du poll 5s) |
 | `LikerPanel` | Liste des titres likés (liked=1 en DB) avec bouton unliker et lecture |
 | `HistoryPanel` | **Historique** des titres écoutés non purgés (listened=1), trié `listened_at DESC` (plus récent en haut) — horodatage relatif (`formatListenedAt`) + bouton réécouter. Desktop : sidebar droite sous VOS ÉCOUTES · Mobile : onglet **Historique** |
@@ -431,6 +431,7 @@ filteredFeedIndex // Map URI → index dans filteredFeed (useMemo) — O(1) pour
 filterType       // 'all' | 'single' | 'album' | 'dw'
 sortBy           // 'default' | 'date_asc' (plus ancien en haut) | 'artist'
 artistSearch     // string — filtre texte sur artist_name
+genreFilter      // string ('' = tous) — filtre par genre, appliqué UNIQUEMENT en SQL (sous-requête sur artists_scraped.genres, motif JSON '"<genre>"') ; les tracks DW multi-artistes ne matchent pas. Sélecteur « Genre : tous » dans la toolbar de FeedList (options = genres agrégés des artistes scannés, top 30 par fréquence)
 // ⚠ filterType / sortBy / artistSearch : tout changement déclenche un effet debouncé 150ms qui
 //   re-query la DB via loadFeedFromDB (filtre+tri EN SQL) et remplace `feed` → les filtres et
 //   les tris balaient TOUTE la base, même au-delà du cap des 1000 (pas seulement les 1000 en
@@ -453,7 +454,7 @@ setTrackLiked(uri, bool)       // useCallback([dbReady]) — UPDATE liked en DB 
 syncInitialLikes()             // vérifie /me/library/contains par batch de 40 URIs (max 300 tracks), sleep 400ms entre batchs, TTL 24h
 navigateFeed(dir)              // useCallback([markListened]) — dir=-1 prev, +1 next — joue le titre adjacent dans filteredFeed (+ markListened du titre quitté en dir>0)
 markListened(uri)              // useCallback([dbReady]) — marque un titre du feed écouté (UPDATE tracks/stats + saveDB + recharge stats/history + retrait animé), idempotent via listenedUrisRef. Appelé par le clic « Suivant » des 3 players → corrige le double-clic rapide où l'URI intermédiaire échappe au poll 5s
-resetFilters()                 // remet filterType='all', sortBy='default', artistSearch=''
+resetFilters()                 // remet filterType='all', sortBy='default', artistSearch='', genreFilter=''
 logout()
 seek(positionMs)
 setLoopEnabled(bool)
