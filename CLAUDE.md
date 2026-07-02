@@ -38,7 +38,7 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 |---|---|
 | `index.html` | **App complète** — React 18 CDN + Babel + sql.js, tout en un seul fichier |
 | `manifest.json` | Config PWA (nom, icônes, display standalone) |
-| `service-worker.js` | Cache app shell + vendor pour usage offline (v5, clé de cache normalisée, ne cache que les réponses `res.ok`) |
+| `service-worker.js` | Cache app shell + vendor pour usage offline (v6, clé de cache normalisée, ne cache que les réponses `res.ok`, fetch app shell en `{ cache: 'no-store' }` pour bypasser le cache HTTP `max-age=600` de GitHub Pages) |
 | `vendor/sql-wasm.js` | sql.js 1.10.2 **auto-hébergé** (hash sha384 vérifié = ancien SRI cdnjs) |
 | `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
 | `icon-192.png` | Icône PWA 192×192 (présente à la racine, utilisée aussi par les notifications) |
@@ -74,7 +74,7 @@ SCOPES       = 'user-follow-read user-read-private user-read-currently-playing u
 ```
 
 ### Version de l'app — `APP_VERSION`
-Constante module-level `APP_VERSION` (**actuellement `'3.0.4'`**, commit ≈304), format `MAJ.MIN.U` = **le nombre de commits du projet avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 278 commits → `2.7.8`, 270 → `2.7.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 3.0.0 »). **⚠ Le compteur suit l'historique du PROJET (≈300), pas `git rev-list --count HEAD` de ce dépôt-fork qui est bien plus bas (~65)** — incrémenter à la main en suivant le compteur projet.
+Constante module-level `APP_VERSION` (**actuellement `'3.0.5'`**, commit ≈305), format `MAJ.MIN.U` = **le nombre de commits du projet avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 278 commits → `2.7.8`, 270 → `2.7.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 3.0.0 »). **⚠ Le compteur suit l'historique du PROJET (≈300), pas `git rev-list --count HEAD` de ce dépôt-fork qui est bien plus bas (~65)** — incrémenter à la main en suivant le compteur projet.
 **⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le compteur = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit puis appliquer le découpage ci-dessus).
 
 ### Délai de scraping
@@ -360,7 +360,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 ## PWA
 
 - `manifest.json` à la racine — `start_url: /NewSpotifyRelease/`, `display: standalone`
-- `service-worker.js` (cache `spotifyplus-v5`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne (**mise en cache uniquement si `res.ok`** — une 404/5xx ne remplace plus l'app en cache) ; cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
+- `service-worker.js` (cache `spotifyplus-v6`) — **network-first pour l'app shell** (`navigate`, `/`, `/index.html`) avec fallback cache hors-ligne (**mise en cache uniquement si `res.ok`** — une 404/5xx ne remplace plus l'app en cache) ; le fetch réseau de l'app shell utilise **`{ cache: 'no-store' }`** (fetch par URL, pas la Request en mode `navigate`) pour **bypasser le cache HTTP du navigateur** (`Cache-Control: max-age=600` de GitHub Pages) — sinon le network-first récupérait un `index.html` périmé et la version restait figée. Cache-first pour le reste (dont `vendor/`, précaché). Handler `activate` qui purge les anciens caches + `skipWaiting`/`clients.claim`.
 - **⚠️ Clé de cache NORMALISÉE** : l'app shell est toujours stocké sous `'./index.html'` (`c.put('./index.html', copy)`), jamais sous l'URL réelle de navigation — sinon le retour OAuth (`?code=...&state=...`) écrivait le code d'autorisation dans Cache Storage
 - **⚠️ L'ancienne stratégie cache-first servait l'index.html du cache pour toujours** → les PWA installées ne recevaient jamais les mises à jour. Ne pas revenir en cache-first pour l'app shell.
 - Enregistrement dans `<head>` : `navigator.serviceWorker.register('./service-worker.js')`
@@ -506,8 +506,9 @@ L'effet 2 (redémarrage du même titre : `now.current < 5` après avoir été pr
 ### Reset mensuel — mois LOCAL, pas UTC
 Le reset de `listened_this_month` compare `last_reset_month` à `curMonth`. `curMonth` est désormais calculé en **local** (`getFullYear()`/`getMonth()`) et non via `toISOString().slice(0,7)` (UTC) — sinon le compteur mensuel bascule à minuit UTC (≈ 01h/02h en France) au lieu de minuit local.
 
-### Service worker — ne cache que les réponses OK (v5)
+### Service worker — ne cache que les réponses OK (v5) + fetch app shell no-store (v6)
 Le handler network-first de l'app shell met en cache le `fetch` réseau **uniquement si `res.ok`** : sinon une page 404/5xx (GitHub Pages en maintenance) écrasait `./index.html` en cache et était servie hors-ligne à la place de l'app. Cache bumpé `spotifyplus-v4` → `spotifyplus-v5`.
+**v6** : le `fetch` réseau de l'app shell passe de `fetch(e.request)` à `fetch(e.request.url, { cache: 'no-store' })`. GitHub Pages sert `index.html` avec `Cache-Control: max-age=600` → le network-first récupérait une copie **périmée depuis le cache HTTP du navigateur** et la version affichée restait figée (ex. bloquée en 3.0.0) même après un nouveau déploiement + fermeture de l'app. Le `no-store` force la récupération du dernier déploiement. On fetch **par URL** (pas `e.request`) car une `Request` en mode `navigate` + init lève une exception. Cache bumpé `spotifyplus-v5` → `spotifyplus-v6`.
 
 ### Optimisations sync + countdowns
 - **Feed batché par artiste** : dans `startSync`, les items d'un artiste sont accumulés dans `artistFeedItems` puis insérés en **un seul `setFeed`** en fin d'artiste (au lieu d'une recopie du tableau `feed` par album).

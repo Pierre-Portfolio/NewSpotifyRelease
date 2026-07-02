@@ -1,11 +1,14 @@
-// v4 : bump de cache (force la maj des PWA installées) — sinon l'ancien index.html
-// pouvait persister et le code Finance/Twelve Data n'arrivait jamais à l'appareil.
+// v6 : bump de cache (force la maj des PWA installées) + le fetch réseau de l'app shell
+// bypasse désormais le cache HTTP du navigateur ({ cache: 'no-store' }). Sinon GitHub Pages
+// sert l'index.html avec Cache-Control: max-age=600, et le network-first du SW récupérait
+// une copie PÉRIMÉE depuis le cache HTTP → la version affichée restait figée (ex. 3.0.0)
+// malgré un nouveau déploiement.
 // network-first pour l'app shell (v2) + clé de cache NORMALISÉE : on stocke toujours
 // sous './index.html', jamais sous l'URL réelle de navigation — sinon le retour OAuth
 // (?code=...&state=...) écrivait le code d'autorisation dans Cache Storage.
 // L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
 // → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
-const CACHE  = 'spotifyplus-v5';
+const CACHE  = 'spotifyplus-v6';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm'];
 
 self.addEventListener('install', e => {
@@ -28,9 +31,12 @@ self.addEventListener('fetch', e => {
     (url.origin === location.origin && (url.pathname.endsWith('/') || url.pathname.endsWith('/index.html')));
 
   if (isAppShell) {
-    // Network-first : version fraîche si en ligne, cache en secours hors-ligne
+    // Network-first : version fraîche si en ligne, cache en secours hors-ligne.
+    // { cache: 'no-store' } → on court-circuite le cache HTTP du navigateur (max-age=600
+    // de GitHub Pages) pour toujours récupérer le dernier index.html déployé. On fetch par
+    // URL (pas e.request) car une Request en mode 'navigate' + init lève une exception.
     e.respondWith(
-      fetch(e.request)
+      fetch(e.request.url, { cache: 'no-store' })
         .then(res => {
           // Ne mettre en cache QUE les réponses OK : sinon une page 404/5xx (GitHub Pages
           // en maintenance, erreur transitoire) écraserait './index.html' en cache et serait
