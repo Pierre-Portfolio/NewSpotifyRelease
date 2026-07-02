@@ -427,6 +427,7 @@ delayChoice      // 10 | 20 | 30 (secondes)
 dailyScrapings   // number — artistes scrapés dans la fenêtre 24h en cours (localStorage spotifyplus_daily_scrapings)
 quotaUntil       // timestamp ms — fin de la fenêtre glissante de 24h ouverte au 100e artiste (0 si inactive)
 filteredFeed     // array — feed filtré + trié (useMemo, dépend de feed + filterType + sortBy + artistSearch)
+filteredFeedIndex // Map URI → index dans filteredFeed (useMemo) — O(1) pour les players et les effets d'auto-avance (fini les findIndex O(n) au tick 5s)
 filterType       // 'all' | 'single' | 'album' | 'dw'
 sortBy           // 'default' | 'date_asc' (plus ancien en haut) | 'artist'
 artistSearch     // string — filtre texte sur artist_name

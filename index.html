@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.8.8';
+const APP_VERSION = '2.8.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -918,6 +918,17 @@ function StoreProvider({ children }) {
   const filteredFeedRef = React.useRef([]);
   React.useEffect(() => { filteredFeedRef.current = filteredFeed; }, [filteredFeed]);
 
+  // #opt : index URI → position dans filteredFeed. O(1) au lieu des findIndex O(n) répétés
+  // par les 3 effets d'auto-avance (à chaque tick du poll 5s) et les 3 players (à chaque
+  // render). ⚠ Déclaré APRÈS filteredFeed (useMemo évalué pendant le rendu — var hoisting).
+  const filteredFeedIndex = React.useMemo(() => {
+    const m = new Map();
+    filteredFeed.forEach((it, i) => { if (!m.has(it.spotifyUri)) m.set(it.spotifyUri, i); });
+    return m;
+  }, [filteredFeed]);
+  const filteredFeedIndexRef = React.useRef(new Map());
+  React.useEffect(() => { filteredFeedIndexRef.current = filteredFeedIndex; }, [filteredFeedIndex]);
+
   // Tout filtre/tri actif (type, recherche artiste, tri date/artiste) re-query la DB
   // (loadFeedFromDB applique filtre+tri EN SQL) → on voit les titres même au-delà du cap des
   // 1000 chargés en mémoire. Retour à 'all'/'default'/'' → recharge le feed de base. Debounce
@@ -1139,8 +1150,9 @@ function StoreProvider({ children }) {
     // Déclenche si : loop désactivé ET (rien ne joue OU le nouveau titre n'est pas dans le feed)
     if (!loopEnabledRef.current && dbReady) {
       const f = filteredFeedRef.current;
-      const prevIdx       = f.findIndex(item => item.spotifyUri === prevUri);
-      const currentInFeed = currentUri ? f.some(item => item.spotifyUri === currentUri) : false;
+      const idxMap = filteredFeedIndexRef.current;
+      const prevIdx       = idxMap.get(prevUri) ?? -1;
+      const currentInFeed = currentUri ? idxMap.has(currentUri) : false;
       // Garde anti-vol de lecture : n'avancer que si le titre quitté était PROCHE DE SA FIN
       // au dernier tick (poll 5s + marge). Sans ça, lancer manuellement un titre hors feed
       // (ou stopper la lecture) déclenchait playTrack et écrasait le choix de l'utilisateur.
@@ -1205,7 +1217,7 @@ function StoreProvider({ children }) {
     const sameUriRestart = prevNowRef.current.uri === now.uri;
     if (sameUriRestart && now.duration > 15 && now.current < 5 && prevPos > prevDur - 10 && prevDur > 0) {
       const f = filteredFeedRef.current;
-      const idx = f.findIndex(item => item.spotifyUri === now.uri);
+      const idx = filteredFeedIndexRef.current.get(now.uri) ?? -1;
       if (idx !== -1) {
         const next = f[idx + 1] ?? f[0];
         if (next) playTrack(next.spotifyUri);
@@ -1218,7 +1230,7 @@ function StoreProvider({ children }) {
       const remaining = now.duration - now.current;
       if (remaining >= 0 && remaining <= 3) {
         const f = filteredFeedRef.current;
-        const idx = f.findIndex(item => item.spotifyUri === now.uri);
+        const idx = filteredFeedIndexRef.current.get(now.uri) ?? -1;
         if (idx !== -1) {
           advancedForRef.current = now.uri; // marquer pour éviter le double appel
           const next = f[idx + 1] ?? f[0];
@@ -1250,7 +1262,7 @@ function StoreProvider({ children }) {
     if (!uri || advancedForRef.current === uri) return;
 
     const f = filteredFeedRef.current;
-    const idx = f.findIndex(item => item.spotifyUri === uri);
+    const idx = filteredFeedIndexRef.current.get(uri) ?? -1;
     if (idx === -1) return; // titre pas dans notre feed (ou filtré)
 
     // Avancer si les dernières secondes connues indiquent la fin du titre
@@ -1442,7 +1454,7 @@ function StoreProvider({ children }) {
     const f = filteredFeedRef.current;
     if (f.length === 0) return;
     const nowUri = _effUri(prevNowRef.current?.uri);
-    const currentIdx = nowUri ? f.findIndex(item => item.spotifyUri === nowUri) : -1;
+    const currentIdx = nowUri ? (filteredFeedIndexRef.current.get(nowUri) ?? -1) : -1;
     let nextIdx;
     if (dir === -1) nextIdx = currentIdx > 0 ? currentIdx - 1 : f.length - 1;
     else nextIdx = currentIdx < f.length - 1 ? currentIdx + 1 : 0;
@@ -1928,7 +1940,7 @@ function StoreProvider({ children }) {
     dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
-    filteredFeed, filterType, setFilterType, sortBy, setSortBy,
+    filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, resetFilters,
     resumableSession, resumeSync,
   };
@@ -2154,7 +2166,7 @@ function Home({ isMobile }) {
 // PLAYER BARS
 // ════════════════════════════════════════════════
 function MobilePlayer() {
-  const { now, feed, filteredFeed, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks, markListened } = useStore();
+  const { now, feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks, markListened } = useStore();
   const [isLiked, setIsLiked] = React.useState(false);
 
   // Vérifier si le titre en cours est liké — local d'abord, API seulement si inconnu
@@ -2173,7 +2185,8 @@ function MobilePlayer() {
 
   if (!now) return null;
 
-  const currentIndex = filteredFeed.findIndex(f => f.spotifyUri === _effUri(now.uri));
+  const _cuMob = _effUri(now.uri);
+  const currentIndex = _cuMob ? (filteredFeedIndex.get(_cuMob) ?? -1) : -1;
   const hasFeed      = filteredFeed.length > 0;
 
   const togglePlayPause = async () => {
@@ -2285,7 +2298,7 @@ function MobilePlayer() {
 }
 
 function PlayerBar() {
-  const { now, feed, filteredFeed, loopEnabled, setLoopEnabled, seek, markListened } = useStore();
+  const { now, feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, markListened } = useStore();
 
   const togglePlayPause = async () => {
     if (!now) return;
@@ -2303,7 +2316,7 @@ function PlayerBar() {
   };
 
   const _cu = _effUri(now?.uri);
-  const currentIndex = _cu ? filteredFeed.findIndex(f => f.spotifyUri === _cu) : -1;
+  const currentIndex = _cu ? (filteredFeedIndex.get(_cu) ?? -1) : -1;
 
   const prevTrack = async () => {
     const idx = currentIndex > 0 ? currentIndex - 1 : filteredFeed.length - 1;
@@ -4746,7 +4759,7 @@ function ArtistRow({ a }) {
 // N'affiche QUE les contrôles : précédent / play-pause / suivant
 // ════════════════════════════════════════════════
 function CompactPlayer() {
-  const { now, feed, filteredFeed, seek, setTrackLiked, likedTracks, markListened } = useStore();
+  const { now, feed, filteredFeed, filteredFeedIndex, seek, setTrackLiked, likedTracks, markListened } = useStore();
   const [isLiked, setIsLiked] = React.useState(false);
 
   // Vérifier si le titre en cours est liké — local d'abord, API seulement si inconnu
@@ -4762,7 +4775,7 @@ function CompactPlayer() {
   }, [now?.uri]);
 
   const _cu = _effUri(now?.uri);
-  const currentIndex = _cu ? filteredFeed.findIndex(f => f.spotifyUri === _cu) : -1;
+  const currentIndex = _cu ? (filteredFeedIndex.get(_cu) ?? -1) : -1;
   const hasFeed      = filteredFeed.length > 0;
 
   const togglePlayPause = async () => {
