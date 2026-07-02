@@ -353,7 +353,7 @@ Les 4 appels utilisent `apiGetSafe` : `/me`, page artistes, albums d'un artiste,
 - Affiche une `alert` avec le nombre de titres supprimés
 
 ### Undo du retrait (`UndoToast`)
-`removeFromFeed` pose un **snapshot** `{ uri, item, durMs, counted }` dans `undoToast` (state + `undoToastRef`). Le composant `UndoToast` (rendu dans `Shell` quand `connected`) affiche un toast **« ↩ Annuler » pendant 5 s** (auto-fermé via `clearUndo`). `undoRemove()` remet `listened = 0` + `listened_at = NULL`, **ré-décrémente les stats uniquement si `counted`** (le retrait avait bien compté l'écoute, plancher `MAX(...,0)`), retire l'URI de `listenedUrisRef`, et réinsère l'item en tête du feed. Exposés dans l'api du store : `undoToast`, `undoRemove`, `clearUndo`.
+`removeFromFeed` pose un **snapshot** `{ uri, item, idx, durMs, counted }` (`idx` = position d'origine dans le feed) dans `undoToast` (state + `undoToastRef`). Le composant `UndoToast` (rendu dans `Shell` quand `connected`) affiche un toast **« ↩ Annuler » pendant 5 s** (auto-fermé via `clearUndo`). `undoRemove()` remet `listened = 0` + `listened_at = NULL`, **ré-décrémente les stats uniquement si `counted`** (le retrait avait bien compté l'écoute, plancher `MAX(...,0)`), retire l'URI de `listenedUrisRef`, et réinsère l'item **à sa position d'origine** dans le feed (`idx`). Exposés dans l'api du store : `undoToast`, `undoRemove`, `clearUndo`.
 
 ---
 

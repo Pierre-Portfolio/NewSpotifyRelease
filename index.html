@@ -65,7 +65,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '2.8.4';
+const APP_VERSION = '2.8.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1333,7 +1333,8 @@ function StoreProvider({ children }) {
     // marqué listened = 1 + listened_at + incrément des compteurs de la table stats, pour
     // qu'il apparaisse dans l'Historique ET compte dans les stats d'écoute.
     // Idempotent via listenedUrisRef : si le poll player l'a déjà compté, on ne recompte pas.
-    const item = feedRef.current.find(f => f.spotifyUri === uri) || null; // snapshot pour l'undo
+    const itemIdx = feedRef.current.findIndex(f => f.spotifyUri === uri); // position pour l'undo
+    const item = itemIdx !== -1 ? feedRef.current[itemIdx] : null;        // snapshot pour l'undo
     const counted = !listenedUrisRef.current.has(uri); // a-t-on incrémenté les stats dans cet appel ?
     let durMs = 0;
     if (counted) {
@@ -1353,7 +1354,7 @@ function StoreProvider({ children }) {
     setFeed(f => f.filter(item => item.spotifyUri !== uri));
     setListenStats(loadListenStatsFromDB());
     setHistory(loadHistoryFromDB());
-    setUndo({ uri, item, durMs, counted }); // affiche le toast "↩ Annuler" (5 s, cf. UndoToast)
+    setUndo({ uri, item, idx: itemIdx, durMs, counted }); // affiche le toast "↩ Annuler" (5 s, cf. UndoToast)
   }, [dbReady]);
 
   // Annule le dernier retrait : remet le titre non écouté, ré-décrémente les stats (si
@@ -1361,7 +1362,7 @@ function StoreProvider({ children }) {
   const undoRemove = React.useCallback(async () => {
     const t = undoToastRef.current;
     if (!t || !dbReady) return;
-    const { uri, item, durMs, counted } = t;
+    const { uri, item, idx, durMs, counted } = t;
     try {
       dbRun("UPDATE tracks SET listened = 0, listened_at = NULL WHERE spotify_uri = ?", [uri]);
       if (counted) {
@@ -1372,7 +1373,13 @@ function StoreProvider({ children }) {
         listenedUrisRef.current.delete(uri);
       }
       await saveDB();
-      if (item) setFeed(f => f.some(x => x.spotifyUri === uri) ? f : [item, ...f].slice(0, 1000));
+      // Réinsertion à la position d'origine (pas en tête) — bornée à la taille actuelle
+      if (item) setFeed(f => {
+        if (f.some(x => x.spotifyUri === uri)) return f;
+        const next = [...f];
+        next.splice(Math.min(Math.max(idx ?? 0, 0), next.length), 0, item);
+        return next.slice(0, 1000);
+      });
       setListenStats(loadListenStatsFromDB());
       setHistory(loadHistoryFromDB());
     } catch {}
