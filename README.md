@@ -73,15 +73,16 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Compteur de position dans le feed (ex: `3 / 25`)
 
 ### À propos (ex-Stats)
-- Sections **repliables** (collapse) : **🎵 Musiques**, **✅ To do**, **📈 Graphique** et **📊 Stats avancées**
+- Sections **repliables** (collapse) : **🎵 Musiques**, **✅ To do**, **🎬 Stats Film**, **📈 Graphique** et **📊 Stats avancées**
 - **🎵 Musiques** — compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - **✅ To do** — nombre de **tâches terminées** (validées) : tâches de la journée / du mois / de l'année, plus **⭐ Tâches compliquées** = total des tâches **favorites** effectuées. Une tâche compte comme terminée quand on la supprime (×) ou qu'on valide (✓) une tâche Quotidien
+- **🎬 Stats Film** — **films vus**, **épisodes de série vus** (+ nombre de séries entamées), **temps passé devant les films** et **devant les séries** — calculées entièrement depuis le cache local TV Time (aucune requête API)
 - **📈 Graphique** — deux histogrammes sur **14 jours** (dessinés sans librairie externe) : **écoutes par jour** et **tâches terminées par jour**
 - **📊 Stats avancées** — top 5 artistes écoutés, répartition Singles/Albums/Découvertes, moyenne d'écoutes/jour sur 30 jours (calculées sur les titres non purgés)
-- **↧ Exporter mes données** : télécharge une sauvegarde **JSON** (stats d'écoute, dernières dates de scrapping des artistes, to do, **rappels Remember**) — pour ne rien perdre (les données ne vivent que sur cet appareil). La **sync Dropbox** sauvegarde exactement les mêmes informations
-- **↥ Restaurer mes données** : réimporte une sauvegarde JSON exportée — les dates de scan des artistes sont fusionnées (jamais régressées), les stats fusionnées prudemment, les to do / rappels remplacés par la sauvegarde
+- **↧ Exporter mes données** : télécharge une sauvegarde **JSON** (stats d'écoute, dernières dates de scrapping des artistes, to do, **rappels Remember**, **suivi TV Time**) — pour ne rien perdre (les données ne vivent que sur cet appareil). La **sync Dropbox** sauvegarde exactement les mêmes informations
+- **↥ Restaurer mes données** : réimporte une sauvegarde JSON exportée — les dates de scan des artistes sont fusionnées (jamais régressées), les stats fusionnées prudemment, les to do / rappels / TV Time remplacés par la sauvegarde
 - **💾 Proposition de sauvegarde hebdomadaire** : une fois par semaine, au lancement, l'app propose (via une alerte) de télécharger une sauvegarde — uniquement si tu as des données et qu'aucune sauvegarde n'a eu lieu depuis 7 jours
 - **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la même donnée dans ton Dropbox, accessible depuis plusieurs appareils. Nécessite de renseigner une clé d'app Dropbox (sinon la section reste « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
@@ -106,6 +107,19 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Chargement à la demande** : en mode Light seules les valeurs Light sont récupérées ; les valeurs Full ne sont chargées qu'au premier passage en mode Full
 - **Chargement à l'ouverture de Finance** : les APIs boursières ne sont appelées **que lorsqu'on ouvre la section/onglet Finance** (plus au login) — les cours commencent alors à se charger (valeurs Light en priorité) avec un **indicateur de chargement** clair pendant la récupération (les appels boursiers sont espacés de ~8 s pour respecter la limite gratuite de Twelve Data)
 - **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
+
+### TV Time
+- Section **TV Time** dédiée (titre en vert-cyan) — onglet **au-dessus de To do** (desktop et menu « ⋯ » mobile)
+- **Suivi personnel de tes séries et films** via l'API **[TMDB](https://www.themoviedb.org/) v3** (gratuite, **sans plafond journalier** — simple limite de ~50 requêtes/seconde, largement suffisante)
+- **Clé API personnelle requise** : crée un compte gratuit sur themoviedb.org, génère une clé API v3 dans *Paramètres → API* et colle-la dans la section (stockée uniquement sur ton appareil ; bouton ⚙ pour la changer). Sans clé, aucune requête ne part
+- **Recherche** films + séries (une seule requête pour les deux) avec affiche, année et type — ajoute chaque résultat en **📌 À voir**, **▶ En cours** ou **✓ Vu**
+- **▶ En cours** : progression par série (`5/20 ép. · prochain S2E5`) avec boutons **− / ＋** pour compter les épisodes vus, **✓** pour marquer la série terminée (tout vu)
+- **📌 À voir** : ta watchlist — passe un titre en cours (▶), marque-le vu (✓) ou retire-le (×)
+- **✓ Vus** : historique repliable de tout ce que tu as terminé (avec retour possible en « En cours » pour un re-visionnage)
+- **📅 Prochaines sorties** : les prochains épisodes annoncés de tes séries suivies (`S3E1 « titre » · date · dans X j`), triés par date, actualisés automatiquement au plus **1×/24h** + bouton ↻ manuel
+- **Économie de requêtes maximale** : toutes les infos TMDB (affiches, durées, saisons, nombre d'épisodes, prochain épisode) sont **mises en cache localement à l'ajout** — compter tes épisodes, consulter tes listes et les stats ne redemande **jamais rien** à l'API ; seules les séries suivies non terminées sont rafraîchies (1 requête/série, max 1×/jour)
+- Données incluses dans l'**export/restauration** de sauvegarde (et la sync Dropbox)
+- Alimente le collapse **🎬 Stats Film** de l'onglet À propos : **films vus**, **épisodes vus** (+ nombre de séries), **temps passé devant les films** et **devant les séries** (épisodes vus × durée moyenne d'un épisode)
 
 ### To do
 - Section **To do** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
@@ -187,8 +201,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
 
 ### Interface
-- **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (À propos, Historique, Météo, Finance, To do, Maps, Mot de passe, Remember) — une seule section affichée à la fois (plus de colonne de droite)
-- **Mobile** : 3 onglets principaux (Scrapping / En attente / ❤ Likés) + un menu **« ⋯ »** regroupant les autres sections. Les libellés du menu suivent un **dégradé arc-en-ciel** (violet → indigo → bleu → cyan → vert → jaune → ambre → orange → rouge), le rouge final rejoignant le bouton **Déconnecter**
+- **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (À propos, Historique, Météo, Finance, TV Time, To do, Maps, Mot de passe, Remember) — une seule section affichée à la fois (plus de colonne de droite)
+- **Mobile** : 3 onglets principaux (Scrapping / En attente / ❤ Likés) + un menu **« ⋯ »** regroupant les autres sections. Les libellés du menu suivent un **dégradé arc-en-ciel** (violet → indigo → bleu → cyan → vert-cyan → vert → jaune → ambre → orange → rouge), le rouge final rejoignant le bouton **Déconnecter**
 - **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant / ❤ like**
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
