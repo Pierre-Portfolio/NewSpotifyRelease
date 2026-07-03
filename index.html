@@ -70,7 +70,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.0.7';
+const APP_VERSION = '3.1.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2820,19 +2820,47 @@ function buildBackup() {
     remembers: lsJson('spotifyplus_remember_custom') || [],
     // TV Time : suivi séries/films (métadonnées TMDB en cache comprises)
     tvtime: lsJson('spotifyplus_tvtime') || [],
+    // Maps : données du futur module Maps (placeholder tant que la section est vide)
+    maps: lsJson('spotifyplus_maps') || {},
+    // Mot de passe : blob CHIFFRÉ du coffre { v, salt, iv, ct } — jamais en clair,
+    // déchiffrable uniquement avec le mot de passe maître
+    mdp_vault: loadVaultBlob(),
   };
 }
-// Télécharge la sauvegarde en JSON. Retourne l'objet (réutilisé par la proposition hebdo).
-function downloadBackup() {
-  const data = buildBackup();
+// Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
+// dans le fichier ; fields:null = export complet. Un export partiel reste un fichier
+// buildBackup() valide (app/version/exported_at + les clés choisies) → restaurable
+// par le même bouton ↥ Restaurer (applyBackup ignore les clés absentes).
+const EXPORT_SECTIONS = [
+  { key:'tous',     label:'Tous',         icon:'📦', hint:'sauvegarde complète',        fields:null },
+  { key:'artistes', label:'Artistes',     icon:'🎤', hint:'dates de scan + compteurs',  fields:['artists'] },
+  { key:'tvtime',   label:'TV Time',      icon:'🎬', hint:'séries & films suivis',      fields:['tvtime'] },
+  { key:'todo',     label:'To do',        icon:'✅', hint:'tâches + journal terminées', fields:['todos', 'todos_done'] },
+  { key:'maps',     label:'Maps',         icon:'🗺️', hint:'module à venir',             fields:['maps'] },
+  { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
+  { key:'remember', label:'Remember',     icon:'🔔', hint:'rappels fixes + persos',     fields:['rappels', 'remembers'] },
+  { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute",         fields:['stats'] },
+];
+// Télécharge la sauvegarde en JSON. `section` = entrée d'EXPORT_SECTIONS (défaut : Tous).
+// Retourne l'objet (réutilisé par la proposition hebdo).
+function downloadBackup(section) {
+  const fields = (section && section.fields) || null;
+  const full = buildBackup();
+  let data = full;
+  if (fields) {
+    data = { app: full.app, version: full.version, exported_at: full.exported_at, scope: fields };
+    for (const f of fields) data[f] = full[f];
+  }
   const file = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
   const url  = URL.createObjectURL(file);
   const a    = document.createElement('a');
   a.href = url;
-  a.download = `spotifyplus-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+  const day = new Date().toISOString().slice(0, 10);
+  a.download = fields ? `spotifyplus-${section.key}-${day}.json` : `spotifyplus-sauvegarde-${day}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
-  try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
+  // Seul l'export COMPLET compte comme sauvegarde (proposition hebdo)
+  if (!fields) { try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {} }
   return data;
 }
 // Proposition de sauvegarde 1×/semaine au lancement (via confirm). Ne s'affiche que si
@@ -2905,6 +2933,14 @@ function applyBackup(data) {
   if (data.rappels && typeof data.rappels === 'object') put('spotifyplus_rappels', data.rappels);
   if (Array.isArray(data.remembers))  put('spotifyplus_remember_custom', data.remembers);
   if (Array.isArray(data.tvtime))     put('spotifyplus_tvtime', data.tvtime);
+  if (data.maps && typeof data.maps === 'object') put('spotifyplus_maps', data.maps);
+  // Coffre MDP : blob chiffré — copie de secours de l'existant avant remplacement
+  // (même filet que l'import de GestionMdpPanel : spotifyplus_mdp_vault_prev)
+  if (isVaultBlob(data.mdp_vault)) {
+    const existing = loadVaultBlob();
+    if (existing) { try { localStorage.setItem('spotifyplus_mdp_vault_prev', JSON.stringify(existing)); } catch {} }
+    saveVaultBlob(data.mdp_vault);
+  }
   return { artistsRestored, statsRestored };
 }
 
@@ -3077,7 +3113,7 @@ function DropboxSync() {
     <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
       {connected ? (
         <>
-          <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>☁︎ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Dropbox'}</button>
+          <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>☁︎ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Dropbox'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(tout, écrase la dernière version)</span>}</button>
           <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Dropbox</button>
         </>
       ) : (
@@ -3194,7 +3230,7 @@ function VosEcoutesPanel() {
         if (!data || data.app !== 'spotifyplus') { alert('Fichier invalide : ce n\'est pas une sauvegarde Spotify+.'); return; }
         const n = Array.isArray(data.artists) ? data.artists.length : 0;
         const when = data.exported_at ? new Date(data.exported_at).toLocaleDateString('fr-FR') : '?';
-        if (!confirm(`Restaurer la sauvegarde du ${when} ?\n\n· ${n} artiste(s) — dates de scan fusionnées (jamais régressées)\n· Stats d'écoute — fusion prudente\n· To do / Remember — REMPLACÉS par la sauvegarde`)) return;
+        if (!confirm(`Restaurer la sauvegarde du ${when} ?\n\n· ${n} artiste(s) — dates de scan fusionnées (jamais régressées)\n· Stats d'écoute — fusion prudente\n· To do / Remember / TV Time / Maps / Coffre MDP — REMPLACÉS par la sauvegarde (seulement s'ils sont présents dans le fichier)`)) return;
         const res = await restoreBackup(data);
         alert(`✓ Sauvegarde restaurée : ${res.artistsRestored} artiste(s)${res.statsRestored ? ' + stats' : ''} + to do / remember.\nRecharge la page pour voir les to do / rappels restaurés.`);
       } catch (e) { alert('Fichier illisible ou invalide.'); }
@@ -3204,12 +3240,16 @@ function VosEcoutesPanel() {
   const onResetQuota = () => {
     if (confirm('Réinitialiser le quota 24h ?\nLe compteur repart à 0/100 et tu pourras relancer une synchro immédiatement.')) resetQuota();
   };
+  const exportBtn = { background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-      <button onClick={downloadBackup}
-        style={{ background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
-        ↧ Exporter mes données <span style={{ fontWeight:400, opacity:0.7 }}>(stats, artistes, to do, remember)</span>
-      </button>
+      <StatsCollapse title="↧ EXPORTER MES DONNÉES" color="#4ea3f5">
+        {EXPORT_SECTIONS.map(sec => (
+          <button key={sec.key} onClick={() => downloadBackup(sec)} style={exportBtn}>
+            {sec.icon} {sec.label} <span style={{ fontWeight:400, opacity:0.7 }}>({sec.hint})</span>
+          </button>
+        ))}
+      </StatsCollapse>
       <button onClick={() => restoreRef.current && restoreRef.current.click()} disabled={!dbReady}
         style={{ background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor: dbReady ? 'pointer' : 'default', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left', opacity: dbReady ? 1 : 0.4 }}>
         ↥ Restaurer mes données <span style={{ fontWeight:400, opacity:0.7 }}>(depuis un export JSON)</span>
