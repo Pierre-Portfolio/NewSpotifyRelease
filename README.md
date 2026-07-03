@@ -72,7 +72,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Barre de progression cliquable et draggable** — clic ou glissement pour se déplacer dans le titre
 - Compteur de position dans le feed (ex: `3 / 25`)
 
-### À propos (ex-Stats)
+### Stats
+- Section dédiée (onglet **Stats**, juste avant **À propos**) regroupant **tous les chiffres et graphiques**
 - Sections **repliables** (collapse) : **🎵 Musiques**, **✅ To do**, **🎬 Stats Film**, **📈 Graphique** et **📊 Stats avancées**
 - **🎵 Musiques** — compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
@@ -81,13 +82,16 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **🎬 Stats Film** — **films vus**, **épisodes de série vus** (+ nombre de séries entamées), **temps passé devant les films** et **devant les séries** — calculées entièrement depuis le cache local TV Time (aucune requête API)
 - **📈 Graphique** — deux histogrammes sur **14 jours** (dessinés sans librairie externe) : **écoutes par jour** et **tâches terminées par jour**
 - **📊 Stats avancées** — top 5 artistes écoutés, répartition Singles/Albums/Découvertes, moyenne d'écoutes/jour sur 30 jours (calculées sur les titres non purgés)
+
+### À propos
+- Section dédiée (onglet **À propos**) regroupant les **actions de données** et la version
 - **↧ Exporter mes données** : télécharge une sauvegarde **JSON** (stats d'écoute, dernières dates de scrapping des artistes, to do, **rappels Remember**, **suivi TV Time**) — pour ne rien perdre (les données ne vivent que sur cet appareil). La **sync Dropbox** sauvegarde exactement les mêmes informations
 - **↥ Restaurer mes données** : réimporte une sauvegarde JSON exportée — les dates de scan des artistes sont fusionnées (jamais régressées), les stats fusionnées prudemment, les to do / rappels / TV Time remplacés par la sauvegarde
 - **💾 Proposition de sauvegarde hebdomadaire** : une fois par semaine, au lancement, l'app propose (via une alerte) de télécharger une sauvegarde — uniquement si tu as des données et qu'aucune sauvegarde n'a eu lieu depuis 7 jours
 - **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la même donnée dans ton Dropbox, accessible depuis plusieurs appareils. Nécessite de renseigner une clé d'app Dropbox (sinon la section reste « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
 - Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 2.7.8`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 3.0.7`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
@@ -201,7 +205,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
 
 ### Interface
-- **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (À propos, Historique, Météo, Finance, TV Time, To do, Maps, Mot de passe, Remember) — une seule section affichée à la fois (plus de colonne de droite)
+- **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (Stats, À propos, Historique, Météo, Finance, TV Time, To do, Maps, Mot de passe, Remember) — une seule section affichée à la fois (plus de colonne de droite)
 - **Mobile** : 3 onglets principaux (Scrapping / En attente / ❤ Likés) + un menu **« ⋯ »** regroupant les autres sections. Les libellés du menu suivent un **dégradé arc-en-ciel** (violet → indigo → bleu → cyan → vert-cyan → vert → jaune → ambre → orange → rouge), le rouge final rejoignant le bouton **Déconnecter**
 - **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant / ❤ like**
 - Logs en temps réel pendant la sync
