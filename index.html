@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.1.6';
+const APP_VERSION = '3.1.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4748,6 +4748,7 @@ const TVTIME_COLOR = '#38c98a';   // vert-cyan de l'arc-en-ciel (entre Finance e
 const TMDB_API_KEY = '';          // clé v3 en dur (optionnelle) — sinon saisie dans l'UI
 const TMDB_KEY_LS  = 'spotifyplus_tmdb_key';
 const TVTIME_LS_KEY = 'spotifyplus_tvtime';
+const TVTIME_FILTER_LS = 'spotifyplus_tvtime_filter';  // 'all' | 'movie' | 'tv' — filtre Films/Séries persisté
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w92';   // affiches (vignettes)
 const TV_REFRESH_TTL = 24 * 60 * 60 * 1000;          // TTL du refresh « prochaines sorties »
 
@@ -4861,6 +4862,11 @@ function TvTimePanel() {
   const [showKey, setShowKey] = React.useState(false);
   const [keyInput, setKeyInput] = React.useState('');
   const [showDone, setShowDone] = React.useState(false);
+  // Filtre Films/Séries persisté — 'all' | 'movie' | 'tv'
+  const [mediaFilter, setMediaFilter] = React.useState(() => {
+    try { const v = localStorage.getItem(TVTIME_FILTER_LS); return (v === 'movie' || v === 'tv') ? v : 'all'; } catch { return 'all'; }
+  });
+  const pickFilter = f => { setMediaFilter(f); try { localStorage.setItem(TVTIME_FILTER_LS, f); } catch {} };
   const hasKey = !!tmdbKey();
 
   const update = next => { setItems(next); saveTvItems(next); };
@@ -4931,9 +4937,13 @@ function TvTimePanel() {
     if (confirm(`Retirer « ${item.title} » de TV Time ?`)) update(items.filter(it => it.id !== item.id || it.type !== item.type));
   };
 
-  const watching = items.filter(it => it.status === 'watching');
-  const towatch  = items.filter(it => it.status === 'towatch');
-  const done     = items.filter(it => it.status === 'done');
+  // Les sections par statut sont calculées sur la liste filtrée Films/Séries.
+  // PROCHAINES SORTIES est 100% séries : masquée en mode Films (pas d'état vide inutile).
+  const visible  = mediaFilter === 'all' ? items : items.filter(it => it.type === mediaFilter);
+  const nbMovies = items.reduce((a, it) => a + (it.type === 'movie' ? 1 : 0), 0);
+  const watching = visible.filter(it => it.status === 'watching');
+  const towatch  = visible.filter(it => it.status === 'towatch');
+  const done     = visible.filter(it => it.status === 'done');
   const upcoming = items.filter(it => it.type === 'tv' && it.status !== 'done' && it.nextEp && it.nextEp.date)
     .sort((a, b) => a.nextEp.date < b.nextEp.date ? -1 : 1);
 
@@ -5023,21 +5033,40 @@ function TvTimePanel() {
             </div>
           )}
 
-          {/* Prochaines sorties (nextEp mis en cache, refresh TTL 24h ou ↻ manuel) */}
-          {secTitle('📅', 'PROCHAINES SORTIES', upcoming.length,
-            <button onClick={doRefresh} disabled={refreshing} title="Actualiser les prochaines sorties (séries suivies)"
-              style={{ background:'none', border:'none', color: refreshing ? C.dim : TVTIME_COLOR, fontSize:12, cursor:'pointer', padding:'0 2px', flexShrink:0 }}>{refreshing ? '…' : '↻'}</button>
-          )}
-          {upcoming.length === 0
-            ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucun épisode annoncé pour tes séries</div>
-            : upcoming.map(it => {
-                const dj = tvDaysUntil(it.nextEp.date);
-                const when = dj === null ? '' : dj < 0 ? 'diffusé' : dj === 0 ? "aujourd'hui" : dj === 1 ? 'demain' : `dans ${dj} j`;
-                return row(it,
-                  `S${it.nextEp.s}E${it.nextEp.e}${it.nextEp.name ? ` « ${it.nextEp.name} »` : ''} · ${new Date(it.nextEp.date + 'T00:00:00').toLocaleDateString('fr-FR')}`,
-                  <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
+          {/* Filtre Films / Séries (persisté) */}
+          {items.length > 0 && (
+            <div style={{ display:'flex', gap:5 }}>
+              {[['all', `Tous · ${items.length}`], ['movie', `🎬 Films · ${nbMovies}`], ['tv', `📺 Séries · ${items.length - nbMovies}`]].map(([k, label]) => {
+                const active = mediaFilter === k;
+                return (
+                  <button key={k} onClick={() => pickFilter(k)}
+                    style={{ flex:1, background: active ? `${TVTIME_COLOR}22` : 'none', border:`1px solid ${active ? TVTIME_COLOR + '66' : C.border}`, borderRadius:6, color: active ? TVTIME_COLOR : C.dim, fontSize:10, fontWeight:700, padding:'4px 0', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                    {label}
+                  </button>
                 );
               })}
+            </div>
+          )}
+
+          {/* Prochaines sorties (nextEp mis en cache, refresh TTL 24h ou ↻ manuel) — séries only, masquée en mode Films */}
+          {mediaFilter !== 'movie' && (
+            <>
+              {secTitle('📅', 'PROCHAINES SORTIES', upcoming.length,
+                <button onClick={doRefresh} disabled={refreshing} title="Actualiser les prochaines sorties (séries suivies)"
+                  style={{ background:'none', border:'none', color: refreshing ? C.dim : TVTIME_COLOR, fontSize:12, cursor:'pointer', padding:'0 2px', flexShrink:0 }}>{refreshing ? '…' : '↻'}</button>
+              )}
+              {upcoming.length === 0
+                ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucun épisode annoncé pour tes séries</div>
+                : upcoming.map(it => {
+                    const dj = tvDaysUntil(it.nextEp.date);
+                    const when = dj === null ? '' : dj < 0 ? 'diffusé' : dj === 0 ? "aujourd'hui" : dj === 1 ? 'demain' : `dans ${dj} j`;
+                    return row(it,
+                      `S${it.nextEp.s}E${it.nextEp.e}${it.nextEp.name ? ` « ${it.nextEp.name} »` : ''} · ${new Date(it.nextEp.date + 'T00:00:00').toLocaleDateString('fr-FR')}`,
+                      <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
+                    );
+                  })}
+            </>
+          )}
 
           {/* En cours de visionnage */}
           {secTitle('▶', 'EN COURS', watching.length)}
