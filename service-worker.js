@@ -1,3 +1,4 @@
+// v7 : ajout de Leaflet auto-hébergé (vendor/leaflet.js + .css, section Maps) au précache.
 // v6 : bump de cache (force la maj des PWA installées) + le fetch réseau de l'app shell
 // bypasse désormais le cache HTTP du navigateur ({ cache: 'no-store' }). Sinon GitHub Pages
 // sert l'index.html avec Cache-Control: max-age=600, et le network-first du SW récupérait
@@ -8,8 +9,9 @@
 // (?code=...&state=...) écrivait le code d'autorisation dans Cache Storage.
 // L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
 // → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
-const CACHE  = 'spotifyplus-v6';
-const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm'];
+const CACHE  = 'spotifyplus-v7';
+const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
+                './vendor/leaflet.js', './vendor/leaflet.css'];
 
 self.addEventListener('install', e => {
   self.skipWaiting();

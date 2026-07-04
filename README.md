@@ -74,12 +74,13 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Stats
 - Section dédiée (onglet **Stats**, juste avant **À propos**) regroupant **tous les chiffres et graphiques**
-- Sections **repliables** (collapse) : **🎵 Musiques**, **✅ To do**, **🎬 Stats Film**, **📈 Graphique** et **📊 Stats avancées**
+- Sections **repliables** (collapse) : **🎵 Musiques**, **✅ To do**, **🎬 Stats Film**, **🗺️ Stats Maps**, **📈 Graphique** et **📊 Stats avancées**
 - **🎵 Musiques** — compteurs incrémentaux depuis la table `stats` : restantes / **temps d'écoute restant (HH:MM)** / ce mois-ci / cette année / depuis toujours
 - **⌛ Temps total écouté** : `SUM(duration_ms) WHERE listened=1` + durée du titre en cours — affiché en `Xh Ymin`
 - **❤ % de titres likés** : pourcentage des écoutes likées **via l'app** (`total_liked / écoutes all-time`) — compteur persistant dans la table `stats`, **non affecté par la purge** et indépendant des titres likés sur Spotify avant/hors de l'app
 - **✅ To do** — nombre de **tâches terminées** (validées) : tâches de la journée / du mois / de l'année, plus **⭐ Tâches compliquées** = total des tâches **favorites** effectuées. Une tâche compte comme terminée quand on la supprime (×) ou qu'on valide (✓) une tâche Quotidien
 - **🎬 Stats Film** — **films vus**, **épisodes de série vus** (+ nombre de séries entamées), **temps passé devant les films** et **devant les séries** — calculées entièrement depuis le cache local TV Time (aucune requête API)
+- **🗺️ Stats Maps** — **distance parcourue** aujourd'hui / ce mois-ci / cette année / depuis toujours (+ nombre de trajets et de jours suivis) et **🥇 mode de déplacement préféré** — calculées depuis les trajets Google Timeline importés (100 % local, aucune requête)
 - **📈 Graphique** — deux histogrammes sur **14 jours** (dessinés sans librairie externe) : **écoutes par jour** et **tâches terminées par jour**
 - **📊 Stats avancées** — top 5 artistes écoutés, répartition Singles/Albums/Découvertes, moyenne d'écoutes/jour sur 30 jours (calculées sur les titres non purgés)
 
@@ -133,9 +134,16 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Flèches ‹ › (ou points indicateurs) pour parcourir les échéances ; chaque tâche peut être **déplacée** d'un cran d'échéance, marquée **favorite** ou **supprimée** (× = terminée)
 - Tâches mémorisées localement (aucun backend)
 
-### Maps
+### Maps — Mes trajets (visuel type « Vos trajets » Google Maps)
 - Section **Maps** dédiée (titre en jaune) — onglet sous To do (desktop et menu « ⋯ » mobile)
-- **Vide pour le moment** (placeholder « 🗺️ Section Maps — à venir »)
+- **Carte interactive** (Leaflet auto-hébergé + tuiles OpenStreetMap assombries pour le thème dark) affichant les **trajets d'une journée** : tracés colorés par mode de déplacement (🚶 à pied bleu, 🚗 voiture jaune, 🚆 transports violet, 🚴 vélo vert, 🏃 course rose, ✈️ avion…), **lieux visités** en marqueurs jaunes — popup au clic (mode, distance, horaires)
+- **Timeline horodatée** sous la carte, comme dans Google Maps : chaque trajet (icône, mode, distance, heure de début – fin, durée) et chaque lieu visité (nom, horaires) dans l'ordre chronologique
+- **Navigation par jour** : ‹ › sautent au jour renseigné précédent/suivant, sélecteur de date libre, bouton « Auj. » — ouvre par défaut sur aujourd'hui (ou le dernier jour renseigné)
+- **Résumé du jour** : distance totale, temps de déplacement, nombre de trajets et de lieux
+- **⚠ Aucun tracking par l'app** : Spotify+ ne trace jamais la position. Les trajets viennent de **Google Maps**, via l'**export officiel de la Timeline** à importer (bouton 📥) : Google ne fournit aucune API publique et les trajets sont stockés sur le téléphone depuis fin 2024 — un scraping direct est impossible depuis une app statique (auth Google + CORS)
+- **Deux formats d'export acceptés** : export sur appareil de l'appli Google Maps (`location-history.json` / `Timeline.json` — Vos trajets → ⚙ → Exporter) et ancien **Google Takeout** « Historique des positions » (`Semantic Location History/AAAA_MOIS.json`) — mode d'emploi détaillé dans la section repliable « ❓ Comment récupérer mes trajets »
+- **Import incrémental** : les jours contenus dans le fichier remplacent les mêmes jours déjà présents, les autres sont conservés — réimporter régulièrement ne perd rien
+- Données en `localStorage` (tracés simplifiés automatiquement pour tenir dans le quota), incluses dans l'**export 🗺️ Maps** (À propos) et la **sauvegarde Dropbox**
 
 ### Mot de Passe
 - Section **Mot de Passe** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
@@ -217,6 +225,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Sauvegarde Dropbox optionnelle** : OAuth 2.0 PKCE (offline / refresh token local), aucune clé secrète dans le code
 - **Coffre Mot de passe** : URL assainies avant rendu (seuls les liens `http(s)` sont cliquables) — pas d'exécution de `javascript:` via une sauvegarde importée
 - **sql.js 1.10.2** (SQLite WebAssembly) **auto-hébergé** dans `vendor/` — le `.wasm` ne pouvant pas avoir de SRI, l'auto-hébergement ferme le dernier vecteur d'attaque CDN
+- **Leaflet 1.9.4** (carte des trajets Maps) **auto-hébergé** dans `vendor/`, chargé **lazy** au premier affichage de la carte — tuiles OpenStreetMap (seule origine image ajoutée à la CSP), marqueurs 100 % vectoriels
 - `apiDel()` — helper DELETE pour l'API Spotify (unlike)
 - **IndexedDB** (persistance locale du binaire SQLite, connexion unique réutilisée)
 - Spotify Web API (refresh token avec rotation + mutex — plus de déconnexions aléatoires ; retry automatique sur 401 pour tous les verbes HTTP)
@@ -236,10 +245,13 @@ Au premier lancement, la base de données est créée vide dans le navigateur. L
 NewSpotifyRelease/
   index.html          → App complète (React 18 CDN + sql.js)
   manifest.json       → Config PWA (nom, icônes, display standalone)
-  service-worker.js   → Cache app shell + vendor pour offline (v5, ne cache que les réponses OK)
+  service-worker.js   → Cache app shell + vendor pour offline (v7, ne cache que les réponses OK)
   vendor/
     sql-wasm.js       → sql.js auto-hébergé
     sql-wasm.wasm     → Binaire SQLite WebAssembly auto-hébergé
+    leaflet.js        → Leaflet 1.9.4 auto-hébergé (carte des trajets Maps)
+    leaflet.css       → Styles Leaflet
+    images/           → Assets Leaflet (marqueurs par défaut, non utilisés — circleMarker vectoriels)
   icon-192.png        → Icône PWA 192×192
   icon-512.png        → Icône PWA 512×512
   CLAUDE.md           → Documentation technique pour Claude
