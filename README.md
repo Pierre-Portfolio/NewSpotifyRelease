@@ -119,7 +119,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Suivi personnel de tes séries et films** via l'API **[TMDB](https://www.themoviedb.org/) v3** (gratuite, **sans plafond journalier** — simple limite de ~50 requêtes/seconde, largement suffisante)
 - **Clé API personnelle requise** : crée un compte gratuit sur themoviedb.org, génère une clé API v3 dans *Paramètres → API* et colle-la dans la section (stockée uniquement sur ton appareil ; bouton ⚙ pour la changer). Sans clé, aucune requête ne part
 - **Recherche** films + séries (une seule requête pour les deux) avec affiche, année et type — ajoute chaque résultat en **📌 À voir**, **▶ En cours** ou **✓ Vu**
-- **Filtre Films / Séries** : sélecteur **Tous · N / 🎬 Films · N / 📺 Séries · N** sous la recherche — filtre toutes les listes (En cours, À voir, Vus), masque « Prochaines sorties » en mode Films, et **mémorise ton choix** d'une visite à l'autre
+- **Filtre Films / Séries** : sélecteur **Tous · N / 📺 Séries · N / 🎬 Films · N** sous la recherche — filtre toutes les listes (En cours, À voir, Vus), masque « Prochaines sorties » en mode Films, et **mémorise ton choix** d'une visite à l'autre
 - **▶ En cours** : progression par série (`5/20 ép. · prochain S2E5`) avec boutons **− / ＋** pour compter les épisodes vus, **✓** pour marquer la série terminée (tout vu)
 - **📌 À voir** : ta watchlist — passe un titre en cours (▶), marque-le vu (✓) ou retire-le (×)
 - **✓ Vus** : historique repliable de tout ce que tu as terminé (avec retour possible en « En cours » pour un re-visionnage)
