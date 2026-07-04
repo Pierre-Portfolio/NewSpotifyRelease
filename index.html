@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- CSP : même en cas d'XSS, connect-src empêche d'exfiltrer le token (localStorage) vers un domaine attaquant.
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://api.dropboxapi.com https://content.dropboxapi.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://tile.openstreetmap.org https://*.tile.openstreetmap.org; connect-src 'self' https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.1.5';
+const APP_VERSION = '3.1.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -259,6 +259,96 @@ async function dropboxUpload(dataObj) {
   });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
+}
+
+// ════════════════════════════════════════════════
+// GOOGLE DRIVE — sauvegarde optionnelle multi-appareils (OAuth 2.0 implicite)
+// ⚠ CONFIG REQUISE : créer un projet sur https://console.cloud.google.com,
+//   activer l'API "Google Drive API", créer un ID client OAuth (type "Application Web"),
+//   ajouter REDIRECT_URI dans "Origines JavaScript autorisées" ET "URI de redirection
+//   autorisés", puis coller l'ID client ci-dessous. Tant que GDRIVE_CLIENT_ID est vide,
+//   l'UI affiche un état "non configuré" (aucun appel réseau).
+// ⚠ Pas de PKCE possible côté Google pour une app statique : l'échange de code des clients
+//   "Application Web" exige un client_secret (interdit dans du code public) → flux IMPLICITE
+//   (response_type=token) : access token ~1h stocké en localStorage, PAS de refresh token.
+//   À l'expiration, le bouton repasse en « Connecter » (reconnexion en 1 clic, consentement
+//   déjà accordé → redirection quasi instantanée). L'ID client est public par nature.
+// Scope drive.file : l'app ne voit QUE les fichiers qu'elle a elle-même créés.
+// ════════════════════════════════════════════════
+const GDRIVE_CLIENT_ID   = '';
+const GDRIVE_BACKUP_NAME = 'spotifyplus-sauvegarde.json';
+function gdriveConfigured() { return !!GDRIVE_CLIENT_ID; }
+// Connecté = token présent ET non expiré (flux implicite : pas de refresh possible)
+function gdriveConnected() {
+  const exp = parseInt(localStorage.getItem('gdrive_expiry') || '0') || 0;
+  return !!localStorage.getItem('gdrive_access') && Date.now() < exp - 60000;
+}
+function gdriveToken() { return gdriveConnected() ? localStorage.getItem('gdrive_access') : null; }
+function gdriveLogout() { ['gdrive_access','gdrive_expiry','gdrive_file_id'].forEach(k => localStorage.removeItem(k)); }
+function gdriveLogin() {
+  if (!GDRIVE_CLIENT_ID) return;
+  const params = new URLSearchParams({
+    client_id: GDRIVE_CLIENT_ID, response_type: 'token', redirect_uri: REDIRECT_URI,
+    scope: 'https://www.googleapis.com/auth/drive.file',
+    include_granted_scopes: 'true', state: 'gdrive', // state='gdrive' distingue le retour (fragment #) de Spotify/Dropbox (query ?)
+  });
+  window.location = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+}
+// Retour du consentement Google : le token arrive dans le FRAGMENT (#access_token=…&state=gdrive),
+// jamais envoyé au serveur. Appelé tout en tête de l'init, avant le parsing des query params.
+function gdriveHandleRedirect() {
+  if (!window.location.hash || window.location.hash.indexOf('access_token') === -1) return;
+  const h = new URLSearchParams(window.location.hash.slice(1));
+  if (h.get('state') === 'gdrive' && h.get('access_token')) {
+    try {
+      localStorage.setItem('gdrive_access', h.get('access_token'));
+      localStorage.setItem('gdrive_expiry', String(Date.now() + (parseInt(h.get('expires_in') || '3600') || 3600) * 1000));
+    } catch {}
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+}
+// Retrouve l'id du fichier de sauvegarde (cache localStorage → 1 seule recherche, puis PATCH direct)
+async function gdriveFindBackupId(token) {
+  const cached = localStorage.getItem('gdrive_file_id');
+  if (cached) return cached;
+  const q = encodeURIComponent(`name='${GDRIVE_BACKUP_NAME}' and trashed=false`);
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)&pageSize=1`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const d  = await res.json();
+  const id = (d.files && d.files[0] && d.files[0].id) || null;
+  if (id) try { localStorage.setItem('gdrive_file_id', id); } catch {}
+  return id;
+}
+// Upload (overwrite) de la sauvegarde JSON sur Google Drive : PATCH du fichier existant,
+// sinon création multipart (métadonnées {name} + contenu). Même contenu que Dropbox (buildBackup complet).
+async function gdriveUpload(dataObj) {
+  const token = gdriveToken();
+  if (!token) throw new Error('Google Drive non connecté');
+  const body = JSON.stringify(dataObj);
+  let id = null;
+  try { id = await gdriveFindBackupId(token); } catch {}
+  if (id) {
+    const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media`, {
+      method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body,
+    });
+    if (res.ok) return res.json();
+    if (res.status !== 404) throw new Error('HTTP ' + res.status);
+    try { localStorage.removeItem('gdrive_file_id'); } catch {} // fichier supprimé côté Drive → on le recrée
+  }
+  const boundary = 'spotifyplus' + Math.random().toString(36).slice(2);
+  const multipart =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+    JSON.stringify({ name: GDRIVE_BACKUP_NAME }) +
+    `\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n` + body + `\r\n--${boundary}--`;
+  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart,
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const d = await res.json();
+  if (d.id) try { localStorage.setItem('gdrive_file_id', d.id); } catch {}
+  return d;
 }
 
 // ════════════════════════════════════════════════
@@ -1016,6 +1106,9 @@ function StoreProvider({ children }) {
   // ── Init OAuth + local DB ──
   React.useEffect(() => {
     (async () => {
+      // Retour Google Drive (token dans le fragment #access_token=…&state=gdrive) : stocké
+      // puis URL nettoyée, l'init Spotify normale reprend (le token Spotify est en localStorage)
+      gdriveHandleRedirect();
       const params = new URLSearchParams(window.location.search);
       const code   = params.get('code');
       const returnedState = params.get('state');
@@ -3627,6 +3720,50 @@ function DropboxSync() {
   );
 }
 
+// Sync Google Drive optionnelle (upload de la sauvegarde) — même UX que DropboxSync.
+// Affiche un état "non configuré" tant que GDRIVE_CLIENT_ID est vide (aucun appel réseau).
+// Flux implicite (pas de refresh token) : à l'expiration du token (~1h), le bouton repasse
+// automatiquement en « Connecter » (reconnexion en 1 clic).
+function GoogleDriveSync() {
+  const [connected, setConnected] = React.useState(gdriveConnected());
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg]   = React.useState('');
+  const GD = '#34a853';
+  const btn = { background:`${GD}15`, border:`1px solid ${GD}55`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#57c973', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
+  if (!gdriveConfigured()) {
+    return (
+      <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', fontSize:10, color:C.muted, lineHeight:1.55 }}>
+        △ <b style={{ color:C.text }}>Sync Google Drive</b> — non configurée. Crée un projet sur <span style={{ color:'#57c973' }}>console.cloud.google.com</span> (activer l'<i>API Google Drive</i> + ID client OAuth type <i>Application Web</i>, avec l'URL de l'app en origine ET URI de redirection autorisées), puis colle l'<i>ID client</i> dans <code style={{ color:MDP_PURPLE }}>GDRIVE_CLIENT_ID</code>.
+      </div>
+    );
+  }
+  const save = async () => {
+    if (!gdriveToken()) { setConnected(false); setMsg('✗ Session Google expirée — reconnecte-toi'); return; }
+    setBusy(true); setMsg('');
+    try { await gdriveUpload(buildBackup()); try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {} setMsg('✓ Sauvegardé sur Google Drive'); }
+    catch (e) {
+      // 401 = token révoqué/expiré côté Google → on repasse en état déconnecté
+      if (String(e && e.message).indexOf('401') !== -1) { gdriveLogout(); setConnected(false); setMsg('✗ Session Google expirée — reconnecte-toi'); }
+      else setMsg('✗ Échec : ' + ((e && e.message) || 'erreur'));
+    }
+    setBusy(false);
+  };
+  const disconnect = () => { gdriveLogout(); setConnected(false); setMsg(''); };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      {connected ? (
+        <>
+          <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>△ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Google Drive'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(tout, écrase la dernière version)</span>}</button>
+          <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Google Drive</button>
+        </>
+      ) : (
+        <button onClick={gdriveLogin} style={btn}>△ Connecter Google Drive <span style={{ fontWeight:400, opacity:0.7 }}>(sauvegarde multi-appareils)</span></button>
+      )}
+      {msg && <div style={{ fontSize:10, color: msg.startsWith('✓') ? C.accent : '#e0708a' }}>{msg}</div>}
+    </div>
+  );
+}
+
 // STATS — sections repliables (musiques / to do / film / graphique / stats avancées).
 // Séparé d'À propos (VosEcoutesPanel) : Stats = les chiffres, À propos = export / restore /
 // Dropbox / quota / purge / version.
@@ -3773,6 +3910,7 @@ function VosEcoutesPanel() {
         ))}
       </StatsCollapse>
       <DropboxSync />
+      <GoogleDriveSync />
       <button onClick={onResetQuota}
         style={{ background:`${C.accent}12`, border:`1px solid ${C.accent}40`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color:C.accent, fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
         🔄 Réinitialiser le quota 24h <span style={{ fontWeight:400, opacity:0.7 }}>({dailyScrapings}/100{quotaActive ? ' · bloqué' : ''})</span>
