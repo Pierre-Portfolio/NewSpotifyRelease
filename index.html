@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.1.8';
+const APP_VERSION = '3.1.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4343,11 +4343,20 @@ function SolIcon() {
   );
 }
 
-function FinanceRow({ icon, name, value, pct, loading }) {
+// `chart` (optionnel) = spec de graphique { kind, id, interval? } → la ligne devient
+// cliquable et ouvre FinanceChartModal (via le callback `onChart` posé par FinancePanel).
+function FinanceRow({ icon, name, value, pct, loading, chart, onChart }) {
+  const clickable = !!(chart && onChart);
   return (
-    <div style={{ display:'flex', alignItems:'center', gap:10, padding:'5px 0', borderTop:`1px solid ${C.border}` }}>
+    <div
+      onClick={clickable ? () => onChart({ ...chart, name, icon }) : undefined}
+      title={clickable ? 'Voir le graphique du prix' : undefined}
+      style={{ display:'flex', alignItems:'center', gap:10, padding:'5px 0', borderTop:`1px solid ${C.border}`, cursor: clickable ? 'pointer' : 'default' }}>
       <div style={{ fontSize:15, width:22, textAlign:'center', flexShrink:0 }}>{icon}</div>
-      <div style={{ flex:1, minWidth:0, fontSize:12, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{name}</div>
+      <div style={{ flex:1, minWidth:0, fontSize:12, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+        {name}
+        {clickable && <span style={{ fontSize:9, color:C.dim, marginLeft:5 }}>📈</span>}
+      </div>
       <div style={{ textAlign:'right', flexShrink:0 }}>
         <div style={{ fontSize: loading ? 10 : 12, fontWeight: loading ? 600 : 800, fontFamily:'DM Mono,monospace', color: loading ? FINANCE_BLUE : C.text, lineHeight:1.2, fontStyle: loading ? 'italic' : 'normal' }}>{loading ? 'Loading…' : value}</div>
         {!loading && pct !== undefined && <FinancePct v={pct} />}
@@ -4495,6 +4504,246 @@ async function fetchIndicesJSON() {
     const j = await r.json();
     return j && j.indices ? j.indices : null;
   } catch (e) { return null; }
+}
+
+// ════════════════════════════════════════════════
+// GRAPHIQUES FINANCE — clic sur une ligne → modal avec l'historique du prix.
+// Sources par type de ligne (toutes DÉJÀ autorisées dans la CSP connect-src) :
+//  • coingecko   (crypto)                       : /coins/{id}/market_chart — CORS natif, sans clé
+//  • frankfurter (EUR/USD)                      : /{start}..{end} — BCE, CORS natif, sans clé
+//  • stooq       (indices, actions, or/argent)  : CSV historique quotidien via corsFetchText (proxies CORS)
+//  • alpha       (pétrole WTI, sucre)           : série complète Alpha Vantage (⚠ 1 req du quota ~25/j)
+// Tout est mis en cache session (_chartCache) : rouvrir un graphique ne refetch jamais.
+// ════════════════════════════════════════════════
+const _chartCache = {};
+const CHART_RANGE_DAYS = { '24h':1, '7j':7, '1m':31, '3m':92, '1a':366, '5a':1830, '10a':3660 };
+
+// Périodes proposées selon la source (défaut = 2e entrée)
+function chartRanges(spec) {
+  if (spec.kind === 'coingecko') return ['24h', '7j', '1m', '1a'];
+  if (spec.kind === 'alpha' && spec.interval === 'monthly') return ['1a', '5a', '10a'];
+  return ['1m', '3m', '1a'];
+}
+
+// Ré-échantillonnage : garde ≤ maxPts points (premier/dernier conservés) pour un SVG léger
+function chartDownsample(pts, maxPts = 400) {
+  if (pts.length <= maxPts) return pts;
+  const step = (pts.length - 1) / (maxPts - 1), out = [];
+  for (let i = 0; i < maxPts; i++) out.push(pts[Math.round(i * step)]);
+  return out;
+}
+
+// Historique quotidien Stooq (1 an) — CSV `Date,Open,High,Low,Close,Volume`, via les
+// mêmes proxies CORS que les cotations. Cache par symbole, découpé ensuite par période.
+async function fetchStooqHistory(symbol) {
+  const key = 'stooqhist:' + symbol;
+  if (_chartCache[key]) return _chartCache[key];
+  const fmt = d => d.toISOString().slice(0, 10).replace(/-/g, '');
+  const txt = await corsFetchText(`https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&d1=${fmt(new Date(Date.now() - 366 * 864e5))}&d2=${fmt(new Date())}&i=d`);
+  if (!txt) return null;
+  const pts = [];
+  for (const ln of txt.trim().split('\n').slice(1)) {
+    const c = ln.split(',');
+    const t = new Date(c[0]).getTime(), v = parseFloat(c[4]);
+    if (!isNaN(t) && !isNaN(v)) pts.push({ t, v });
+  }
+  pts.sort((a, b) => a.t - b.t);
+  if (pts.length < 2) return null;
+  _chartCache[key] = pts; return pts;
+}
+
+// Historique EUR/USD via Frankfurter (BCE) — 1 an de fixings quotidiens en 1 requête.
+async function fetchFxHistory() {
+  const key = 'fxhist:EURUSD';
+  if (_chartCache[key]) return _chartCache[key];
+  try {
+    const iso = d => d.toISOString().slice(0, 10);
+    const r = await fetch(`https://api.frankfurter.app/${iso(new Date(Date.now() - 366 * 864e5))}..${iso(new Date())}?from=EUR&to=USD`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const pts = Object.keys(j.rates || {}).sort()
+      .map(d => ({ t: new Date(d).getTime(), v: j.rates[d] && j.rates[d].USD }))
+      .filter(p => p.v != null && !isNaN(p.t));
+    if (pts.length < 2) return null;
+    _chartCache[key] = pts; return pts;
+  } catch (e) { return null; }
+}
+
+// Série complète Alpha Vantage (WTI daily / SUGAR monthly) — même endpoint que
+// fetchAlphaCommodity mais on garde TOUTE la série. ⚠ Consomme 1 requête du quota
+// AV (~25/j) au premier clic seulement (cache session ensuite).
+async function fetchAlphaSeries(func, interval) {
+  const key = 'alphahist:' + func + ':' + interval;
+  if (_chartCache[key]) return _chartCache[key];
+  if (!ALPHA_VANTAGE_KEY) return null;
+  try {
+    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval}&apikey=${ALPHA_VANTAGE_KEY}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!Array.isArray(j && j.data)) return null;
+    const pts = j.data
+      .filter(d => d && d.value && d.value !== '.' && !isNaN(parseFloat(d.value)))
+      .map(d => ({ t: new Date(d.date).getTime(), v: parseFloat(d.value) }))
+      .filter(p => !isNaN(p.t))
+      .sort((a, b) => a.t - b.t);
+    if (pts.length < 2) return null;
+    _chartCache[key] = pts; return pts;
+  } catch (e) { return null; }
+}
+
+// Points du graphique pour un spec + une période → [{ t, v }] triés, ou null si échec.
+async function fetchChartPoints(spec, range) {
+  try {
+    if (spec.kind === 'coingecko') {
+      // CoinGecko : 1 fetch PAR période (la granularité dépend de `days` : 5 min sur
+      // 24h, horaire sur 7j, quotidien au-delà) — chacun caché séparément.
+      const key = 'cg:' + spec.id + ':' + range;
+      if (_chartCache[key]) return _chartCache[key];
+      const r = await fetch(`https://api.coingecko.com/api/v3/coins/${encodeURIComponent(spec.id)}/market_chart?vs_currency=usd&days=${CHART_RANGE_DAYS[range] || 7}`);
+      if (!r.ok) return null;
+      const j = await r.json();
+      const pts = chartDownsample((j.prices || []).map(p => ({ t: p[0], v: p[1] })).filter(p => p.v != null));
+      if (pts.length < 2) return null;
+      _chartCache[key] = pts; return pts;
+    }
+    let all = null;
+    if (spec.kind === 'frankfurter') all = await fetchFxHistory();
+    else if (spec.kind === 'stooq')  all = await fetchStooqHistory(spec.id);
+    else if (spec.kind === 'alpha')  all = await fetchAlphaSeries(spec.id, spec.interval);
+    if (!all) return null;
+    const since = Date.now() - (CHART_RANGE_DAYS[range] || 92) * 864e5;
+    const pts = chartDownsample(all.filter(p => p.t >= since));
+    return pts.length >= 2 ? pts : null;
+  } catch (e) { return null; }
+}
+
+function fmtChartDate(t, range) {
+  const d = new Date(t);
+  if (range === '24h') return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  if (range === '5a' || range === '10a') return d.toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
+  if (range === '1a') return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: '2-digit' });
+  return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+}
+
+// Courbe SVG pure (aucune lib → CSP inchangée) : aire dégradée + ligne 2px, couleur
+// hausse/baisse sur la période (FIN_UP/FIN_DOWN), 3 gridlines discrètes, crosshair
+// au survol/drag tactile (readout date · valeur dans un slot fixe au-dessus).
+function FinanceChart({ pts, fmtV, range }) {
+  const [hover, setHover] = React.useState(null);        // index du point survolé | null
+  const svgRef = React.useRef(null);
+  const W = 400, H = 170, PT = 8, PB = 6, PL = 4, PR = 4;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t, tSpan = (t1 - t0) || 1;
+  let vmin = Infinity, vmax = -Infinity;
+  for (const p of pts) { if (p.v < vmin) vmin = p.v; if (p.v > vmax) vmax = p.v; }
+  if (vmax === vmin) { const e = Math.abs(vmax) * 0.01 || 1; vmax += e; vmin -= e; }
+  const X = t => PL + ((t - t0) / tSpan) * (W - PL - PR);
+  const Y = v => PT + (1 - (v - vmin) / (vmax - vmin)) * (H - PT - PB);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
+  const up  = pts[pts.length - 1].v >= pts[0].v;
+  const col = up ? FIN_UP : FIN_DOWN;
+
+  const onMove = e => {
+    const rect = svgRef.current && svgRef.current.getBoundingClientRect();
+    if (!rect || !rect.width) return;
+    const t = t0 + ((e.clientX - rect.left) / rect.width) * tSpan;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < pts.length; i++) { const d = Math.abs(pts[i].t - t); if (d < bd) { bd = d; best = i; } }
+    setHover(best);
+  };
+  const hp = hover != null ? pts[hover] : null;
+
+  return (
+    <div>
+      <div style={{ height:16, fontSize:11, fontWeight:700, fontFamily:'DM Mono,monospace', color: hp ? C.text : C.dim, textAlign:'center', marginBottom:2 }}>
+        {hp ? `${fmtChartDate(hp.t, range)} · ${fmtV(hp.v)}` : ''}
+      </div>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'auto', display:'block', touchAction:'none', cursor:'crosshair' }}
+        onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
+        <defs>
+          <linearGradient id="finchartgrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor={col} stopOpacity="0.25" />
+            <stop offset="1" stopColor={col} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {[0.25, 0.5, 0.75].map(f => (
+          <line key={f} x1={PL} x2={W - PR} y1={PT + f * (H - PT - PB)} y2={PT + f * (H - PT - PB)} stroke={C.border} strokeWidth="1" strokeDasharray="3 4" />
+        ))}
+        <path d={`${line}L${X(t1).toFixed(1)},${H}L${X(t0).toFixed(1)},${H}Z`} fill="url(#finchartgrad)" />
+        <path d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <circle cx={X(t1)} cy={Y(pts[pts.length - 1].v)} r="3" fill={col} />
+        {hp && (
+          <g>
+            <line x1={X(hp.t)} x2={X(hp.t)} y1={PT} y2={H - PB} stroke={C.muted} strokeWidth="1" strokeDasharray="2 3" />
+            <circle cx={X(hp.t)} cy={Y(hp.v)} r="4" fill={col} stroke={C.surface} strokeWidth="2" />
+          </g>
+        )}
+      </svg>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:3 }}>
+        <span>{fmtChartDate(t0, range)}</span>
+        <span>{fmtChartDate(t1, range)}</span>
+      </div>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:6 }}>
+        <span>⬇ {fmtV(vmin)}</span>
+        <span>⬆ {fmtV(vmax)}</span>
+      </div>
+    </div>
+  );
+}
+
+// Modal graphique (même gabarit que MeteoDetailModal) : header valeur + variation sur
+// la période, chips de période, courbe. Fermeture par clic overlay ou ×.
+function FinanceChartModal({ spec, onClose }) {
+  const ranges = chartRanges(spec);
+  const [range, setRange] = React.useState(ranges[1]);
+  const [state, setState] = React.useState({ loading: true, pts: null });
+  React.useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, pts: null });
+    fetchChartPoints(spec, range).then(pts => { if (!cancelled) setState({ loading: false, pts }); });
+    return () => { cancelled = true; };
+  }, [range]);
+
+  const fmtV = spec.kind === 'frankfurter' ? (v => '$' + Number(v).toFixed(4)) : fmtPrice;
+  const { loading, pts } = state;
+  const first = pts && pts[0].v, last = pts && pts[pts.length - 1].v;
+  const periodPct = (pts && first) ? ((last - first) / first) * 100 : null;
+
+  const chip = active => ({
+    background: active ? `${FINANCE_BLUE}22` : 'none',
+    border: active ? `1px solid ${FINANCE_BLUE}66` : `1px solid ${C.border}`,
+    color: active ? FINANCE_BLUE : C.muted, borderRadius:6, padding:'3px 10px',
+    cursor:'pointer', fontSize:10, fontWeight: active ? 700 : 500, fontFamily:'DM Mono,monospace',
+  });
+
+  return (
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:200, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:'16px 18px', width:'100%', maxWidth:440, maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.6)' }}>
+        <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:10, marginBottom:10 }}>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:11, color:FINANCE_BLUE, fontWeight:700, letterSpacing:'0.05em', marginBottom:2, display:'flex', alignItems:'center', gap:6 }}>
+              <span style={{ fontSize:14 }}>{spec.icon}</span> {spec.name}
+            </div>
+            <div style={{ fontSize:19, fontWeight:900, fontFamily:'DM Mono,monospace', color:C.text }}>
+              {last != null ? fmtV(last) : '…'}{' '}
+              {periodPct != null && <FinancePct v={periodPct} />}
+              {periodPct != null && <span style={{ fontSize:9, color:C.dim, fontWeight:500, marginLeft:4 }}>sur {range}</span>}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, fontSize:16, lineHeight:1, padding:'3px 9px', cursor:'pointer', flexShrink:0 }}>×</button>
+        </div>
+        <div style={{ display:'flex', gap:4, marginBottom:10 }}>
+          {ranges.map(rg => <button key={rg} onClick={() => setRange(rg)} style={chip(rg === range)}>{rg}</button>)}
+        </div>
+        {loading ? (
+          <div style={{ fontSize:11, color:C.muted, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Chargement du graphique…</div>
+        ) : !pts ? (
+          <div style={{ fontSize:11, color:C.muted, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Graphique indisponible (source injoignable)</div>
+        ) : (
+          <FinanceChart pts={pts} fmtV={fmtV} range={range} />
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ════════════════════════════════════════════════
@@ -4674,6 +4923,9 @@ function FinancePanel() {
   // Gardé par TD_ENABLED : si TD est coupé, on ne montre jamais « Loading » (→ « — »).
   const tdPending = (phaseLoading, v) => TD_ENABLED && phaseLoading && v === undefined;
 
+  // Graphique au clic : spec de la ligne cliquée (null = modal fermée)
+  const [chartSpec, setChartSpec] = React.useState(null);
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ display:'flex', gap:4, justifyContent:'flex-end' }}>
@@ -4696,39 +4948,41 @@ function FinancePanel() {
       <style>{'@keyframes finspin{to{transform:rotate(360deg)}}'}</style>
 
       <FinanceSection title="CRYPTO" eurusd={eurusd}>
-        <FinanceRow icon="₿"  name="Bitcoin"  value={fmtPrice(cg && cg.bitcoin && cg.bitcoin.usd)}     pct={cg && cg.bitcoin && cg.bitcoin.usd_24h_change} />
-        {full && <FinanceRow icon={<EthIcon />}  name="Ethereum" value={fmtPrice(cg && cg.ethereum && cg.ethereum.usd)}   pct={cg && cg.ethereum && cg.ethereum.usd_24h_change} />}
-        {full && <FinanceRow icon={<SolIcon />}  name="Solana"   value={fmtPrice(cg && cg.solana && cg.solana.usd)}       pct={cg && cg.solana && cg.solana.usd_24h_change} />}
-        {full && <FinanceRow icon="τ"  name="TAO"      value={fmtPrice(cg && cg.bittensor && cg.bittensor.usd)} pct={cg && cg.bittensor && cg.bittensor.usd_24h_change} />}
-        {full && <FinanceRow icon="✕"  name="XRP"      value={fmtPrice(cg && cg.ripple && cg.ripple.usd)}       pct={cg && cg.ripple && cg.ripple.usd_24h_change} />}
-        <FinanceRow icon="🐸" name="PEPE"     value={fmtPrice(cg && cg.pepe && cg.pepe.usd)}           pct={cg && cg.pepe && cg.pepe.usd_24h_change} />
+        <FinanceRow icon="₿"  name="Bitcoin"  value={fmtPrice(cg && cg.bitcoin && cg.bitcoin.usd)}     pct={cg && cg.bitcoin && cg.bitcoin.usd_24h_change} chart={{ kind:'coingecko', id:'bitcoin' }} onChart={setChartSpec} />
+        {full && <FinanceRow icon={<EthIcon />}  name="Ethereum" value={fmtPrice(cg && cg.ethereum && cg.ethereum.usd)}   pct={cg && cg.ethereum && cg.ethereum.usd_24h_change} chart={{ kind:'coingecko', id:'ethereum' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon={<SolIcon />}  name="Solana"   value={fmtPrice(cg && cg.solana && cg.solana.usd)}       pct={cg && cg.solana && cg.solana.usd_24h_change} chart={{ kind:'coingecko', id:'solana' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon="τ"  name="TAO"      value={fmtPrice(cg && cg.bittensor && cg.bittensor.usd)} pct={cg && cg.bittensor && cg.bittensor.usd_24h_change} chart={{ kind:'coingecko', id:'bittensor' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon="✕"  name="XRP"      value={fmtPrice(cg && cg.ripple && cg.ripple.usd)}       pct={cg && cg.ripple && cg.ripple.usd_24h_change} chart={{ kind:'coingecko', id:'ripple' }} onChart={setChartSpec} />}
+        <FinanceRow icon="🐸" name="PEPE"     value={fmtPrice(cg && cg.pepe && cg.pepe.usd)}           pct={cg && cg.pepe && cg.pepe.usd_24h_change} chart={{ kind:'coingecko', id:'pepe' }} onChart={setChartSpec} />
       </FinanceSection>
 
       <FinanceSection title="INDICES" eurusd={eurusd}>
-        <FinanceRow icon="🇺🇸" name="S&P 500" value={fmtPrice(idx && idx.spx && idx.spx.price)} pct={idx && idx.spx && idx.spx.pct} />
-        <FinanceRow icon="💻" name="NASDAQ-100"  value={fmtPrice(idx && idx.ndq && idx.ndq.price)} pct={idx && idx.ndq && idx.ndq.pct} />
-        {full && <FinanceRow icon="🇫🇷" name="CAC 40"  value={fmtPrice(idx && idx.cac && idx.cac.price)} pct={idx && idx.cac && idx.cac.pct} />}
+        <FinanceRow icon="🇺🇸" name="S&P 500" value={fmtPrice(idx && idx.spx && idx.spx.price)} pct={idx && idx.spx && idx.spx.pct} chart={{ kind:'stooq', id:'^spx' }} onChart={setChartSpec} />
+        <FinanceRow icon="💻" name="NASDAQ-100"  value={fmtPrice(idx && idx.ndq && idx.ndq.price)} pct={idx && idx.ndq && idx.ndq.pct} chart={{ kind:'stooq', id:'^ndq' }} onChart={setChartSpec} />
+        {full && <FinanceRow icon="🇫🇷" name="CAC 40"  value={fmtPrice(idx && idx.cac && idx.cac.price)} pct={idx && idx.cac && idx.cac.pct} chart={{ kind:'stooq', id:'^cac' }} onChart={setChartSpec} />}
       </FinanceSection>
 
       <FinanceSection title="STOCK PICKING" eurusd={eurusd}>
-        <FinanceRow icon="🟢" name="NVIDIA"   value={fmtPrice(stocks.nvda && stocks.nvda.price)} pct={stocks.nvda && stocks.nvda.pct} loading={tdPending(loadingLight, stocks.nvda)} />
-        <FinanceRow icon="🎮" name="Take-Two" value={fmtPrice(stocks.ttwo && stocks.ttwo.price)} pct={stocks.ttwo && stocks.ttwo.pct} loading={tdPending(loadingLight, stocks.ttwo)} />
-        {full && <FinanceRow icon="🔍" name="Google"   value={fmtPrice(stocks.googl && stocks.googl.price)} pct={stocks.googl && stocks.googl.pct} loading={tdPending(loadingFull, stocks.googl)} />}
-        {full && <FinanceRow icon="🪟" name="Microsoft" value={fmtPrice(stocks.msft && stocks.msft.price)} pct={stocks.msft && stocks.msft.pct} loading={tdPending(loadingFull, stocks.msft)} />}
-        {full && <FinanceRow icon="📦" name="Amazon"   value={fmtPrice(stocks.amzn && stocks.amzn.price)} pct={stocks.amzn && stocks.amzn.pct} loading={tdPending(loadingFull, stocks.amzn)} />}
-        {full && <FinanceRow icon="🚗" name="Tesla"    value={fmtPrice(stocks.tsla && stocks.tsla.price)} pct={stocks.tsla && stocks.tsla.pct} loading={tdPending(loadingFull, stocks.tsla)} />}
+        <FinanceRow icon="🟢" name="NVIDIA"   value={fmtPrice(stocks.nvda && stocks.nvda.price)} pct={stocks.nvda && stocks.nvda.pct} loading={tdPending(loadingLight, stocks.nvda)} chart={{ kind:'stooq', id:'nvda.us' }} onChart={setChartSpec} />
+        <FinanceRow icon="🎮" name="Take-Two" value={fmtPrice(stocks.ttwo && stocks.ttwo.price)} pct={stocks.ttwo && stocks.ttwo.pct} loading={tdPending(loadingLight, stocks.ttwo)} chart={{ kind:'stooq', id:'ttwo.us' }} onChart={setChartSpec} />
+        {full && <FinanceRow icon="🔍" name="Google"   value={fmtPrice(stocks.googl && stocks.googl.price)} pct={stocks.googl && stocks.googl.pct} loading={tdPending(loadingFull, stocks.googl)} chart={{ kind:'stooq', id:'googl.us' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon="🪟" name="Microsoft" value={fmtPrice(stocks.msft && stocks.msft.price)} pct={stocks.msft && stocks.msft.pct} loading={tdPending(loadingFull, stocks.msft)} chart={{ kind:'stooq', id:'msft.us' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon="📦" name="Amazon"   value={fmtPrice(stocks.amzn && stocks.amzn.price)} pct={stocks.amzn && stocks.amzn.pct} loading={tdPending(loadingFull, stocks.amzn)} chart={{ kind:'stooq', id:'amzn.us' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon="🚗" name="Tesla"    value={fmtPrice(stocks.tsla && stocks.tsla.price)} pct={stocks.tsla && stocks.tsla.pct} loading={tdPending(loadingFull, stocks.tsla)} chart={{ kind:'stooq', id:'tsla.us' }} onChart={setChartSpec} />}
       </FinanceSection>
 
       <FinanceSection title="MATIÈRES PREMIÈRES" eurusd={eurusd}>
-        <FinanceRow icon="🛢" name="Pétrole (WTI)" value={fmtPrice(oil && oil.price)}  pct={oil && oil.pct} />
-        <FinanceRow icon="🥇" name="Or (once)"     value={fmtPrice(gold && gold.price)} />
-        {full && <FinanceRow icon="🥈" name="Argent (once)" value={fmtPrice(silver && silver.price)} />}
-        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} pct={sugar && sugar.pct} />}
+        <FinanceRow icon="🛢" name="Pétrole (WTI)" value={fmtPrice(oil && oil.price)}  pct={oil && oil.pct} chart={{ kind:'alpha', id:'WTI', interval:'daily' }} onChart={setChartSpec} />
+        <FinanceRow icon="🥇" name="Or (once)"     value={fmtPrice(gold && gold.price)} chart={{ kind:'stooq', id:'xauusd' }} onChart={setChartSpec} />
+        {full && <FinanceRow icon="🥈" name="Argent (once)" value={fmtPrice(silver && silver.price)} chart={{ kind:'stooq', id:'xagusd' }} onChart={setChartSpec} />}
+        {full && <FinanceRow icon="🍬" name="Sucre"          value={fmtPrice(sugar && sugar.price)} pct={sugar && sugar.pct} chart={{ kind:'alpha', id:'SUGAR', interval:'monthly' }} onChart={setChartSpec} />}
       </FinanceSection>
 
       <FinanceSection title="MONNAIE" eurusd={eurusd}>
-        <FinanceRow icon="💶" name="1 EUR → USD" value={eurusd != null ? '$' + Number(eurusd).toFixed(4) : '—'} />
+        <FinanceRow icon="💶" name="1 EUR → USD" value={eurusd != null ? '$' + Number(eurusd).toFixed(4) : '—'} chart={{ kind:'frankfurter', id:'EURUSD' }} onChart={setChartSpec} />
       </FinanceSection>
+
+      {chartSpec && <FinanceChartModal key={chartSpec.kind + ':' + chartSpec.id} spec={chartSpec} onClose={() => setChartSpec(null)} />}
     </div>
   );
 }

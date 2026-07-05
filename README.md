@@ -113,6 +113,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Chargement à la demande** : en mode Light seules les valeurs Light sont récupérées ; les valeurs Full ne sont chargées qu'au premier passage en mode Full
 - **Chargement à l'ouverture de Finance** : les APIs boursières ne sont appelées **que lorsqu'on ouvre la section/onglet Finance** (plus au login) — les cours commencent alors à se charger (valeurs Light en priorité) avec un **indicateur de chargement** clair pendant la récupération (les appels boursiers sont espacés de ~8 s pour respecter la limite gratuite de Twelve Data)
 - **Stock picking** (Full) : NVIDIA, Take-Two (TTWO), Google (GOOGL), Microsoft (MSFT), Amazon (AMZN), Tesla (TSLA) via **Twelve Data** (clé) + repli **[Stooq](https://stooq.com/)**
+- **📈 Graphique au clic** : **cliquer sur n'importe quelle ligne** (crypto, indice, action, or/argent, pétrole, sucre, EUR/USD) ouvre une **modal avec la courbe historique du prix** (SVG maison, aucune lib) — sélecteur de période (24h/7j/1m/1a pour la crypto, 1m/3m/1a pour le reste, 1a/5a/10a pour le sucre), variation sur la période, min/max, et **crosshair au survol/glisser** (date + valeur). Sources : CoinGecko (crypto), Frankfurter (EUR/USD), Stooq (indices/actions/métaux), Alpha Vantage (pétrole/sucre) — historiques mis en cache pour la session
 
 ### TV Time
 - Section **TV Time** dédiée (titre en vert-cyan) — onglet **au-dessus de To do** (desktop et menu « ⋯ » mobile)
