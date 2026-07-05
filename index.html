@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.1.9';
+const APP_VERSION = '3.2.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2929,6 +2929,9 @@ function buildBackup() {
     tmdb_key: tmdbKey() || null,
     // Maps : données du futur module Maps (placeholder tant que la section est vide)
     maps: lsJson('spotifyplus_maps') || {},   // trajets Google Timeline importés (section Maps)
+    // Finance : historique local des prix (crypto, indices, actions, matières, EUR/USD)
+    // échantillonné par l'app — sert de repli aux graphiques quand la source distante échoue
+    finance: lsJson('spotifyplus_finance_history') || { version: 1, series: {} },
     // Mot de passe : blob CHIFFRÉ du coffre { v, salt, iv, ct } — jamais en clair,
     // déchiffrable uniquement avec le mot de passe maître
     mdp_vault: loadVaultBlob(),
@@ -2944,6 +2947,7 @@ const EXPORT_SECTIONS = [
   { key:'tvtime',   label:'TV Time',      icon:'🎬', hint:'séries & films + clé TMDB',  fields:['tvtime', 'tmdb_key'] },
   { key:'todo',     label:'To do',        icon:'✅', hint:'tâches + journal terminées', fields:['todos', 'todos_done'] },
   { key:'maps',     label:'Maps',         icon:'🗺️', hint:'trajets Google Timeline',    fields:['maps'] },
+  { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…)', fields:['finance'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Remember',     icon:'🔔', hint:'rappels fixes + persos',     fields:['rappels', 'remembers'] },
   { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute",         fields:['stats'] },
@@ -2993,6 +2997,7 @@ function maybeWeeklyBackupPrompt() {
 //   prudente des compteurs cumulés uniquement (pas les compteurs mois/année, liés aux
 //   marqueurs de reset locaux).
 // - todos / todos_done / rappels / remembers : REMPLACÉS par la sauvegarde (si présents).
+// - finance (historique local des prix) : FUSIONNÉ — union par série, jamais écrasé.
 // La table `tracks` n'est pas dans la sauvegarde : le feed n'est pas touché.
 function applyBackup(data) {
   if (!data || data.app !== 'spotifyplus') throw new Error('format invalide');
@@ -3045,6 +3050,25 @@ function applyBackup(data) {
     try { localStorage.setItem('spotifyplus_tmdb_key', data.tmdb_key.trim()); } catch {}
   }
   if (data.maps && typeof data.maps === 'object') { put('spotifyplus_maps', data.maps); _mapsCache = null; }
+  // Finance : historique local des prix — FUSIONNÉ (pas remplacé) : union par série,
+  // tri par date, densité bornée (≥ 30 min entre 2 points), cap FIN_HIST_MAX_PTS.
+  // Un backup d'un autre appareil COMPLÈTE donc l'historique local sans l'écraser.
+  if (data.finance && typeof data.finance === 'object' && data.finance.series && typeof data.finance.series === 'object') {
+    try {
+      const h = loadFinHist();
+      for (const k of Object.keys(data.finance.series)) {
+        const arr = data.finance.series[k];
+        if (!Array.isArray(arr)) continue;
+        const merged = (h.series[k] || [])
+          .concat(arr.filter(p => p && p.t != null && p.v != null && !isNaN(p.v)))
+          .sort((a, b) => a.t - b.t);
+        const out = [];
+        for (const p of merged) if (!out.length || p.t - out[out.length - 1].t >= FIN_HIST_MIN_MS) out.push(p);
+        h.series[k] = out.slice(-FIN_HIST_MAX_PTS);
+      }
+      saveFinHist();
+    } catch {}
+  }
   // Coffre MDP : blob chiffré — copie de secours de l'existant avant remplacement
   // (même filet que l'import de GestionMdpPanel : spotifyplus_mdp_vault_prev)
   if (isVaultBlob(data.mdp_vault)) {
@@ -4533,6 +4557,73 @@ function chartDownsample(pts, maxPts = 400) {
   return out;
 }
 
+// ── Historique LOCAL des prix (repli du graphique) ──
+// Les sources d'historique distantes peuvent échouer (proxies CORS bloqués, quota
+// Alpha Vantage épuisé, rate-limit CoinGecko…) : l'app ÉCHANTILLONNE donc les prix
+// affichés — à chaque `_finNotify` via `finHistSnapshot()`, ≥ 30 min entre 2 points
+// par série, ≤ 500 points/série — dans localStorage `spotifyplus_finance_history`
+// (`{ version:1, series: { '<clé>': [{ t, v }, …] } }`, clés = `finHistKey(spec)` :
+// `cg:bitcoin` / `stooq:^spx` / `alpha:WTI` / `fx:EURUSD`). Quand la source distante
+// ne répond pas, `FinanceChartModal` retombe sur ces points locaux (bandeau ⚠ affiché).
+// Inclus dans buildBackup/applyBackup (clé `finance`, FUSIONNÉ à la restauration).
+const FIN_HIST_LS = 'spotifyplus_finance_history';
+const FIN_HIST_MIN_MS = 30 * 60 * 1000;   // ≥ 30 min entre 2 points d'une même série
+const FIN_HIST_MAX_PTS = 500;             // cap par série (≈ 10 ans à 1 point/semaine)
+let _finHistCache = null;                  // cache mémoire (évite le JSON.parse à chaque notify)
+function loadFinHist() {
+  if (_finHistCache) return _finHistCache;
+  try { _finHistCache = JSON.parse(localStorage.getItem(FIN_HIST_LS)) || null; } catch (e) { _finHistCache = null; }
+  if (!_finHistCache || typeof _finHistCache !== 'object' || !_finHistCache.series) _finHistCache = { version: 1, series: {} };
+  return _finHistCache;
+}
+function saveFinHist() { try { localStorage.setItem(FIN_HIST_LS, JSON.stringify(loadFinHist())); } catch (e) {} }
+// Ajoute un point à une série (si valeur valide et ≥ 30 min après le dernier). → true si ajouté
+function finHistRecord(h, key, v) {
+  if (v == null || isNaN(v)) return false;
+  const s = h.series[key] || (h.series[key] = []);
+  const last = s[s.length - 1];
+  if (last && Date.now() - last.t < FIN_HIST_MIN_MS) return false;
+  s.push({ t: Date.now(), v: Number(v) });
+  if (s.length > FIN_HIST_MAX_PTS) s.splice(0, s.length - FIN_HIST_MAX_PTS);
+  return true;
+}
+// Snapshot de TOUTES les valeurs présentes dans `_finance` → séries locales.
+// Appelé par `_finNotify` (donc à chaque prix qui arrive) ; n'écrit dans localStorage
+// que si au moins un point a réellement été ajouté (throttle 30 min par série).
+function finHistSnapshot() {
+  try {
+    const f = _finance, h = loadFinHist();
+    let dirty = false;
+    const cg = (f.crypto && f.crypto !== 'error') ? f.crypto : null;
+    if (cg) for (const id of ['bitcoin', 'ethereum', 'solana', 'bittensor', 'ripple', 'pepe'])
+      dirty = finHistRecord(h, 'cg:' + id, cg[id] && cg[id].usd) || dirty;
+    if (f.idx) for (const [k, sym] of [['spx', '^spx'], ['ndq', '^ndq'], ['cac', '^cac']])
+      dirty = finHistRecord(h, 'stooq:' + sym, f.idx[k] && f.idx[k].price) || dirty;
+    for (const [k, sym] of [['nvda', 'nvda.us'], ['ttwo', 'ttwo.us'], ['googl', 'googl.us'], ['msft', 'msft.us'], ['amzn', 'amzn.us'], ['tsla', 'tsla.us']])
+      dirty = finHistRecord(h, 'stooq:' + sym, f.stocks[k] && f.stocks[k].price) || dirty;
+    dirty = finHistRecord(h, 'stooq:xauusd', f.gold && f.gold.price) || dirty;
+    dirty = finHistRecord(h, 'stooq:xagusd', f.silver && f.silver.price) || dirty;
+    dirty = finHistRecord(h, 'alpha:WTI',   f.oil && f.oil.price) || dirty;
+    dirty = finHistRecord(h, 'alpha:SUGAR', f.sugar && f.sugar.price) || dirty;
+    dirty = finHistRecord(h, 'fx:EURUSD',   f.eurusd) || dirty;
+    if (dirty) saveFinHist();
+  } catch (e) {}
+}
+// Clé de série locale pour un spec de graphique (mêmes clés que finHistSnapshot)
+function finHistKey(spec) {
+  if (spec.kind === 'coingecko')   return 'cg:' + spec.id;
+  if (spec.kind === 'frankfurter') return 'fx:EURUSD';
+  if (spec.kind === 'alpha')       return 'alpha:' + spec.id;
+  return 'stooq:' + spec.id;
+}
+// Points locaux pour un spec + une période (null si < 2 points dans la fenêtre)
+function finHistPoints(spec, range) {
+  const s = loadFinHist().series[finHistKey(spec)] || [];
+  const since = Date.now() - (CHART_RANGE_DAYS[range] || 92) * 864e5;
+  const pts = s.filter(p => p && p.t >= since && p.v != null && !isNaN(p.v));
+  return pts.length >= 2 ? chartDownsample(pts) : null;
+}
+
 // Historique quotidien Stooq (1 an) — CSV `Date,Open,High,Low,Close,Volume`, via les
 // mêmes proxies CORS que les cotations. Cache par symbole, découpé ensuite par période.
 async function fetchStooqHistory(symbol) {
@@ -4695,16 +4786,21 @@ function FinanceChart({ pts, fmtV, range }) {
 function FinanceChartModal({ spec, onClose }) {
   const ranges = chartRanges(spec);
   const [range, setRange] = React.useState(ranges[1]);
-  const [state, setState] = React.useState({ loading: true, pts: null });
+  const [state, setState] = React.useState({ loading: true, pts: null, local: false });
   React.useEffect(() => {
     let cancelled = false;
-    setState({ loading: true, pts: null });
-    fetchChartPoints(spec, range).then(pts => { if (!cancelled) setState({ loading: false, pts }); });
+    setState({ loading: true, pts: null, local: false });
+    fetchChartPoints(spec, range).then(pts => {
+      if (cancelled) return;
+      // Source distante KO → repli sur l'historique local échantillonné par l'app
+      if (pts) setState({ loading: false, pts, local: false });
+      else setState({ loading: false, pts: finHistPoints(spec, range), local: true });
+    });
     return () => { cancelled = true; };
   }, [range]);
 
   const fmtV = spec.kind === 'frankfurter' ? (v => '$' + Number(v).toFixed(4)) : fmtPrice;
-  const { loading, pts } = state;
+  const { loading, pts, local } = state;
   const first = pts && pts[0].v, last = pts && pts[pts.length - 1].v;
   const periodPct = (pts && first) ? ((last - first) / first) * 100 : null;
 
@@ -4737,9 +4833,19 @@ function FinanceChartModal({ spec, onClose }) {
         {loading ? (
           <div style={{ fontSize:11, color:C.muted, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Chargement du graphique…</div>
         ) : !pts ? (
-          <div style={{ fontSize:11, color:C.muted, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Graphique indisponible (source injoignable)</div>
+          <div style={{ fontSize:11, color:C.muted, padding:'40px 0', textAlign:'center', fontFamily:'DM Mono,monospace', lineHeight:1.6 }}>
+            Graphique indisponible — source injoignable et pas encore assez d'historique local.<br/>
+            <span style={{ fontSize:9, color:C.dim }}>Les prix affichés sont échantillonnés automatiquement à chaque ouverture de Finance : la courbe se construira au fil des visites.</span>
+          </div>
         ) : (
-          <FinanceChart pts={pts} fmtV={fmtV} range={range} />
+          <>
+            <FinanceChart pts={pts} fmtV={fmtV} range={range} />
+            {local && (
+              <div style={{ fontSize:9, color:C.muted, textAlign:'center', marginTop:8, fontStyle:'italic' }}>
+                ⚠ Source distante indisponible — courbe reconstituée depuis l'historique local échantillonné par l'app
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -4782,7 +4888,10 @@ const _finance = {
   startedLight: false, startedFull: false,
   subs: new Set(),
 };
-function _finNotify() { _finance.subs.forEach(fn => { try { fn(); } catch (e) {} }); }
+function _finNotify() {
+  finHistSnapshot();   // échantillonne les prix affichés (repli local des graphiques)
+  _finance.subs.forEach(fn => { try { fn(); } catch (e) {} });
+}
 
 // Piste Alpha Vantage : appels SÉQUENTIELS avec une pause (400ms) pour ne pas burster
 // la limite par minute d'AV. `jobs` = [ [() => Promise<{price,pct}>, setter], ... ].
