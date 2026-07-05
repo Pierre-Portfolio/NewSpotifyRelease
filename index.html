@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.2.9';
+const APP_VERSION = '3.3.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5138,7 +5138,11 @@ const TMDB_KEY_LS  = 'spotifyplus_tmdb_key';
 const TVTIME_LS_KEY = 'spotifyplus_tvtime';
 const TVTIME_FILTER_LS = 'spotifyplus_tvtime_filter';  // 'all' | 'movie' | 'tv' — filtre Films/Séries persisté
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w92';   // affiches (vignettes)
+const TMDB_STILL = 'https://image.tmdb.org/t/p/w185'; // vignettes d'épisodes (16:9)
 const TV_REFRESH_TTL = 24 * 60 * 60 * 1000;          // TTL du refresh « prochaines sorties »
+const TVTIME_EPS_LS = 'spotifyplus_tvtime_eps';      // cache des épisodes par saison
+const TV_EPS_TTL = 7 * 24 * 60 * 60 * 1000;          // TTL du cache épisodes (7 j)
+const TV_EPS_CACHE_MAX = 80;                          // nb max de saisons en cache (éviction des plus anciennes)
 
 function tmdbKey() { try { return (localStorage.getItem(TMDB_KEY_LS) || '').trim() || TMDB_API_KEY; } catch { return TMDB_API_KEY; } }
 function loadTvItems() { try { return JSON.parse(localStorage.getItem(TVTIME_LS_KEY)) || []; } catch { return []; } }
@@ -5211,6 +5215,33 @@ function tvSeasonBreakdown(item) {
   });
 }
 
+// Épisodes d'une saison (fiche série dépliée) — 1 requête /tv/{id}/season/{n} PAR SAISON,
+// uniquement au 1er dépliage, puis cache localStorage 7 j (+ cache mémoire session).
+// Retourne [{ e, name, still }] ou null (erreur réseau / clé absente — le caller génère
+// alors des épisodes placeholder pour que les coches restent utilisables hors-ligne).
+const _tvEpsCache = {};   // mémoire session — évite de re-parser le localStorage à chaque render
+async function tvFetchSeasonEps(tvId, n) {
+  const key = `${tvId}:${n}`;
+  if (_tvEpsCache[key]) return _tvEpsCache[key];
+  let store = {};
+  try { store = JSON.parse(localStorage.getItem(TVTIME_EPS_LS)) || {}; } catch {}
+  const hit = store[key];
+  if (hit && Date.now() - (hit.at || 0) < TV_EPS_TTL) { _tvEpsCache[key] = hit.eps; return hit.eps; }
+  const d = await tmdbGet(`/tv/${tvId}/season/${n}`);
+  if (!d || !Array.isArray(d.episodes)) return (hit && hit.eps) || null;  // échec → cache périmé plutôt que rien
+  const eps = d.episodes.map(ep => ({ e: ep.episode_number, name: ep.name || '', still: ep.still_path || null }));
+  _tvEpsCache[key] = eps;
+  store[key] = { at: Date.now(), eps };
+  // Éviction des saisons les plus anciennes si le cache grossit trop
+  const keys = Object.keys(store);
+  if (keys.length > TV_EPS_CACHE_MAX) {
+    keys.sort((a, b) => (store[a].at || 0) - (store[b].at || 0))
+      .slice(0, keys.length - TV_EPS_CACHE_MAX).forEach(k => delete store[k]);
+  }
+  try { localStorage.setItem(TVTIME_EPS_LS, JSON.stringify(store)); } catch {}
+  return eps;
+}
+
 // Statut de production TMDB → libellé FR pour la fiche série
 function tvStatusFR(s) {
   if (/ended/i.test(s || '')) return 'Terminée';
@@ -5266,11 +5297,27 @@ function tvTimeStats() {
 // ── Fiche série (popup au clic sur l'affiche) — progression décortiquée par saison.
 // Concept type TV Time : « Continuer le suivi » (prochain ép. + coche), une ligne par
 // saison (barre + x/y + coche verte), épisodes spéciaux affichés À PART et JAMAIS comptés.
-function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onStatus }) {
+function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onStatus }) {
   const total   = item.totalEps || 0;
   const watched = Math.min(item.watchedEps || 0, total);
   const pct     = total ? Math.round(watched / total * 100) : 0;
   const rows    = tvSeasonBreakdown(item);
+  // Saison dépliée (liste des épisodes façon TV Time) — 1 fetch /tv/{id}/season/{n} au
+  // 1er dépliage (cache 7 j), puis tout est local. Placeholders si l'API échoue.
+  const [openSeason, setOpenSeason] = React.useState(null);
+  const [epsMap, setEpsMap]         = React.useState({});
+  const [epsLoading, setEpsLoading] = React.useState(null);
+  const toggleSeason = async s => {
+    if (openSeason === s.n) { setOpenSeason(null); return; }
+    setOpenSeason(s.n);
+    if (!epsMap[s.n]) {
+      setEpsLoading(s.n);
+      const eps = await tvFetchSeasonEps(item.id, s.n);
+      const list = (eps && eps.length) ? eps : Array.from({ length: s.eps }, (_, i) => ({ e: i + 1, name: '', still: null }));
+      setEpsMap(m => ({ ...m, [s.n]: list }));
+      setEpsLoading(null);
+    }
+  };
   const nextSeason = rows.find(s => s.watched < s.eps) || null;   // 1re saison incomplète
   const allSeen = total > 0 && watched >= total;
   const prodLbl = tvStatusFR(item.tvStatus);
@@ -5349,15 +5396,46 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onStatus }) {
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
           {rows.map(s => {
             const done = s.watched >= s.eps;
+            const open = openSeason === s.n;
             return (
               <div key={s.n} style={{ background:C.surfaceHigh, borderRadius:10, padding:'8px 12px' }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                <div onClick={() => toggleSeason(s)} title={open ? 'Replier la saison' : 'Voir les épisodes'}
+                  style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6, cursor:'pointer', userSelect:'none' }}>
+                  <span style={{ display:'inline-block', color:C.dim, fontSize:10, lineHeight:1, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
                   <div style={{ flex:1, fontSize:12, fontWeight:800, color:C.text }}>Saison {s.n}</div>
                   <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: done ? '#4caf50' : C.muted, fontWeight:700 }}>{s.watched}/{s.eps}</div>
-                  <Check done={done} onClick={() => onSeasonToggle(s)}
+                  <Check done={done} onClick={e => { e.stopPropagation(); onSeasonToggle(s); }}
                     title={done ? `Décocher (revenir au début de la saison ${s.n})` : `Marquer vue jusqu'à la fin de la saison ${s.n}`} />
                 </div>
                 <Bar v={s.watched} max={s.eps} color={done ? '#4caf50' : TVTIME_COLOR} />
+                {/* Liste des épisodes (dépliée) — vignette + S02 | E05 + nom + coche */}
+                {open && (
+                  epsLoading === s.n
+                    ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'8px 0 2px', fontFamily:'DM Mono,monospace' }}>Chargement des épisodes…</div>
+                    : (epsMap[s.n] || []).length > 0 && (
+                        <div style={{ display:'flex', flexDirection:'column', gap:5, marginTop:8 }}>
+                          {epsMap[s.n].map(ep => {
+                            const seen = s.cumStart + ep.e <= (item.watchedEps || 0);
+                            return (
+                              <div key={ep.e} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52 }}>
+                                {ep.still
+                                  ? <img src={TMDB_STILL + ep.still} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', flexShrink:0, background:'#1a1a1a' }} />
+                                  : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0 }}>📺</div>}
+                                <div style={{ flex:1, minWidth:0 }}>
+                                  <div style={{ fontSize:13, fontWeight:900, fontFamily:'DM Mono,monospace', color:C.text }}>
+                                    S{String(s.n).padStart(2, '0')} | E{String(ep.e).padStart(2, '0')}
+                                  </div>
+                                  {ep.name && <div style={{ fontSize:10, color:C.muted, marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{ep.name}</div>}
+                                </div>
+                                <Check done={seen}
+                                  onClick={() => onSetEps(seen ? s.cumStart + ep.e - 1 : s.cumStart + ep.e)}
+                                  title={seen ? `Décocher (vu jusqu'à S${s.n}E${ep.e - 1})` : `Vu jusqu'à S${s.n}E${ep.e}`} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )
+                )}
               </div>
             );
           })}
@@ -5370,7 +5448,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onStatus }) {
           )}
         </div>
         <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
-          ℹ Les épisodes hors-série (saison 0) ne comptent pas dans la progression : pas besoin de les voir pour considérer la série comme vue en entier. Cocher une saison marque la série vue jusqu'à la fin de cette saison.
+          ℹ Les épisodes hors-série (saison 0) ne comptent pas dans la progression : pas besoin de les voir pour considérer la série comme vue en entier. Cocher une saison marque la série vue jusqu'à la fin de cette saison ; cocher un épisode la marque vue jusqu'à cet épisode inclus.
         </div>
       </div>
     </div>
@@ -5653,6 +5731,7 @@ function TvTimePanel() {
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
         onSeasonToggle={s => setWatchedTo(detailItem, s.watched >= s.eps ? s.cumStart : s.cumEnd)}
+        onSetEps={v => setWatchedTo(detailItem, v)}
         onStatus={st => setStatus(detailItem, st)} />}
     </div>
   );
