@@ -121,10 +121,11 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Clé API personnelle requise** : crée un compte gratuit sur themoviedb.org, génère une clé API v3 dans *Paramètres → API* et colle-la dans la section (stockée uniquement sur ton appareil ; bouton ⚙ pour la changer). Sans clé, aucune requête ne part
 - **Recherche** films + séries (une seule requête pour les deux) avec affiche, année et type — ajoute chaque résultat en **📌 À voir**, **▶ En cours** ou **✓ Vu**
 - **Filtre Films / Séries** : sélecteur **Tous · N / 📺 Séries · N / 🎬 Films · N** sous la recherche — filtre toutes les listes (En cours, À voir, Vus), masque « Prochaines sorties » en mode Films, et **mémorise ton choix** d'une visite à l'autre
+- **4 sections toutes repliables** (clic sur le titre, chevron ▶) — dans l'ordre : En cours, À voir, Prochaines sorties, Vus (Vus repliée par défaut)
 - **▶ En cours** : progression par série (`5/20 ép. · prochain S2E5`) avec boutons **− / ＋** pour compter les épisodes vus, **✓** pour marquer la série terminée (tout vu)
 - **📌 À voir** : ta watchlist — passe un titre en cours (▶), marque-le vu (✓) ou retire-le (×)
-- **✓ Vus** : historique repliable de tout ce que tu as terminé (avec retour possible en « En cours » pour un re-visionnage)
 - **📅 Prochaines sorties** : les prochains épisodes annoncés de tes séries suivies (`S3E1 « titre » · date · dans X j`), triés par date, actualisés automatiquement au plus **1×/24h** + bouton ↻ manuel
+- **✓ Vus** : historique de tout ce que tu as terminé (avec retour possible en « En cours » pour un re-visionnage)
 - **Économie de requêtes maximale** : toutes les infos TMDB (affiches, durées, saisons, nombre d'épisodes, prochain épisode) sont **mises en cache localement à l'ajout** — compter tes épisodes, consulter tes listes et les stats ne redemande **jamais rien** à l'API ; seules les séries suivies non terminées sont rafraîchies (1 requête/série, max 1×/jour)
 - Données incluses dans l'**export/restauration** de sauvegarde (et la sync Dropbox)
 - Alimente le collapse **🎬 Stats Film** de l'onglet À propos : **films vus**, **épisodes vus** (+ nombre de séries), **temps passé devant les films** et **devant les séries** (épisodes vus × durée moyenne d'un épisode)
