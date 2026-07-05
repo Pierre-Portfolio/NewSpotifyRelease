@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.3.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5181,7 +5181,8 @@ async function tmdbFetchItem(type, id) {
   const specialEps = ((d.seasons || []).find(s => s.season_number === 0) || {}).episode_count || 0;
   return {
     ...base,
-    specialEps,   // épisodes hors-série (saison 0) — affichés dans la fiche, JAMAIS comptés
+    specialEps,   // épisodes hors-série (saison 0) — suivis à part, JAMAIS comptés dans totalEps
+    watchedSpecials: 0,   // compteur plat des spéciaux vus (fiche série) — n'entre pas dans la progression
     epRuntime: (d.episode_run_time && d.episode_run_time[0]) || (d.last_episode_to_air && d.last_episode_to_air.runtime) || 35,
     totalEps: d.number_of_episodes || seasons.reduce((a, s) => a + s.eps, 0),
     seasons,
@@ -5285,7 +5286,9 @@ function tvTimeStats() {
     if (it.type === 'movie') {
       if (it.status === 'done') { movies++; movieMin += it.runtime || 0; }
     } else {
-      const w = it.watchedEps || 0;
+      // Les spéciaux vus (watchedSpecials) comptent dans les stats d'épisodes,
+      // mais jamais dans la progression / le passage en « Vu » d'une série
+      const w = (it.watchedEps || 0) + Math.min(it.watchedSpecials || 0, it.specialEps || 0);
       if (w > 0) series++;
       episodes += w;
       epMin += w * (it.epRuntime || 0);
@@ -5296,12 +5299,21 @@ function tvTimeStats() {
 
 // ── Fiche série (popup au clic sur l'affiche) — progression décortiquée par saison.
 // Concept type TV Time : « Continuer le suivi » (prochain ép. + coche), une ligne par
-// saison (barre + x/y + coche verte), épisodes spéciaux affichés À PART et JAMAIS comptés.
-function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onStatus }) {
+// saison (barre + x/y + coche verte). Les épisodes spéciaux (saison 0) sont SUIVABLES
+// (ligne dépliable + coches, compteur watchedSpecials) mais JAMAIS comptés dans les
+// 100 % ni requis pour que la série passe en « Vu ».
+function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetSpecials, onStatus }) {
   const total   = item.totalEps || 0;
   const watched = Math.min(item.watchedEps || 0, total);
   const pct     = total ? Math.round(watched / total * 100) : 0;
   const rows    = tvSeasonBreakdown(item);
+  // Pseudo-ligne « Épisodes spéciaux » (n=0) ajoutée en fin de liste — même mécanique
+  // de dépliage/coches que les vraies saisons, mais compteur séparé (watchedSpecials)
+  const spEps   = item.specialEps || 0;
+  const spW     = Math.min(item.watchedSpecials || 0, spEps);
+  const allRows = spEps > 0
+    ? rows.concat([{ n: 0, special: true, eps: spEps, watched: spW, cumStart: 0, cumEnd: spEps }])
+    : rows;
   // Saison dépliée (liste des épisodes façon TV Time) — 1 fetch /tv/{id}/season/{n} au
   // 1er dépliage (cache 7 j), puis tout est local. Placeholders si l'API échoue.
   const [openSeason, setOpenSeason] = React.useState(null);
@@ -5394,20 +5406,26 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onStat
         {/* Saisons */}
         <div style={{ fontSize:10, fontWeight:800, color:TVTIME_COLOR, letterSpacing:'0.05em', marginBottom:6 }}>TOUTES LES SAISONS</div>
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {rows.map(s => {
+          {allRows.map(s => {
             const done = s.watched >= s.eps;
             const open = openSeason === s.n;
+            // Ligne spéciaux : compteur séparé (watchedSpecials), coches via onSetSpecials,
+            // rendu grisé — même mécanique de dépliage que les vraies saisons (saison 0 TMDB)
+            const cnt = s.special ? spW : (item.watchedEps || 0);
+            const setTo = s.special ? onSetSpecials : onSetEps;
             return (
-              <div key={s.n} style={{ background:C.surfaceHigh, borderRadius:10, padding:'8px 12px' }}>
-                <div onClick={() => toggleSeason(s)} title={open ? 'Replier la saison' : 'Voir les épisodes'}
+              <div key={s.n} style={{ background: s.special ? '#111' : C.surfaceHigh, borderRadius:10, padding:'8px 12px' }}>
+                <div onClick={() => toggleSeason(s)} title={open ? 'Replier' : 'Voir les épisodes'}
                   style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6, cursor:'pointer', userSelect:'none' }}>
                   <span style={{ display:'inline-block', color:C.dim, fontSize:10, lineHeight:1, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
-                  <div style={{ flex:1, fontSize:12, fontWeight:800, color:C.text }}>Saison {s.n}</div>
-                  <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: done ? '#4caf50' : C.muted, fontWeight:700 }}>{s.watched}/{s.eps}</div>
-                  <Check done={done} onClick={e => { e.stopPropagation(); onSeasonToggle(s); }}
-                    title={done ? `Décocher (revenir au début de la saison ${s.n})` : `Marquer vue jusqu'à la fin de la saison ${s.n}`} />
+                  <div style={{ flex:1, fontSize:12, fontWeight:800, color: s.special ? C.dim : C.text }}>{s.special ? 'Épisodes spéciaux' : `Saison ${s.n}`}</div>
+                  <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: done ? '#4caf50' : (s.special ? C.dim : C.muted), fontWeight:700 }}>{s.watched}/{s.eps}{s.special ? ' · non comptés' : ''}</div>
+                  <Check done={done} onClick={e => { e.stopPropagation(); s.special ? onSetSpecials(done ? 0 : s.eps) : onSeasonToggle(s); }}
+                    title={s.special
+                      ? (done ? 'Décocher tous les épisodes spéciaux' : 'Marquer tous les épisodes spéciaux vus')
+                      : (done ? `Décocher (revenir au début de la saison ${s.n})` : `Marquer vue jusqu'à la fin de la saison ${s.n}`)} />
                 </div>
-                <Bar v={s.watched} max={s.eps} color={done ? '#4caf50' : TVTIME_COLOR} />
+                <Bar v={s.watched} max={s.eps} color={done ? '#4caf50' : (s.special ? C.dim : TVTIME_COLOR)} />
                 {/* Liste des épisodes (dépliée) — vignette + S02 | E05 + nom + coche */}
                 {open && (
                   epsLoading === s.n
@@ -5415,9 +5433,9 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onStat
                     : (epsMap[s.n] || []).length > 0 && (
                         <div style={{ display:'flex', flexDirection:'column', gap:5, marginTop:8 }}>
                           {epsMap[s.n].map(ep => {
-                            const seen = s.cumStart + ep.e <= (item.watchedEps || 0);
+                            const seen = s.cumStart + ep.e <= cnt;
                             return (
-                              <div key={ep.e} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52 }}>
+                              <div key={ep.e} style={{ display:'flex', alignItems:'center', gap:10, background: s.special ? '#0a0a0a' : '#111', borderRadius:8, padding:6, minHeight:52 }}>
                                 {ep.still
                                   ? <img src={TMDB_STILL + ep.still} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', flexShrink:0, background:'#1a1a1a' }} />
                                   : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0 }}>📺</div>}
@@ -5428,7 +5446,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onStat
                                   {ep.name && <div style={{ fontSize:10, color:C.muted, marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{ep.name}</div>}
                                 </div>
                                 <Check done={seen}
-                                  onClick={() => onSetEps(seen ? s.cumStart + ep.e - 1 : s.cumStart + ep.e)}
+                                  onClick={() => setTo(seen ? s.cumStart + ep.e - 1 : s.cumStart + ep.e)}
                                   title={seen ? `Décocher (vu jusqu'à S${s.n}E${ep.e - 1})` : `Vu jusqu'à S${s.n}E${ep.e}`} />
                               </div>
                             );
@@ -5439,16 +5457,9 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onStat
               </div>
             );
           })}
-          {/* Épisodes spéciaux — à part, jamais comptés */}
-          {(item.specialEps || 0) > 0 && (
-            <div style={{ background:'#111', borderRadius:10, padding:'8px 12px', display:'flex', alignItems:'center', gap:8 }}>
-              <div style={{ flex:1, fontSize:12, fontWeight:700, color:C.dim }}>Épisodes spéciaux</div>
-              <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color:C.dim }}>{item.specialEps} ép. · non comptés</div>
-            </div>
-          )}
         </div>
         <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
-          ℹ Les épisodes hors-série (saison 0) ne comptent pas dans la progression : pas besoin de les voir pour considérer la série comme vue en entier. Cocher une saison marque la série vue jusqu'à la fin de cette saison ; cocher un épisode la marque vue jusqu'à cet épisode inclus.
+          ℹ Les épisodes hors-série (saison 0) sont suivables (coches) mais ne comptent pas dans la progression : pas besoin de les voir pour atteindre 100 % — la série passe automatiquement en « Vu » dès que tous les épisodes normaux sont vus. Cocher une saison marque la série vue jusqu'à la fin de cette saison ; cocher un épisode la marque vue jusqu'à cet épisode inclus.
         </div>
       </div>
     </div>
@@ -5537,12 +5548,28 @@ function TvTimePanel() {
     setResults(null); setQuery('');
   };
 
+  // Clamp du compteur + STATUT AUTO : tous les épisodes normaux vus (les spéciaux ne
+  // comptent pas) → la série passe automatiquement en « ✓ Vu » ; redescendre sous le
+  // total la repasse en « ▶ En cours » (une série 'done' a toujours watchedEps=totalEps)
+  const withEps = (it, v) => {
+    const w = Math.min(it.totalEps || 9999, Math.max(0, v));
+    const next = { ...it, watchedEps: w };
+    if (it.type === 'tv' && (it.totalEps || 0) > 0) {
+      if (w >= it.totalEps && it.status !== 'done') { next.status = 'done'; next.doneAt = Date.now(); }
+      else if (w < it.totalEps && it.status === 'done') next.status = 'watching';
+    }
+    return next;
+  };
   // +1 / −1 épisode vu (bornés 0..totalEps) — aucune requête, tout est déjà en cache
   const bump = (item, d) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
-    { ...it, watchedEps: Math.min(it.totalEps || 9999, Math.max(0, (it.watchedEps || 0) + d)) }));
-  // Pose le compteur à une valeur absolue (coche saison de la fiche série)
+    withEps(it, (it.watchedEps || 0) + d)));
+  // Pose le compteur à une valeur absolue (coche saison / épisode de la fiche série)
   const setWatchedTo = (item, v) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
-    { ...it, watchedEps: Math.min(it.totalEps || 9999, Math.max(0, v)) }));
+    withEps(it, v)));
+  // Compteur des épisodes SPÉCIAUX vus (saison 0) — suivi à part, aucun effet sur le
+  // statut ni la progression (pas besoin de les voir pour terminer la série)
+  const setSpecialsTo = (item, v) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
+    { ...it, watchedSpecials: Math.min(it.specialEps || 0, Math.max(0, v)) }));
 
   const removeItem = item => {
     if (confirm(`Retirer « ${item.title} » de TV Time ?`)) update(items.filter(it => it.id !== item.id || it.type !== item.type));
@@ -5732,6 +5759,7 @@ function TvTimePanel() {
         onBump={d => bump(detailItem, d)}
         onSeasonToggle={s => setWatchedTo(detailItem, s.watched >= s.eps ? s.cumStart : s.cumEnd)}
         onSetEps={v => setWatchedTo(detailItem, v)}
+        onSetSpecials={v => setSpecialsTo(detailItem, v)}
         onStatus={st => setStatus(detailItem, st)} />}
     </div>
   );
