@@ -540,6 +540,9 @@ Une `release_date` Spotify peut avoir la précision `day` (`"2026-05-10"`), `mon
 ### Auto-avance « restart » — garde anti-vol de lecture
 L'effet 2 (redémarrage du même titre : `now.current < 5` après avoir été proche de la fin) exige désormais `prevNowRef.current.uri === now.uri` (**même URI** au tick précédent). Sans cette garde, un **changement de titre** ou un **seek manuel au début** d'un titre du feed était pris pour un rebouclage → `playTrack` écrasait le choix de l'utilisateur. (Même logique que la garde `nearEnd` de l'effet 1.)
 
+### Écran tout noir au chargement — erreur de compilation Babel (redéclaration `days`)
+Toute l'app est dans **un seul `<script type="text/babel">`** compilé au runtime par Babel standalone. **La moindre erreur de syntaxe fait échouer la compilation du script ENTIER → React ne monte jamais → `#root` reste vide → écran tout noir** (même pas le « // CHARGEMENT… », qui est déjà du React). Cas rencontré : `fetchMeteoDetail(lat, lon, days = 3)` (paramètre `days` ajouté pour le bouton Light/Full) avait déjà un `const days = d.time.map(...)` dans son corps → `SyntaxError: Identifier 'days' has already been declared`. Corrigé en renommant la variable locale en `daysArr` (`return { days: daysArr, hourly }`). **⚠ Il n'y a AUCUN filet de sécurité** : pas de build tool qui validerait la syntaxe avant déploiement, et aucun message d'erreur visible à l'écran. Après toute modif de `index.html`, vérifier que le script compile (charger la page et confirmer que `#root` n'est pas vide) avant de commit.
+
 ### Reset mensuel — mois LOCAL, pas UTC
 Le reset de `listened_this_month` compare `last_reset_month` à `curMonth`. `curMonth` est désormais calculé en **local** (`getFullYear()`/`getMonth()`) et non via `toISOString().slice(0,7)` (UTC) — sinon le compteur mensuel bascule à minuit UTC (≈ 01h/02h en France) au lieu de minuit local.
 
