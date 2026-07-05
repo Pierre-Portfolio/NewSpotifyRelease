@@ -97,7 +97,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
-- Prévisions sur **3 jours** (aujourd'hui + 2) pour **4 lieux** : **Voisins-le-Bretonneux**, **Massy**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
+- **Bouton Light / Full** en haut à droite (comme la section Finance) : **Light = 3 jours** (aujourd'hui + 2, par défaut), **Full = 7 jours** (tuiles plus compactes)
+- Prévisions pour **4 lieux** : **Voisins-le-Bretonneux**, **Massy**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
 - Le dernier lieu s'affiche **« Ma position (ville) »**, la ville étant détectée à partir des coordonnées GPS (reverse-geocoding via [BigDataCloud](https://www.bigdatacloud.com/), gratuit sans clé — repli sur « Ma position » si indisponible)
 - Chaque jour : icône météo + température max (en bleu) et min
 - **Clic sur un jour** → fiche détaillée : température ressentie, probabilité et cumul de pluie, heures de pluie, vent max + rafales + direction, indice UV, lever/coucher du soleil, et le **détail heure par heure** (température, proba de pluie, météo)

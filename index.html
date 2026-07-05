@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.2.7';
+const APP_VERSION = '3.2.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3978,10 +3978,10 @@ function wmoMeteo(code) {
   return m[code] || ['❓','—'];
 }
 
-async function fetchMeteo(lat, lon) {
+async function fetchMeteo(lat, lon, days = 3) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
     + `&daily=weather_code,temperature_2m_max,temperature_2m_min`
-    + `&timezone=Europe%2FParis&forecast_days=3`;
+    + `&timezone=Europe%2FParis&forecast_days=${days}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const j = await res.json();
@@ -3997,13 +3997,13 @@ async function fetchMeteo(lat, lon) {
 // Prévision détaillée (clic sur un jour) — Open-Meteo, beaucoup plus de champs :
 // ressenti, précipitations, proba pluie, vent + rafales + direction, UV, humidité,
 // lever/coucher du soleil + détail heure par heure de la journée.
-async function fetchMeteoDetail(lat, lon) {
+async function fetchMeteoDetail(lat, lon, days = 3) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
     + `&daily=weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,`
     + `sunrise,sunset,uv_index_max,precipitation_sum,precipitation_probability_max,precipitation_hours,`
     + `wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant`
     + `&hourly=temperature_2m,precipitation_probability,relative_humidity_2m,weather_code`
-    + `&timezone=Europe%2FParis&forecast_days=3`;
+    + `&timezone=Europe%2FParis&forecast_days=${days}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const j = await res.json();
@@ -4224,17 +4224,20 @@ function MeteoDetailModal({ locName, dayIndex, detail, loading, onClose }) {
   );
 }
 
-function MeteoLoc({ loc }) {
+function MeteoLoc({ loc, full }) {
   const [sel, setSel] = React.useState(null);     // index du jour sélectionné | null
   const [detail, setDetail] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
+
+  // Le nb de jours (3/7) change avec Light/Full → purger le détail caché et fermer la modal
+  React.useEffect(() => { setDetail(null); setSel(null); }, [full]);
 
   const openDay = async (i) => {
     setSel(i);
     if (loc.lat == null) return;
     if (detail) return;                            // déjà chargé pour ce lieu
     setLoading(true);
-    try { setDetail(await fetchMeteoDetail(loc.lat, loc.lon)); }
+    try { setDetail(await fetchMeteoDetail(loc.lat, loc.lon, full ? 7 : 3)); }
     catch (e) { setDetail({ days: [], hourly: {} }); }
     finally { setLoading(false); }
   };
@@ -4252,18 +4255,18 @@ function MeteoLoc({ loc }) {
           {loc.denied ? 'Position non autorisée' : 'Météo indisponible'}
         </div>
       ) : (
-        <div style={{ display:'flex', gap:6 }}>
+        <div style={{ display:'flex', gap: full ? 3 : 6 }}>
           {loc.days.map((day, i) => {
             const [emoji, label] = wmoMeteo(day.code);
             return (
               <div key={day.date} title={`${label} — clic pour le détail`} onClick={() => openDay(i)}
-                style={{ flex:1, background:C.surfaceHigh, borderRadius:8, padding:'8px 2px', textAlign:'center', cursor:'pointer', transition:'background 0.15s' }}
+                style={{ flex:1, minWidth:0, background:C.surfaceHigh, borderRadius:8, padding: full ? '6px 1px' : '8px 2px', textAlign:'center', cursor:'pointer', transition:'background 0.15s' }}
                 onMouseEnter={e => e.currentTarget.style.background = C.border}
                 onMouseLeave={e => e.currentTarget.style.background = C.surfaceHigh}>
-                <div style={{ fontSize:9, color:C.muted, fontWeight:700, letterSpacing:'0.03em' }}>{meteoDayLabel(day.date, i)}</div>
-                <div style={{ fontSize:20, margin:'4px 0', lineHeight:1 }}>{emoji}</div>
-                <div style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:METEO_BLUE, lineHeight:1.1 }}>{day.tmax}°</div>
-                <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>{day.tmin}°</div>
+                <div style={{ fontSize: full ? 8 : 9, color:C.muted, fontWeight:700, letterSpacing:'0.03em' }}>{meteoDayLabel(day.date, i)}</div>
+                <div style={{ fontSize: full ? 15 : 20, margin: full ? '3px 0' : '4px 0', lineHeight:1 }}>{emoji}</div>
+                <div style={{ fontSize: full ? 10 : 12, fontWeight:800, fontFamily:'DM Mono,monospace', color:METEO_BLUE, lineHeight:1.1 }}>{day.tmax}°</div>
+                <div style={{ fontSize: full ? 8 : 9, color:C.muted, fontFamily:'DM Mono,monospace' }}>{day.tmin}°</div>
               </div>
             );
           })}
@@ -4278,12 +4281,15 @@ function MeteoLoc({ loc }) {
 
 function MeteoPanel() {
   const [data, setData] = React.useState({}); // key -> { name, days } | { name, error }
+  // Light = 3 jours (défaut) · Full = 7 jours (tuiles plus petites). NON persisté.
+  const [full, setFull] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
+    const nDays = full ? 7 : 3;
     const load = async (key, name, lat, lon) => {
       try {
-        const days = await fetchMeteo(lat, lon);
+        const days = await fetchMeteo(lat, lon, nDays);
         if (!cancelled) setData(prev => ({ ...prev, [key]: { name, days, lat, lon } }));
       } catch (e) {
         if (!cancelled) setData(prev => ({ ...prev, [key]: { name, error:true, lat, lon } }));
@@ -4306,14 +4312,25 @@ function MeteoPanel() {
       setData(prev => ({ ...prev, me: { name:'Ma position', error:true } }));
     }
     return () => { cancelled = true; };
-  }, []);
+  }, [full]);
+
+  const modeBtn = active => ({
+    background: active ? `${METEO_BLUE}22` : 'none',
+    border: active ? `1px solid ${METEO_BLUE}66` : `1px solid ${C.border}`,
+    color: active ? METEO_BLUE : C.muted, borderRadius:6, padding:'3px 12px',
+    cursor:'pointer', fontSize:10, fontWeight: active ? 700 : 500,
+  });
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-      <MeteoLoc loc={data.voisins} />
-      <MeteoLoc loc={data.massy} />
-      <MeteoLoc loc={data.boulogne} />
-      <MeteoLoc loc={data.me} />
+      <div style={{ display:'flex', gap:4, justifyContent:'flex-end' }}>
+        <button onClick={() => setFull(false)} style={modeBtn(!full)}>Light</button>
+        <button onClick={() => setFull(true)}  style={modeBtn(full)}>Full</button>
+      </div>
+      <MeteoLoc loc={data.voisins} full={full} />
+      <MeteoLoc loc={data.massy} full={full} />
+      <MeteoLoc loc={data.boulogne} full={full} />
+      <MeteoLoc loc={data.me} full={full} />
     </div>
   );
 }
