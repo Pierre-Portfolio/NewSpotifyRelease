@@ -82,7 +82,7 @@ SCOPES       = 'user-follow-read user-read-private user-read-currently-playing u
 ```
 
 ### Version de l'app — `APP_VERSION`
-Constante module-level `APP_VERSION` (**actuellement `'3.5.9'`**, commit ≈359), format `MAJ.MIN.U` = **le nombre de commits du projet avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 278 commits → `2.7.8`, 270 → `2.7.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 3.0.0 »). **⚠ Le compteur suit l'historique du PROJET (≈300), pas `git rev-list --count HEAD` de ce dépôt-fork qui est bien plus bas (~65)** — incrémenter à la main en suivant le compteur projet.
+Constante module-level `APP_VERSION` (**actuellement `'3.6.0'`**, commit ≈360), format `MAJ.MIN.U` = **le nombre de commits du projet avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 278 commits → `2.7.8`, 270 → `2.7.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 3.0.0 »). **⚠ Le compteur suit l'historique du PROJET (≈300), pas `git rev-list --count HEAD` de ce dépôt-fork qui est bien plus bas (~65)** — incrémenter à la main en suivant le compteur projet.
 **⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le compteur = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit puis appliquer le découpage ci-dessus).
 
 ### Délai de scraping
@@ -578,6 +578,9 @@ Le champ `url` d'une entrée est rendu en `<a href>`. Comme la CSP autorise `'un
 `/me/player/currently-playing` retourne 204 quand rien ne joue (pas de body).
 Sans le guard `if (res.status === 204) return null`, `.json()` lève une exception → catch silencieux → `setNow(null)` jamais appelé → `now?.uri` ne change pas → auto-avance ne se déclenche jamais.
 **Toujours retourner `null` sur 204 dans `apiGet`** — et `{ rate_limited: true }` (pas `null`) quand le guard bloque, pour que le tick puisse distinguer les deux cas.
+
+### TV Time — bouton loupe qui cherchait en « Séries » (event passé comme type)
+Le bouton de recherche était `onClick={search}` : React passe l'**évènement de clic** en 1er argument, donc `search(event)` posait `type = event` → `path` retombait sur `/search/tv` (séries only) **et** `media_type: r.media_type || event` faisait échouer le `.filter(=== 'movie'|'tv')` → **0 résultat**. Symptôme : sur mobile (où l'on tape le bouton au lieu d'Entrée), « Les deux » renvoyait 0, « Films » marchait, puis rebasculer sur « Les deux » via `pickSearchType` (qui appelle `search('all')` correctement) affichait enfin les résultats — d'où l'impression d'un bug de filtre au démarrage + « pas d'étoiles » (les seuls résultats vus venaient du filtre Films). Corrigé : `onClick={() => search()}` + garde défensive dans `search` (`typeArg` ignoré s'il n'est pas `'all'|'movie'|'tv'`). Les étoiles sont le **même composant partagé** desktop/mobile : elles apparaissent dès qu'un résultat correspond à un titre déjà suivi.
 
 ### FeedItem — clé React stable
 `key={item.id}` (l'URI, unique) et **jamais** `key={item.id + i}` : avec l'index concaténé, retirer un titre changeait la clé de tous les suivants → remount complet de centaines de lignes, `React.memo` inopérant.
