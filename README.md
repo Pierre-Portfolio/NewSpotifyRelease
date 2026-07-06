@@ -87,13 +87,14 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### À propos
 - Section dédiée (onglet **À propos**) regroupant les **actions de données** et la version
 - **↥ Restaurer mes données** (en premier) : réimporte une sauvegarde JSON exportée (complète **ou** partielle) — les dates de scan des artistes sont fusionnées (jamais régressées), les stats fusionnées prudemment, les to do / rappels / TV Time / Maps / coffre MDP remplacés par la sauvegarde s'ils y figurent (une copie de secours du coffre actuel est conservée), et l'**historique local des prix Finance fusionné** (jamais écrasé)
-- **↧ Exporter mes données** : section **repliable** (fermée par défaut) proposant **9 exports JSON séparés** — **Tous** (sauvegarde complète), **Artistes** (dates de scan + compteurs), **TV Time** (suivi + clé API TMDB), **To do**, **Maps**, **📈 Finance** (historique local des prix : crypto, indices, actions, matières, EUR/USD), **Mot de passe** (coffre **chiffré**, déchiffrable uniquement avec le mot de passe maître), **Remember** et **Stats** — pour ne rien perdre (les données ne vivent que sur cet appareil)
+- **↧ Exporter mes données** : section **repliable** (fermée par défaut) proposant **10 exports JSON séparés** — **Tous** (sauvegarde complète), **Artistes** (dates de scan + compteurs), **TV Time** (suivi + clé API TMDB), **To do**, **Maps**, **📈 Finance** (historique local des prix : crypto, indices, actions, matières, EUR/USD), **Mot de passe** (coffre **chiffré**, déchiffrable uniquement avec le mot de passe maître), **Remember**, **Stats** et **⚙️ Paramétrage** (modules activés/désactivés) — pour ne rien perdre (les données ne vivent que sur cet appareil)
+- **⚙️ Paramétrage des modules** : section **repliable** avec un **interrupteur par module** (Historique, Artistes, Météo, Finance, TV Time, To do, Maps, Mot de passe, Remember) — activer/désactiver un module **fait apparaître/disparaître son onglet** en direct (desktop et mobile). Le réglage est inclus dans l'export/import (et la sync Dropbox/Drive)
 - **💾 Proposition de sauvegarde hebdomadaire** : une fois par semaine, au lancement, l'app propose (via une alerte) de télécharger une sauvegarde — uniquement si tu as des données et qu'aucune sauvegarde **complète** n'a eu lieu depuis 7 jours (les exports partiels ne comptent pas)
 - **☁︎ Sync Dropbox (optionnelle)** : connexion Dropbox (OAuth 2.0 PKCE) pour sauvegarder la **sauvegarde complète (« Tous »)** dans ton Dropbox — chaque sauvegarde **écrase la version précédente** sur Dropbox. Accessible depuis plusieurs appareils. La clé d'app Dropbox est renseignée dans le code (App folder dédié, aucun secret — OAuth PKCE)
 - **△ Sync Google Drive (optionnelle)** : même principe que Dropbox, juste en dessous — connexion Google (OAuth 2.0 implicite, scope `drive.file` : l'app ne voit que ses propres fichiers) pour sauvegarder la **sauvegarde complète (« Tous »)** dans ton Drive, en **écrasant la version précédente**. Le token Google expire au bout d'~1h : le bouton repasse alors en « Connecter » (reconnexion en 1 clic). Nécessite un **ID client OAuth** créé sur console.cloud.google.com et collé dans `GDRIVE_CLIENT_ID` (tant qu'il est vide, la section affiche « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
 - Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 3.0.7`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 3.5.5`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
 
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
@@ -105,7 +106,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Données météo via **[Open-Meteo](https://open-meteo.com/)**, API gratuite sans clé (issue du repo [public-apis](https://github.com/public-apis/public-apis)) — aucun backend, appel direct côté client
 
 ### Finance
-- Section **Finance** dédiée (titre en bleu) — desktop (onglet en haut) et menu « ⋯ » sur mobile
+- Section **Finance** dédiée (titre en cyan) — desktop (onglet en haut) et menu « ⋯ » sur mobile
 - Données live ; chaque sous-section affiche le taux **EUR/USD** (via **Twelve Data**, repli [Frankfurter](https://www.frankfurter.app/) / BCE)
 - **Bouton Light / Full** (Light par défaut) : en mode **Light** seules les valeurs essentielles sont affichées (**Bitcoin, PEPE, Or, Pétrole, S&P 500, NASDAQ, NVIDIA, Take-Two, EUR/USD**) ; le mode **Full** affiche tout. **Revient toujours en Light à chaque reconnexion** (choix non mémorisé).
 - **Crypto** : Bitcoin, Ethereum, Solana, TAO, XRP, PEPE (prix USD + variation 24h) via **[CoinGecko](https://www.coingecko.com/en/api)**
@@ -138,7 +139,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Alimente le collapse **🎬 Stats Film** de l'onglet À propos : **films vus**, **épisodes vus** (+ nombre de séries), **temps passé devant les films** et **devant les séries** (épisodes vus × durée moyenne d'un épisode)
 
 ### To do
-- Section **To do** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
+- Section **To do** dédiée (titre en vert) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
 - Ajout / suppression de tâches, classées par échéance via un **carrousel** : **Quotidien**, **Aujourd'hui**, **Dans la semaine**, **Dans le mois**, **Dans l'année**, **À faire un jour**
 - **⭐ Étoile** sur chaque tâche pour la marquer comme **favorite** (« compliquée ») — les favorites effectuées alimentent la stat **Tâches compliquées**
 - **Quotidien** : liste de tâches récurrentes qui **repartent chaque jour à 00h**. Le bouton **× vaut « valider pour aujourd'hui »** (il devient ✓) : la tâche est comptée comme terminée et grisée jusqu'à minuit, puis redevient active le lendemain. Pour la sortir du Quotidien, la **déplacer** avec les flèches ‹ › vers Aujourd'hui
@@ -157,7 +158,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Données en `localStorage` (tracés simplifiés automatiquement pour tenir dans le quota), incluses dans l'**export 🗺️ Maps** (À propos) et la **sauvegarde Dropbox**
 
 ### Mot de Passe
-- Section **Mot de Passe** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
+- Section **Mot de Passe** dédiée (titre en ambre) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
 - **Les URL sont assainies avant affichage** : seuls les liens `http(s)` sont cliquables — un lien `javascript:` d'une sauvegarde importée ne peut pas exécuter de code (protection contre le self-XSS)
 - **Coffre chiffré par un mot de passe maître** (AES-GCM 256 + PBKDF2 via la Web Crypto API native) : le localStorage ne contient que des données chiffrées, le mot de passe maître n'est jamais stocké
 - **Ajout / suppression** d'entrées avec **identifiant, mot de passe, URL et commentaire** ; le formulaire d'ajout est **repliable**, et un **champ de recherche** filtre les entrées (identifiant / URL / commentaire)
@@ -167,8 +168,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - ⚠️ Le chiffrement protège contre une **fuite passive** du stockage (sauvegarde/dump volé), **pas** contre un logiciel malveillant déjà actif sur l'appareil. **Mot de passe maître oublié = données irrécupérables** (aucun backend, aucune réinitialisation possible)
 
 ### Remember
-- Section **Remember** dédiée (titre en violet) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
-- Sections fixes (repliables) : **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Logement** (AG, Détecteur de fumée, Nettoyer hotte cuisine, Nettoyer VMC, Nettoyer aérations fenêtres), **Véhicule** (Contrôle technique, Assurance auto, Carte navigo, Permis de conduire), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné, Mutuelle), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Sport** (Licence Course à pied), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile), **Autre** (Lunettes, Carte restaurant expiration)
+- Section **Remember** dédiée (titre en orange) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
+- Sections fixes (repliables) : **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Logement** (AG, Détecteur de fumée, Nettoyer hotte cuisine, Nettoyer VMC, Nettoyer aérations fenêtres), **Véhicule** (Contrôle technique, Assurance auto, Carte navigo, Permis de conduire), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné, Mutuelle), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Finance** (Faire ses comptes, DCA), **Sport** (Licence Course à pied), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile), **Autre** (Lunettes, Carte restaurant expiration)
 - **Rappels personnalisés** : ajoute ton propre rappel (libellé + date)
 - Pour chaque rappel, un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
 - **Notification à l'ouverture de l'app** à 1 mois, 7 jours et 1 jour avant l'échéance, le jour même, ainsi que pour les rappels en retard (une fois par jour) + bandeau des rappels échus
@@ -226,6 +227,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Interface
 - **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (Stats, À propos, Historique, Météo, Finance, TV Time, To do, Maps, Mot de passe, Remember) — une seule section affichée à la fois (plus de colonne de droite)
 - **Mobile** : 3 onglets principaux (Scrapping / En attente / ❤ Likés) + un menu **« ⋯ »** regroupant les autres sections. Les libellés du menu suivent un **dégradé arc-en-ciel** (violet → indigo → bleu → cyan → vert-cyan → vert → jaune → ambre → orange → rouge), le rouge final rejoignant le bouton **Déconnecter**
+- **Cohérence des couleurs** : le titre/accent de chaque section reprend **exactement la couleur de son onglet dans le menu « ⋯ »** (Finance cyan, TV Time vert-cyan, To do vert, Maps jaune, Mot de passe ambre, Remember orange, Historique/Stats/À propos dans les tons finaux) — le contenu et son entrée de menu partagent la même identité visuelle
 - **Mode compact (split-screen)** : quand l'app est placée dans une petite fenêtre (ex. multi-fenêtres sur téléphone, ton projet en bas et une autre app en haut), l'interface se réduit automatiquement à **une barre de contrôles** : titre en cours + **précédent / lecture-pause / suivant / ❤ like**
 - Logs en temps réel pendant la sync
 - Countdown avant le prochain appel Spotify
