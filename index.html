@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.5.8';
+const APP_VERSION = '3.5.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5548,8 +5548,13 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
 function TvTimePanel() {
   const [items, setItems]     = React.useState(loadTvItems);
   const [query, setQuery]     = React.useState('');
-  const [results, setResults] = React.useState(null); // null = pas de résultats affichés
+  const [results, setResults] = React.useState(null); // null = pas de résultats affichés (tableau complet fetché, toutes pages)
   const [busy, setBusy]       = React.useState(false);
+  // Pagination « lazy load » de la recherche : on n'affiche que `visibleCount` résultats
+  // et « Voir plus » récupère la page TMDB suivante à la demande (au-delà des 8 premiers)
+  const [visibleCount, setVisibleCount] = React.useState(8);
+  const [searchMeta, setSearchMeta]     = React.useState(null); // { q, type, page, totalPages }
+  const [loadingMore, setLoadingMore]   = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [showKey, setShowKey] = React.useState(false);
   const [keyInput, setKeyInput] = React.useState('');
@@ -5624,9 +5629,32 @@ function TvTimePanel() {
     // /search/movie et /search/tv ne renvoient pas media_type → on le pose depuis le filtre
     setResults(d ? (d.results || [])
       .map(r => ({ ...r, media_type: r.media_type || type }))
-      .filter(r => r.media_type === 'movie' || r.media_type === 'tv')
-      .slice(0, 8) : []);
+      .filter(r => r.media_type === 'movie' || r.media_type === 'tv') : []);
+    setSearchMeta(d ? { q, type, page: 1, totalPages: d.total_pages || 1 } : null);
+    setVisibleCount(8);   // on repart des 8 premiers à chaque nouvelle recherche
     setBusy(false);
+  };
+  // « Voir plus » : affiche 8 résultats de plus. Si tout le fetch courant est déjà affiché
+  // et qu'il reste des pages TMDB, on récupère la page suivante à la demande (lazy load) —
+  // permet de trouver un titre absent des 8 premiers résultats. Dédoublonnage par id+type.
+  const loadMore = async () => {
+    if (loadingMore) return;
+    const next = visibleCount + 8;
+    if (searchMeta && next > (results ? results.length : 0) && searchMeta.page < searchMeta.totalPages) {
+      setLoadingMore(true);
+      const path = searchMeta.type === 'all' ? '/search/multi' : (searchMeta.type === 'movie' ? '/search/movie' : '/search/tv');
+      const d = await tmdbGet(path, { query: searchMeta.q, include_adult: 'false', page: searchMeta.page + 1 });
+      setLoadingMore(false);
+      const more = d ? (d.results || [])
+        .map(r => ({ ...r, media_type: r.media_type || searchMeta.type }))
+        .filter(r => r.media_type === 'movie' || r.media_type === 'tv') : [];
+      setResults(prev => {
+        const seen = new Set((prev || []).map(x => x.media_type + x.id));
+        return [...(prev || []), ...more.filter(x => !seen.has(x.media_type + x.id))];
+      });
+      setSearchMeta(m => m ? { ...m, page: m.page + 1, totalPages: d ? (d.total_pages || m.totalPages) : m.totalPages } : m);
+    }
+    setVisibleCount(next);
   };
   const pickSearchType = t => {
     setSearchType(t);
@@ -5815,11 +5843,11 @@ function TvTimePanel() {
           {results !== null && (
             <div style={{ display:'flex', flexDirection:'column', gap:5, background:'#111', borderRadius:8, padding:'6px 6px' }}>
               <div style={{ display:'flex', alignItems:'center' }}>
-                <div style={{ flex:1, fontSize:9, fontWeight:700, color:C.dim, letterSpacing:'0.05em' }}>RÉSULTATS · {results.length}</div>
-                <button onClick={() => { setResults(null); setQuery(''); }} style={abtn(C.dim)}>×</button>
+                <div style={{ flex:1, fontSize:9, fontWeight:700, color:C.dim, letterSpacing:'0.05em' }}>RÉSULTATS · {Math.min(visibleCount, results.length)}{((searchMeta && searchMeta.page < searchMeta.totalPages) || visibleCount < results.length) ? '+' : ''}</div>
+                <button onClick={() => { setResults(null); setQuery(''); setSearchMeta(null); }} style={abtn(C.dim)}>×</button>
               </div>
               {results.length === 0 && <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'4px 0' }}>Aucun résultat</div>}
-              {results.map(r => {
+              {results.slice(0, visibleCount).map(r => {
                 // ★ si le titre est déjà suivi, quel que soit son statut (à voir / en cours / vu, film comme série)
                 const exist = items.find(it => it.id === r.id && it.type === r.media_type);
                 const mark  = !!exist;
@@ -5840,6 +5868,12 @@ function TvTimePanel() {
                   () => openDetail(r)
                 );
               })}
+              {((searchMeta && searchMeta.page < searchMeta.totalPages) || visibleCount < results.length) && (
+                <button onClick={loadMore} disabled={loadingMore}
+                  style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color: loadingMore ? C.dim : TVTIME_COLOR, fontSize:10, fontWeight:700, padding:'6px 0', cursor: loadingMore ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', marginTop:2 }}>
+                  {loadingMore ? 'Chargement…' : '▼ Voir plus de résultats'}
+                </button>
+              )}
             </div>
           )}
 
