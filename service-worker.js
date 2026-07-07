@@ -9,7 +9,8 @@
 // (?code=...&state=...) écrivait le code d'autorisation dans Cache Storage.
 // L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
 // → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
-const CACHE  = 'spotifyplus-v7';
+// v8 : bump de cache pour forcer la maj des PWA installées (renommage sections Stats).
+const CACHE  = 'spotifyplus-v8';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
