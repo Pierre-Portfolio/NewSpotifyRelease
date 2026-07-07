@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.7.8';
+const APP_VERSION = '3.7.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1334,6 +1334,7 @@ function StoreProvider({ children }) {
         "UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1, total_listened_ms = total_listened_ms + ? WHERE id = 1",
         [durMs]
       );
+      recordListen(); // journal persistant (graphique) — survit à la purge
       saveDB().catch(() => {});
       setListenStats(loadListenStatsFromDB());
       setHistory(loadHistoryFromDB());
@@ -1490,6 +1491,7 @@ function StoreProvider({ children }) {
         "UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1, total_listened_ms = total_listened_ms + ? WHERE id = 1",
         [durMs]
       );
+      recordListen(); // journal persistant (graphique) — survit à la purge
     } else {
       // Déjà compté écouté par le poll : on s'assure juste qu'il est bien marqué (idempotent)
       dbRun("UPDATE tracks SET listened = 1, listened_at = COALESCE(listened_at, datetime('now')) WHERE spotify_uri = ?", [uri]);
@@ -1515,6 +1517,7 @@ function StoreProvider({ children }) {
           [durMs]
         );
         listenedUrisRef.current.delete(uri);
+        unrecordListen(); // retire la dernière entrée du journal persistant (le retrait vient de la poser)
       }
       await saveDB();
       // Réinsertion à la position d'origine (pas en tête) — bornée à la taille actuelle
@@ -1586,6 +1589,7 @@ function StoreProvider({ children }) {
         "UPDATE stats SET total_listened = total_listened + 1, listened_this_month = listened_this_month + 1, listened_this_year = listened_this_year + 1, total_listened_ms = total_listened_ms + ? WHERE id = 1",
         [durMs]
       );
+      recordListen(); // journal persistant (graphique) — survit à la purge
       saveDB().catch(() => {});
       setListenStats(loadListenStatsFromDB());
       setHistory(loadHistoryFromDB());
@@ -2975,6 +2979,8 @@ function buildBackup() {
     mdp_vault: loadVaultBlob(),
     // Paramétrage : modules activés/désactivés (section Paramétrage d'À propos)
     modules: lsJson(MODULES_LS_KEY) || {},
+    // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
+    listens: lsJson(LISTEN_LOG_KEY) || [],
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -2990,7 +2996,7 @@ const EXPORT_SECTIONS = [
   { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…)', fields:['finance'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Remember',     icon:'🔔', hint:'rappels fixes + persos',     fields:['rappels', 'remembers'] },
-  { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute",         fields:['stats'] },
+  { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique", fields:['stats', 'listens'] },
   { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés', fields:['modules'] },
 ];
 // Télécharge la sauvegarde en JSON. `section` = entrée d'EXPORT_SECTIONS (défaut : Tous).
@@ -3083,6 +3089,16 @@ function applyBackup(data) {
   const put = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
   if (Array.isArray(data.todos))      put('spotifyplus_todos', data.todos);
   if (Array.isArray(data.todos_done)) put('spotifyplus_todos_done', data.todos_done);
+  // Journal d'écoutes (graphique) — FUSIONNÉ : union des timestamps (dédup), tri, cap 5000
+  if (Array.isArray(data.listens)) {
+    try {
+      const cur = loadListenLog();
+      const seen = new Set(cur.map(e => e && e.ts));
+      const merged = cur.concat(data.listens.filter(e => e && typeof e.ts === 'number' && !seen.has(e.ts)))
+        .sort((a, b) => a.ts - b.ts);
+      saveListenLog(merged);
+    } catch {}
+  }
   if (data.rappels && typeof data.rappels === 'object') put('spotifyplus_rappels', data.rappels);
   if (Array.isArray(data.remembers))  put('spotifyplus_remember_custom', data.remembers);
   if (Array.isArray(data.tvtime))     put('spotifyplus_tvtime', data.tvtime);
@@ -3152,12 +3168,23 @@ function _lastNDays(n) {
   }
   return arr;
 }
-// Écoutes par jour (listened_at est en UTC → date(...,'localtime') pour la date locale)
+// Journal PERSISTANT des écoutes — [{ ts }] en localStorage, borné à 5000 entrées.
+// ⚠ SURVIT À LA PURGE (contrairement à tracks.listened_at, supprimé par « Purger les
+// écoutes ») → alimente durablement le graphique Écoutes/jour. Inclus dans le backup (fusionné).
+const LISTEN_LOG_KEY = 'spotifyplus_listens';
+function loadListenLog() { try { return JSON.parse(localStorage.getItem(LISTEN_LOG_KEY)) || []; } catch { return []; } }
+function saveListenLog(v) { try { localStorage.setItem(LISTEN_LOG_KEY, JSON.stringify(v.slice(-5000))); } catch {} }
+function recordListen()   { try { const l = loadListenLog(); l.push({ ts: Date.now() }); saveListenLog(l); } catch {} }
+function unrecordListen() { try { const l = loadListenLog(); l.pop(); saveListenLog(l); } catch {} } // undo du retrait
+// Écoutes par jour — depuis le journal persistant (pas tracks.listened_at) → survit à la purge
 function listensPerDay(n = 14) {
   const days = _lastNDays(n), counts = {};
   try {
-    dbAll("SELECT date(listened_at,'localtime') d, COUNT(*) c FROM tracks WHERE listened = 1 AND listened_at IS NOT NULL GROUP BY d")
-      .forEach(r => { counts[r.d] = r.c; });
+    loadListenLog().forEach(e => {
+      const d = new Date(e.ts);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      counts[key] = (counts[key] || 0) + 1;
+    });
   } catch {}
   return days.map(d => ({ ...d, value: counts[d.key] || 0 }));
 }
@@ -3928,6 +3955,9 @@ function StatsPanel() {
       <StatsCollapse title="🎵 MUSIQUES" color={C.accent}>
         {cards.map(renderCard)}
         <AdvancedStats />
+      </StatsCollapse>
+      <StatsCollapse title="📈 GRAPHIQUE" color={C.accent}>
+        <ListeningCharts />
       </StatsCollapse>
       <StatsCollapse title="🎬 FILMS" color={TVTIME_COLOR}>
         {filmCards.map(renderCard)}
