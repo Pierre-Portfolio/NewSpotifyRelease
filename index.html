@@ -82,7 +82,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.7.2';
+const APP_VERSION = '3.7.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5264,7 +5264,7 @@ async function tmdbFetchItem(type, id) {
     year: ((type === 'movie' ? d.release_date : d.first_air_date) || '').slice(0, 4),
     addedAt: Date.now(),
   };
-  if (type === 'movie') return { ...base, runtime: d.runtime || 0, overview: d.overview || '' };
+  if (type === 'movie') return { ...base, runtime: d.runtime || 0, overview: d.overview || '', releaseDate: d.release_date || '', refreshedAt: Date.now() };
   // Saisons "spéciales" (n°0) exclues du décompte des épisodes
   const seasons = (d.seasons || []).filter(s => s.season_number > 0 && s.episode_count > 0)
     .map(s => ({ n: s.season_number, eps: s.episode_count }));
@@ -5350,19 +5350,30 @@ function tvDaysUntil(iso) {
   return Math.round((new Date(iso + 'T00:00:00') - today) / 86400000);
 }
 
-// Rafraîchit les séries suivies (non 'done', non terminées) dont le cache a plus de 24h.
-// SÉQUENTIEL, 1 requête /tv/{id} par série. Retourne une Map "tv<id>" → champs frais
-// (jamais watchedEps/status : les compteurs perso ne sont pas touchés).
+// Rafraîchit les PROCHAINES SORTIES suivies dont le cache a plus de 24h :
+// - séries non 'done' et non terminées (prochain épisode à diffuser)
+// - films non vus dont la date de sortie est absente (backfill des films ajoutés avant
+//   cette feature) ou encore à venir (aujourd'hui/futur) — une date passée est figée,
+//   plus aucune requête.
+// SÉQUENTIEL, 1 requête /tv|movie/{id} par titre. Retourne une Map "<type><id>" → champs
+// frais (jamais watchedEps/status : les compteurs perso ne sont pas touchés).
 async function tvRefreshShows(items, force) {
   const out = new Map();
   if (!tmdbKey()) return out;
-  const stale = items.filter(it => it.type === 'tv' && it.status !== 'done'
-    && !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
-    && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL));
+  const stale = items.filter(it => {
+    if (it.status === 'done') return false;
+    if (it.type === 'tv') return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
+      && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
+    // Films : suit uniquement la date des films PAS ENCORE VUS
+    if (it.releaseDate === undefined) return true;                     // backfill (ajouté avant la feature)
+    const upcoming = !it.releaseDate || tvDaysUntil(it.releaseDate) >= 0;
+    return upcoming && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
+  });
   for (const it of stale) {
-    const f = await tmdbFetchItem('tv', it.id);
-    if (f) out.set('tv' + it.id, { seasons: f.seasons, specialEps: f.specialEps, totalEps: f.totalEps, epRuntime: f.epRuntime, tvStatus: f.tvStatus, nextEp: f.nextEp, poster: f.poster || it.poster, refreshedAt: Date.now() });
-    // échec → refreshedAt inchangé : nouvel essai au prochain montage du panneau
+    const f = await tmdbFetchItem(it.type, it.id);
+    if (!f) continue;   // échec → refreshedAt inchangé : nouvel essai au prochain montage du panneau
+    if (it.type === 'tv') out.set('tv' + it.id, { seasons: f.seasons, specialEps: f.specialEps, totalEps: f.totalEps, epRuntime: f.epRuntime, tvStatus: f.tvStatus, nextEp: f.nextEp, poster: f.poster || it.poster, refreshedAt: Date.now() });
+    else out.set('movie' + it.id, { releaseDate: f.releaseDate, runtime: f.runtime || it.runtime, year: f.year || it.year, poster: f.poster || it.poster, refreshedAt: Date.now() });
   }
   return out;
 }
@@ -5783,8 +5794,14 @@ function TvTimePanel() {
   const watching = visible.filter(it => it.status === 'watching');
   const towatch  = visible.filter(it => it.status === 'towatch');
   const done     = visible.filter(it => it.status === 'done');
-  const upcoming = items.filter(it => it.type === 'tv' && it.status !== 'done' && it.nextEp && it.nextEp.date)
-    .sort((a, b) => a.nextEp.date < b.nextEp.date ? -1 : 1);
+  // PROCHAINES SORTIES : séries (prochain épisode à diffuser) + films PAS ENCORE SORTIS
+  // (date de sortie aujourd'hui ou future). Le contenu suit le filtre Films/Séries/Les deux :
+  // Séries → prochains épisodes ; Films → films à venir ; Les deux → les deux, triés par date.
+  const upSeries = items.filter(it => it.type === 'tv' && it.status !== 'done' && it.nextEp && it.nextEp.date);
+  const upMovies = items.filter(it => it.type === 'movie' && it.status !== 'done' && it.releaseDate && tvDaysUntil(it.releaseDate) >= 0);
+  const upDate = it => it.type === 'tv' ? it.nextEp.date : it.releaseDate;
+  const upcoming = (mediaFilter === 'movie' ? upMovies : mediaFilter === 'tv' ? upSeries : [...upSeries, ...upMovies])
+    .slice().sort((a, b) => { const da = upDate(a), db = upDate(b); return da < db ? -1 : da > db ? 1 : 0; });
 
   const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' };
   const abtn = (color, title) => ({ background:'none', border:'none', color, fontSize:13, lineHeight:1, padding:'0 3px', cursor:'pointer', flexShrink:0 });
@@ -5970,16 +5987,25 @@ function TvTimePanel() {
                 </>
               )))}
 
-          {/* Prochaines sorties (nextEp mis en cache, refresh TTL 24h ou ↻ manuel) — séries only, affichée dans tous les modes de filtre */}
+          {/* Prochaines sorties (cache, refresh TTL 24h ou ↻ manuel) — séries (prochain
+              épisode) ET films non encore sortis ; le contenu suit le filtre Films/Séries/Les deux */}
           {true && (
             <>
               {secTitle('upcoming', '📅', 'PROCHAINES SORTIES', upcoming.length,
-                <button onClick={e => { e.stopPropagation(); doRefresh(); }} disabled={refreshing} title="Actualiser les prochaines sorties (séries suivies)"
+                <button onClick={e => { e.stopPropagation(); doRefresh(); }} disabled={refreshing} title="Actualiser les prochaines sorties (séries & films suivis)"
                   style={{ background:'none', border:'none', color: refreshing ? C.dim : TVTIME_COLOR, fontSize:12, cursor:'pointer', padding:'0 2px', flexShrink:0 }}>{refreshing ? '…' : '↻'}</button>
               )}
               {secOpen.upcoming && (upcoming.length === 0
-                ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucun épisode annoncé pour tes séries</div>
+                ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>{mediaFilter === 'movie' ? 'Aucun film à venir' : mediaFilter === 'tv' ? 'Aucun épisode annoncé pour tes séries' : 'Aucune sortie à venir'}</div>
                 : upcoming.map(it => {
+                    if (it.type === 'movie') {
+                      const dj = tvDaysUntil(it.releaseDate);
+                      const when = dj === null ? '' : dj <= 0 ? "aujourd'hui" : dj === 1 ? 'demain' : `dans ${dj} j`;
+                      return row(it,
+                        `🎬 Sortie ciné · ${new Date(it.releaseDate + 'T00:00:00').toLocaleDateString('fr-FR')}`,
+                        <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
+                      );
+                    }
                     const dj = tvDaysUntil(it.nextEp.date);
                     const when = dj === null ? '' : dj < 0 ? 'diffusé' : dj === 0 ? "aujourd'hui" : dj === 1 ? 'demain' : `dans ${dj} j`;
                     return row(it,
