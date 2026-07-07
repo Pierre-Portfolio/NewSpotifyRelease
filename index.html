@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.8.0';
+const APP_VERSION = '3.8.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -266,6 +266,19 @@ async function dropboxUpload(dataObj) {
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
 }
+// Télécharge la dernière sauvegarde depuis Dropbox (pour la RESTAURATION). Retourne l'objet
+// buildBackup() parsé, ou throw. 409 = fichier absent (jamais sauvegardé).
+async function dropboxDownload() {
+  const token = await dropboxToken();
+  if (!token) throw new Error('Dropbox non connecté');
+  const res = await fetch('https://content.dropboxapi.com/2/files/download', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Dropbox-API-Arg': JSON.stringify({ path: DBX_BACKUP_PATH }) },
+  });
+  if (res.status === 409) throw new Error('Aucune sauvegarde trouvée sur Dropbox');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return JSON.parse(await res.text());
+}
 
 // ════════════════════════════════════════════════
 // GOOGLE DRIVE — sauvegarde optionnelle multi-appareils (OAuth 2.0 implicite)
@@ -355,6 +368,21 @@ async function gdriveUpload(dataObj) {
   const d = await res.json();
   if (d.id) try { localStorage.setItem('gdrive_file_id', d.id); } catch {}
   return d;
+}
+// Télécharge la dernière sauvegarde depuis Google Drive (pour la RESTAURATION). Retourne
+// l'objet buildBackup() parsé, ou throw. Sur 401 → gdriveLogout (token révoqué/expiré).
+async function gdriveDownload() {
+  const token = gdriveToken();
+  if (!token) throw new Error('Google Drive non connecté');
+  const id = await gdriveFindBackupId(token);
+  if (!id) throw new Error('Aucune sauvegarde trouvée sur Google Drive');
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) { gdriveLogout(); throw new Error('Session Google expirée — reconnecte-toi'); }
+  if (res.status === 404) { try { localStorage.removeItem('gdrive_file_id'); } catch {} throw new Error('Sauvegarde introuvable'); }
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return JSON.parse(await res.text());
 }
 
 // ════════════════════════════════════════════════
@@ -3780,6 +3808,7 @@ function MapsPanel() {
 // Sync Dropbox optionnelle (upload de la sauvegarde). Affiche un état "non configuré"
 // tant que DROPBOX_APP_KEY est vide (aucun appel réseau).
 function DropboxSync() {
+  const { restoreBackup } = useStore();
   const [connected, setConnected] = React.useState(dropboxConnected());
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
@@ -3798,12 +3827,20 @@ function DropboxSync() {
     catch (e) { setMsg('✗ Échec : ' + (e.message || 'erreur')); }
     setBusy(false);
   };
+  const restore = async () => {
+    if (!confirm('↥ Restaurer depuis Dropbox\n\nCela applique la dernière sauvegarde Dropbox sur cet appareil (les dates de scan ne régressent jamais, l\'historique finance/écoutes est fusionné, le reste est remplacé).\n\nContinuer ?')) return;
+    setBusy(true); setMsg('');
+    try { const data = await dropboxDownload(); await restoreBackup(data); setMsg('✓ Restauré depuis Dropbox'); }
+    catch (e) { setMsg('✗ Échec : ' + ((e && e.message) || 'erreur')); }
+    setBusy(false);
+  };
   const disconnect = () => { dropboxLogout(); setConnected(false); setMsg(''); };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
       {connected ? (
         <>
           <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>☁︎ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Dropbox'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(tout, écrase la dernière version)</span>}</button>
+          <button onClick={restore} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>↥ {busy ? '…' : 'Restaurer depuis Dropbox'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(dernière sauvegarde)</span>}</button>
           <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Dropbox</button>
         </>
       ) : (
@@ -3819,6 +3856,7 @@ function DropboxSync() {
 // Flux implicite (pas de refresh token) : à l'expiration du token (~1h), le bouton repasse
 // automatiquement en « Connecter » (reconnexion en 1 clic).
 function GoogleDriveSync() {
+  const { restoreBackup } = useStore();
   const [connected, setConnected] = React.useState(gdriveConnected());
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
@@ -3842,12 +3880,24 @@ function GoogleDriveSync() {
     }
     setBusy(false);
   };
+  const restore = async () => {
+    if (!gdriveToken()) { setConnected(false); setMsg('✗ Session Google expirée — reconnecte-toi'); return; }
+    if (!confirm('↥ Restaurer depuis Google Drive\n\nCela applique la dernière sauvegarde Drive sur cet appareil (les dates de scan ne régressent jamais, l\'historique finance/écoutes est fusionné, le reste est remplacé).\n\nContinuer ?')) return;
+    setBusy(true); setMsg('');
+    try { const data = await gdriveDownload(); await restoreBackup(data); setMsg('✓ Restauré depuis Google Drive'); }
+    catch (e) {
+      if (String(e && e.message).indexOf('expirée') !== -1) { setConnected(false); setMsg('✗ ' + e.message); }
+      else setMsg('✗ Échec : ' + ((e && e.message) || 'erreur'));
+    }
+    setBusy(false);
+  };
   const disconnect = () => { gdriveLogout(); setConnected(false); setMsg(''); };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
       {connected ? (
         <>
           <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>△ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Google Drive'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(tout, écrase la dernière version)</span>}</button>
+          <button onClick={restore} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>↥ {busy ? '…' : 'Restaurer depuis Google Drive'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(dernière sauvegarde)</span>}</button>
           <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Google Drive</button>
         </>
       ) : (
