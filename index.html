@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '3.9.9';
+const APP_VERSION = '4.0.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6102,13 +6102,26 @@ function TvTimePanel() {
   const [listFilter, setListFilter] = React.useState('');
   const hasKey = !!tmdbKey();
 
-  const update = next => { setItems(next); saveTvItems(next); };
+  // Pile d'annulation (en mémoire) : chaque action TV Time passe par `update`, qui empile
+  // l'état PRÉCÉDENT → le bouton « retour en arrière » restaure le dernier état (cap 30).
+  const [undoStack, setUndoStack] = React.useState([]);
+  const update = next => { setUndoStack(s => [...s.slice(-29), items]); setItems(next); saveTvItems(next); };
+  const undoLast = () => {
+    setUndoStack(s => {
+      if (!s.length) return s;
+      const prev = s[s.length - 1];
+      setItems(prev); saveTvItems(prev);
+      return s.slice(0, -1);
+    });
+  };
   // Applique les champs frais du refresh SUR le dernier état persisté (une action utilisateur
   // pendant le refresh — ép. +1, ajout… — passe par update() qui sauvegarde : rien n'est perdu)
   const applyFresh = m => {
     if (!m || m.size === 0) return;
     const cur = loadTvItems();
-    update(cur.map(it => m.has(it.type + it.id) ? { ...it, ...m.get(it.type + it.id) } : it));
+    // Refresh (métadonnées auto) : PAS empilé dans l'annulation (ce n'est pas une action user)
+    const next = cur.map(it => m.has(it.type + it.id) ? { ...it, ...m.get(it.type + it.id) } : it);
+    setItems(next); saveTvItems(next);
   };
 
   // Refresh auto des prochaines sorties au montage (TTL 24h — 0 requête si cache frais)
@@ -6241,6 +6254,10 @@ function TvTimePanel() {
     watchedIds: (status === 'done' && it.type === 'youtube') ? (it.videos || []).map(v => v.id) : it.watchedIds,
     doneAt: status === 'done' ? Date.now() : it.doneAt,
   }));
+  // « Arrêter le visionnage » (depuis EN PAUSE) : passe en VUS mais CONSERVE la progression
+  // actuelle — ne valide PAS les épisodes restants (contrairement au ✓ « tout vu »).
+  const abandonSeries = item => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
+    { ...it, status: 'done', doneAt: Date.now() }));
 
   const addItem = async (r, status) => {
     if (busy) return;
@@ -6570,7 +6587,7 @@ function TvTimePanel() {
             : paused.map(it => row(it, progLabel(it),
                 <>
                   <button onClick={() => setStatus(it, 'watching')} title="Reprendre le visionnage" style={abtn(TVTIME_COLOR)}>▶</button>
-                  <button onClick={() => setStatus(it, 'done')} title="Arrêter le visionnage (passer en Vus)" style={abtn('#4caf50')}>⏹</button>
+                  <button onClick={() => abandonSeries(it)} title="Arrêter le visionnage (passer en Vus, sans valider les épisodes restants)" style={abtn('#4caf50')}>⏹</button>
                   <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                 </>
               )))}
@@ -6668,6 +6685,16 @@ function TvTimePanel() {
                           </>
                         )))}
                   </div>}
+            </div>
+          )}
+
+          {/* Retour en arrière — annule la dernière action TV Time (tout en bas) */}
+          {undoStack.length > 0 && (
+            <div style={{ marginTop:8, paddingTop:8, borderTop:`1px solid ${C.border}`, display:'flex', justifyContent:'center' }}>
+              <button onClick={undoLast} title="Annuler la dernière action effectuée"
+                style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, fontWeight:700, padding:'6px 16px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                ↩ Retour en arrière
+              </button>
             </div>
           )}
         </>
