@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.0.1';
+const APP_VERSION = '4.0.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3067,6 +3067,43 @@ function maybeWeeklyBackupPrompt() {
   if (ok) { try { downloadBackup(); } catch {} }
 }
 
+// ── Fusion TV Time (import) ──────────────────────────────────────────────
+// Clé d'un item : type + id (un id TMDB peut coexister en movie/tv, YouTube à part).
+function _tvItemKey(it) { return (it && it.type ? it.type : 'tv') + ':' + (it ? it.id : ''); }
+// Rang de progression d'un statut — le plus avancé gagne à la fusion.
+function _tvStatusRank(s) { return { towatch: 0, paused: 1, watching: 2, done: 3 }[s] ?? 0; }
+// Fusionne deux versions d'un même item (a = local, b = importé) SANS perdre de progression :
+// métadonnées de la version la plus fraîche (refreshedAt), progression = la plus avancée
+// (watchedEps max, union des spéciaux/vidéos vues, statut le plus avancé, addedAt le plus ancien).
+function mergeTvItem(a, b) {
+  const aFresh = a.refreshedAt || 0, bFresh = b.refreshedAt || 0;
+  const base = bFresh > aFresh ? { ...a, ...b } : { ...b, ...a };
+  base.status = _tvStatusRank(a.status) >= _tvStatusRank(b.status) ? a.status : b.status;
+  if (a.watchedEps != null || b.watchedEps != null)
+    base.watchedEps = Math.max(a.watchedEps || 0, b.watchedEps || 0);
+  const sp = new Set([...(a.specialsSeen || []), ...(b.specialsSeen || [])]);
+  if (sp.size) base.specialsSeen = [...sp].sort((x, y) => x - y);
+  const wid = new Set([...(a.watchedIds || []), ...(b.watchedIds || [])]);
+  if (wid.size) base.watchedIds = [...wid];
+  const added = Math.min(a.addedAt || Infinity, b.addedAt || Infinity);
+  if (isFinite(added)) base.addedAt = added;
+  base.manga = !!(a.manga || b.manga);
+  if (base.status === 'done') base.doneAt = a.doneAt || b.doneAt || Date.now();
+  else delete base.doneAt;
+  return base;
+}
+// Fusion d'une liste TV Time importée dans la liste locale (union par clé, items communs fusionnés).
+function mergeTvImport(current, incoming) {
+  const byKey = new Map();
+  for (const it of (Array.isArray(current) ? current : [])) if (it && it.id != null) byKey.set(_tvItemKey(it), it);
+  for (const it of (Array.isArray(incoming) ? incoming : [])) {
+    if (!it || it.id == null) continue;
+    const k = _tvItemKey(it);
+    byKey.set(k, byKey.has(k) ? mergeTvItem(byKey.get(k), it) : it);
+  }
+  return [...byKey.values()];
+}
+
 // Restaure une sauvegarde produite par buildBackup() (export local ou Dropbox).
 // - artists_scraped : UPSERT prudent — la date de scan locale n'est JAMAIS régressée
 //   (MAX des deux), les cumuls scan_count/total_tracks_added sont fusionnés au MAX.
@@ -3074,6 +3111,7 @@ function maybeWeeklyBackupPrompt() {
 //   prudente des compteurs cumulés uniquement (pas les compteurs mois/année, liés aux
 //   marqueurs de reset locaux).
 // - todos / todos_done / rappels / remembers : REMPLACÉS par la sauvegarde (si présents).
+// - tvtime : FUSIONNÉ — union par clé (type+id), progression la plus avancée conservée.
 // - finance (historique local des prix) : FUSIONNÉ — union par série, jamais écrasé.
 // La table `tracks` n'est pas dans la sauvegarde : le feed n'est pas touché.
 function applyBackup(data) {
@@ -3131,7 +3169,11 @@ function applyBackup(data) {
   }
   if (data.rappels && typeof data.rappels === 'object') put('spotifyplus_rappels', data.rappels);
   if (Array.isArray(data.remembers))  put('spotifyplus_remember_custom', data.remembers);
-  if (Array.isArray(data.tvtime))     put('spotifyplus_tvtime', data.tvtime);
+  // TV Time — FUSIONNÉ avec la liste locale (union par type+id, progression la plus avancée conservée)
+  if (Array.isArray(data.tvtime)) {
+    try { saveTvItems(mergeTvImport(loadTvItems(), data.tvtime)); }
+    catch { put('spotifyplus_tvtime', data.tvtime); }
+  }
   // Clé API TMDB : chaîne brute (PAS de JSON.stringify — tmdbKey() la lit telle quelle)
   if (typeof data.tmdb_key === 'string' && data.tmdb_key.trim()) {
     try { localStorage.setItem('spotifyplus_tmdb_key', data.tmdb_key.trim()); } catch {}
