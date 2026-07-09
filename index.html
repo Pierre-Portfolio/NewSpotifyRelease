@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.1.4';
+const APP_VERSION = '4.1.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6113,7 +6113,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
 
 // ── Fiche YouTube (clic sur l'affiche d'une chaîne/playlist suivie) — vidéos groupées
 // en SAISONS = ANNÉES de publication, cochage INDIVIDUEL par vidéo (watchedIds).
-function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited }) {
+function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock }) {
   const [openYear, setOpenYear] = React.useState(null);
   const seen = new Set(item.watchedIds || []);
   const total = item.totalEps || (item.videos || []).length;
@@ -6197,8 +6197,14 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
               style={{ width:'100%', background:'none', border:`1px dashed ${C.border}`, borderRadius:8, color: refreshing ? C.dim : YT_COLOR, fontSize:10.5, fontWeight:700, padding:'7px 10px', cursor: refreshing ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', marginBottom:12 }}>
               {refreshing ? '⏳ Récupération…' : `🔓 Récupérer toutes les vidéos (plafond de ${YT_MAX_VIDEOS} retiré)`}
             </button>
-          : <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginBottom:12, display:'flex', alignItems:'center', gap:6 }}>
-              <span style={{ color:YT_COLOR }}>🔓</span> Plafond de {YT_MAX_VIDEOS} retiré pour cette chaîne
+          : <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', display:'flex', alignItems:'center', gap:6, marginBottom:6 }}>
+                <span style={{ color:YT_COLOR }}>🔓</span> Plafond de {YT_MAX_VIDEOS} retiré pour cette chaîne
+              </div>
+              <button onClick={onRelock} disabled={refreshing} title={`Reverrouiller : ne garder que les vidéos vues + celles de ${new Date().getFullYear()}`}
+                style={{ width:'100%', background:'none', border:`1px dashed ${C.border}`, borderRadius:8, color: refreshing ? C.dim : C.muted, fontSize:10.5, fontWeight:700, padding:'7px 10px', cursor: refreshing ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
+                🔒 Reverrouiller (garder seulement les vidéos vues + {new Date().getFullYear()})
+              </button>
             </div>}
 
         {/* Vidéos par année (saison) */}
@@ -6409,6 +6415,32 @@ function TvTimePanel() {
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
       ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt } : x));
     setYtMsg(`Toutes les vidéos récupérées : ${built.title} (${built.totalEps} vidéos)`);
+  };
+  // Reverrouille une chaîne dont le plafond avait été retiré : ne conserve que les vidéos
+  // COCHÉES (vues) + toutes celles de l'ANNÉE EN COURS ; supprime le reste (allège le stockage).
+  const ytRelock = item => {
+    const curYear = String(new Date().getFullYear());
+    const seen = new Set(item.watchedIds || []);
+    const kept = (item.videos || []).filter(v => seen.has(v.id) || (v.date || '').slice(0, 4) === curYear);
+    if (!confirm(`Reverrouiller « ${item.title} » ?\n\nOn ne garde que les vidéos vues + celles de ${curYear} : ${kept.length} sur ${(item.videos || []).length} vidéos conservées, le reste est supprimé du suivi.`)) return;
+    kept.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const byYear = {};
+    for (const v of kept) { const y = (v.date || '').slice(0, 4) || '—'; (byYear[y] = byYear[y] || []).push(v); }
+    const seasons = Object.keys(byYear).sort().map(y => ({ n: y, eps: byYear[y].length }));
+    const totalMin = kept.reduce((a, v) => a + (v.dur || 0), 0);
+    const keptIds = new Set(kept.map(v => v.id));
+    const watchedIds = (item.watchedIds || []).filter(id => keptIds.has(id));
+    const totalEps = kept.length;
+    let status = item.status, doneAt = item.doneAt;
+    if (totalEps > 0) {
+      if (watchedIds.length >= totalEps) { if (status !== 'done') { status = 'done'; doneAt = Date.now(); } }
+      else if (status === 'done') { status = 'watching'; doneAt = undefined; }
+    }
+    update(items.map(x => (x.type === 'youtube' && x.id === item.id)
+      ? { ...x, videos: kept, seasons, totalEps, epRuntime: totalEps ? Math.round(totalMin / totalEps) : 0,
+          year: kept.length ? (kept[kept.length - 1].date || '').slice(0, 4) : x.year,
+          watchedIds, status, doneAt, unlimited: false } : x));
+    setYtMsg(`Chaîne reverrouillée : ${kept.length} vidéo(s) gardée(s) (vues + ${curYear}).`);
   };
   // Pose la liste des vidéos vues (cochage individuel) + statut auto done/en cours
   const ytSetWatched = (item, ids) => update(items.map(it => {
@@ -6929,7 +6961,8 @@ function TvTimePanel() {
         onCartoon={v => setCartoon(detailItem, v)}
         onRefresh={() => ytRefreshItem(detailItem)}
         refreshing={ytRefreshingId === detailItem.id}
-        onUnlimited={() => ytLoadAll(detailItem)} />}
+        onUnlimited={() => ytLoadAll(detailItem)}
+        onRelock={() => ytRelock(detailItem)} />}
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
