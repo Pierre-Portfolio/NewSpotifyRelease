@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.3.2';
+const APP_VERSION = '4.3.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -293,6 +293,10 @@ async function dropboxDownload() {
 //   À l'expiration, le bouton repasse en « Connecter » (reconnexion en 1 clic, consentement
 //   déjà accordé → redirection quasi instantanée). L'ID client est public par nature.
 // Scope drive.file : l'app ne voit QUE les fichiers qu'elle a elle-même créés.
+// + Scope drive.readonly (lecture seule de tout le Drive) : requis par l'onglet Finance
+//   « Mes Actifs » pour retrouver le tableur « Finance » de l'utilisateur (dossier
+//   finance) et l'exporter en CSV. Un token émis AVANT l'ajout de ce scope provoque un
+//   403 sur la recherche → l'UI demande une reconnexion (consentement incrémental).
 // ════════════════════════════════════════════════
 const GDRIVE_CLIENT_ID   = '968594008637-12ssdcr5i1uutq9vru5f8444bfchephd.apps.googleusercontent.com';
 const GDRIVE_BACKUP_NAME = 'spotifyplus-sauvegarde.json';
@@ -308,7 +312,7 @@ function gdriveLogin() {
   if (!GDRIVE_CLIENT_ID) return;
   const params = new URLSearchParams({
     client_id: GDRIVE_CLIENT_ID, response_type: 'token', redirect_uri: REDIRECT_URI,
-    scope: 'https://www.googleapis.com/auth/drive.file',
+    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
     include_granted_scopes: 'true', state: 'gdrive', // state='gdrive' distingue le retour (fragment #) de Spotify/Dropbox (query ?)
   });
   window.location = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
@@ -383,6 +387,212 @@ async function gdriveDownload() {
   if (res.status === 404) { try { localStorage.removeItem('gdrive_file_id'); } catch {} throw new Error('Sauvegarde introuvable'); }
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return JSON.parse(await res.text());
+}
+
+// ════════════════════════════════════════════════
+// MES ACTIFS — patrimoine perso lu depuis le Google Sheets « Finance » de l'utilisateur
+// (3e onglet de la section Finance, à côté de Light/Full).
+// Fonctionnement : si Google Drive est connecté (scope drive.readonly), on cherche un
+// DOSSIER dont le nom contient « finance », puis le TABLEUR Google Sheets qu'il contient
+// (repli : un tableur nommé « Finance » n'importe où dans le Drive). L'API Drive exporte
+// la PREMIÈRE feuille en CSV (`/export?mimeType=text/csv`) — c'est la feuille « Actif »
+// du classeur, qui contient tout : patrimoine brut/net, comptes, actifs physiques,
+// pyramide 10/80/5/5, 50/30/20, FIRE/liberté financière, totaux annuels.
+// Le résultat parsé est caché en localStorage (TTL 6h + bouton ↻ manuel) : l'onglet
+// s'affiche instantanément et hors-ligne. Aucune origine à ajouter à la CSP
+// (www.googleapis.com déjà autorisé pour la sauvegarde Drive).
+// ════════════════════════════════════════════════
+const ACTIFS_LS      = 'spotifyplus_actifs';        // cache { fetched_at, file, months, totals }
+const ACTIFS_FILE_LS = 'spotifyplus_actifs_file';   // fichier trouvé { id, name, modifiedTime }
+const ACTIFS_TTL     = 6 * 3600 * 1000;             // re-fetch auto au-delà de 6h
+
+let _actifsCache;                                    // cache mémoire (évite le re-JSON.parse)
+function loadActifs() {
+  if (_actifsCache !== undefined) return _actifsCache;
+  try { _actifsCache = JSON.parse(localStorage.getItem(ACTIFS_LS)) || null; } catch { _actifsCache = null; }
+  return _actifsCache;
+}
+function saveActifs(d) {
+  _actifsCache = d;
+  try { localStorage.setItem(ACTIFS_LS, JSON.stringify(d)); } catch {}
+}
+
+// Parseur CSV minimal mais complet (guillemets, virgules et sauts de ligne quotés)
+function actifsParseCsvRows(text) {
+  const rows = [[]]; let cur = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+      else cur += ch;
+    }
+    else if (ch === '"')  inQ = true;
+    else if (ch === ',')  { rows[rows.length - 1].push(cur); cur = ''; }
+    else if (ch === '\n') { rows[rows.length - 1].push(cur); cur = ''; rows.push([]); }
+    else if (ch !== '\r') cur += ch;
+  }
+  rows[rows.length - 1].push(cur);
+  while (rows.length && rows[rows.length - 1].every(c => c === '')) rows.pop();
+  return rows;
+}
+
+// Nombre robuste : gère « 1 234,56 € », « 1,234.56 », « 12.5% », espaces insécables…
+function actifsNum(raw) {
+  if (raw == null) return null;
+  let s = String(raw).trim().replace(/[€$%\s]/g, '');
+  if (!s || s === '-' || s === '—') return null;
+  const lc = s.lastIndexOf(','), ld = s.lastIndexOf('.');
+  if (lc !== -1 && ld !== -1) s = lc > ld ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  else if (lc !== -1) s = s.split(',').length > 2 ? s.replace(/,/g, '') : s.replace(',', '.');
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+
+// Date de la colonne A : ISO « 2026-06-01 » ou « 01/06/2026 » (fr) ou « 6/1/2026 »
+// (export locale US : si le 2e nombre dépasse 12, c'est forcément le jour → swap)
+function actifsDate(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) {
+    let d = +m[1], mo = +m[2];
+    if (d <= 12 && mo > 12) { const t = d; d = mo; mo = t; }
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return new Date(+m[3], mo - 1, d).getTime();
+  }
+  return null;
+}
+
+// Normalisation d'un en-tête pour le matching (minuscules, sans accents ni ponctuation)
+function actifsNorm(h) {
+  return String(h || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9/()' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Champs « scalaires » de la feuille Actif — clé canonique → en-tête normalisé.
+// ⚠ indexOf = PREMIÈRE occurrence : les doublons (Voiture/Ordi/Displate apparaissent
+// aussi dans le bloc « répartition Exotique » plus à droite) matchent bien la colonne
+// VALEUR (bloc actifs physiques, situé avant).
+const ACTIFS_FIELDS = {
+  brut:'patrimoine brut', net:'patrimoine net', horsImmo:'total hors immo',
+  physique:'physique', numerique:'numerique',
+  revenu:'revenue', salaire:'salaire', vente:'placement vente', refonte:'refonte',
+  coursInfo:'cours info', achat:'placement achat', dette:'dette', depense:'depense', economie:'economie',
+  immoNet:'immo net', immoBrut:'immo brut', syndic:'tresorie syndic',
+  charge:'charge', loisir:'loisir', invest:'investissement',
+  pyrMatelas:'matelas securite', pyrImmo:'immobilier', pyrEtf:'etf / actions',
+  pyrCrypto:'crypto', pyrGold:'gold', pyrExotique:'exotique',
+  gainMoyen:'gain mensuel moyen',
+  capital:'capital actuel (c)', cible:'capital cible (t)',
+  epargne:'epargne (s)', epargneLisse:"epargne lisse (s')", rendement:'rendement approx (r)',
+  libApprox:'liberte approx', libMensuel:'liberte mensuel', libAnnuel:'liberte annuel',
+  poids:'poids',
+};
+// Comptes bancaires & plateformes — [clé, libellé affiché, en-tête normalisé]
+const ACTIFS_COMPTES = [
+  ['courant','🏦 Compte courant','courant'], ['livretA','📗 Livret A','livret a'],
+  ['pel','🏠 PEL','pel'], ['cel','🏠 CEL','cel'], ['cto','📈 CTO','cto'],
+  ['pea','📈 PEA','pea'], ['pei','📈 PEI','pei'], ['n26','💳 N26','n26'],
+  ['etoro','📊 eToro','etoro'], ['traderep','📊 TradeRepublic','traderepublic'],
+  ['binance','🪙 Binance','binance'], ['edenred','🍽 MyEdenred','myedenred'],
+  ['cpf','🎓 CPF','cpf'], ['paypal','💸 Paypal','paypal'],
+  ['liquide','💵 Liquide','liquide'], ['tricount','🧾 Tricount','tricount'],
+];
+// Actifs physiques / collections — [clé, libellé, en-tête normalisé]
+const ACTIFS_PHYSIQUES = [
+  ['voiture','🚗 Voiture','voiture'], ['ordi','💻 Ordi','ordi'], ['metaux','🥇 Métaux','metaux'],
+  ['magic','🃏 Magic','magic'], ['displate','🖼 Displate','displate'],
+  ['pokemon','⚡ Pokémon','pokemon'], ['mobilier','🛋 Mobilier','mobilier'],
+  ['wankul','🎴 Wankul','wankul'], ['gaming','🎮 Gaming','gaming'],
+  ['onthatass','🧦 OnThatAss','onthatass'], ['pop','🧸 Pop','pop'],
+  ['yugioh','🐉 Yu-Gi-Oh','yu gi oh'], ['vinted','👕 Vinted','vinted'],
+];
+
+// CSV → { months (desc, plus récent en 1er), totals (lignes « Total 20XX ») }
+function actifsParseCsv(text) {
+  const rows = actifsParseCsvRows(text);
+  if (rows.length < 2) return null;
+  const header = rows[0].map(actifsNorm);
+  const col = {};
+  for (const k in ACTIFS_FIELDS) col[k] = header.indexOf(ACTIFS_FIELDS[k]);
+  for (const [k,, h] of ACTIFS_COMPTES)   col[k] = header.indexOf(h);
+  for (const [k,, h] of ACTIFS_PHYSIQUES) col[k] = header.indexOf(h);
+  const months = [], totals = [];
+  for (const r of rows.slice(1)) {
+    const a = (r[0] || '').trim();
+    const t = actifsDate(a);
+    const my = a.match(/^total\s+(\d{4})$/i);
+    if (!t && !my) continue;
+    const o = t ? { t } : { year: +my[1] };
+    for (const k in col) if (col[k] >= 0) o[k] = actifsNum(r[col[k]]);
+    (t ? months : totals).push(o);
+  }
+  months.sort((a, b) => b.t - a.t);
+  totals.sort((a, b) => b.year - a.year);
+  return { months, totals };
+}
+
+// Recherche Drive générique — throw 'AUTH' (401, token mort) / 'SCOPE' (403, consentement
+// lecture pas encore accordé) pour que l'UI affiche le bon message + bouton reconnexion
+async function actifsDriveQuery(token, q, fields) {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent(fields)}&pageSize=10&orderBy=${encodeURIComponent('modifiedTime desc')}`,
+    { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 401) { gdriveLogout(); throw new Error('AUTH'); }
+  if (res.status === 403) throw new Error('SCOPE');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return (await res.json()).files || [];
+}
+
+// Trouve le tableur : dossier « finance » → Sheets dedans (de préférence nommé Finance),
+// repli tableur « Finance » n'importe où. Résultat caché (1 seule recherche).
+async function actifsFindFile(token) {
+  const cached = localStorage.getItem(ACTIFS_FILE_LS);
+  if (cached) { try { const f = JSON.parse(cached); if (f && f.id) return f; } catch {} }
+  const SS = "mimeType='application/vnd.google-apps.spreadsheet'";
+  let file = null;
+  const folders = await actifsDriveQuery(token,
+    "mimeType='application/vnd.google-apps.folder' and name contains 'finance' and trashed=false", 'files(id,name)');
+  for (const f of folders) {
+    const inside = await actifsDriveQuery(token, `'${f.id}' in parents and ${SS} and trashed=false`, 'files(id,name,modifiedTime)');
+    file = inside.find(x => /finance/i.test(x.name)) || inside[0] || null;
+    if (file) break;
+  }
+  if (!file) {
+    const any = await actifsDriveQuery(token, `name contains 'Finance' and ${SS} and trashed=false`, 'files(id,name,modifiedTime)');
+    file = any.find(x => /finance/i.test(x.name)) || any[0] || null;
+  }
+  if (file) try { localStorage.setItem(ACTIFS_FILE_LS, JSON.stringify(file)); } catch {}
+  return file;
+}
+
+// Fetch complet : trouve le fichier, exporte la 1re feuille en CSV, parse, met en cache.
+async function actifsFetch(force) {
+  const token = gdriveToken();
+  if (!token) throw new Error('AUTH');
+  if (force) try { localStorage.removeItem(ACTIFS_FILE_LS); } catch {}
+  let file = await actifsFindFile(token);
+  if (!file) throw new Error('NOTFOUND');
+  const dl = id => fetch(`https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=${encodeURIComponent('text/csv')}`,
+    { headers: { Authorization: `Bearer ${token}` } });
+  let res = await dl(file.id);
+  if (res.status === 404) {            // id caché périmé (fichier déplacé/supprimé) → re-recherche
+    try { localStorage.removeItem(ACTIFS_FILE_LS); } catch {}
+    file = await actifsFindFile(token);
+    if (!file) throw new Error('NOTFOUND');
+    res = await dl(file.id);
+  }
+  if (res.status === 401) { gdriveLogout(); throw new Error('AUTH'); }
+  if (res.status === 403) throw new Error('SCOPE');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const parsed = actifsParseCsv(await res.text());
+  if (!parsed || !parsed.months.length) throw new Error('EMPTY');
+  const data = { fetched_at: Date.now(),
+    file: { id: file.id, name: file.name, modifiedTime: file.modifiedTime || null },
+    months: parsed.months, totals: parsed.totals };
+  saveActifs(data);
+  return data;
 }
 
 // ════════════════════════════════════════════════
@@ -5354,6 +5564,331 @@ async function startFinanceFull() {
   _finance.loadingFull = false; _finance.nextLabel = null; _finNotify();
 }
 
+// ════════════════════════════════════════════════
+// MES ACTIFS — panneau (3e mode de la section Finance, à côté de Light/Full)
+// Affiche le patrimoine perso lu depuis le Google Sheets « Finance » du Drive
+// (helpers module-level actifsFetch/loadActifs — voir le bloc MES ACTIFS plus haut).
+// ════════════════════════════════════════════════
+const ACTIFS_GOLD = '#e0c060';   // accent doré du panneau Mes Actifs
+
+// Formatage € (fr-FR, pas de décimales au-delà de 100 €)
+function fmtEur(v, dec) {
+  if (v == null || isNaN(v)) return '—';
+  const n = Number(v);
+  const d = dec != null ? dec : (Math.abs(n) >= 100 ? 0 : 2);
+  return n.toLocaleString('fr-FR', { maximumFractionDigits: d }) + ' €';
+}
+function fmtEurSigned(v) { return v == null || isNaN(v) ? '—' : (v >= 0 ? '+' : '') + fmtEur(v, 0); }
+function fmtActifMonth(t) { return new Date(t).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }); }
+
+// Carte-section (même gabarit que FinanceSection, sans le badge EUR/USD)
+function ActifSection({ title, right, children }) {
+  return (
+    <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'8px 12px 6px' }}>
+      <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', marginBottom:2, gap:8 }}>
+        <div style={{ fontSize:11, fontWeight:700, color:ACTIFS_GOLD, letterSpacing:'0.05em' }}>{title}</div>
+        {right != null && <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', textAlign:'right' }}>{right}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// Ligne clé/valeur simple
+function ActifKV({ label, value, color, sub }) {
+  return (
+    <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:10, padding:'4px 0', borderTop:`1px solid ${C.border}` }}>
+      <div style={{ fontSize:11, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{label}</div>
+      <div style={{ textAlign:'right', flexShrink:0 }}>
+        <span style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color: color || C.text }}>{value}</span>
+        {sub != null && <span style={{ fontSize:9, color:C.muted, marginLeft:5 }}>{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+// Ligne avec barre de proportion (comptes, actifs physiques, pyramide…)
+function ActifBar({ label, value, pct, color, valueTxt }) {
+  const p = pct == null || isNaN(pct) ? 0 : Math.max(0, pct);
+  return (
+    <div style={{ padding:'4px 0 5px', borderTop:`1px solid ${C.border}` }}>
+      <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:10 }}>
+        <span style={{ fontSize:11, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{label}</span>
+        <span style={{ fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text, flexShrink:0 }}>
+          {valueTxt != null ? valueTxt : fmtEur(value, 0)}
+          {pct != null && !isNaN(pct) && <span style={{ fontSize:9, color:C.muted, fontWeight:500, marginLeft:5 }}>{p.toFixed(p >= 10 ? 0 : 1)}%</span>}
+        </span>
+      </div>
+      <div style={{ height:4, background:C.surfaceHigh, borderRadius:2, marginTop:3 }}>
+        <div style={{ width:`${Math.min(100, p)}%`, height:'100%', background: color || ACTIFS_GOLD, borderRadius:2 }} />
+      </div>
+    </div>
+  );
+}
+
+function MesActifsPanel() {
+  const [data, setData]       = React.useState(loadActifs());
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState(null);
+  const [range, setRange]     = React.useState('1a');      // période du graphe : '1a' | 'tout'
+  const [serie, setSerie]     = React.useState('net');     // série du graphe : net | brut | horsImmo
+  const connected = gdriveConnected();
+
+  const refresh = async (force) => {
+    if (!gdriveToken()) return;
+    setLoading(true); setErr(null);
+    try { setData(await actifsFetch(force)); }
+    catch (e) { setErr((e && e.message) || 'ERR'); }
+    setLoading(false);
+  };
+  // Au montage : cache affiché immédiatement, re-fetch auto si absent ou périmé (> 6h)
+  React.useEffect(() => {
+    const cached = loadActifs();
+    if (connected && (!cached || Date.now() - cached.fetched_at > ACTIFS_TTL)) refresh(false);
+  }, []);
+
+  const chip = active => ({
+    background: active ? `${ACTIFS_GOLD}22` : 'none',
+    border: active ? `1px solid ${ACTIFS_GOLD}66` : `1px solid ${C.border}`,
+    color: active ? ACTIFS_GOLD : C.muted, borderRadius:6, padding:'3px 10px',
+    cursor:'pointer', fontSize:10, fontWeight: active ? 700 : 500,
+  });
+  const connectBtn = (
+    <button onClick={gdriveLogin} style={{ background:`${ACTIFS_GOLD}22`, border:`1px solid ${ACTIFS_GOLD}66`,
+      color:ACTIFS_GOLD, borderRadius:8, padding:'7px 14px', cursor:'pointer', fontSize:11, fontWeight:700 }}>
+      △ Connecter Google Drive
+    </button>
+  );
+
+  if (!gdriveConfigured()) {
+    return <div style={{ fontSize:11, color:C.muted, padding:'20px 0', textAlign:'center' }}>Google Drive non configuré (GDRIVE_CLIENT_ID vide).</div>;
+  }
+
+  // ── Bandeaux d'état (connexion / erreur / chargement) — le cache reste affiché dessous ──
+  const banners = [];
+  if (!connected) banners.push(
+    <div key="co" style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'flex-start', padding:'10px 12px',
+      background:`${ACTIFS_GOLD}14`, border:`1px solid ${ACTIFS_GOLD}44`, borderRadius:8, fontSize:11, color:C.text }}>
+      <div><b style={{ color:ACTIFS_GOLD }}>Google Drive non connecté.</b> Mes Actifs lit le tableur « Finance » de ton Drive (dossier finance) — connecte-toi pour synchroniser.</div>
+      {connectBtn}
+    </div>
+  );
+  if (err) {
+    const msg = err === 'SCOPE'    ? "Accès lecture Drive pas encore accordé — reconnecte Google Drive pour autoriser la lecture du tableur (nouveau consentement)."
+             : err === 'AUTH'      ? 'Session Google expirée — reconnecte-toi.'
+             : err === 'NOTFOUND'  ? 'Aucun tableur trouvé : ni dossier « finance » contenant un Google Sheets, ni tableur nommé « Finance » dans le Drive.'
+             : err === 'EMPTY'     ? "Le tableur a été trouvé mais sa 1re feuille ne ressemble pas à la feuille « Actif » attendue (colonnes Date / Patrimoine…)."
+             : `Erreur de synchronisation (${err}).`;
+    banners.push(
+      <div key="er" style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'flex-start', padding:'10px 12px',
+        background:'#e0608a14', border:'1px solid #e0608a44', borderRadius:8, fontSize:11, color:C.text }}>
+        <div>⚠ {msg}</div>
+        {(err === 'SCOPE' || err === 'AUTH') && connectBtn}
+      </div>
+    );
+  }
+  if (loading) banners.push(
+    <div key="lo" style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 10px',
+      background:`${ACTIFS_GOLD}14`, border:`1px solid ${ACTIFS_GOLD}44`, borderRadius:8, fontSize:11, color:ACTIFS_GOLD, fontWeight:600 }}>
+      <span style={{ width:12, height:12, border:`2px solid ${ACTIFS_GOLD}55`, borderTopColor:ACTIFS_GOLD,
+        borderRadius:'50%', display:'inline-block', animation:'finspin 0.8s linear infinite' }} />
+      Synchronisation du tableur Finance…
+    </div>
+  );
+
+  if (!data) {
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+        {banners}
+        {!loading && connected && !err && <div style={{ fontSize:11, color:C.muted, padding:'14px 0', textAlign:'center' }}>Aucune donnée — lance une synchronisation.</div>}
+        {connected && <button onClick={() => refresh(true)} style={chip(false)}>↻ Synchroniser</button>}
+      </div>
+    );
+  }
+
+  // ── Données dérivées ──
+  const months = data.months;                                        // desc (plus récent en 1er)
+  const latest = months.find(x => x.net != null) || months[0];       // dernier mois avec patrimoine
+  const iLat   = months.indexOf(latest);
+  const prev   = months.slice(iLat + 1).find(x => x.net != null) || null;
+  const yearAgo = months.slice(iLat + 1).find(x => x.net != null && latest.t - x.t >= 350 * 864e5) || null;
+  const dNet  = prev    && latest.net != null ? latest.net - prev.net    : null;
+  const dNetY = yearAgo && latest.net != null ? latest.net - yearAgo.net : null;
+  const lastFlow = months.find(x => x.revenu != null) || latest;     // dernier mois avec budget saisi
+  const tauxEpargne = lastFlow.revenu > 0 && lastFlow.economie != null ? lastFlow.economie / lastFlow.revenu * 100 : null;
+
+  // Graphe patrimoine : série choisie, points ascendants, période 1 an / tout
+  const serieLabel = { net:'Net', brut:'Brut', horsImmo:'Hors immo' };
+  const ptsAll = months.filter(x => x[serie] != null).map(x => ({ t: x.t, v: x[serie] })).reverse();
+  const since  = range === '1a' ? Date.now() - 366 * 864e5 : 0;
+  const pts    = ptsAll.filter(p => p.t >= since);
+
+  const comptes = ACTIFS_COMPTES.map(([k, label]) => ({ k, label, v: latest[k] }))
+    .filter(x => x.v != null && Math.abs(x.v) >= 0.5).sort((a, b) => b.v - a.v);
+  const comptesTotal = comptes.reduce((s, x) => s + Math.max(0, x.v), 0);
+  const physiques = ACTIFS_PHYSIQUES.map(([k, label]) => ({ k, label, v: latest[k] }))
+    .filter(x => x.v != null && x.v >= 0.5).sort((a, b) => b.v - a.v);
+  const physTotal = physiques.reduce((s, x) => s + x.v, 0);
+
+  const pyramide = [
+    ['pyrMatelas','🛟 Matelas sécurité','#4ea3f5'], ['pyrImmo','🏠 Immobilier','#45c552'],
+    ['pyrEtf','📈 ETF / Actions','#2fc1c1'], ['pyrCrypto','🪙 Crypto','#b06cf5'],
+    ['pyrGold','🥇 Gold','#e0c060'], ['pyrExotique','🎴 Exotique','#f5813c'],
+  ].map(([k, label, color]) => ({ k, label, color, v: latest[k] })).filter(x => x.v != null);
+
+  const budget503020 = [
+    ['charge','🏠 Charges','#4ea3f5','50 %'], ['loisir','🎉 Loisirs','#f5b81f','30 %'],
+    ['invest','📈 Investissement','#45c552','20 %'],
+  ].map(([k, label, color, target]) => ({ k, label, color, target, v: lastFlow[k] })).filter(x => x.v != null);
+
+  const fireProgress = latest.capital != null && latest.cible > 0 ? latest.capital / latest.cible * 100 : null;
+  const fmtYears = v => v == null || isNaN(v) ? '—' : Number(v).toLocaleString('fr-FR', { maximumFractionDigits:1 }) + ' ans';
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {banners}
+
+      {/* ── PATRIMOINE ── */}
+      <ActifSection title="💰 PATRIMOINE" right={fmtActifMonth(latest.t)}>
+        <div style={{ padding:'6px 0 8px', textAlign:'center' }}>
+          <div style={{ fontSize:26, fontWeight:900, fontFamily:'DM Mono,monospace', color:ACTIFS_GOLD, lineHeight:1.1 }}>{fmtEur(latest.net, 0)}</div>
+          <div style={{ fontSize:10, color:C.muted, marginTop:3 }}>
+            Patrimoine net
+            {dNet != null && <span style={{ marginLeft:8, fontFamily:'DM Mono,monospace', fontWeight:700, color: dNet >= 0 ? FIN_UP : FIN_DOWN }}>{fmtEurSigned(dNet)} <span style={{ color:C.muted, fontWeight:500 }}>/ mois</span></span>}
+            {dNetY != null && <span style={{ marginLeft:8, fontFamily:'DM Mono,monospace', fontWeight:700, color: dNetY >= 0 ? FIN_UP : FIN_DOWN }}>{fmtEurSigned(dNetY)} <span style={{ color:C.muted, fontWeight:500 }}>/ an</span></span>}
+          </div>
+        </div>
+        <ActifKV label="Patrimoine brut" value={fmtEur(latest.brut, 0)} />
+        <ActifKV label="Total hors immo" value={fmtEur(latest.horsImmo, 0)} />
+        <ActifKV label="— dont physique" value={fmtEur(latest.physique, 0)}
+          sub={latest.horsImmo > 0 && latest.physique != null ? (latest.physique / latest.horsImmo * 100).toFixed(0) + '%' : null} />
+        <ActifKV label="— dont numérique" value={fmtEur(latest.numerique, 0)}
+          sub={latest.horsImmo > 0 && latest.numerique != null ? (latest.numerique / latest.horsImmo * 100).toFixed(0) + '%' : null} />
+        {latest.immoBrut != null && latest.immoBrut > 0 && <ActifKV label="Immobilier brut" value={fmtEur(latest.immoBrut, 0)} />}
+        {latest.immoNet != null && latest.immoNet !== 0 && <ActifKV label="Immobilier net (hors crédit)" value={fmtEur(latest.immoNet, 0)} />}
+        {latest.syndic != null && latest.syndic > 0 && <ActifKV label="Trésorerie syndic" value={fmtEur(latest.syndic, 0)} />}
+
+        {/* Courbe du patrimoine (SVG maison réutilisé — FinanceChart) */}
+        {ptsAll.length >= 2 && (
+          <div style={{ marginTop:8 }}>
+            <div style={{ display:'flex', gap:4, marginBottom:6, flexWrap:'wrap' }}>
+              {['net','brut','horsImmo'].map(s => <button key={s} onClick={() => setSerie(s)} style={chip(serie === s)}>{serieLabel[s]}</button>)}
+              <span style={{ flex:1 }} />
+              <button onClick={() => setRange('1a')}   style={chip(range === '1a')}>1 an</button>
+              <button onClick={() => setRange('tout')} style={chip(range === 'tout')}>Tout</button>
+            </div>
+            {pts.length >= 2
+              ? <FinanceChart pts={pts} fmtV={v => fmtEur(v, 0)} range={range === 'tout' ? '5a' : '1a'} />
+              : <div style={{ fontSize:10, color:C.muted, textAlign:'center', padding:'10px 0' }}>Pas assez de points sur la période.</div>}
+          </div>
+        )}
+      </ActifSection>
+
+      {/* ── BUDGET DU MOIS ── */}
+      <ActifSection title="📆 BUDGET DU MOIS" right={fmtActifMonth(lastFlow.t)}>
+        <ActifKV label="Revenus" value={fmtEur(lastFlow.revenu, 0)} />
+        <ActifKV label="— dont salaire" value={fmtEur(lastFlow.salaire, 0)} />
+        {lastFlow.vente != null && lastFlow.vente > 0 && <ActifKV label="— dont ventes placement" value={fmtEur(lastFlow.vente, 0)} />}
+        {lastFlow.refonte != null && lastFlow.refonte > 0 && <ActifKV label="— dont refonte" value={fmtEur(lastFlow.refonte, 0)} />}
+        <ActifKV label="Dépenses" value={fmtEur(lastFlow.depense, 0)} color={FIN_DOWN} />
+        {lastFlow.achat != null && lastFlow.achat > 0 && <ActifKV label="Achats placement" value={fmtEur(lastFlow.achat, 0)} />}
+        {lastFlow.dette != null && lastFlow.dette > 0 && <ActifKV label="Remboursement dette" value={fmtEur(lastFlow.dette, 0)} color={FIN_DOWN} />}
+        <ActifKV label="Économie" value={fmtEurSigned(lastFlow.economie)} color={lastFlow.economie >= 0 ? FIN_UP : FIN_DOWN}
+          sub={tauxEpargne != null ? `taux d'épargne ${tauxEpargne.toFixed(0)}%` : null} />
+        {budget503020.length > 0 && (
+          <div style={{ marginTop:6 }}>
+            <div style={{ fontSize:9, color:C.muted, fontWeight:700, letterSpacing:'0.05em', margin:'4px 0 2px' }}>RÈGLE 50/30/20 <span style={{ fontWeight:400 }}>(part du revenu — cible entre parenthèses)</span></div>
+            {budget503020.map(x => (
+              <ActifBar key={x.k} label={`${x.label} (${x.target})`} pct={x.v * 100} color={x.color} valueTxt={(x.v * 100).toFixed(0) + ' %'} />
+            ))}
+          </div>
+        )}
+      </ActifSection>
+
+      {/* ── COMPTES ── */}
+      {comptes.length > 0 && (
+        <ActifSection title="🏦 COMPTES & PLATEFORMES" right={`total ${fmtEur(comptesTotal, 0)}`}>
+          {comptes.map(x => (
+            <ActifBar key={x.k} label={x.label} value={x.v}
+              pct={comptesTotal > 0 && x.v > 0 ? x.v / comptesTotal * 100 : null}
+              color={x.v < 0 ? FIN_DOWN : FINANCE_CYAN} />
+          ))}
+        </ActifSection>
+      )}
+
+      {/* ── ACTIFS PHYSIQUES ── */}
+      {physiques.length > 0 && (
+        <ActifSection title="🧸 ACTIFS PHYSIQUES & COLLECTIONS" right={`total ${fmtEur(physTotal, 0)}`}>
+          {physiques.map(x => (
+            <ActifBar key={x.k} label={x.label} value={x.v} pct={physTotal > 0 ? x.v / physTotal * 100 : null} />
+          ))}
+        </ActifSection>
+      )}
+
+      {/* ── PYRAMIDE PATRIMONIALE ── */}
+      {pyramide.length > 0 && (
+        <ActifSection title="🔺 PYRAMIDE 10/80/5/5" right="répartition du patrimoine">
+          {pyramide.map(x => (
+            <ActifBar key={x.k} label={x.label} pct={x.v * 100} color={x.color} valueTxt={(x.v * 100).toFixed(1) + ' %'} />
+          ))}
+        </ActifSection>
+      )}
+
+      {/* ── LIBERTÉ FINANCIÈRE (FIRE) ── */}
+      {(latest.capital != null || latest.libApprox != null) && (
+        <ActifSection title="🔥 LIBERTÉ FINANCIÈRE" right={fireProgress != null ? `${fireProgress.toFixed(1)}% de l'objectif` : null}>
+          {fireProgress != null && (
+            <div style={{ padding:'6px 0 2px' }}>
+              <div style={{ height:8, background:C.surfaceHigh, borderRadius:4 }}>
+                <div style={{ width:`${Math.min(100, fireProgress)}%`, height:'100%', background:`linear-gradient(90deg, ${ACTIFS_GOLD}, ${FIN_UP})`, borderRadius:4 }} />
+              </div>
+              <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:3 }}>
+                <span>{fmtEur(latest.capital, 0)}</span><span>{fmtEur(latest.cible, 0)}</span>
+              </div>
+            </div>
+          )}
+          <ActifKV label="Capital actuel" value={fmtEur(latest.capital, 0)} />
+          <ActifKV label="Capital cible" value={fmtEur(latest.cible, 0)} />
+          {latest.epargneLisse != null && <ActifKV label="Épargne lissée / an" value={fmtEur(latest.epargneLisse, 0)} />}
+          {latest.gainMoyen != null && <ActifKV label="Gain mensuel moyen" value={fmtEurSigned(latest.gainMoyen)} color={latest.gainMoyen >= 0 ? FIN_UP : FIN_DOWN} />}
+          {latest.rendement != null && <ActifKV label="Rendement approx." value={(latest.rendement * 100).toFixed(2) + ' %'} />}
+          {latest.libApprox != null && <ActifKV label="Liberté (approx.)" value={fmtYears(latest.libApprox)} />}
+          {latest.libMensuel != null && <ActifKV label="Liberté (calc. mensuel)" value={fmtYears(latest.libMensuel)} />}
+          {latest.libAnnuel != null && <ActifKV label="Liberté (calc. annuel)" value={fmtYears(latest.libAnnuel)} />}
+        </ActifSection>
+      )}
+
+      {/* ── TOTAUX ANNUELS ── */}
+      {data.totals.length > 0 && (
+        <ActifSection title="📅 TOTAUX ANNUELS" right="salaire · dépenses · économie">
+          <div style={{ display:'grid', gridTemplateColumns:'auto 1fr 1fr 1fr', gap:'3px 10px', fontSize:10, fontFamily:'DM Mono,monospace', paddingTop:4 }}>
+            <span style={{ color:C.muted, fontWeight:700 }}>Année</span>
+            <span style={{ color:C.muted, fontWeight:700, textAlign:'right' }}>Salaire</span>
+            <span style={{ color:C.muted, fontWeight:700, textAlign:'right' }}>Dépenses</span>
+            <span style={{ color:C.muted, fontWeight:700, textAlign:'right' }}>Économie</span>
+            {data.totals.map(y => (
+              <React.Fragment key={y.year}>
+                <span style={{ color:C.text, fontWeight:700 }}>{y.year}</span>
+                <span style={{ color:C.text, textAlign:'right' }}>{fmtEur(y.salaire, 0)}</span>
+                <span style={{ color:FIN_DOWN, textAlign:'right' }}>{fmtEur(y.depense, 0)}</span>
+                <span style={{ color: y.economie >= 0 ? FIN_UP : FIN_DOWN, textAlign:'right', fontWeight:700 }}>{fmtEurSigned(y.economie)}</span>
+              </React.Fragment>
+            ))}
+          </div>
+        </ActifSection>
+      )}
+
+      {/* ── Pied : source + refresh ── */}
+      <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+        <span style={{ flex:1, minWidth:0, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+          📄 {data.file.name}{data.file.modifiedTime ? ` · modifié le ${new Date(data.file.modifiedTime).toLocaleDateString('fr-FR')}` : ''} · sync {new Date(data.fetched_at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })}
+        </span>
+        {connected && <button onClick={() => refresh(true)} disabled={loading} style={{ ...chip(false), flexShrink:0 }}>↻ Actualiser</button>}
+      </div>
+    </div>
+  );
+}
+
 function FinancePanel() {
   // Lit l'état depuis le gestionnaire module-level `_finance` et se ré-rend à chaque
   // notification. `startFinanceLight()` (idempotent) est déclenché ICI au montage du
@@ -5369,10 +5904,13 @@ function FinancePanel() {
   const cg = (crypto && crypto !== 'error') ? crypto : null;
 
   // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, S&P 500,
-  // NASDAQ-100, NVIDIA, Take-Two, EUR/USD). Mode Full : tout. ⚠ NON persisté : on repart
-  // TOUJOURS en Light à chaque (re)chargement / reconnexion.
-  const [full, setFull] = React.useState(false);
-  const toggleMode = () => setFull(f => !f);
+  // NASDAQ-100, NVIDIA, Take-Two, EUR/USD). Mode Full : tout. Mode Mes Actifs : patrimoine
+  // perso lu depuis le Google Sheets « Finance » du Drive (MesActifsPanel — remplace les
+  // sections marché, ne déclenche AUCUN appel des APIs de cours). ⚠ NON persisté : on
+  // repart TOUJOURS en Light à chaque (re)chargement / reconnexion.
+  const [mode, setMode] = React.useState('light');   // 'light' | 'full' | 'actifs'
+  const full   = mode === 'full';
+  const actifs = mode === 'actifs';
   const modeBtn = active => ({
     background: active ? `${FINANCE_CYAN}22` : 'none',
     border: active ? `1px solid ${FINANCE_CYAN}66` : `1px solid ${C.border}`,
@@ -5402,9 +5940,13 @@ function FinancePanel() {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ display:'flex', gap:4, justifyContent:'flex-end' }}>
-        <button onClick={() => full && toggleMode()} style={modeBtn(!full)}>Light</button>
-        <button onClick={() => !full && toggleMode()} style={modeBtn(full)}>Full</button>
+        <button onClick={() => setMode('light')}  style={modeBtn(mode === 'light')}>Light</button>
+        <button onClick={() => setMode('full')}   style={modeBtn(full)}>Full</button>
+        <button onClick={() => setMode('actifs')} style={{ ...modeBtn(actifs), ...(actifs ? { background:`${ACTIFS_GOLD}22`, border:`1px solid ${ACTIFS_GOLD}66`, color:ACTIFS_GOLD } : {}) }}>Mes Actifs</button>
       </div>
+      <style>{'@keyframes finspin{to{transform:rotate(360deg)}}'}</style>
+
+      {actifs ? <MesActifsPanel /> : (<>
 
       {loading && (
         <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 10px',
@@ -5418,7 +5960,6 @@ function FinancePanel() {
             color:C.muted, fontSize:10 }}>≈8s/valeur (limite Twelve Data)</span>
         </div>
       )}
-      <style>{'@keyframes finspin{to{transform:rotate(360deg)}}'}</style>
 
       <FinanceSection title="CRYPTO" eurusd={eurusd}>
         <FinanceRow icon="₿"  name="Bitcoin"  value={fmtPrice(cg && cg.bitcoin && cg.bitcoin.usd)}     pct={cg && cg.bitcoin && cg.bitcoin.usd_24h_change} chart={{ kind:'coingecko', id:'bitcoin' }} onChart={setChartSpec} />
@@ -5456,6 +5997,8 @@ function FinancePanel() {
       </FinanceSection>
 
       {chartSpec && <FinanceChartModal key={chartSpec.kind + ':' + chartSpec.id} spec={chartSpec} onClose={() => setChartSpec(null)} />}
+
+      </>)}
     </div>
   );
 }
