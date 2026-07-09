@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.0.4';
+const APP_VERSION = '4.0.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1184,6 +1184,11 @@ function StoreProvider({ children }) {
 
           // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
           try { notifyDueReminders(); } catch {}
+
+          // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
+          // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
+          // Fire-and-forget (ne bloque pas l'init) — écrit directement en localStorage.
+          try { ytCheckNewVideos(); } catch {}
 
           // Init local DB
           await initDB();
@@ -5396,6 +5401,7 @@ const TVTIME_FILTER_LS = 'spotifyplus_tvtime_filter';  // 'all' | 'movie' | 'tv'
 const YT_KEY_LS = 'spotifyplus_yt_key';   // clé API YouTube Data v3 (séparée de la clé TMDB)
 const YT_COLOR = '#ff4d4d';               // rouge YouTube (filtre + accents de la section)
 const YT_MAX_VIDEOS = 500;                // plafond de vidéos récupérées par chaîne/playlist (quota + localStorage)
+const YT_NEW_CHECK_TTL = 6 * 3600 * 1000; // 6h — TTL du check auto « nouvelles vidéos » au login (économie de quota)
 const TVTIME_SORT_LS = 'spotifyplus_tvtime_sort';      // tri des listes (clé de TVTIME_SORTS) persisté
 const TVTIME_SORTS = [
   ['added_desc', 'Ajout récent'],
@@ -5573,6 +5579,45 @@ async function ytBuildItem(raw) {
     videos, watchedIds: [],
     refreshedAt: Date.now(),
   };
+}
+
+// Appelé au login : ré-interroge l'API YouTube pour chaque chaîne/playlist suivie (TTL 6h par
+// item via refreshedAt) et détecte les NOUVELLES vidéos. Une série marquée « vue » (status
+// 'done') qui a une nouvelle vidéo repasse automatiquement EN COURS ('watching'). Préserve les
+// vues (watchedIds), le statut (sauf le repassage en cours) et les labels manga/cartoon.
+// Écrit directement dans localStorage (loadTvItems/saveTvItems) — ne dépend pas du montage du
+// panneau TV Time. Retourne true si au moins un item a changé.
+async function ytCheckNewVideos() {
+  if (!ytKey()) return false;
+  const cur = loadTvItems();
+  const yts = cur.filter(x => x.type === 'youtube');
+  if (!yts.length) return false;
+  const now = Date.now();
+  const patches = new Map();   // id → { built, hasNew }
+  for (const it of yts) {
+    if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
+    const built = await ytBuildItem(it.id);
+    if (!built || built.error) continue;
+    const oldIds = new Set((it.videos || []).map(v => v.id));
+    const hasNew = (built.videos || []).some(v => !oldIds.has(v.id));
+    patches.set(it.id, { built, hasNew });
+  }
+  if (!patches.size) return false;
+  // Relit l'état le plus récent avant d'écrire (une action a pu se produire entre-temps)
+  const latest = loadTvItems();
+  let changed = false;
+  const next = latest.map(x => {
+    if (x.type !== 'youtube' || !patches.has(x.id)) return x;
+    const { built, hasNew } = patches.get(x.id);
+    const merged = { ...built, watchedIds: x.watchedIds || [], status: x.status,
+      doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt };
+    // Nouvelle vidéo sur une série déjà « vue » → on la remet en cours
+    if (hasNew && x.status === 'done') { merged.status = 'watching'; merged.doneAt = undefined; }
+    changed = true;
+    return merged;
+  });
+  if (changed) saveTvItems(next);
+  return changed;
 }
 
 // Détails d'un film/série → item TV Time normalisé et AUTO-SUFFISANT (tout en cache).
@@ -6180,6 +6225,15 @@ function TvTimePanel() {
     if (!hasKey) return;
     let cancelled = false;
     (async () => { const m = await tvRefreshShows(loadTvItems(), false); if (!cancelled) applyFresh(m); })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // YouTube : check des nouvelles vidéos au montage (TTL 6h par item — déjà lancé au login,
+  // ici pour refléter dans un onglet TV Time déjà ouvert). Repasse en cours les séries « vues »
+  // qui ont une nouvelle vidéo, puis recharge l'état local si quelque chose a changé.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => { const ch = await ytCheckNewVideos(); if (ch && !cancelled) setItems(loadTvItems()); })();
     return () => { cancelled = true; };
   }, []);
 
