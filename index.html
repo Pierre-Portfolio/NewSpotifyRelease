@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.1.0';
+const APP_VERSION = '4.1.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3094,6 +3094,7 @@ function mergeTvItem(a, b) {
   if (isFinite(added)) base.addedAt = added;
   base.manga = !!(a.manga || b.manga);
   base.cartoon = !!(a.cartoon || b.cartoon);
+  if (a.unlimited || b.unlimited) base.unlimited = true;   // plafond 500 retiré : on garde le plus permissif
   if (base.status === 'done') base.doneAt = a.doneAt || b.doneAt || Date.now();
   else delete base.doneAt;
   return base;
@@ -5557,11 +5558,14 @@ async function ytResolveChannel(parsed) {
   };
 }
 
-// Pagine une playlist → [{ id, title, date:'YYYY-MM-DD', still }] (plafonné à YT_MAX_VIDEOS)
+// Pagine une playlist → [{ id, title, date:'YYYY-MM-DD', still }] (plafonné à YT_MAX_VIDEOS,
+// ou SANS limite si max = Infinity — bouton « récupérer toutes les vidéos » d'une chaîne).
 async function ytFetchPlaylistVideos(playlistId, max = YT_MAX_VIDEOS) {
   const out = [];
   let pageToken = '';
-  for (let i = 0; i < 40 && out.length < max; i++) {
+  // 40 pages (2000 vidéos) par défaut ; garde-fou 1000 pages (50k) en mode illimité
+  const pageCap = Number.isFinite(max) ? 40 : 1000;
+  for (let i = 0; i < pageCap && out.length < max; i++) {
     const d = await ytApi('playlistItems', { part: 'snippet,contentDetails', maxResults: '50', playlistId, ...(pageToken ? { pageToken } : {}) });
     if (!d || !d.items) break;
     for (const e of d.items) {
@@ -5594,10 +5598,11 @@ async function ytFetchDurations(ids) {
 
 // Construit un item TV Time 'youtube' à partir d'un lien (chaîne ou playlist). Les vidéos
 // sont groupées en « saisons » = ANNÉES de publication. Retourne l'item ou { error }.
-async function ytBuildItem(raw) {
+async function ytBuildItem(raw, opts = {}) {
   if (!ytKey()) return { error: 'Clé API YouTube manquante.' };
   const parsed = parseYoutubeInput(raw);
   if (!parsed) return { error: 'Lien YouTube invalide.' };
+  const cap = opts.unlimited ? Infinity : YT_MAX_VIDEOS;   // sans plafond si l'utilisateur l'a demandé
   let playlistId, title, thumb, ytKind, srcId;
   if (parsed.kind === 'playlist') {
     ytKind = 'playlist'; playlistId = parsed.id; srcId = parsed.id;
@@ -5613,7 +5618,7 @@ async function ytBuildItem(raw) {
     if (!ch || !ch.uploads) return { error: 'Chaîne introuvable (lien ou clé invalide).' };
     playlistId = ch.uploads; srcId = ch.channelId; title = ch.title; thumb = ch.thumb;
   }
-  const videos = await ytFetchPlaylistVideos(playlistId);
+  const videos = await ytFetchPlaylistVideos(playlistId, cap);
   if (!videos.length) return { error: 'Aucune vidéo trouvée pour ce lien.' };
   const durs = await ytFetchDurations(videos.map(v => v.id));
   for (const v of videos) v.dur = durs.get(v.id) || 0;
@@ -5631,6 +5636,7 @@ async function ytBuildItem(raw) {
     epRuntime: videos.length ? Math.round(totalMin / videos.length) : 0,
     videos, watchedIds: [],
     refreshedAt: Date.now(),
+    unlimited: !!opts.unlimited,   // plafond 500 retiré pour cette chaîne
   };
 }
 
@@ -5649,7 +5655,7 @@ async function ytCheckNewVideos() {
   const patches = new Map();   // id → { built, hasNew }
   for (const it of yts) {
     if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
-    const built = await ytBuildItem(it.id);
+    const built = await ytBuildItem(it.id, { unlimited: it.unlimited });   // préserve le plafond retiré
     if (!built || built.error) continue;
     const oldIds = new Set((it.videos || []).map(v => v.id));
     const hasNew = (built.videos || []).some(v => !oldIds.has(v.id));
@@ -5663,7 +5669,7 @@ async function ytCheckNewVideos() {
     if (x.type !== 'youtube' || !patches.has(x.id)) return x;
     const { built, hasNew } = patches.get(x.id);
     const merged = { ...built, watchedIds: x.watchedIds || [], status: x.status,
-      doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt };
+      doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited };
     // Nouvelle vidéo sur une série déjà « vue » → on la remet en cours
     if (hasNew && x.status === 'done') { merged.status = 'watching'; merged.doneAt = undefined; }
     changed = true;
@@ -6085,7 +6091,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
 
 // ── Fiche YouTube (clic sur l'affiche d'une chaîne/playlist suivie) — vidéos groupées
 // en SAISONS = ANNÉES de publication, cochage INDIVIDUEL par vidéo (watchedIds).
-function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing }) {
+function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited }) {
   const [openYear, setOpenYear] = React.useState(null);
   const seen = new Set(item.watchedIds || []);
   const total = item.totalEps || (item.videos || []).length;
@@ -6161,6 +6167,17 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
             🎨 {item.cartoon ? 'Dessin animé ✓' : 'Dessin animé'}
           </button>
         </div>
+
+        {/* Retirer le plafond de 500 vidéos pour cette chaîne — visible tant que non illimitée
+            (proposé surtout quand le cap a été atteint, mais toujours dispo pour forcer un fetch complet) */}
+        {!item.unlimited
+          ? <button onClick={onUnlimited} disabled={refreshing} title="Récupérer toutes les vidéos de cette chaîne (au-delà de 500)"
+              style={{ width:'100%', background:'none', border:`1px dashed ${C.border}`, borderRadius:8, color: refreshing ? C.dim : YT_COLOR, fontSize:10.5, fontWeight:700, padding:'7px 10px', cursor: refreshing ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', marginBottom:12 }}>
+              {refreshing ? '⏳ Récupération…' : `🔓 Récupérer toutes les vidéos (plafond de ${YT_MAX_VIDEOS} retiré)`}
+            </button>
+          : <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginBottom:12, display:'flex', alignItems:'center', gap:6 }}>
+              <span style={{ color:YT_COLOR }}>🔓</span> Plafond de {YT_MAX_VIDEOS} retiré pour cette chaîne
+            </div>}
 
         {/* Vidéos par année (saison) */}
         <div style={{ fontSize:10, fontWeight:800, color:YT_COLOR, letterSpacing:'0.05em', marginBottom:6 }}>VIDÉOS PAR ANNÉE</div>
@@ -6332,25 +6349,44 @@ function TvTimePanel() {
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
     const exist = items.find(x => x.type === 'youtube' && x.id === built.id);
     if (exist) {
-      // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé
+      // Si l'existant avait le plafond retiré, on re-fetch sans limite pour ne pas régresser à 500
+      let merged = built;
+      if (exist.unlimited && !built.unlimited) {
+        const full = await ytBuildItem(raw, { unlimited: true });
+        if (full && !full.error) merged = full;
+      }
+      // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé / plafond
       update(items.map(x => (x.type === 'youtube' && x.id === built.id)
-        ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt } : x));
-      setYtMsg(`Mis à jour : ${built.title} (${built.totalEps} vidéos)`);
+        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited } : x));
+      setYtMsg(`Mis à jour : ${merged.title} (${merged.totalEps} vidéos)`);
     } else {
       update([built, ...items]);
       setYtMsg(`Ajouté : ${built.title} (${built.totalEps} vidéos)`);
     }
     setYtInput('');
   };
-  // Actualise une chaîne/playlist déjà suivie (bouton ↻ de la fiche)
+  // Actualise une chaîne/playlist déjà suivie (bouton ↻ de la fiche) — préserve le plafond retiré
   const ytRefreshItem = async item => {
     if (ytRefreshingId) return;
     setYtRefreshingId(item.id);
-    const built = await ytBuildItem(item.id);
+    const built = await ytBuildItem(item.id, { unlimited: item.unlimited });
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de l\'actualisation.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
+  };
+  // Retire le plafond de 500 vidéos pour CETTE chaîne : re-fetch complet (peut être long / coûteux en quota)
+  const ytLoadAll = async item => {
+    if (ytRefreshingId) return;
+    if (!confirm(`Récupérer TOUTES les vidéos de « ${item.title} » (plus de plafond à 500) ?\n\nCela peut être long et consommer beaucoup de quota API + stockage local.`)) return;
+    setYtRefreshingId(item.id);
+    setYtMsg('Récupération de toutes les vidéos… (peut prendre du temps)');
+    const built = await ytBuildItem(item.id, { unlimited: true });
+    setYtRefreshingId(null);
+    if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
+    update(items.map(x => (x.type === 'youtube' && x.id === item.id)
       ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt } : x));
+    setYtMsg(`Toutes les vidéos récupérées : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Pose la liste des vidéos vues (cochage individuel) + statut auto done/en cours
   const ytSetWatched = (item, ids) => update(items.map(it => {
@@ -6870,7 +6906,8 @@ function TvTimePanel() {
         onManga={v => setManga(detailItem, v)}
         onCartoon={v => setCartoon(detailItem, v)}
         onRefresh={() => ytRefreshItem(detailItem)}
-        refreshing={ytRefreshingId === detailItem.id} />}
+        refreshing={ytRefreshingId === detailItem.id}
+        onUnlimited={() => ytLoadAll(detailItem)} />}
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
