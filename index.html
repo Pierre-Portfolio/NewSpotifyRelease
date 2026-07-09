@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.3.7';
+const APP_VERSION = '4.3.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1095,38 +1095,45 @@ async function importDiscoverWeekly(addLog) {
 
   addLog('── Import Découvertes de la semaine ──', 'info');
 
-  // Chercher la playlist parmi les playlists de l'utilisateur (toutes pages)
-  let playlistId = null;
+  // Collecter TOUTES les playlists dont le nom correspond (toutes pages) — pas seulement la
+  // première : depuis la migration Spotify, l'éditoriale (owner 'spotify') n'est plus lisible,
+  // mais une COPIE PERSO du même nom (owner = l'utilisateur) l'est. On veut pouvoir tenter les deux.
+  const candidates = [];
   let nextUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
-  while (nextUrl && !playlistId) {
+  while (nextUrl) {
     const data = await apiGet(nextUrl);
     if (data?.rate_limited) return; // fenêtre 429 — retentera au prochain login
     if (!data?.items) break;
-    const pl = data.items.find(p => {
+    for (const p of data.items) {
       const n = (p.name || '').toLowerCase();
-      // Discover Weekly est éditée par Spotify (owner 'spotify'), mais on tolère aussi un
-      // owner différent au cas où le nom correspond (playlist clonée/renommée par l'utilisateur).
-      return n.includes('découvertes de la semaine') || n.includes('discover weekly')
+      const match = n.includes('découvertes de la semaine') || n.includes('discover weekly')
         || (p.owner?.id === 'spotify' && (n.includes('découvertes') || n.includes('discover')));
-    });
-    if (pl) playlistId = pl.id;
+      if (match) candidates.push(p);
+    }
     nextUrl = data.next || null;
   }
 
-  if (!playlistId) {
+  if (!candidates.length) {
     addLog('⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
     localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // re-tentera dans 6 h
     return;
   }
 
+  // Priorité aux copies PERSO (owner ≠ 'spotify' → contenu lisible), l'éditoriale en dernier.
+  candidates.sort((a, b) => (a.owner?.id === 'spotify' ? 1 : 0) - (b.owner?.id === 'spotify' ? 1 : 0));
+
   const today = new Date().toISOString().slice(0, 10);
-  // Migration Spotify fév. 2026 : /tracks → /items, et le contenu n'est renvoyé QUE pour les
-  // playlists possédées/collaboratives. "Découvertes de la semaine" appartient à Spotify → l'API
-  // peut refuser (403) ou renvoyer sans items. On essaie /items ET /tracks (fetchPlaylistItems).
-  const tracksData = await fetchPlaylistItems(playlistId);
-  if (tracksData.rate_limited) return; // fenêtre 429 — retentera au prochain login
-  if (!tracksData.items.length) {
-    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible (403/vide). Depuis la migration Spotify de février 2026, les playlists éditoriales Spotify ne sont plus toujours lisibles par les apps tierces. Nouvel essai dans 6 h.', 'warn');
+  // Migration Spotify : /tracks → /items, et le contenu n'est renvoyé QUE pour les playlists
+  // possédées/collaboratives. On essaie chaque candidate (copie perso d'abord) via /items ET
+  // /tracks (fetchPlaylistItems) jusqu'à en trouver une dont le contenu est lisible.
+  let tracksData = null;
+  for (const pl of candidates) {
+    const d = await fetchPlaylistItems(pl.id);
+    if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
+    if (d.items.length) { tracksData = d; break; }
+  }
+  if (!tracksData) {
+    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible (403/vide). Depuis la migration Spotify, les playlists ÉDITORIALES Spotify (Découvertes, Radar…) ne sont plus lisibles par les apps tierces, même ajoutées à ta bibliothèque. CONTOURNEMENT : sur Spotify, ouvre la playlist → menu ⋯ → "Ajouter à une autre playlist" → "Nouvelle playlist" (garde "découvertes" dans le nom) → cette COPIE PERSO sera lisible et importée automatiquement. Nouvel essai dans 6 h.', 'warn');
     localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // cooldown court, auto-réparant
     return;
   }
