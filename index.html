@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.4.8';
+const APP_VERSION = '4.4.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3339,6 +3339,7 @@ function mergeTvItem(a, b) {
   if (isFinite(added)) base.addedAt = added;
   base.manga = !!(a.manga || b.manga);
   base.cartoon = !!(a.cartoon || b.cartoon);
+  if (a.dropped || b.dropped) base.dropped = true;         // « ne plus suivre » conservé à la fusion
   if (a.unlimited || b.unlimited) base.unlimited = true;   // plafond 500 retiré : on garde le plus permissif
   if (base.status === 'done') base.doneAt = a.doneAt || b.doneAt || Date.now();
   else delete base.doneAt;
@@ -6541,6 +6542,7 @@ async function ytCheckNewVideos() {
   const now = Date.now();
   const patches = new Map();   // id → { built, hasNew }
   for (const it of yts) {
+    if (it.dropped) continue;   // « ne plus suivre » → jamais de recherche de nouveautés
     if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
     const built = await ytBuildItem(it.id, { unlimited: it.unlimited });   // préserve le plafond retiré
     if (!built || built.error) continue;
@@ -6740,6 +6742,7 @@ async function tvRefreshShows(items, force) {
   const out = new Map();
   if (!tmdbKey()) return out;
   const stale = items.filter(it => {
+    if (it.dropped) return false;              // « ne plus suivre » → plus jamais rafraîchi
     if (it.status === 'done') return false;
     if (it.type === 'youtube') return false;   // YouTube : actualisé via le bouton ↻ de sa fiche
     if (it.type === 'tv') return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
@@ -7307,7 +7310,7 @@ function TvTimePanel() {
       }
       // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé / plafond
       update(items.map(x => (x.type === 'youtube' && x.id === built.id)
-        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited } : x));
+        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited } : x));
       setYtMsg(`Mis à jour : ${merged.title} (${merged.totalEps} vidéos)`);
     } else {
       update([built, ...items]);
@@ -7323,7 +7326,7 @@ function TvTimePanel() {
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de l\'actualisation.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
   };
   // Retire le plafond de 500 vidéos pour CETTE chaîne : re-fetch complet (peut être long / coûteux en quota)
   const ytLoadAll = async item => {
@@ -7335,7 +7338,7 @@ function TvTimePanel() {
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt } : x));
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt } : x));
     setYtMsg(`Toutes les vidéos récupérées : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Reverrouille une chaîne dont le plafond avait été retiré : ne conserve que les vidéos
@@ -7439,12 +7442,19 @@ function TvTimePanel() {
       // ✓ chaîne/playlist YouTube terminée = toutes les vidéos cochées
       watchedIds: (status === 'done' && it.type === 'youtube') ? (it.videos || []).map(v => v.id) : it.watchedIds,
       doneAt: status === 'done' ? Date.now() : it.doneAt,
+      // Repasser en actif (watching/towatch/paused) = re-suivre → on lève le drapeau « ne plus suivre »
+      dropped: status === 'done' ? it.dropped : false,
     };
   }));
   // « Arrêter le visionnage » (depuis EN PAUSE) : passe en VUS mais CONSERVE la progression
   // actuelle — ne valide PAS les épisodes restants (contrairement au ✓ « tout vu »).
   const abandonSeries = item => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
     { ...it, status: 'done', doneAt: Date.now() }));
+  // « Ne plus suivre » (toutes catégories) : passe en VUS avec la progression ACTUELLE (les
+  // épisodes déjà vus, sans valider les nouveaux) ET pose `dropped` → l'item n'est plus
+  // rafraîchi et ne resurgit jamais avec ses nouveautés (nouveaux épisodes / vidéos).
+  const unfollow = item => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
+    { ...it, status: 'done', dropped: true, doneAt: Date.now() }));
 
   const addItem = async (r, status) => {
     if (busy) return;
@@ -7619,6 +7629,12 @@ function TvTimePanel() {
     const nxt = tvNextToWatch(it);
     return `${it.watchedEps || 0}/${it.totalEps || '?'} ép.${nxt ? ` · prochain ${nxt}` : ' · à jour ✓'}`;
   };
+  // Bouton « Ne plus suivre » (séries & chaînes YouTube) — passe en Vus avec la progression
+  // actuelle, sans valider les nouveaux épisodes, et empêche toute réapparition future.
+  const unfollowBtn = it => (it.type === 'movie' ? null :
+    <button key="unfollow" onClick={() => unfollow(it)}
+      title="Ne plus suivre — passe en Vus avec les épisodes déjà vus, sans y ajouter les nouveautés (n'apparaîtra plus dans les nouveautés)"
+      style={abtn('#b06cf5')}>🚫</button>);
 
   return (
     <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
@@ -7786,6 +7802,7 @@ function TvTimePanel() {
                   {it.type === 'tv' && <button onClick={() => setStatus(it, 'paused')} title="Mettre en pause (arrêter de regarder)" style={abtn('#f5b81f')}>⏸</button>}
                   {it.type === 'movie' && <button onClick={() => setStatus(it, 'towatch')} title="Repasser en À voir" style={abtn('#f5b81f')}>📌</button>}
                   <button onClick={() => setStatus(it, 'done')} title={it.type === 'tv' ? 'Série terminée (tout vu)' : it.type === 'youtube' ? 'Tout vu' : 'Film vu'} style={abtn('#4caf50')}>✓</button>
+                  {unfollowBtn(it)}
                   <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                 </>
               )))}
@@ -7798,6 +7815,7 @@ function TvTimePanel() {
                 <>
                   <button onClick={() => setStatus(it, 'watching')} title="Reprendre le visionnage" style={abtn(TVTIME_COLOR)}>▶</button>
                   <button onClick={() => abandonSeries(it)} title="Arrêter le visionnage (passer en Vus, sans valider les épisodes restants)" style={abtn('#4caf50')}>⏹</button>
+                  {unfollowBtn(it)}
                   <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                 </>
               )))}
@@ -7810,6 +7828,7 @@ function TvTimePanel() {
                 <>
                   <button onClick={() => setStatus(it, 'watching')} title="Commencer" style={abtn(TVTIME_COLOR)}>▶</button>
                   <button onClick={() => setStatus(it, 'done')} title="Déjà vu" style={abtn('#4caf50')}>✓</button>
+                  {unfollowBtn(it)}
                   <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                 </>
               )))}
@@ -7838,7 +7857,10 @@ function TvTimePanel() {
                     const when = dj === null ? '' : dj < 0 ? 'diffusé' : dj === 0 ? "aujourd'hui" : dj === 1 ? 'demain' : `dans ${dj} j`;
                     return row(it,
                       `S${it.nextEp.s}E${it.nextEp.e}${it.nextEp.name ? ` « ${it.nextEp.name} »` : ''} · ${new Date(it.nextEp.date + 'T00:00:00').toLocaleDateString('fr-FR')}`,
-                      <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
+                      <>
+                        <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
+                        {unfollowBtn(it)}
+                      </>
                     );
                   }))}
             </>
@@ -7849,9 +7871,10 @@ function TvTimePanel() {
           {secOpen.done && (done.length === 0
             ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucun film ou série vu·e</div>
             : done.map(it => row(it,
-                it.type === 'movie' ? `Film${it.runtime ? ` · ${it.runtime} min` : ''}` : it.type === 'youtube' ? `${(it.watchedIds || []).length} vidéos vues` : `${it.watchedEps || 0} ép. vus`,
+                it.type === 'movie' ? `Film${it.runtime ? ` · ${it.runtime} min` : ''}` : it.type === 'youtube' ? `${(it.watchedIds || []).length} vidéos vues` : `${it.watchedEps || 0} ép. vus${it.dropped ? ' · plus suivie' : ''}`,
                 <>
                   <button onClick={() => setStatus(it, 'watching')} title="Repasser en cours" style={abtn(C.muted)}>↩</button>
+                  {it.type !== 'movie' && !it.dropped && unfollowBtn(it)}
                   <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                 </>
               )))}
@@ -7870,15 +7893,17 @@ function TvTimePanel() {
                       : ytWatching.map(it => row(it, progLabel(it),
                           <>
                             <button onClick={() => setStatus(it, 'done')} title="Tout vu" style={abtn('#4caf50')}>✓</button>
+                            {unfollowBtn(it)}
                             <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                           </>
                         )))}
                     {secTitle('ytDone', '✓', 'VUS', ytDone.length, null, YT_COLOR)}
                     {secOpen.ytDone && (ytDone.length === 0
                       ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucune chaîne vue</div>
-                      : ytDone.map(it => row(it, `${(it.watchedIds || []).length} vidéos vues`,
+                      : ytDone.map(it => row(it, `${(it.watchedIds || []).length} vidéos vues${it.dropped ? ' · plus suivie' : ''}`,
                           <>
                             <button onClick={() => setStatus(it, 'watching')} title="Repasser en cours" style={abtn(C.muted)}>↩</button>
+                            {!it.dropped && unfollowBtn(it)}
                             <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                           </>
                         )))}
