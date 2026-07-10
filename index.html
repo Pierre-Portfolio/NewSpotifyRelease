@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.3.9';
+const APP_VERSION = '4.4.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1406,6 +1406,8 @@ function StoreProvider({ children }) {
 
           // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
           try { notifyDueReminders(); } catch {}
+          // Remember → To do : ajoute au carrousel « Aujourd'hui » les rappels à ≤ 3 j de l'échéance
+          try { syncRemembersToTodos(); } catch {}
 
           // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
           // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
@@ -8300,15 +8302,18 @@ function rappelBadge(days) {
   if (days <= 30)    return { txt:`dans ${days} j`,       color:'#f5a623' };
   return { txt:`dans ${days} j`, color:'#46c46a' };
 }
-// Tous les rappels datés (fixes + persos) avec leur nb de jours restants { label, days }.
+// Tous les rappels datés (fixes + persos) avec leur nb de jours restants
+// { key, label, days, date } — `key` = identifiant stable ("<section>.<item>" pour les
+// fixes, "custom.<id>" pour les persos), utilisé pour dédoublonner l'ajout auto au To do.
 function rememberAllWithDelta() {
   const out = [];
   const dates = loadRappels();
   RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
-    const d = rappelDelta(dates[sec.key + '.' + ik]);
-    if (d != null) out.push({ label, days: d });
+    const k = sec.key + '.' + ik;
+    const d = rappelDelta(dates[k]);
+    if (d != null) out.push({ key: k, label, days: d, date: dates[k] });
   }));
-  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ label: r.label, days: d }); });
+  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ key: 'custom.' + r.id, label: r.label, days: d, date: r.date }); });
   return out;
 }
 // Liste des rappels ÉCHUS (date ≤ aujourd'hui) — items fixes + persos.
@@ -8341,6 +8346,34 @@ function notifyDueReminders() {
   notify('Spotify+ — Remember', alerts.length === 1 ? `Rappel : ${names}` : `${alerts.length} rappels : ${names}`);
 }
 
+// To do : quand un rappel Remember arrive à ≤ 3 jours de son échéance (ou est en retard),
+// on l'ajoute automatiquement dans le carrousel « Aujourd'hui » du To do. Dédoublonné PAR
+// OCCURRENCE (clé du rappel → date pour laquelle on a déjà ajouté) via localStorage : un même
+// rappel/date n'est ajouté qu'une seule fois — même si l'utilisateur supprime ensuite la tâche —
+// et un changement de date recrée une occurrence. Appelé à l'ouverture de l'app (passage en
+// connected) et après chaque modification de date dans RappelPanel.
+const REMEMBER_TODO_LEAD_DAYS = 3;
+const REMEMBER_TODO_ADDED_KEY = 'spotifyplus_remember_todo_added'; // { "<key>": "<date>" }
+function syncRemembersToTodos() {
+  const soon = rememberAllWithDelta().filter(r => r.date && r.days != null && r.days <= REMEMBER_TODO_LEAD_DAYS);
+  if (!soon.length) return false;
+  let added;
+  try { added = JSON.parse(localStorage.getItem(REMEMBER_TODO_ADDED_KEY)) || {}; } catch { added = {}; }
+  const todos = loadTodos();
+  let changed = false;
+  soon.forEach(r => {
+    if (added[r.key] === r.date) return;   // déjà ajouté pour cette échéance
+    todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), text: '🔔 ' + r.label, bucket: 'today', fav: false, rememberKey: r.key });
+    added[r.key] = r.date;
+    changed = true;
+  });
+  if (changed) {
+    saveTodos(todos);
+    try { localStorage.setItem(REMEMBER_TODO_ADDED_KEY, JSON.stringify(added)); } catch {}
+  }
+  return changed;
+}
+
 function RappelPanel() {
   const [dates, setDates]   = React.useState(loadRappels);
   const [customs, setCustoms] = React.useState(loadRemembers);
@@ -8352,8 +8385,9 @@ function RappelPanel() {
     const next = { ...dates };
     if (val) next[key] = val; else delete next[key];
     setDates(next); saveRappels(next);
+    try { syncRemembersToTodos(); } catch {}   // échéance ≤ 3 j → tâche « Aujourd'hui »
   };
-  const updateCustoms = next => { setCustoms(next); saveRemembers(next); };
+  const updateCustoms = next => { setCustoms(next); saveRemembers(next); try { syncRemembersToTodos(); } catch {} };
   const addCustom = () => {
     const label = cLabel.trim();
     if (!label || !cDate) return;

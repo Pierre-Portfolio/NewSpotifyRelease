@@ -187,6 +187,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Rappels personnalisés** : ajoute ton propre rappel (libellé + date)
 - Pour chaque rappel, un badge indique « à définir », « en retard », « aujourd'hui » ou « dans X jours » (coloré selon l'urgence)
 - **Notification à l'ouverture de l'app** à 1 mois, 7 jours et 1 jour avant l'échéance, le jour même, ainsi que pour les rappels en retard (une fois par jour) + bandeau des rappels échus
+- **Ajout automatique au To do** : dès qu'un rappel arrive à **3 jours ou moins** de son échéance (ou est en retard), il est ajouté automatiquement dans le carrousel **« Aujourd'hui »** du To do (préfixé 🔔). Chaque échéance n'est ajoutée qu'une seule fois — modifier la date d'un rappel recrée l'ajout pour la nouvelle échéance
 - Dates mémorisées localement (aucun backend)
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h
