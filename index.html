@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.4.0';
+const APP_VERSION = '4.4.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3221,8 +3221,9 @@ function buildBackup() {
     artists,
     todos: lsJson('spotifyplus_todos') || [],
     todos_done: lsJson('spotifyplus_todos_done') || [],
-    // Remember : dates des rappels fixes (clés "<section>.<item>") + rappels persos
+    // Remember : dates des rappels fixes (clés "<section>.<item>") + heures optionnelles + rappels persos
     rappels: lsJson('spotifyplus_rappels') || {},
+    rappels_time: lsJson('spotifyplus_rappels_time') || {},
     remembers: lsJson('spotifyplus_remember_custom') || [],
     // TV Time : suivi séries/films (métadonnées TMDB en cache comprises)
     tvtime: lsJson('spotifyplus_tvtime') || [],
@@ -3256,7 +3257,7 @@ const EXPORT_SECTIONS = [
   { key:'maps',     label:'Maps',         icon:'🗺️', hint:'trajets Google Timeline',    fields:['maps'] },
   { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…)', fields:['finance'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
-  { key:'remember', label:'Remember',     icon:'🔔', hint:'rappels fixes + persos',     fields:['rappels', 'remembers'] },
+  { key:'remember', label:'Remember',     icon:'🔔', hint:'rappels fixes + persos (dates & heures)', fields:['rappels', 'rappels_time', 'remembers'] },
   { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique", fields:['stats', 'listens'] },
   { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés', fields:['modules'] },
 ];
@@ -3401,6 +3402,7 @@ function applyBackup(data) {
     } catch {}
   }
   if (data.rappels && typeof data.rappels === 'object') put('spotifyplus_rappels', data.rappels);
+  if (data.rappels_time && typeof data.rappels_time === 'object') put('spotifyplus_rappels_time', data.rappels_time);
   if (Array.isArray(data.remembers))  put('spotifyplus_remember_custom', data.remembers);
   // TV Time — FUSIONNÉ avec la liste locale (union par type+id, progression la plus avancée conservée)
   if (Array.isArray(data.tvtime)) {
@@ -8283,8 +8285,11 @@ const RAPPEL_SECTIONS = [
   { key:'anniversaire', label:'Anniversaire', icon:'🎂', items:[['anniv_papa','Anniversaire Papa'], ['anniv_maman','Anniv Maman'], ['fete_peres','Fête des pères'], ['fete_meres','Fête des mères'], ['anniv_cecile','Anniversaire Cécile']] },
   { key:'autre',        label:'Autre',        icon:'📌', items:[['lunettes','Lunettes'], ['carte_restaurant','Carte restaurant expiration']] },
 ];
+const RAPPEL_TIME_KEY = 'spotifyplus_rappels_time';     // heure OPTIONNELLE des items fixes : { "<section>.<item>": "HH:MM" }
 function loadRappels() { try { return JSON.parse(localStorage.getItem(RAPPEL_LS_KEY)) || {}; } catch { return {}; } }
 function saveRappels(v) { try { localStorage.setItem(RAPPEL_LS_KEY, JSON.stringify(v)); } catch {} }
+function loadRappelTimes() { try { return JSON.parse(localStorage.getItem(RAPPEL_TIME_KEY)) || {}; } catch { return {}; } }
+function saveRappelTimes(v) { try { localStorage.setItem(RAPPEL_TIME_KEY, JSON.stringify(v)); } catch {} }
 function loadRemembers() { try { return JSON.parse(localStorage.getItem(REMEMBER_CUSTOM_KEY)) || []; } catch { return []; } }
 function saveRemembers(v) { try { localStorage.setItem(REMEMBER_CUSTOM_KEY, JSON.stringify(v)); } catch {} }
 // Jours restants jusqu'à la date (négatif = en retard), ou null si pas de date.
@@ -8308,12 +8313,13 @@ function rappelBadge(days) {
 function rememberAllWithDelta() {
   const out = [];
   const dates = loadRappels();
+  const times = loadRappelTimes();
   RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
     const k = sec.key + '.' + ik;
     const d = rappelDelta(dates[k]);
-    if (d != null) out.push({ key: k, label, days: d, date: dates[k] });
+    if (d != null) out.push({ key: k, label, days: d, date: dates[k], time: times[k] || '' });
   }));
-  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ key: 'custom.' + r.id, label: r.label, days: d, date: r.date }); });
+  loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ key: 'custom.' + r.id, label: r.label, days: d, date: r.date, time: r.time || '' }); });
   return out;
 }
 // Liste des rappels ÉCHUS (date ≤ aujourd'hui) — items fixes + persos.
@@ -8363,7 +8369,7 @@ function syncRemembersToTodos() {
   let changed = false;
   soon.forEach(r => {
     if (added[r.key] === r.date) return;   // déjà ajouté pour cette échéance
-    todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), text: '🔔 ' + r.label, bucket: 'today', fav: false, rememberKey: r.key });
+    todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), text: '🔔 ' + r.label + (r.time ? ` (${r.time})` : ''), bucket: 'today', fav: false, rememberKey: r.key });
     added[r.key] = r.date;
     changed = true;
   });
@@ -8376,26 +8382,35 @@ function syncRemembersToTodos() {
 
 function RappelPanel() {
   const [dates, setDates]   = React.useState(loadRappels);
+  const [times, setTimes]   = React.useState(loadRappelTimes);   // heure OPTIONNELLE des items fixes
   const [customs, setCustoms] = React.useState(loadRemembers);
   const [cLabel, setCLabel] = React.useState('');
   const [cDate, setCDate]   = React.useState('');
+  const [cTime, setCTime]   = React.useState('');
   const [showUpcoming, setShowUpcoming] = React.useState(false);   // false = affichage par rubriques (défaut)
 
   const setDate = (key, val) => {
     const next = { ...dates };
     if (val) next[key] = val; else delete next[key];
     setDates(next); saveRappels(next);
+    if (!val) { const nt = { ...times }; delete nt[key]; setTimes(nt); saveRappelTimes(nt); }  // pas de date → on oublie l'heure
     try { syncRemembersToTodos(); } catch {}   // échéance ≤ 3 j → tâche « Aujourd'hui »
+  };
+  const setTime = (key, val) => {
+    const next = { ...times };
+    if (val) next[key] = val; else delete next[key];
+    setTimes(next); saveRappelTimes(next);
   };
   const updateCustoms = next => { setCustoms(next); saveRemembers(next); try { syncRemembersToTodos(); } catch {} };
   const addCustom = () => {
     const label = cLabel.trim();
     if (!label || !cDate) return;
-    updateCustoms([...customs, { id: Date.now() + '_' + Math.random().toString(36).slice(2), label, date: cDate }]);
-    setCLabel(''); setCDate('');
+    updateCustoms([...customs, { id: Date.now() + '_' + Math.random().toString(36).slice(2), label, date: cDate, time: cTime || '' }]);
+    setCLabel(''); setCDate(''); setCTime('');
   };
   const removeCustom = id => updateCustoms(customs.filter(c => c.id !== id));
-  const setCustomDate = (id, val) => updateCustoms(customs.map(c => c.id === id ? { ...c, date: val } : c));
+  const setCustomDate = (id, val) => updateCustoms(customs.map(c => c.id === id ? { ...c, date: val, time: val ? c.time : '' } : c));
+  const setCustomTime = (id, val) => updateCustoms(customs.map(c => c.id === id ? { ...c, time: val } : c));
 
   // Rappels échus (pour le bandeau) — fixes + persos
   const due = [];
@@ -8407,17 +8422,22 @@ function RappelPanel() {
   const upcoming = React.useMemo(() => {
     const out = [];
     RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
-      const ds = dates[sec.key + '.' + ik]; const d = rappelDelta(ds);
-      if (d != null && d >= 0) out.push({ label, date: ds, days: d });
+      const k = sec.key + '.' + ik; const ds = dates[k]; const d = rappelDelta(ds);
+      if (d != null && d >= 0) out.push({ label, date: ds, time: times[k] || '', days: d });
     }));
-    customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d >= 0) out.push({ label: c.label, date: c.date, days: d }); });
+    customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d >= 0) out.push({ label: c.label, date: c.date, time: c.time || '', days: d }); });
     return out.sort((a, b) => a.days - b.days);
-  }, [dates, customs]);
+  }, [dates, customs, times]);
   const fmtRappelDate = ds => { const d = new Date(ds + 'T00:00:00'); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('fr-FR', { day:'numeric', month:'short', year:'numeric' }); };
 
   const dateInput = (val, onChange) => (
     <input type="date" value={val} onChange={onChange}
       style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 6px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
+  );
+  // Heure OPTIONNELLE — affichée seulement quand une date est renseignée
+  const timeInput = (val, onChange) => (
+    <input type="time" value={val} onChange={onChange} title="Heure (optionnel)"
+      style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 5px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
   );
 
   return (
@@ -8443,7 +8463,7 @@ function RappelPanel() {
               return (
                 <div key={i} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8 }}>
                   <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{r.label}</div>
-                  <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, whiteSpace:'nowrap', flexShrink:0 }}>{fmtRappelDate(r.date)}</span>
+                  <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, whiteSpace:'nowrap', flexShrink:0 }}>{fmtRappelDate(r.date)}{r.time ? ' · ' + r.time : ''}</span>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                 </div>
               );
@@ -8460,6 +8480,7 @@ function RappelPanel() {
                 <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{label}</div>
                 <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                 {dateInput(val, e => setDate(key, e.target.value))}
+                {val && timeInput(times[key] || '', e => setTime(key, e.target.value))}
               </div>
             );
           })}
@@ -8477,6 +8498,7 @@ function RappelPanel() {
                   <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{c.label}</div>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                   {dateInput(c.date || '', e => setCustomDate(c.id, e.target.value))}
+                  {c.date && timeInput(c.time || '', e => setCustomTime(c.id, e.target.value))}
                   <button onClick={() => removeCustom(c.id)} title="Supprimer" style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
                 </div>
               );
@@ -8486,6 +8508,7 @@ function RappelPanel() {
             onChange={e => setCLabel(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addCustom(); }}
             style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${cLabel ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }} />
           {dateInput(cDate, e => setCDate(e.target.value))}
+          {cDate && timeInput(cTime, e => setCTime(e.target.value))}
           <button onClick={addCustom} title="Ajouter" style={{ background:`${RAPPEL_PURPLE}22`, border:`1px solid ${RAPPEL_PURPLE}66`, borderRadius:6, color:RAPPEL_PURPLE, fontSize:16, lineHeight:1, padding:'0 10px', cursor:'pointer', flexShrink:0 }}>+</button>
         </div>
       </StatsCollapse>
