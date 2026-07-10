@@ -88,7 +88,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.4.4';
+const APP_VERSION = '4.4.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3311,8 +3311,12 @@ function mergeTvItem(a, b) {
   const aFresh = a.refreshedAt || 0, bFresh = b.refreshedAt || 0;
   const base = bFresh > aFresh ? { ...a, ...b } : { ...b, ...a };
   base.status = _tvStatusRank(a.status) >= _tvStatusRank(b.status) ? a.status : b.status;
-  if (a.watchedEps != null || b.watchedEps != null)
-    base.watchedEps = Math.max(a.watchedEps || 0, b.watchedEps || 0);
+  // Progression épisodes = UNION des ensembles vus (cochage individuel) — jamais de régression
+  if (a.watchedSet || b.watchedSet || a.watchedEps != null || b.watchedEps != null) {
+    const u = [...new Set([...tvWatchedSet(a), ...tvWatchedSet(b)])];
+    base.watchedSet = u;
+    base.watchedEps = Math.max(u.length, a.watchedEps || 0, b.watchedEps || 0);
+  }
   const sp = new Set([...(a.specialsSeen || []), ...(b.specialsSeen || [])]);
   if (sp.size) base.specialsSeen = [...sp].sort((x, y) => x - y);
   const wid = new Set([...(a.watchedIds || []), ...(b.watchedIds || [])]);
@@ -6559,27 +6563,56 @@ async function tmdbFetchItem(type, id) {
       : null,
     refreshedAt: Date.now(),
     watchedEps: 0,
+    watchedSet: [],   // épisodes vus (cochage individuel) — voir tvWatchedSet
   };
 }
 
-// Prochain épisode À REGARDER (position du compteur watchedEps dans les saisons) — "S2E5"
-function tvNextToWatch(item) {
+// Ensemble des épisodes vus (SOURCE DE VÉRITÉ, cochage INDIVIDUEL par épisode) — clés
+// "S{n}E{e}" (saison, épisode ; hors épisodes spéciaux gérés à part via specialsSeen).
+// Permet de cocher n'importe quelle saison/épisode isolément (ex. S28-S32 sans S1-S27).
+// `watchedEps` (compteur) est maintenu = watchedSet.length pour les stats/listes.
+// Migration : un ancien item n'a que le compteur plat `watchedEps` → on reconstitue le set
+// en marquant les N premiers épisodes dans l'ordre des saisons (comportement historique).
+function tvWatchedSet(item) {
+  if (Array.isArray(item.watchedSet)) return item.watchedSet;
+  const out = [];
   let rem = item.watchedEps || 0;
   for (const s of item.seasons || []) {
-    if (rem < s.eps) return `S${s.n}E${rem + 1}`;
-    rem -= s.eps;
+    for (let e = 1; e <= s.eps && rem > 0; e++, rem--) out.push(`S${s.n}E${e}`);
+  }
+  return out;
+}
+// Toutes les clés d'épisodes (hors spéciaux) d'une série — pour « tout vu »
+function tvAllKeys(item) {
+  const out = [];
+  for (const s of item.seasons || []) for (let e = 1; e <= s.eps; e++) out.push(`S${s.n}E${e}`);
+  return out;
+}
+// Dernier épisode vu dans l'ordre des saisons (pour le bouton −1) — clé "S{n}E{e}" ou null
+function tvLastWatched(item) {
+  const set = new Set(tvWatchedSet(item));
+  let last = null;
+  for (const s of item.seasons || []) for (let e = 1; e <= s.eps; e++) { const k = `S${s.n}E${e}`; if (set.has(k)) last = k; }
+  return last;
+}
+
+// Prochain épisode À REGARDER (1er épisode non vu dans l'ordre) — "S2E5" (= clé du set)
+function tvNextToWatch(item) {
+  const set = new Set(tvWatchedSet(item));
+  for (const s of item.seasons || []) {
+    for (let e = 1; e <= s.eps; e++) { const k = `S${s.n}E${e}`; if (!set.has(k)) return k; }
   }
   return null; // tout est vu
 }
 
-// Projection du compteur plat watchedEps sur les saisons — pour la fiche série.
-// Retourne [{ n, eps, watched, cumStart, cumEnd }] (cumStart/cumEnd = bornes du compteur)
+// Décompte des épisodes vus PAR SAISON (membres du set) — pour la fiche série.
+// Retourne [{ n, eps, watched }] (chaque saison indépendante des autres)
 function tvSeasonBreakdown(item) {
-  let cum = 0;
+  const set = new Set(tvWatchedSet(item));
   return (item.seasons || []).map(s => {
-    const cumStart = cum; cum += s.eps;
-    const watched = Math.max(0, Math.min(s.eps, (item.watchedEps || 0) - cumStart));
-    return { n: s.n, eps: s.eps, watched, cumStart, cumEnd: cum };
+    let watched = 0;
+    for (let e = 1; e <= s.eps; e++) if (set.has(`S${s.n}E${e}`)) watched++;
+    return { n: s.n, eps: s.eps, watched };
   });
 }
 
@@ -6741,10 +6774,11 @@ function tvTimeStats() {
 // saison (barre + x/y + coche verte). Les épisodes spéciaux (saison 0) sont SUIVABLES
 // (ligne dépliable + coches INDIVIDUELLES, liste specialsSeen) mais JAMAIS comptés dans
 // les 100 % ni requis pour que la série passe en « Vu ».
-function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetSpecials, onStatus, onManga, onCartoon }) {
+function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onSetSpecials, onStatus, onManga, onCartoon }) {
   const isMovie = item.type === 'movie';
   const total   = item.totalEps || 0;
-  const watched = Math.min(item.watchedEps || 0, total);
+  const wset    = new Set(tvWatchedSet(item));   // épisodes vus (clés "S{n}E{e}") — cochage individuel
+  const watched = Math.min(wset.size, total);
   const pct     = total ? Math.round(watched / total * 100) : 0;
   const rows    = tvSeasonBreakdown(item);
   // Pseudo-ligne « Épisodes spéciaux » (n=0) ajoutée en fin de liste — même mécanique
@@ -6753,7 +6787,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
   const spSeen  = tvSpecialsSeen(item);   // n° des spéciaux vus (cochage individuel)
   const spW     = Math.min(spSeen.length, spEps);
   const allRows = spEps > 0
-    ? rows.concat([{ n: 0, special: true, eps: spEps, watched: spW, cumStart: 0, cumEnd: spEps }])
+    ? rows.concat([{ n: 0, special: true, eps: spEps, watched: spW }])
     : rows;
   // Saison dépliée (liste des épisodes façon TV Time) — 1 fetch /tv/{id}/season/{n} au
   // 1er dépliage (cache 7 j), puis tout est local. Placeholders si l'API échoue.
@@ -6771,7 +6805,8 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
       setEpsLoading(null);
     }
   };
-  const nextSeason = rows.find(s => s.watched < s.eps) || null;   // 1re saison incomplète
+  const nextKey  = tvNextToWatch(item);   // 1er épisode non vu (clé "S{n}E{e}") ou null
+  const nextM    = nextKey && nextKey.match(/^S(\d+)E(\d+)$/);   // → [_, saison, épisode]
   const allSeen = total > 0 && watched >= total;
   const prodLbl = tvStatusFR(item.tvStatus);
   const Bar = ({ v, max, color, h = 4 }) => (
@@ -6861,9 +6896,9 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
             <>
               <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ fontSize:16, fontWeight:900, fontFamily:'DM Mono,monospace', color:C.text }}>
-                  {nextSeason ? `S${String(nextSeason.n).padStart(2, '0')} | E${String(nextSeason.watched + 1).padStart(2, '0')}` : '—'}
+                  {nextM ? `S${nextM[1].padStart(2, '0')} | E${nextM[2].padStart(2, '0')}` : '—'}
                 </div>
-                <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2 }}>prochain épisode à regarder</div>
+                <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2 }}>prochain épisode non vu</div>
               </div>
               <button onClick={() => onBump(-1)} disabled={watched === 0} title="−1 épisode vu"
                 style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color: watched === 0 ? '#333' : C.muted, fontSize:14, lineHeight:1, padding:'6px 10px', cursor: watched === 0 ? 'default' : 'pointer', flexShrink:0 }}>−</button>
@@ -6879,10 +6914,9 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
           {allRows.map(s => {
             const done = s.watched >= s.eps;
             const open = openSeason === s.n;
-            // Ligne spéciaux : cochage INDIVIDUEL (specialsSeen = n° des ép. vus), rendu grisé —
-            // même mécanique de dépliage que les vraies saisons (saison 0 TMDB) mais chaque
-            // spécial est indépendant (cocher E01 ne coche pas E02+). Saisons officielles : cumulatif.
-            const cnt = item.watchedEps || 0;
+            // Cochage INDIVIDUEL par épisode (wset), pour les vraies saisons comme pour les
+            // spéciaux (specialsSeen). Chaque saison/épisode est indépendant des autres :
+            // cocher la saison 28 n'affecte pas les saisons 1-27.
             // « Tout cocher » les spéciaux : n° réels si la saison 0 est chargée, sinon 1..spEps
             const allSpNums = ((epsMap[0] || []).map(ep => ep.e).length ? (epsMap[0] || []).map(ep => ep.e) : Array.from({ length: spEps }, (_, i) => i + 1));
             return (
@@ -6895,7 +6929,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
                   <Check done={done} onClick={e => { e.stopPropagation(); s.special ? onSetSpecials(done ? [] : allSpNums) : onSeasonToggle(s); }}
                     title={s.special
                       ? (done ? 'Décocher tous les épisodes spéciaux' : 'Marquer tous les épisodes spéciaux vus')
-                      : (done ? `Décocher (revenir au début de la saison ${s.n})` : `Marquer vue jusqu'à la fin de la saison ${s.n}`)} />
+                      : (done ? `Décocher toute la saison ${s.n}` : `Cocher toute la saison ${s.n}`)} />
                 </div>
                 <Bar v={s.watched} max={s.eps} color={done ? '#4caf50' : (s.special ? C.dim : TVTIME_COLOR)} />
                 {/* Liste des épisodes (dépliée) — vignette + S02 | E05 + nom + coche */}
@@ -6905,9 +6939,9 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
                     : (epsMap[s.n] || []).length > 0 && (
                         <div style={{ display:'flex', flexDirection:'column', gap:5, marginTop:8 }}>
                           {epsMap[s.n].map(ep => {
-                            // Spéciaux : coché = ce n° est dans specialsSeen (individuel).
-                            // Saisons officielles : coché = vu jusqu'à cet épisode inclus (cumulatif).
-                            const seen = s.special ? spSeen.includes(ep.e) : (s.cumStart + ep.e <= cnt);
+                            // Coché = cet épisode est dans l'ensemble vu (individuel).
+                            // Spéciaux : lu dans specialsSeen ; saisons officielles : dans wset.
+                            const seen = s.special ? spSeen.includes(ep.e) : wset.has(`S${s.n}E${ep.e}`);
                             return (
                               <div key={ep.e} style={{ display:'flex', alignItems:'center', gap:10, background: s.special ? '#0a0a0a' : '#111', borderRadius:8, padding:6, minHeight:52 }}>
                                 {ep.still
@@ -6922,10 +6956,10 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
                                 <Check done={seen}
                                   onClick={() => s.special
                                     ? onSetSpecials(seen ? spSeen.filter(n => n !== ep.e) : [...spSeen, ep.e])
-                                    : onSetEps(seen ? s.cumStart + ep.e - 1 : s.cumStart + ep.e)}
+                                    : onToggleEp(s.n, ep.e, seen)}
                                   title={s.special
                                     ? (seen ? `Décocher le spécial E${ep.e}` : `Cocher le spécial E${ep.e}`)
-                                    : (seen ? `Décocher (vu jusqu'à S${s.n}E${ep.e - 1})` : `Vu jusqu'à S${s.n}E${ep.e}`)} />
+                                    : (seen ? `Décocher S${s.n}E${ep.e}` : `Cocher S${s.n}E${ep.e}`)} />
                               </div>
                             );
                           })}
@@ -6937,7 +6971,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onSetEps, onSetS
           })}
         </div>
         <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
-          ℹ Les épisodes hors-série (saison 0) sont suivables (coches) mais ne comptent pas dans la progression : pas besoin de les voir pour atteindre 100 % — la série passe automatiquement en « Vu » dès que tous les épisodes normaux sont vus. Cocher une saison marque la série vue jusqu'à la fin de cette saison ; cocher un épisode la marque vue jusqu'à cet épisode inclus.
+          ℹ Chaque épisode se coche individuellement : tu peux cocher n'importe quelle saison ou n'importe quel épisode isolément (ex. les saisons 28 à 32 sans cocher les précédentes). Les épisodes hors-série (saison 0) sont suivables mais ne comptent pas dans la progression : la série passe automatiquement en « Vu » dès que tous les épisodes normaux sont vus.
         </div>
         </>}
       </div>
@@ -7342,13 +7376,19 @@ function TvTimePanel() {
     if (results !== null && query.trim()) search(t);
   };
 
-  const setStatus = (item, status) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it : {
-    ...it, status,
-    // ✓ série terminée = tout vu (alimente les stats d'épisodes)
-    watchedEps: (status === 'done' && it.type === 'tv') ? (it.totalEps || it.watchedEps || 0) : it.watchedEps,
-    // ✓ chaîne/playlist YouTube terminée = toutes les vidéos cochées
-    watchedIds: (status === 'done' && it.type === 'youtube') ? (it.videos || []).map(v => v.id) : it.watchedIds,
-    doneAt: status === 'done' ? Date.now() : it.doneAt,
+  const setStatus = (item, status) => update(items.map(it => {
+    if (it.id !== item.id || it.type !== item.type) return it;
+    // ✓ série terminée = tous les épisodes cochés (alimente les stats d'épisodes)
+    const doneTv = status === 'done' && it.type === 'tv';
+    const allKeys = doneTv ? tvAllKeys(it) : null;
+    return {
+      ...it, status,
+      watchedSet: doneTv ? allKeys : it.watchedSet,
+      watchedEps: doneTv ? (allKeys.length || it.totalEps || it.watchedEps || 0) : it.watchedEps,
+      // ✓ chaîne/playlist YouTube terminée = toutes les vidéos cochées
+      watchedIds: (status === 'done' && it.type === 'youtube') ? (it.videos || []).map(v => v.id) : it.watchedIds,
+      doneAt: status === 'done' ? Date.now() : it.doneAt,
+    };
   }));
   // « Arrêter le visionnage » (depuis EN PAUSE) : passe en VUS mais CONSERVE la progression
   // actuelle — ne valide PAS les épisodes restants (contrairement au ✓ « tout vu »).
@@ -7363,7 +7403,7 @@ function TvTimePanel() {
     const it = await tmdbFetchItem(r.media_type, r.id);   // 1 seule requête, tout est mis en cache
     setBusy(false);
     if (!it) { alert('Impossible de récupérer les détails TMDB (clé invalide ou réseau).'); return; }
-    if (status === 'done') { if (it.type === 'tv') it.watchedEps = it.totalEps; it.doneAt = Date.now(); }
+    if (status === 'done') { if (it.type === 'tv') { it.watchedSet = tvAllKeys(it); it.watchedEps = it.watchedSet.length || it.totalEps; } it.doneAt = Date.now(); }
     update([{ ...it, status }, ...items]);
     setResults(null); setQuery('');
   };
@@ -7378,7 +7418,7 @@ function TvTimePanel() {
     const it = await tmdbFetchItem(r.media_type, r.id);
     setPreviewLoading(false);
     if (!it) { alert('Impossible de récupérer les détails TMDB (clé invalide ou réseau).'); return; }
-    setPreview({ ...it, status: 'towatch', watchedEps: it.watchedEps || 0, specialsSeen: [] });
+    setPreview({ ...it, status: 'towatch', watchedEps: it.watchedEps || 0, watchedSet: it.watchedSet || [], specialsSeen: [] });
   };
   // 1re action dans la fiche d'un aperçu → l'enregistre (avec la modif) puis bascule sur sa vraie fiche
   const commitPreview = extra => {
@@ -7389,24 +7429,40 @@ function TvTimePanel() {
     setDetail({ type: base.type, id: base.id });
   };
 
-  // Clamp du compteur + STATUT AUTO : tous les épisodes normaux vus (les spéciaux ne
-  // comptent pas) → la série passe automatiquement en « ✓ Vu » ; redescendre sous le
-  // total la repasse en « ▶ En cours » (une série 'done' a toujours watchedEps=totalEps)
-  const withEps = (it, v) => {
-    const w = Math.min(it.totalEps || 9999, Math.max(0, v));
-    const next = { ...it, watchedEps: w };
+  // Applique un nouvel ensemble d'épisodes vus + STATUT AUTO : tous les épisodes normaux
+  // vus (les spéciaux ne comptent pas) → la série passe automatiquement en « ✓ Vu » ;
+  // redescendre sous le total la repasse en « ▶ En cours ». `watchedEps` = taille du set
+  // (maintenu pour les stats/listes qui lisent le compteur).
+  const applyWatchedSet = (it, set) => {
+    const arr = [...new Set(set)];
+    const next = { ...it, watchedSet: arr, watchedEps: arr.length };
     if (it.type === 'tv' && (it.totalEps || 0) > 0) {
-      if (w >= it.totalEps && it.status !== 'done') { next.status = 'done'; next.doneAt = Date.now(); }
-      else if (w < it.totalEps && it.status === 'done') next.status = 'watching';
+      if (arr.length >= it.totalEps && it.status !== 'done') { next.status = 'done'; next.doneAt = Date.now(); }
+      else if (arr.length < it.totalEps && it.status === 'done') next.status = 'watching';
     }
     return next;
   };
-  // +1 / −1 épisode vu (bornés 0..totalEps) — aucune requête, tout est déjà en cache
-  const bump = (item, d) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
-    withEps(it, (it.watchedEps || 0) + d)));
-  // Pose le compteur à une valeur absolue (coche saison / épisode de la fiche série)
-  const setWatchedTo = (item, v) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
-    withEps(it, v)));
+  const setWatchedSet = (item, set) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
+    applyWatchedSet(it, set)));
+  // +1 = coche le prochain épisode non vu · −1 = décoche le dernier vu (dans l'ordre)
+  const bump = (item, d) => {
+    const set = new Set(tvWatchedSet(item));
+    if (d > 0) { const nx = tvNextToWatch(item); if (nx) set.add(nx); }
+    else { const last = tvLastWatched(item); if (last) set.delete(last); }
+    setWatchedSet(item, [...set]);
+  };
+  // Coche/décoche TOUTE une saison (tous ses épisodes) — cochage indépendant des autres saisons
+  const toggleSeasonEps = (item, n, eps, check) => {
+    const set = new Set(tvWatchedSet(item));
+    for (let e = 1; e <= eps; e++) { const k = `S${n}E${e}`; check ? set.add(k) : set.delete(k); }
+    setWatchedSet(item, [...set]);
+  };
+  // Coche/décoche UN épisode isolé
+  const toggleEp = (item, n, e, seen) => {
+    const set = new Set(tvWatchedSet(item));
+    const k = `S${n}E${e}`; seen ? set.delete(k) : set.add(k);
+    setWatchedSet(item, [...set]);
+  };
   // Épisodes SPÉCIAUX vus (saison 0) — cochage INDIVIDUEL : specialsSeen = liste des n°
   // d'ép. vus (aucun effet sur le statut / la progression ; pas requis pour terminer la série)
   const setSpecials = (item, arr) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
@@ -7803,22 +7859,26 @@ function TvTimePanel() {
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
-        onSeasonToggle={s => setWatchedTo(detailItem, s.watched >= s.eps ? s.cumStart : s.cumEnd)}
-        onSetEps={v => setWatchedTo(detailItem, v)}
+        onSeasonToggle={s => toggleSeasonEps(detailItem, s.n, s.eps, s.watched < s.eps)}
+        onToggleEp={(n, e, seen) => toggleEp(detailItem, n, e, seen)}
         onSetSpecials={arr => setSpecials(detailItem, arr)}
         onManga={v => setManga(detailItem, v)}
         onCartoon={v => setCartoon(detailItem, v)}
         onStatus={st => setStatus(detailItem, st)} />}
       {/* Fiche d'un résultat de recherche non enregistré — la 1re action l'ajoute à la liste */}
-      {preview && <TvDetailModal item={preview}
-        onClose={() => setPreview(null)}
-        onBump={d => commitPreview(withEps({ ...preview, status:'watching' }, (preview.watchedEps || 0) + d))}
-        onSeasonToggle={s => commitPreview(withEps({ ...preview, status:'watching' }, s.watched >= s.eps ? s.cumStart : s.cumEnd))}
-        onSetEps={v => commitPreview(withEps({ ...preview, status:'watching' }, v))}
-        onSetSpecials={arr => commitPreview({ specialsSeen: [...new Set(arr)].filter(n => Number.isFinite(n) && n >= 0).sort((a, b) => a - b) })}
-        onManga={v => commitPreview({ manga: !!v })}
-        onCartoon={v => commitPreview({ cartoon: !!v })}
-        onStatus={st => commitPreview({ status: st, ...(st === 'done' ? { watchedEps: preview.type === 'tv' ? (preview.totalEps || 0) : (preview.watchedEps || 0), doneAt: Date.now() } : {}) })} />}
+      {preview && (() => {
+        // Applique un nouvel ensemble d'épisodes vus sur l'aperçu puis l'enregistre (status 'watching')
+        const commitSet = arr0 => { const arr = [...new Set(arr0)]; commitPreview({ status:'watching', watchedSet: arr, watchedEps: arr.length }); };
+        return <TvDetailModal item={preview}
+          onClose={() => setPreview(null)}
+          onBump={d => { const set = new Set(tvWatchedSet(preview)); if (d > 0) { const nx = tvNextToWatch(preview); if (nx) set.add(nx); } else { const last = tvLastWatched(preview); if (last) set.delete(last); } commitSet([...set]); }}
+          onSeasonToggle={s => { const set = new Set(tvWatchedSet(preview)); for (let e = 1; e <= s.eps; e++) { const k = `S${s.n}E${e}`; (s.watched < s.eps) ? set.add(k) : set.delete(k); } commitSet([...set]); }}
+          onToggleEp={(n, e, seen) => { const set = new Set(tvWatchedSet(preview)); const k = `S${n}E${e}`; seen ? set.delete(k) : set.add(k); commitSet([...set]); }}
+          onSetSpecials={arr => commitPreview({ specialsSeen: [...new Set(arr)].filter(n => Number.isFinite(n) && n >= 0).sort((a, b) => a - b) })}
+          onManga={v => commitPreview({ manga: !!v })}
+          onCartoon={v => commitPreview({ cartoon: !!v })}
+          onStatus={st => commitPreview({ status: st, ...(st === 'done' ? (preview.type === 'tv' ? { watchedSet: tvAllKeys(preview), watchedEps: tvAllKeys(preview).length, doneAt: Date.now() } : { doneAt: Date.now() }) : {}) })} />;
+      })()}
     </div>
   );
 }
