@@ -11,7 +11,7 @@
      reste d'empêcher tout XSS (SRI + sql.js auto-hébergé + échappement de tout contenu importé).
      Pour fermer complètement ce vecteur : retirer ces 3 proxies (au prix du repli Stooq).
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.9.4';
+const APP_VERSION = '4.9.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -9198,6 +9198,175 @@ function syncRemembersToTodos() {
   return changed;
 }
 
+// ════════════════════════════════════════════════
+// Veilles Techno — sous-sections du collapse « 🛰️ VEILLES TECHNO » de Remember.
+// Chacune se connecte à une API tierce via un token/clé perso stocké en localStorage
+// (comme les clés TMDB/Riot). GitHub (api.github.com) envoie des en-têtes CORS → fetch
+// DIRECT, jamais via les proxies CORS ouverts : le token ne transite QUE vers api.github.com.
+// ════════════════════════════════════════════════
+const VEILLE_COLOR     = '#6ea8fe';                    // bleu « veille techno » (collapse parent)
+const DEPENDABOT_COLOR = '#4b9fea';                    // bleu GitHub / Dependabot
+const GH_TOKEN_LS = 'spotifyplus_github_token';        // PAT GitHub (classic, scope repo)
+const GH_CACHE_LS = 'spotifyplus_dependabot';          // résultat caché (re-fetchable, TTL 30 min → PAS dans buildBackup)
+const GH_TTL      = 30 * 60000;                        // 30 min
+const DEP_SEV_ORDER = ['critical', 'high', 'medium', 'low'];
+const DEP_SEV_LABEL = { critical:'Critiques', high:'Élevées', medium:'Moyennes', low:'Faibles' };
+const DEP_SEV_COLOR = { critical:'#f85149', high:'#f0883e', medium:'#e3b341', low:'#8b949e' };
+function ghToken() { try { return (localStorage.getItem(GH_TOKEN_LS) || '').trim(); } catch { return ''; } }
+
+// Alertes Dependabot OUVERTES de tous les dépôts possédés, via l'API GraphQL GitHub
+// (1 requête / 100 dépôts, au lieu d'1 requête PAR dépôt en REST). `vulnerabilityAlerts`
+// = les alertes Dependabot ; `securityVulnerability.severity` ∈ LOW/MODERATE/HIGH/CRITICAL.
+// Erreurs typées : 'CONFIG' (pas de token) | 'KEY' (401) | 'SCOPE' (FORBIDDEN) | 'NET'.
+async function ghFetchDependabot(force) {
+  const token = ghToken();
+  if (!token) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(GH_CACHE_LS)); } catch {}
+  if (!force && cache && Date.now() - cache.fetchedAt < GH_TTL) return cache;
+  const query = `query($cursor:String){viewer{login repositories(first:100,after:$cursor,ownerAffiliations:OWNER,isFork:false){pageInfo{hasNextPage endCursor}nodes{nameWithOwner url vulnerabilityAlerts(states:OPEN,first:100){totalCount nodes{securityVulnerability{severity}}}}}}}`;
+  const repos = [];
+  let login = '', cursor = null, pages = 0;
+  try {
+    while (pages < 5) {                                 // cap 500 dépôts
+      const r = await fetch('https://api.github.com/graphql', {
+        method: 'POST',
+        headers: { 'Authorization': 'bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables: { cursor } }),
+      });
+      if (r.status === 401) return { error: 'KEY' };
+      if (!r.ok) return { error: 'NET' };
+      const j = await r.json();
+      if (j.errors && j.errors.length) return { error: j.errors[0].type === 'FORBIDDEN' ? 'SCOPE' : 'NET' };
+      const v = j.data && j.data.viewer;
+      if (!v) return { error: 'NET' };
+      login = v.login;
+      v.repositories.nodes.forEach(n => {
+        const va = n.vulnerabilityAlerts;
+        if (!va || !va.totalCount) return;
+        const sev = { critical:0, high:0, medium:0, low:0 };
+        (va.nodes || []).forEach(a => {
+          const s = ((a.securityVulnerability && a.securityVulnerability.severity) || '').toLowerCase();
+          const k = s === 'moderate' ? 'medium' : s;
+          if (sev[k] != null) sev[k]++;
+        });
+        repos.push({ name: n.nameWithOwner, url: n.url, total: va.totalCount, ...sev });
+      });
+      pages++;
+      if (!v.repositories.pageInfo.hasNextPage) break;
+      cursor = v.repositories.pageInfo.endCursor;
+    }
+  } catch { return { error: 'NET' }; }
+  const weight = r => r.critical * 1000 + r.high * 100 + r.medium * 10 + r.low;   // le plus critique d'abord
+  repos.sort((a, b) => weight(b) - weight(a) || b.total - a.total);
+  const out = { fetchedAt: Date.now(), login, repos, totalAlerts: repos.reduce((s, r) => s + r.total, 0), totalRepos: repos.length };
+  try { localStorage.setItem(GH_CACHE_LS, JSON.stringify(out)); } catch {}
+  return out;
+}
+
+// Sous-section « 🤖 Dependabot » : dépôts GitHub avec des alertes de sécurité ouvertes.
+function DependabotSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const [showCfg, setShowCfg] = React.useState(false);
+  const [keyInput, setKeyInput] = React.useState('');
+  const configured = !!ghToken();
+
+  const ERR = {
+    KEY:    'Token GitHub invalide ou expiré — vérifie-le (⚙) ou régénère-en un sur github.com/settings/tokens.',
+    SCOPE:  "Le token n'a pas accès aux alertes Dependabot — il faut un PAT « classic » avec le scope repo (ou un fine-grained avec la permission « Dependabot alerts » en lecture).",
+    NET:    'API GitHub injoignable — réessaie dans un instant.',
+    CONFIG: '',
+  };
+
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await ghFetchDependabot(force);
+    if (d.error) { setErr(ERR[d.error] || ERR.NET); if (d.error !== 'CONFIG') setData(null); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const saveCfg = () => {
+    const k = keyInput.trim();
+    if (k) { try { localStorage.setItem(GH_TOKEN_LS, k); } catch {} setKeyInput(''); }
+    try { localStorage.removeItem(GH_CACHE_LS); } catch {}
+    setShowCfg(false); setErr('');
+    if (ghToken()) setTimeout(() => refresh(true), 0);
+  };
+  const forget = () => {
+    try { localStorage.removeItem(GH_TOKEN_LS); localStorage.removeItem(GH_CACHE_LS); } catch {}
+    setData(null); setErr(''); setShowCfg(false);
+  };
+
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px' };
+  const inp  = { background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:'8px 10px', color:C.text, fontSize:11, fontFamily:'inherit', width:'100%', boxSizing:'border-box' };
+  const lab  = { fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim, marginBottom:2 };
+
+  // Écran de configuration (1re visite, ou bouton ⚙)
+  if (!configured || showCfg) {
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+        {!configured && (
+          <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+            Failles de sécurité via l'<b style={{ color:DEPENDABOT_COLOR }}>API GitHub (Dependabot)</b>.<br/>
+            1. Va sur <b>github.com/settings/tokens</b> → « Generate new token (classic) ».<br/>
+            2. Coche le scope <b>repo</b> (accès aux alertes Dependabot de tes dépôts).<br/>
+            3. Copie le token (<b>ghp_…</b>) et colle-le ci-dessous.<br/>
+            <span style={{ color:C.dim }}>Le token reste dans le navigateur (localStorage), comme tes clés TMDB/YouTube, et n'est envoyé qu'à api.github.com (CORS natif, aucun proxy).</span>
+          </div>
+        )}
+        <div style={lab}>TOKEN GITHUB {ghToken() ? '(déjà enregistré — laisser vide pour le garder)' : ''}</div>
+        <input style={inp} type="password" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder="ghp_…" />
+        {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
+        <div style={{ display:'flex', gap:8 }}>
+          <button onClick={saveCfg} style={{ flex:1, background:`${DEPENDABOT_COLOR}18`, border:`1px solid ${DEPENDABOT_COLOR}50`, borderRadius:8, padding:'9px 12px', cursor:'pointer', color:DEPENDABOT_COLOR, fontSize:11, fontWeight:700, fontFamily:'inherit' }}>✓ Enregistrer</button>
+          {configured && <button onClick={() => { setShowCfg(false); setErr(''); }} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'9px 12px', cursor:'pointer', color:C.muted, fontSize:11, fontFamily:'inherit' }}>Annuler</button>}
+          {configured && <button onClick={forget} title="Oublier le token" style={{ background:'none', border:'1px solid #5a2020', borderRadius:8, padding:'9px 12px', cursor:'pointer', color:'#e05050', fontSize:11, fontFamily:'inherit' }}>Oublier</button>}
+        </div>
+      </div>
+    );
+  }
+
+  const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {loading && <div style={{ ...card, fontSize:11, color:C.muted }}>⏳ Analyse des dépôts…</div>}
+      {err && <div style={{ ...card, fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {data && !loading && (
+        data.totalRepos === 0
+          ? <div style={{ ...card, fontSize:11, color:C.muted, textAlign:'center' }}>✅ Aucune alerte Dependabot ouverte sur tes dépôts {data.login ? `(${data.login})` : ''}.</div>
+          : (<>
+              <div style={{ ...card, display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+                <span style={{ fontSize:11, color:C.muted }}>{data.login ? `@${data.login}` : 'GitHub'}</span>
+                <span style={{ fontSize:11, fontWeight:800, color:DEPENDABOT_COLOR, fontFamily:'DM Mono,monospace' }}>{data.totalAlerts} alerte{data.totalAlerts > 1 ? 's' : ''} · {data.totalRepos} dépôt{data.totalRepos > 1 ? 's' : ''}</span>
+              </div>
+              {data.repos.map(r => (
+                <div key={r.name} style={{ ...card, display:'flex', flexDirection:'column', gap:6 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                    <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ flex:1, minWidth:0, fontSize:11.5, fontWeight:700, color:C.text, textDecoration:'none', wordBreak:'break-word' }}>{r.name} ↗</a>
+                    <span style={{ fontSize:11, fontWeight:800, color:DEPENDABOT_COLOR, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{r.total}</span>
+                  </div>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                    {DEP_SEV_ORDER.filter(s => r[s] > 0).map(s => (
+                      <span key={s} style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', color:DEP_SEV_COLOR[s], background:`${DEP_SEV_COLOR[s]}18`, border:`1px solid ${DEP_SEV_COLOR[s]}44`, borderRadius:5, padding:'2px 6px' }}>{r[s]} {DEP_SEV_LABEL[s]}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>)
+      )}
+      <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+        {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
+        <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
+        <button onClick={() => setShowCfg(true)} title="Configuration" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>⚙</button>
+      </div>
+    </div>
+  );
+}
+
 function RappelPanel() {
   const [dates, setDates]   = React.useState(loadRappels);
   const [times, setTimes]   = React.useState(loadRappelTimes);   // heure OPTIONNELLE des items fixes
@@ -9304,6 +9473,12 @@ function RappelPanel() {
           })}
         </StatsCollapse>
       ))}
+      {/* Veilles Techno — sous-collapses connectés à des APIs tierces (sous « Autre ») */}
+      <StatsCollapse title="🛰️ Veilles Techno" color={VEILLE_COLOR}>
+        <StatsCollapse title="🤖 Dependabot" color={DEPENDABOT_COLOR}>
+          <DependabotSection />
+        </StatsCollapse>
+      </StatsCollapse>
       {/* Rappels personnalisés — notif à l'ouverture de l'app quand la date est atteinte */}
       <StatsCollapse title="🔔 Mes rappels" color={RAPPEL_PURPLE}>
         <div style={{ fontSize:8.5, color:C.muted, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>Notification à l'ouverture de l'app quand la date arrive.</div>
