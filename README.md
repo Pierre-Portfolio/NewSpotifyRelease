@@ -83,6 +83,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **🗺️ Stats Maps** — **distance parcourue** aujourd'hui / ce mois-ci / cette année / depuis toujours (+ nombre de trajets et de jours suivis) et **🥇 mode de déplacement préféré** — calculées depuis les trajets Google Timeline importés (100 % local, aucune requête)
 - **📈 Graphique** — deux histogrammes sur **14 jours** (dessinés sans librairie externe) : **écoutes par jour** et **tâches terminées par jour**
 - **📊 Stats avancées** — top 5 artistes écoutés, répartition Singles/Albums/Découvertes, moyenne d'écoutes/jour sur 30 jours (calculées sur les titres non purgés)
+- **🎮 Jeux** (tout en bas) — sous-section **⚔️ League of Legends** via l'**API officielle Riot Games** (gratuite ; clé à générer sur developer.riotgames.com avec son compte Riot, saisie dans l'UI et stockée en localStorage comme les clés TMDB/YouTube) : **profil** (Riot ID, niveau, icône d'invocateur), **rangs classés** Solo/Duo et Flexible (tier + division + LP, victoires/défaites, % de victoires), **top 3 maîtrises de champions**, et **partie en cours** (bandeau 🔴 EN PARTIE via Spectator : mode de jeu, durée, champion joué, compositions des deux équipes avec icônes). Noms/icônes de champions via **Data Dragon** (CDN public Riot, sans clé). Riot n'ayant pas de CORS, les requêtes passent par les proxies CORS keyless déjà utilisés par Finance/Actu ; profil caché 1 h, partie en cours toujours re-vérifiée
 
 ### À propos
 - Section dédiée (onglet **À propos**) regroupant les **actions de données** et la version
