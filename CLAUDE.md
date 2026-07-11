@@ -45,7 +45,7 @@ L'utilisateur parcourt son feed de découverte, écoute les titres un par un via
 |---|---|
 | `index.html` | **App complète** — React 18 CDN + Babel + sql.js, tout en un seul fichier |
 | `manifest.json` | Config PWA (nom, icônes, display standalone) |
-| `service-worker.js` | Cache app shell + vendor pour usage offline (v8 : bump cache ; v7 : + Leaflet précaché ; clé de cache normalisée, ne cache que les réponses `res.ok`, fetch app shell en `{ cache: 'no-store' }` pour bypasser le cache HTTP `max-age=600` de GitHub Pages) |
+| `service-worker.js` | Cache app shell + vendor pour usage offline (v9 : bump cache post-rafale 5.0.x ; v7 : + Leaflet précaché ; clé de cache normalisée, ne cache que les réponses `res.ok`, fetch app shell en `{ cache: 'no-store' }` pour bypasser le cache HTTP `max-age=600` de GitHub Pages) |
 | `vendor/sql-wasm.js` | sql.js 1.10.2 **auto-hébergé** (hash sha384 vérifié = ancien SRI cdnjs) |
 | `vendor/sql-wasm.wasm` | Binaire WebAssembly SQLite auto-hébergé (un .wasm ne peut pas avoir de SRI) |
 | `vendor/leaflet.js` / `vendor/leaflet.css` | **Leaflet 1.9.4 auto-hébergé** (tarball npm officiel) — carte de la section Maps, chargé **lazy** par `loadLeaflet()` au 1er affichage de la carte. `vendor/images/` = assets Leaflet par défaut (jamais fetchés : marqueurs 100% vectoriels via `circleMarker`) |
@@ -86,7 +86,7 @@ SCOPES       = 'user-follow-read user-read-private user-read-currently-playing u
 ```
 
 ### Version de l'app — `APP_VERSION`
-Constante module-level `APP_VERSION` (**actuellement `'5.0.6'`**, commit ≈506), format `MAJ.MIN.U` = **le nombre de commits du projet avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 278 commits → `2.7.8`, 270 → `2.7.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 3.0.0 »). **⚠ Le compteur suit l'historique du PROJET (≈300), pas `git rev-list --count HEAD` de ce dépôt-fork qui est bien plus bas (~65)** — incrémenter à la main en suivant le compteur projet.
+Constante module-level `APP_VERSION` (**actuellement `'5.0.7'`**, commit ≈507), format `MAJ.MIN.U` = **le nombre de commits du projet avec des points séparant le dernier chiffre (patch), l'avant-dernier (minor) et tout le reste (major)** : `patch = N % 10`, `minor = floor(N/10) % 10`, `major = floor(N/100)`. Exemples : 278 commits → `2.7.8`, 270 → `2.7.0`, 300 → `3.0.0`, 1001 → `10.0.1`, 1234 → `12.3.4`. Affichée en gris sous le bouton « 🗑 Purger les écoutes » de `VosEcoutesPanel` (« Version 3.0.0 »). **⚠ Le compteur suit l'historique du PROJET (≈300), pas `git rev-list --count HEAD` de ce dépôt-fork qui est bien plus bas (~65)** — incrémenter à la main en suivant le compteur projet.
 **⚠️ Pas de build tool pour l'injecter** : la incrémenter **manuellement à chaque commit** (le compteur = `git rev-list --count HEAD` après le commit ; le commit qui change `APP_VERSION` compte lui-même, donc poser la valeur du futur commit puis appliquer le découpage ci-dessus).
 
 ### Délai de scraping

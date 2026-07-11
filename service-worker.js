@@ -10,7 +10,11 @@
 // L'ancienne stratégie cache-first (v1) servait l'index.html du cache pour toujours
 // → les utilisateurs PWA ne recevaient jamais les mises à jour. Ne pas y revenir.
 // v8 : bump de cache pour forcer la maj des PWA installées (renommage sections Stats).
-const CACHE  = 'spotifyplus-v8';
+// v9 : bump de cache — purge des caches SW après la rafale de déploiements 5.0.x
+// (sections Actu/Bon plan) : un client ayant chargé l'app en plein milieu d'un
+// déploiement GitHub Pages pouvait garder un shell incohérent (écran noir) jusqu'à
+// expiration ; le bump force réinstallation + purge des anciens caches à l'activate.
+const CACHE  = 'spotifyplus-v9';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
