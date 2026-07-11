@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.7.7';
+const APP_VERSION = '4.7.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -745,7 +745,10 @@ async function apiPut(url, body, _retried = false) {
   if (res.status === 204) return { ok: true };
   if (res.status === 403) return { error: 'forbidden' };
   if (res.status === 404) return { error: 'no_active_device' };
-  return res.json().catch(() => ({ error: 'unknown' }));
+  // 2xx avec un corps vide/non-JSON (fréquent sur PUT /me/library) = SUCCÈS, pas une erreur.
+  // Sans ce guard, res.json() throw → { error:'unknown' } faisait échouer faussement un like.
+  if (res.ok) return res.json().catch(() => ({ ok: true }));
+  return res.json().catch(() => ({ error: 'http_' + res.status }));
 }
 async function apiDel(url, _retried = false) {
   const blocked = _rlCheck();
@@ -787,6 +790,17 @@ function libraryScopeAlert(result) {
   if (result?.error !== 'forbidden') return false;
   alert('Spotify a refusé la gestion des likes (nouvelle permission requise).\nDéconnecte-toi puis reconnecte-toi pour l\'accorder.');
   return true;
+}
+// Un like/unlike a-t-il ÉCHOUÉ côté Spotify ? (scope manquant, rate-limit, erreur HTTP).
+// Si oui, le caller DOIT annuler sa mise à jour d'état locale — sinon la DB locale enregistre
+// un like que Spotify n'a jamais reçu (ou l'inverse), et syncInitialLikes (Spotify fait foi)
+// finit par « corriger » l'état à l'insu de l'utilisateur.
+function libraryWriteFailed(res) {
+  if (!res || res.ok) return false;
+  if (res.error === 'forbidden') { libraryScopeAlert(res); return true; }
+  if (res.rate_limited) { alert('Spotify limite temporairement les requêtes (rate limit) — réessaie dans un instant.'); return true; }
+  if (res.error) { alert('Action impossible pour le moment — Spotify a renvoyé une erreur.'); return true; }
+  return false;
 }
 // ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
@@ -2871,12 +2885,12 @@ function MobilePlayer() {
     if (!now.uri) return;
     if (isLiked) {
       const res = await libraryRemove(now.uri);
-      if (libraryScopeAlert(res)) return;
+      if (libraryWriteFailed(res)) return;
       setIsLiked(false);
       setTrackLiked(now.uri, false);
     } else {
       const res = await librarySave(now.uri);
-      if (libraryScopeAlert(res)) return;
+      if (libraryWriteFailed(res)) return;
       setIsLiked(true);
       setTrackLiked(now.uri, true);
     }
@@ -3292,7 +3306,7 @@ const FeedItem = React.memo(function FeedItem({ item, i, isMobile=false, isNowPl
     setLikedLocal(newVal);
     if (item.spotifyUri) {
       const res = newVal ? await librarySave(item.spotifyUri) : await libraryRemove(item.spotifyUri);
-      if (libraryScopeAlert(res)) { setLikedLocal(liked ? 1 : 0); return; }
+      if (libraryWriteFailed(res)) { setLikedLocal(liked ? 1 : 0); return; }
     }
     setTrackLiked(item.spotifyUri, !!newVal);
   };
@@ -9036,7 +9050,7 @@ function LikerPanel() {
   const onUnlike = async (item) => {
     if (item.spotifyUri) {
       const res = await libraryRemove(item.spotifyUri);
-      if (libraryScopeAlert(res)) return;
+      if (libraryWriteFailed(res)) return;
     }
     setTrackLiked(item.spotifyUri, false);
   };
@@ -9357,12 +9371,12 @@ function CompactPlayer() {
     if (!now?.uri) return;
     if (isLiked) {
       const res = await libraryRemove(now.uri);
-      if (libraryScopeAlert(res)) return;
+      if (libraryWriteFailed(res)) return;
       setIsLiked(false);
       setTrackLiked(now.uri, false);
     } else {
       const res = await librarySave(now.uri);
-      if (libraryScopeAlert(res)) return;
+      if (libraryWriteFailed(res)) return;
       setIsLiked(true);
       setTrackLiked(now.uri, true);
     }
