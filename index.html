@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.7.5';
+const APP_VERSION = '4.7.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1477,6 +1477,10 @@ function StoreProvider({ children }) {
           try { notifyDueReminders(); } catch {}
           // Remember → To do : ajoute au carrousel « Aujourd'hui » les rappels à ≤ 3 j de l'échéance
           try { syncRemembersToTodos(); } catch {}
+
+          // [v4.7.6 — À RETIRER en 4.7.7] Purge ponctuelle des vidéos YouTube < 3 min déjà
+          // enregistrées (le filtre ytBuildItem ne touche que les nouveaux fetchs). Une seule fois.
+          try { ytPurgeShortVideos(); } catch {}
 
           // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
           // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
@@ -6766,6 +6770,37 @@ async function ytCheckNewVideos() {
     return merged;
   });
   if (changed) saveTvItems(next);
+  return changed;
+}
+
+// [v4.7.6 — nettoyage ponctuel · À RETIRER en 4.7.7] Le filtre YT_MIN_MINUTES de ytBuildItem
+// ne s'applique qu'aux NOUVEAUX fetchs : les vidéos de moins de 3 min déjà enregistrées en
+// localStorage (avant la 4.7.5) y restaient. Ce helper les supprime des chaînes/playlists
+// YouTube déjà stockées et recalcule saisons/totalEps/epRuntime + purge les vues (watchedIds)
+// des vidéos retirées. Guardé par un flag → une seule exécution. À SUPPRIMER en 4.7.7.
+function ytPurgeShortVideos() {
+  if (localStorage.getItem('spotifyplus_yt_short_purged')) return false;
+  const cur = loadTvItems();
+  let changed = false;
+  const next = cur.map(it => {
+    if (it.type !== 'youtube' || !Array.isArray(it.videos)) return it;
+    const kept = it.videos.filter(v => (v.dur || 0) >= YT_MIN_MINUTES);
+    if (kept.length === it.videos.length) return it;   // rien à retirer pour cet item
+    changed = true;
+    const keptIds = new Set(kept.map(v => v.id));
+    const byYear = {};
+    for (const v of kept) { const y = (v.date || '').slice(0, 4) || '—'; (byYear[y] = byYear[y] || []).push(v); }
+    const seasons = Object.keys(byYear).sort().map(y => ({ n: y, eps: byYear[y].length }));   // saison = année
+    const totalMin = kept.reduce((a, v) => a + (v.dur || 0), 0);
+    const watchedIds = (it.watchedIds || []).filter(id => keptIds.has(id));
+    return {
+      ...it, videos: kept, watchedIds,
+      seasons, totalEps: kept.length,
+      epRuntime: kept.length ? Math.round(totalMin / kept.length) : 0,
+    };
+  });
+  if (changed) saveTvItems(next);
+  try { localStorage.setItem('spotifyplus_yt_short_purged', '1'); } catch {}
   return changed;
 }
 
