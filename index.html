@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.8.6';
+const APP_VERSION = '4.8.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8414,10 +8414,12 @@ function TodoPanel() {
 
 // ════════════════════════════════════════════════
 // GESTION MDP — coffre d'identifiants CHIFFRÉ par un mot de passe maître.
-// Chiffrement AES-GCM 256, clé dérivée par PBKDF2 (300k itérations, SHA-256) via la
-// Web Crypto API native (aucune lib, aucune origine réseau → rien à ajouter à la CSP).
-// Le localStorage ne contient QUE { salt, iv, ct } chiffrés ; le mot de passe maître
-// n'est JAMAIS stocké (demandé à l'ouverture). L'export = ce blob chiffré (sauvegarde).
+// Chiffrement AES-GCM 256, clé dérivée par PBKDF2 (600k itérations SHA-256 en blob v2 ;
+// v1/300k re-chiffré en v2 au déverrouillage) via la Web Crypto API native (aucune lib,
+// aucune origine réseau → rien à ajouter à la CSP). Le localStorage ne contient QUE
+// { v, salt, iv, ct } chiffrés ; le mot de passe maître n'est JAMAIS stocké (demandé à
+// l'ouverture). Verrouillage auto après 10 min d'inactivité (timer module-level).
+// L'export = ce blob chiffré (sauvegarde).
 // ⚠ Ne protège PAS contre un malware actif sur l'appareil (qui peut lire la mémoire /
 // keylogger le mot de passe maître) — seulement contre une fuite passive du stockage.
 // ⚠ Mot de passe maître oublié = données irrécupérables (pas de backend, pas de reset).
@@ -8473,6 +8475,27 @@ function safeHref(url) {
 // l'app vit (survit au changement d'onglet mobile), effacée au reload (verrouillage auto).
 let _mdpSession = { unlocked:false, pw:null, entries:null };
 
+// ── Verrouillage auto après inactivité ──
+// Le coffre déchiffré reste en mémoire même quand GestionMdpPanel est démonté (autre onglet).
+// Un timer MODULE-LEVEL (indépendant du montage du panneau) reverrouille _mdpSession après
+// MDP_IDLE_MS sans activité, puis notifie le panneau (s'il est monté) via _mdpLockSubs.
+const MDP_IDLE_MS = 10 * 60 * 1000;   // 10 min
+let _mdpIdleTimer = null;
+const _mdpLockSubs = new Set();       // callbacks React notifiés au verrouillage auto
+function _mdpClearIdle() { if (_mdpIdleTimer) { clearTimeout(_mdpIdleTimer); _mdpIdleTimer = null; } }
+function _mdpAutoLock() {
+  _mdpClearIdle();
+  _mdpSession = { unlocked:false, pw:null, entries:null };
+  _mdpLockSubs.forEach(fn => { try { fn(); } catch {} });
+}
+// Réarme le compte à rebours à chaque interaction avec le coffre (déverrouillage, ajout,
+// affichage/copie d'un mot de passe, clic dans le panneau). No-op si le coffre est verrouillé.
+function mdpBumpActivity() {
+  if (!_mdpSession.unlocked) return;
+  _mdpClearIdle();
+  _mdpIdleTimer = setTimeout(_mdpAutoLock, MDP_IDLE_MS);
+}
+
 // Copie d'un mot de passe : le presse-papiers est PURGÉ 10 minutes après la copie
 // (sinon le mot de passe y reste indéfiniment — presse-papiers parfois synchronisé
 // cross-device par l'OS). L'écriture peut échouer si l'onglet n'a plus le focus → best-effort.
@@ -8502,8 +8525,23 @@ function GestionMdpPanel() {
   const masterRef = React.useRef(_mdpSession.pw);       // mot de passe maître courant (mémoire only)
   const fileRef   = React.useRef(null);
 
+  // Verrouillage auto après inactivité : on s'abonne au timer module-level (qui tourne même
+  // panneau démonté) et on bascule l'UI en « verrouillé » quand il se déclenche. Si le coffre
+  // est déjà déverrouillé au (re)montage du panneau, on relance le compte à rebours.
+  React.useEffect(() => {
+    const onAutoLock = () => {
+      masterRef.current = null;
+      setEntries([]); setShown({}); setPw(''); setPhase('locked');
+      setMsg('🔒 Coffre verrouillé automatiquement (inactivité).');
+    };
+    _mdpLockSubs.add(onAutoLock);
+    if (_mdpSession.unlocked) mdpBumpActivity();
+    return () => _mdpLockSubs.delete(onAutoLock);
+  }, []);
+
   // Persiste les entrées : (re)chiffre avec le mot de passe maître courant et écrit le blob.
   const persist = async (next) => {
+    mdpBumpActivity();
     setEntries(next);
     _mdpSession.entries = next;
     try { saveVaultBlob(await mdpEncrypt(masterRef.current, next)); } catch (e) { setErr('Échec du chiffrement'); }
@@ -8520,7 +8558,7 @@ function GestionMdpPanel() {
       saveVaultBlob(await mdpEncrypt(pw, initial));
       try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}  // efface l'ancien clair migré
       masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:initial };
-      setEntries(initial); setPhase('unlocked'); setPw(''); setPw2('');
+      setEntries(initial); setPhase('unlocked'); setPw(''); setPw2(''); mdpBumpActivity();
     } catch (e) { setErr('Erreur de création du coffre'); }
     setBusy(false);
   };
@@ -8533,12 +8571,13 @@ function GestionMdpPanel() {
       // Upgrade transparent : un coffre v1 (300k itér.) est re-chiffré en v2 (600k)
       if ((blob.v || 1) < MDP_VAULT_V) { try { saveVaultBlob(await mdpEncrypt(pw, data)); } catch {} }
       masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:data };
-      setEntries(data); setPhase('unlocked'); setPw('');
+      setEntries(data); setPhase('unlocked'); setPw(''); mdpBumpActivity();
     } catch (e) { setErr('Mot de passe maître incorrect'); }
     setBusy(false);
   };
 
   const lock = () => {
+    _mdpClearIdle();
     _mdpSession = { unlocked:false, pw:null, entries:null };
     masterRef.current = null;
     setEntries([]); setShown({}); setPw(''); setPhase('locked'); setMsg('');
@@ -8552,6 +8591,7 @@ function GestionMdpPanel() {
     try { const existing = loadVaultBlob(); if (existing) localStorage.setItem('spotifyplus_mdp_vault_prev', JSON.stringify(existing)); } catch {}
     try { localStorage.removeItem(MDP_VAULT_KEY); } catch {}
     try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}   // efface aussi un éventuel ancien stockage clair
+    _mdpClearIdle();
     _mdpSession = { unlocked:false, pw:null, entries:null };
     masterRef.current = null;
     setEntries([]); setShown({}); setPw(''); setPw2(''); setErr(''); setMsg('');
@@ -8650,7 +8690,8 @@ function GestionMdpPanel() {
       style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${form[k] ? MDP_AMBER : C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
   );
   return (
-    <div style={card}>
+    // onClick/onKeyDown Capture : toute interaction dans le coffre réarme le verrouillage auto
+    <div style={card} onClickCapture={mdpBumpActivity} onKeyDownCapture={mdpBumpActivity}>
       <div style={{ display:'flex', alignItems:'center', gap:6 }}>
         <div style={{ flex:1, fontSize:9.5, color:MDP_AMBER, fontFamily:'DM Mono,monospace' }}>🔓 Coffre chiffré déverrouillé</div>
         <button onClick={exportVault} title="Exporter une sauvegarde chiffrée" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9.5, padding:'3px 7px', cursor:'pointer' }}>↧ Exporter</button>
