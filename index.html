@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.8.5';
+const APP_VERSION = '4.8.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3912,10 +3912,12 @@ function loadMaps() {
   _mapsCache = (d && typeof d === 'object' && d.days && typeof d.days === 'object') ? d : { version: 1, days: {} };
   return _mapsCache;
 }
-function saveMaps(data) {
-  data.version = 1;
-  data.updated_at = new Date().toISOString();
-  try { localStorage.setItem(MAPS_LS_KEY, JSON.stringify(data)); _mapsCache = data; return true; }
+// `preJson` (optionnel) = sérialisation DÉJÀ calculée par l'appelant, incluant version +
+// updated_at (mapsMergeImport les pose puis mesure la taille) → on la réutilise pour l'écriture
+// au lieu de re-JSON.stringify un blob de plusieurs Mo.
+function saveMaps(data, preJson) {
+  if (!preJson) { data.version = 1; data.updated_at = new Date().toISOString(); }
+  try { localStorage.setItem(MAPS_LS_KEY, preJson || JSON.stringify(data)); _mapsCache = data; return true; }
   catch (e) { alert('⚠ Stockage local plein : impossible d\'enregistrer les trajets.\nSupprime des données (ou importe un fichier plus court).'); return false; }
 }
 
@@ -4099,11 +4101,18 @@ function mapsMergeImport(parsed) {
   const data = loadMaps();
   data.days = data.days || {};
   for (const k in parsed.days) data.days[k] = parsed.days[k];
-  for (const cap of [null, 60, 25]) {
-    if (cap) for (const k in data.days) for (const s of data.days[k]) if (s.kind === 'move') s.path = mapsSimplifyPath(s.path, cap);
-    if (JSON.stringify(data).length < 4200000) break;
+  // On pose version + updated_at MAINTENANT pour que la sérialisation de mesure soit celle
+  // qu'on écrira : plus aucun JSON.stringify redondant (avant : jusqu'à 3× dans la boucle
+  // de mesure + 1× dans saveMaps, tous sur un blob de plusieurs Mo).
+  data.version = 1;
+  data.updated_at = new Date().toISOString();
+  let json = JSON.stringify(data);
+  for (const cap of [60, 25]) {
+    if (json.length < 4200000) break;   // sous le seuil → pas de re-simplification
+    for (const k in data.days) for (const s of data.days[k]) if (s.kind === 'move') s.path = mapsSimplifyPath(s.path, cap);
+    json = JSON.stringify(data);
   }
-  return saveMaps(data);
+  return saveMaps(data, json);   // réutilise la sérialisation déjà calculée
 }
 
 function fmtMapsKm(m) {
