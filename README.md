@@ -102,7 +102,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **📰 Techno · IA · Science** : les tops [Hacker News](https://news.ycombinator.com/) (titre + score + lien)
 - **🇫🇷 Presse FR** : actus IA / science / technologie via le flux Google News
 - **🔥 Tendances du jour · France** : top 10 des recherches tendance Google Trends *(les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends en substitut)*
-- **🔓 Dernières fuites de données** : dernières entrées de [bonjourlafuite.eu.org](https://bonjourlafuite.eu.org/)
+- **🔓 Dernières fuites de données** : dernières entrées de [bonjourlafuite.eu.org](https://bonjourlafuite.eu.org/) — repli automatique sur les dernières fuites mondiales de [Have I Been Pwned](https://haveibeenpwned.com/) si le site est injoignable
 - **▶️ Vidéos YouTube · Abonnements** : les dernières vidéos publiées par les chaînes auxquelles vous êtes abonné (le flux [youtube.com/feed/subscriptions](https://www.youtube.com/feed/subscriptions)) — nécessite de **connecter son compte Google** (lecture seule, même bouton que la sauvegarde Drive). Liste en **chargement infini** (les vidéos suivantes apparaissent en scrollant), miniature + chaîne + ancienneté + durée, les Shorts (< 3 min) sont filtrés. Un bouton **« 🕒 Plus tard »** enregistre la vidéo dans la carte **« 🕒 À regarder plus tard »** juste en dessous (liste locale avec lien + retrait — **rien n'est ajouté dans TV Time**, incluse dans l'export/sauvegarde)
 
 ### Météo

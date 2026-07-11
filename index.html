@@ -11,7 +11,7 @@
      reste d'empêcher tout XSS (SRI + sql.js auto-hébergé + échappement de tout contenu importé).
      Pour fermer complètement ce vecteur : retirer ces 3 proxies (au prix du repli Stooq).
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://hacker-news.firebaseio.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com https://www.speedrun.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://hacker-news.firebaseio.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com https://www.speedrun.com https://haveibeenpwned.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.0.1';
+const APP_VERSION = '5.0.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5306,7 +5306,36 @@ async function actuFetchLeaks() {
     items.push({ text, date: dm ? dm[0] : null, link: href });
   }
   const dated = items.filter(i => i.date);      // on ne garde que les entrées vraiment datées (évite le bruit de nav)
-  return { items: dated.slice(0, 5), needsTuning: dated.length === 0 };
+  if (dated.length) return { items: dated.slice(0, 5), needsTuning: false };
+  // Repli : Have I Been Pwned — /api/v3/breaches est PUBLIC (sans clé, seul
+  // breachedaccount exige une clé) et sert le CORS ; sinon via les proxies.
+  // On trie par AddedDate desc et on ne CACHE que les 5 dernières (la liste
+  // complète pèse lourd, elle n'est jamais stockée).
+  const hibp = await actuFetchHibp();
+  if (hibp.length) return { items: hibp, needsTuning: false, via: 'hibp' };
+  return { items: [], needsTuning: true };
+}
+
+async function actuFetchHibp() {
+  let list = null;
+  try {
+    const r = await fetch('https://haveibeenpwned.com/api/v3/breaches');
+    if (r.ok) list = await r.json();
+  } catch {}
+  if (!list) {
+    const txt = await corsFetchText('https://haveibeenpwned.com/api/v3/breaches');
+    try { list = JSON.parse(txt); } catch { return []; }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter(b => b && b.Title && (b.AddedDate || b.BreachDate))
+    .sort((a, b) => String(b.AddedDate || b.BreachDate).localeCompare(String(a.AddedDate || a.BreachDate)))
+    .slice(0, 5)
+    .map(b => ({
+      text: `${b.Title}${b.PwnCount ? ` — ${Number(b.PwnCount).toLocaleString('fr-FR')} comptes` : ''}`,
+      date: (b.BreachDate || b.AddedDate || '').slice(0, 10),
+      link: 'https://haveibeenpwned.com/PwnedWebsites#' + encodeURIComponent(b.Name || ''),
+    }));
 }
 
 // Récupère les 4 sources en parallèle et met en cache
@@ -5650,6 +5679,8 @@ function ActuPanel() {
         {/* Dernières fuites de données */}
         <StatsCollapse defaultOpen={false} color="#e05050"
           title={<span>🔓 DERNIÈRES FUITES DE DONNÉES</span>}>
+          {(d.leaks && d.leaks.via === 'hibp') &&
+            <div style={{ fontSize:9, color:C.dim, paddingBottom:4 }}>bonjourlafuite injoignable — dernières fuites mondiales via Have I Been Pwned :</div>}
           {(d.leaks && d.leaks.items && d.leaks.items.length)
             ? d.leaks.items.map((l, i) => row('lk' + i, l.link || 'https://bonjourlafuite.eu.org/', l.text, null, l.date, '#e05050'))
             : <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>
