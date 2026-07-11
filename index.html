@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.9.7';
+const APP_VERSION = '4.9.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -372,7 +372,10 @@ function gdriveLogin() {
   try { localStorage.setItem('gdrive_state', nonce); } catch {}
   const params = new URLSearchParams({
     client_id: GDRIVE_CLIENT_ID, response_type: 'token', redirect_uri: REDIRECT_URI,
-    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
+    // + youtube.readonly : requis par la section Actu → Vidéos YouTube (abonnements).
+    // Un token émis AVANT l'ajout de ce scope → 401/403 sur /youtube/v3/subscriptions
+    // → l'UI de la section propose une reconnexion (consentement incrémental).
+    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/youtube.readonly',
     include_granted_scopes: 'true', state: 'gdrive.' + nonce, // préfixe 'gdrive.' = discriminant, suffixe = nonce vérifié
   });
   // Au retour, rouvrir l'onglet d'où on est parti (À propos, Mes Actifs…) au lieu de Scrapping
@@ -3479,6 +3482,8 @@ function buildBackup() {
     modules: lsJson(MODULES_LS_KEY) || {},
     // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
     listens: lsJson(LISTEN_LOG_KEY) || [],
+    // Actu → vidéos YouTube « à regarder plus tard » (liste locale, indépendante de TV Time)
+    yt_watchlater: lsJson(YTSUB_WL_LS) || [],
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -3682,6 +3687,14 @@ function applyBackup(data) {
     try { localStorage.setItem(YT_KEY_LS, data.yt_key.trim()); } catch {}
   }
   if (data.maps && typeof data.maps === 'object') { put('spotifyplus_maps', data.maps); _mapsCache = null; }
+  // Actu → « À regarder plus tard » (YouTube) — FUSIONNÉ (union par id vidéo, local d'abord)
+  if (Array.isArray(data.yt_watchlater)) {
+    try {
+      const cur = loadYtWatchLater();
+      const seen = new Set(cur.map(v => v && v.id));
+      saveYtWatchLater(cur.concat(data.yt_watchlater.filter(v => v && v.id && !seen.has(v.id))));
+    } catch {}
+  }
   // Paramétrage des modules (activés/désactivés) — REMPLACÉ si présent
   if (data.modules && typeof data.modules === 'object' && !Array.isArray(data.modules)) put(MODULES_LS_KEY, data.modules);
   // Finance : historique local des prix — FUSIONNÉ (pas remplacé) : union par série,
@@ -5269,6 +5282,252 @@ async function actuFetchAll() {
   return data;
 }
 
+// ── Actu → Vidéos YouTube (abonnements) ─────────────────────────
+// Le flux youtube.com/feed/subscriptions n'a AUCUNE API keyless : la liste des
+// abonnements est privée → OAuth Google (scope youtube.readonly ajouté à gdriveLogin,
+// même bouton « Connecter Google » que Drive/Mes Actifs). Récupération :
+//   1. /youtube/v3/subscriptions?mine=true (paginé, 1 unité/page de 50)
+//   2. pour chaque chaîne, sa playlist « uploads » (id UC… → UU…, AUCUNE requête
+//      channels.list) : /playlistItems maxResults=5 (1 unité/chaîne, 8 en parallèle)
+//   3. tri par date desc + durées (videos.list par 50) → filtre Shorts < 3 min
+// Coût ≈ nb de chaînes + qq unités — négligeable sur le quota 10 000/j de la clé YT.
+// Les appels passent par le Bearer OAuth (PAS la clé API : mine=true l'exige).
+// Cache localStorage TTL 30 min (re-fetchable → PAS dans buildBackup).
+// « À regarder plus tard » = liste LOCALE (spotifyplus_yt_watchlater) — n'ajoute
+// JAMAIS rien dans TV Time ; incluse dans buildBackup (fusion union par id).
+const YTSUB_LS           = 'spotifyplus_yt_subs';        // cache { fetched_at, videos }
+const YTSUB_TTL          = 30 * 60 * 1000;
+const YTSUB_WL_LS        = 'spotifyplus_yt_watchlater';  // [{ id, title, channel, date, thumb, dur, addedAt }]
+const YTSUB_MAX_CHANNELS = 250;                          // garde-fou quota
+const YTSUB_PER_CHANNEL  = 5;                            // vidéos récentes par chaîne
+const YTSUB_PAGE         = 12;                           // pas du lazyload infini
+
+let _ytSubsCache;
+function loadYtSubs() {
+  if (_ytSubsCache !== undefined) return _ytSubsCache;
+  try { _ytSubsCache = JSON.parse(localStorage.getItem(YTSUB_LS)) || null; } catch { _ytSubsCache = null; }
+  return _ytSubsCache;
+}
+function saveYtSubs(d) { _ytSubsCache = d; try { localStorage.setItem(YTSUB_LS, JSON.stringify(d)); } catch {} }
+function loadYtWatchLater() {
+  try { return JSON.parse(localStorage.getItem(YTSUB_WL_LS)) || []; } catch { return []; }
+}
+function saveYtWatchLater(list) { lsSet(YTSUB_WL_LS, JSON.stringify(list)); }
+
+// GET /youtube/v3/{path} authentifié par le token OAuth Google (Bearer).
+// Retourne le JSON, ou { __error: 'AUTH' | 'SCOPE' | 'QUOTA' | 'NET' }.
+async function ytSubApi(path, params = {}) {
+  const token = gdriveToken();
+  if (!token) return { __error: 'AUTH' };
+  try {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) { gdriveLogout(); return { __error: 'AUTH' }; }
+    if (res.status === 403) {
+      // 403 = scope manquant (token pré-youtube.readonly), API non activée ou quota épuisé
+      let reason = '';
+      try { const j = await res.json(); reason = j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason || ''; } catch {}
+      return { __error: reason === 'quotaExceeded' || reason === 'rateLimitExceeded' ? 'QUOTA' : 'SCOPE' };
+    }
+    if (!res.ok) return { __error: 'NET' };
+    return await res.json();
+  } catch { return { __error: 'NET' }; }
+}
+
+// Toutes les chaînes suivies → [{ id, title }] (paginé, cap YTSUB_MAX_CHANNELS)
+async function ytSubsListChannels() {
+  const subs = [];
+  let pageToken = '';
+  while (subs.length < YTSUB_MAX_CHANNELS) {
+    const d = await ytSubApi('subscriptions', { part: 'snippet', mine: 'true', maxResults: '50', ...(pageToken ? { pageToken } : {}) });
+    if (d.__error) return d;
+    for (const it of (d.items || [])) {
+      const cid = it.snippet && it.snippet.resourceId && it.snippet.resourceId.channelId;
+      if (cid) subs.push({ id: cid, title: (it.snippet && it.snippet.title) || 'Chaîne' });
+    }
+    pageToken = d.nextPageToken || '';
+    if (!pageToken) break;
+  }
+  return { subs };
+}
+
+// Vidéos les plus récentes de tous les abonnements, triées par date desc.
+// Retourne { fetched_at, videos } (mis en cache) ou { __error }.
+async function ytSubsFetchVideos(force) {
+  const cached = loadYtSubs();
+  if (!force && cached && Date.now() - cached.fetched_at < YTSUB_TTL) return cached;
+  const ls = await ytSubsListChannels();
+  if (ls.__error) return ls;
+  const channels = ls.subs;
+  if (!channels.length) { const data = { fetched_at: Date.now(), videos: [] }; saveYtSubs(data); return data; }
+  const vids = [];
+  let idx = 0;
+  // 8 requêtes playlistItems en parallèle (une chaîne supprimée/sans upload → 404 ignoré)
+  const worker = async () => {
+    while (idx < channels.length) {
+      const ch = channels[idx++];
+      const d = await ytSubApi('playlistItems', {
+        part: 'snippet,contentDetails', maxResults: String(YTSUB_PER_CHANNEL),
+        playlistId: 'UU' + ch.id.slice(2),   // playlist uploads dérivée de l'id UC… (0 requête channels.list)
+      });
+      if (d.__error || !d.items) continue;
+      for (const e of d.items) {
+        const vid = e.contentDetails && e.contentDetails.videoId;
+        if (!vid) continue;
+        const sn = e.snippet || {};
+        const th = sn.thumbnails || {};
+        const date = (e.contentDetails && e.contentDetails.videoPublishedAt) || sn.publishedAt || '';
+        if (!date) continue;                 // vidéo privée/programmée non publiée
+        vids.push({ id: vid, title: sn.title || '(sans titre)', channel: ch.title, date,
+          thumb: (th.medium || th.default || {}).url || null });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  vids.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  // Durées (batch de 50) sur les ~300 plus récentes → filtre Shorts (< YT_MIN_MINUTES, même règle que TV Time)
+  const top = vids.slice(0, 300);
+  const durMap = new Map();
+  for (let i = 0; i < top.length; i += 50) {
+    const d = await ytSubApi('videos', { part: 'contentDetails', id: top.slice(i, i + 50).map(v => v.id).join(',') });
+    if (d && !d.__error && d.items) for (const v of d.items) durMap.set(v.id, ytParseDuration(v.contentDetails && v.contentDetails.duration));
+  }
+  const videos = top
+    .map(v => ({ ...v, dur: durMap.get(v.id) || 0 }))
+    .filter(v => !durMap.has(v.id) || v.dur >= YT_MIN_MINUTES);
+  const data = { fetched_at: Date.now(), videos };
+  saveYtSubs(data);
+  return data;
+}
+
+// Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » + « 🕒 À REGARDER PLUS TARD » de la section Actu.
+// Propose les vidéos (lazyload infini) — n'ajoute RIEN dans TV Time.
+function ActuYoutubeSection() {
+  const [data, setData]       = React.useState(() => loadYtSubs());
+  const [wl, setWl]           = React.useState(() => loadYtWatchLater());
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const [visible, setVisible] = React.useState(YTSUB_PAGE);
+  const [connected]           = React.useState(() => gdriveConnected());
+  const sentinelRef           = React.useRef(null);
+
+  const refresh = React.useCallback(async (force) => {
+    if (!gdriveConnected()) return;
+    setLoading(true); setErr('');
+    const d = await ytSubsFetchVideos(force);
+    if (d.__error === 'AUTH')       setErr('AUTH');
+    else if (d.__error === 'SCOPE') setErr('SCOPE');
+    else if (d.__error === 'QUOTA') setErr('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
+    else if (d.__error)             setErr('Réseau indisponible — réessaie plus tard.');
+    else setData(d);
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!connected) return;
+    const c = loadYtSubs();
+    if (!c || Date.now() - c.fetched_at > YTSUB_TTL) refresh(false);
+  }, [connected, refresh]);
+
+  // Lazyload infini : sentinelle observée → +YTSUB_PAGE vidéos à chaque entrée dans le viewport
+  const total = (data && data.videos && data.videos.length) || 0;
+  React.useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || visible >= total) return;
+    const obs = new IntersectionObserver(entries => {
+      if (entries.some(e => e.isIntersecting)) setVisible(v => v + YTSUB_PAGE);
+    }, { rootMargin: '120px' });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [visible, total]);
+
+  const wlIds = React.useMemo(() => new Set(wl.map(v => v.id)), [wl]);
+  const addWL = (v) => {
+    if (wlIds.has(v.id)) return;
+    const next = [{ ...v, addedAt: Date.now() }, ...wl];
+    setWl(next); saveYtWatchLater(next);
+  };
+  const removeWL = (id) => {
+    const next = wl.filter(v => v.id !== id);
+    setWl(next); saveYtWatchLater(next);
+  };
+
+  const fmtDur = m => m >= 60 ? `${Math.floor(m / 60)} h ${m % 60 ? (m % 60) + ' min' : ''}`.trim() : `${m} min`;
+  const vidRow = (v, saved, onAction, actionLabel, actionColor) => (
+    <div key={v.id} style={{ display:'flex', gap:10, alignItems:'center', padding:'7px 0', borderBottom:`1px solid ${C.border}55` }}>
+      {v.thumb
+        ? <img src={v.thumb} alt="" loading="lazy" style={{ width:74, height:42, objectFit:'cover', borderRadius:6, flexShrink:0, background:C.surface }} />
+        : <div style={{ width:74, height:42, borderRadius:6, flexShrink:0, background:C.surface, display:'flex', alignItems:'center', justifyContent:'center', fontSize:16 }}>▶️</div>}
+      <div style={{ flex:1, minWidth:0 }}>
+        <a href={`https://www.youtube.com/watch?v=${encodeURIComponent(v.id)}`} target="_blank" rel="noopener noreferrer"
+          style={{ fontSize:12, color:C.text, lineHeight:1.3, textDecoration:'none', display:'block',
+            overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</a>
+        <div style={{ fontSize:10, color:C.dim, marginTop:2, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+          {v.channel} · {actuAgo(v.date)}{v.dur ? ` · ${fmtDur(v.dur)}` : ''}
+        </div>
+      </div>
+      <button onClick={onAction} title={actionLabel} disabled={saved}
+        style={{ fontSize:10.5, color: saved ? C.dim : actionColor, background:'none', border:`1px solid ${saved ? C.border : actionColor + '66'}`,
+          borderRadius:6, padding:'4px 8px', cursor: saved ? 'default' : 'pointer', whiteSpace:'nowrap', flexShrink:0 }}>
+        {saved ? '✓' : actionLabel}
+      </button>
+    </div>
+  );
+
+  const shown = (data && data.videos || []).slice(0, visible);
+  return (<>
+    <StatsCollapse defaultOpen={false} color={YT_COLOR}
+      title={<span>▶️ VIDÉOS YOUTUBE <span style={{ color:C.dim, fontWeight:400 }}>· Abonnements{total ? ` · ${total}` : ''}</span></span>}>
+      {!connected ? (
+        <div style={{ fontSize:11.5, color:C.dim, lineHeight:1.5, padding:'4px 0' }}>
+          Les abonnements YouTube sont privés — connecte ton compte Google pour lister les
+          dernières vidéos de tes chaînes (lecture seule, rien n'est ajouté dans TV Time).
+          <div style={{ marginTop:8 }}>
+            <button onClick={gdriveLogin} style={{ background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR,
+              borderRadius:8, padding:'7px 14px', fontSize:12, cursor:'pointer', fontWeight:600 }}>▶ Connecter Google (YouTube)</button>
+          </div>
+        </div>
+      ) : (err === 'AUTH' || err === 'SCOPE') ? (
+        <div style={{ fontSize:11.5, color:C.dim, lineHeight:1.5, padding:'4px 0' }}>
+          {err === 'SCOPE'
+            ? 'Ton token Google ne couvre pas encore YouTube (ou l\'API « YouTube Data v3 » n\'est pas activée sur le projet Google Cloud du client OAuth).'
+            : 'Session Google expirée.'} Reconnecte-toi pour accorder l'accès en lecture seule.
+          <div style={{ marginTop:8 }}>
+            <button onClick={gdriveLogin} style={{ background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR,
+              borderRadius:8, padding:'7px 14px', fontSize:12, cursor:'pointer', fontWeight:600 }}>↻ Reconnecter Google</button>
+          </div>
+        </div>
+      ) : (<>
+        {err && <div style={{ fontSize:11, color:'#e05050', padding:'4px 0' }}>{err}</div>}
+        {loading && !total && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Chargement des abonnements…</div>}
+        {!loading && !total && !err && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune vidéo récente trouvée.</div>}
+        {shown.map(v => vidRow(v, wlIds.has(v.id), () => addWL(v), '🕒 Plus tard', YT_COLOR))}
+        {/* Sentinelle du lazyload infini */}
+        {visible < total && <div ref={sentinelRef} style={{ padding:'8px 0', textAlign:'center' }}>
+          <button onClick={() => setVisible(v => v + YTSUB_PAGE)}
+            style={{ fontSize:10.5, color:C.dim, background:'none', border:'none', cursor:'pointer' }}>▼ Charger plus…</button>
+        </div>}
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:8 }}>
+          <span style={{ fontSize:9, color:C.dim }}>{data && data.fetched_at ? `Mis à jour ${actuAgo(new Date(data.fetched_at).toISOString())}` : ''}</span>
+          <button onClick={() => refresh(true)} disabled={loading}
+            style={{ fontSize:10.5, color: loading ? C.dim : C.muted, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'3px 10px', cursor: loading ? 'default' : 'pointer' }}>
+            {loading ? '↻ …' : '↻ Actualiser'}
+          </button>
+        </div>
+      </>)}
+    </StatsCollapse>
+
+    {/* À regarder plus tard — liste locale, indépendante de TV Time */}
+    <StatsCollapse defaultOpen={false} color={YT_COLOR}
+      title={<span>🕒 À REGARDER PLUS TARD <span style={{ color:C.dim, fontWeight:400 }}>{wl.length ? `· ${wl.length}` : ''}</span></span>}>
+      {wl.length
+        ? wl.map(v => vidRow(v, false, () => removeWL(v.id), '× Retirer', '#e05050'))
+        : <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune vidéo enregistrée — utilise « 🕒 Plus tard » sur une vidéo de tes abonnements.</div>}
+    </StatsCollapse>
+  </>);
+}
+
 function ActuPanel() {
   const [data, setData]   = React.useState(() => loadActu());
   const [loading, setLoad] = React.useState(false);
@@ -5321,6 +5580,9 @@ function ActuPanel() {
 
       {/* Cartes repliables (fermées par défaut) — réutilise StatsCollapse */}
       <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+        {/* Vidéos YouTube des abonnements + À regarder plus tard (fetch indépendant, OAuth Google) */}
+        <ActuYoutubeSection />
+
         {/* Techno · IA · Science — Hacker News */}
         <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
           title={<span>📰 TECHNO · IA · SCIENCE <span style={{ color:C.dim, fontWeight:400 }}>· Hacker News</span></span>}>
