@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.0.0';
+const APP_VERSION = '5.0.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5239,15 +5239,27 @@ async function actuFetchHN() {
   } catch { return []; }
 }
 
-// Presse FR (IA / science / techno) via le flux RSS Google News (proxy CORS)
+// Presse FR (IA / science / techno) via le flux RSS Google News (proxy CORS).
+// Repli si le flux « recherche » ne rend rien (throttle des proxies sur les URLs à
+// query) : flux « À la une » France (URL plus simple, mieux tolérée), puis le
+// topic SCIENCE_ET_TECHNOLOGIE éditorial.
 async function actuFetchPresse() {
   const q = encodeURIComponent('intelligence artificielle OR science OR technologie');
-  const xml = await corsFetchText(`https://news.google.com/rss/search?q=${q}&hl=fr&gl=FR&ceid=FR:fr`);
-  return actuParseRss(xml, 12).map(a => {
-    // Google News suffixe le titre par «  - Source » → on sépare
-    const m = a.title.match(/^(.*)\s[-–]\s([^-–]+)$/);
-    return m ? { ...a, title: m[1].trim(), source: a.source || m[2].trim() } : a;
-  });
+  const feeds = [
+    `https://news.google.com/rss/search?q=${q}&hl=fr&gl=FR&ceid=FR:fr`,
+    'https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr',
+    'https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=fr&gl=FR&ceid=FR:fr',
+  ];
+  for (const f of feeds) {
+    const xml = await corsFetchText(f);
+    const items = actuParseRss(xml, 12);
+    if (items.length) return items.map(a => {
+      // Google News suffixe le titre par «  - Source » → on sépare
+      const m = a.title.match(/^(.*)\s[-–]\s([^-–]+)$/);
+      return m ? { ...a, title: m[1].trim(), source: a.source || m[2].trim() } : a;
+    });
+  }
+  return [];
 }
 
 // Google Trends France — recherches tendance du jour (RSS via proxy CORS).
@@ -6131,20 +6143,35 @@ function FinanceSection({ title, eurusd, children }) {
 // Stooq (source EU, pas de mur de consentement RGPD contrairement à Yahoo) n'envoie
 // pas d'en-tête CORS → on passe par des proxies CORS keyless SANS inscription. On en
 // essaie plusieurs (le 1er qui répond gagne) car selon le réseau certains sont bloqués.
+// Chaque tentative est bornée à 12 s (AbortController) : un proxy qui NE RÉPOND
+// JAMAIS (connexion pendante) ne gèle plus toute la carte — on passe au suivant.
+// La variante allorigins /get (JSON { contents }) est plus fiable que /raw sur
+// certains contenus (encodage) → essayée en avant-dernier, même host déjà en CSP.
 async function corsFetchText(url) {
   const tries = [
-    'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url),
-    'https://cors.eu.org/' + url,                       // proxy CORS européen, sans clé
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-    url,                                                // direct en dernier recours
+    ['https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url), 'text'],
+    ['https://cors.eu.org/' + url, 'text'],             // proxy CORS européen, sans clé
+    ['https://api.allorigins.win/raw?url=' + encodeURIComponent(url), 'text'],
+    ['https://api.allorigins.win/get?url=' + encodeURIComponent(url), 'json'],
+    [url, 'text'],                                      // direct en dernier recours
   ];
-  for (const u of tries) {
+  for (const [u, kind] of tries) {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
     try {
-      const r = await fetch(u);
-      if (!r.ok) continue;
-      const t = await r.text();
-      if (t && t.trim()) return t;
+      const r = await fetch(u, ctrl ? { signal: ctrl.signal } : undefined);
+      if (r.ok) {
+        if (kind === 'json') {
+          const j = await r.json();
+          const t = j && j.contents;
+          if (t && String(t).trim()) return String(t);
+        } else {
+          const t = await r.text();
+          if (t && t.trim()) return t;
+        }
+      }
     } catch (e) {}
+    finally { if (timer) clearTimeout(timer); }
   }
   return null;
 }
