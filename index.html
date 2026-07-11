@@ -11,7 +11,7 @@
      reste d'empêcher tout XSS (SRI + sql.js auto-hébergé + échappement de tout contenu importé).
      Pour fermer complètement ce vecteur : retirer ces 3 proxies (au prix du repli Stooq).
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com https://www.speedrun.com; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '4.9.5';
+const APP_VERSION = '4.9.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -9367,6 +9367,166 @@ function DependabotSection() {
   );
 }
 
+// ── Veilles Techno · Speedrun ──────────────────────────────────────────────
+// Nombre de runs EN ATTENTE DE VALIDATION (status=new) sur les jeux que tu MODÈRES,
+// via l'API publique speedrun.com. 100% endpoints PUBLICS (pseudo → user id → jeux
+// modérés → runs status:new) : GET simples (en-tête Accept, CORS-safelisted → pas de
+// preflight), AUCUNE clé API à stocker. speedrun.com envoie des en-têtes CORS → fetch DIRECT.
+const SPEEDRUN_COLOR = '#e0b83a';                      // or « trophée » speedrun
+const SR_USER_LS  = 'spotifyplus_speedrun_user';       // pseudo speedrun.com
+const SR_CACHE_LS = 'spotifyplus_speedrun';            // résultat caché (re-fetchable, TTL 15 min → PAS dans buildBackup)
+const SR_TTL      = 15 * 60000;                        // 15 min
+const SR_API      = 'https://www.speedrun.com/api/v1';
+function srUser() { try { return (localStorage.getItem(SR_USER_LS) || '').trim(); } catch { return ''; } }
+
+// GET JSON speedrun.com. Renvoie l'objet parsé, ou { __status } sur erreur HTTP.
+async function srGet(url) {
+  try {
+    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) return { __status: r.status };
+    return await r.json();
+  } catch { return { __status: 0 }; }
+}
+// Pagine un endpoint listant (games/runs) et renvoie tous les éléments (cap `hardCap`).
+async function srPaginate(baseUrl, hardCap) {
+  const out = []; let offset = 0;
+  while (out.length < hardCap) {
+    const j = await srGet(`${baseUrl}&max=200&offset=${offset}`);
+    if (!j || j.__status || !Array.isArray(j.data)) break;
+    out.push(...j.data);
+    const size = (j.pagination && j.pagination.size) != null ? j.pagination.size : j.data.length;
+    if (size < 200) break;                              // dernière page
+    offset += 200;
+    await new Promise(res => setTimeout(res, 120));     // respire (rate-limit speedrun.com ~100/min)
+  }
+  return out;
+}
+
+// Runs à valider par jeu modéré. Erreurs typées : 'CONFIG' (pas de pseudo) | 'USER'
+// (pseudo introuvable) | 'NET'.
+async function srFetchQueue(force) {
+  const name = srUser();
+  if (!name) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(SR_CACHE_LS)); } catch {}
+  if (!force && cache && cache.name === name && Date.now() - cache.fetchedAt < SR_TTL) return cache;
+  // 1. pseudo → user id (public)
+  const u = await srGet(`${SR_API}/users/${encodeURIComponent(name)}`);
+  if (u && u.__status === 404) return { error: 'USER' };
+  if (!u || u.__status || !u.data || !u.data.id) return { error: 'NET' };
+  const uid = u.data.id;
+  const userName = (u.data.names && u.data.names.international) || name;
+  const userUrl  = u.data.weblink || '';
+  // 2. jeux modérés (public, mode bulk = id + noms uniquement)
+  const games = await srPaginate(`${SR_API}/games?moderator=${uid}&_bulk=true`, 400);
+  // 3. compte les runs status=new par jeu (séquentiel, cap 80 jeux)
+  const rows = [];
+  let totalPending = 0;
+  for (const g of games.slice(0, 80)) {
+    const runs = await srPaginate(`${SR_API}/runs?game=${g.id}&status=new`, 600);
+    const pending = runs.length;
+    totalPending += pending;
+    if (pending > 0) rows.push({ name: (g.names && g.names.international) || g.abbreviation || g.id, url: g.weblink || '', pending });
+    await new Promise(res => setTimeout(res, 120));
+  }
+  rows.sort((a, b) => b.pending - a.pending);
+  const out = { fetchedAt: Date.now(), name, userName, userUrl, games: rows, totalPending, totalGames: games.length };
+  try { localStorage.setItem(SR_CACHE_LS, JSON.stringify(out)); } catch {}
+  return out;
+}
+
+// Sous-section « 🏁 Speedrun » : runs en attente de validation là où je suis modérateur.
+function SpeedrunSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const [showCfg, setShowCfg] = React.useState(false);
+  const [nameInput, setNameInput] = React.useState(srUser());
+  const configured = !!srUser();
+
+  const ERR = {
+    USER:   'Pseudo speedrun.com introuvable — vérifie l\'orthographe (⚙).',
+    NET:    'API speedrun.com injoignable — réessaie dans un instant.',
+    CONFIG: '',
+  };
+
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await srFetchQueue(force);
+    if (d.error) { setErr(ERR[d.error] || ERR.NET); if (d.error !== 'CONFIG') setData(null); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const saveCfg = () => {
+    const n = nameInput.trim();
+    if (!n) { setErr('Renseigne ton pseudo speedrun.com.'); return; }
+    try { localStorage.setItem(SR_USER_LS, n); localStorage.removeItem(SR_CACHE_LS); } catch {}
+    setShowCfg(false); setErr(''); setData(null);
+    setTimeout(() => refresh(true), 0);
+  };
+  const forget = () => {
+    try { localStorage.removeItem(SR_USER_LS); localStorage.removeItem(SR_CACHE_LS); } catch {}
+    setData(null); setErr(''); setShowCfg(false); setNameInput('');
+  };
+
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px' };
+  const inp  = { background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:'8px 10px', color:C.text, fontSize:11, fontFamily:'inherit', width:'100%', boxSizing:'border-box' };
+  const lab  = { fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim, marginBottom:2 };
+
+  if (!configured || showCfg) {
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+        {!configured && (
+          <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+            Runs en attente de validation via l'<b style={{ color:SPEEDRUN_COLOR }}>API publique speedrun.com</b>.<br/>
+            Entre simplement ton <b>pseudo speedrun.com</b> — l'app trouve les jeux que tu modères et compte les runs en <b>status:new</b>.<br/>
+            <span style={{ color:C.dim }}>Aucune clé API : tout passe par les endpoints publics (pseudo → jeux modérés → runs à valider).</span>
+          </div>
+        )}
+        <div style={lab}>PSEUDO SPEEDRUN.COM</div>
+        <input style={inp} value={nameInput} onChange={e => setNameInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') saveCfg(); }} placeholder="ex. Pierre" />
+        {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
+        <div style={{ display:'flex', gap:8 }}>
+          <button onClick={saveCfg} style={{ flex:1, background:`${SPEEDRUN_COLOR}18`, border:`1px solid ${SPEEDRUN_COLOR}50`, borderRadius:8, padding:'9px 12px', cursor:'pointer', color:SPEEDRUN_COLOR, fontSize:11, fontWeight:700, fontFamily:'inherit' }}>✓ Enregistrer</button>
+          {configured && <button onClick={() => { setShowCfg(false); setErr(''); }} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'9px 12px', cursor:'pointer', color:C.muted, fontSize:11, fontFamily:'inherit' }}>Annuler</button>}
+          {configured && <button onClick={forget} title="Oublier le pseudo" style={{ background:'none', border:'1px solid #5a2020', borderRadius:8, padding:'9px 12px', cursor:'pointer', color:'#e05050', fontSize:11, fontFamily:'inherit' }}>Oublier</button>}
+        </div>
+      </div>
+    );
+  }
+
+  const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {loading && <div style={{ ...card, fontSize:11, color:C.muted }}>⏳ Comptage des runs à valider…</div>}
+      {err && <div style={{ ...card, fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {data && !loading && (
+        <>
+          <div style={{ ...card, display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+            <a href={data.userUrl || undefined} target="_blank" rel="noopener noreferrer" style={{ fontSize:11, color:C.muted, textDecoration:'none' }}>{data.userName}{data.userUrl ? ' ↗' : ''}</a>
+            <span style={{ fontSize:11, fontWeight:800, color:SPEEDRUN_COLOR, fontFamily:'DM Mono,monospace' }}>{data.totalPending} à valider · {data.totalGames} jeu{data.totalGames > 1 ? 'x' : ''} modéré{data.totalGames > 1 ? 's' : ''}</span>
+          </div>
+          {data.totalPending === 0
+            ? <div style={{ ...card, fontSize:11, color:C.muted, textAlign:'center' }}>✅ Aucun run en attente de validation.</div>
+            : data.games.map(g => (
+                <div key={g.name} style={{ ...card, display:'flex', alignItems:'center', gap:8 }}>
+                  <a href={g.url ? g.url + '/runs?status=new' : undefined} target="_blank" rel="noopener noreferrer" style={{ flex:1, minWidth:0, fontSize:11.5, fontWeight:700, color:C.text, textDecoration:'none', wordBreak:'break-word' }}>{g.name}{g.url ? ' ↗' : ''}</a>
+                  <span style={{ fontSize:11, fontWeight:800, color:SPEEDRUN_COLOR, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{g.pending}</span>
+                </div>
+              ))}
+        </>
+      )}
+      <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+        {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
+        <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
+        <button onClick={() => setShowCfg(true)} title="Configuration" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>⚙</button>
+      </div>
+    </div>
+  );
+}
+
 function RappelPanel() {
   const [dates, setDates]   = React.useState(loadRappels);
   const [times, setTimes]   = React.useState(loadRappelTimes);   // heure OPTIONNELLE des items fixes
@@ -9477,6 +9637,9 @@ function RappelPanel() {
       <StatsCollapse title="🛰️ Veilles Techno" color={VEILLE_COLOR}>
         <StatsCollapse title="🤖 Dependabot" color={DEPENDABOT_COLOR}>
           <DependabotSection />
+        </StatsCollapse>
+        <StatsCollapse title="🏁 Speedrun" color={SPEEDRUN_COLOR}>
+          <SpeedrunSection />
         </StatsCollapse>
       </StatsCollapse>
       {/* Rappels personnalisés — notif à l'ouverture de l'app quand la date est atteinte */}
