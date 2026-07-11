@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.0.4';
+const APP_VERSION = '5.0.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5333,10 +5333,33 @@ async function actuFetchHibp() {
     }));
 }
 
-// Récupère les 4 sources en parallèle et met en cache
+// JSON same-origin data/actu.json généré par la GitHub Action update-actu.yml
+// (scripts/fetch_actu.py, cron 2 h) — CONTOURNE les proxies CORS peu fiables :
+// le serveur GitHub fetch les sources sans CORS, l'app lit le fichier en 'self'.
+// Retourne null si absent/périmé (> 24 h — Action en panne) → replis client.
+async function actuFetchStatic() {
+  try {
+    const r = await fetch('./data/actu.json?_=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j || !j.updated_at) return null;
+    const age = Date.now() - Date.parse(j.updated_at);
+    if (isNaN(age) || age > 24 * 3600 * 1000) return null;
+    return j;
+  } catch { return null; }
+}
+
+// Récupère les 4 sources et met en cache. PRIORITÉ au JSON de la GitHub Action
+// (zéro proxy) ; chaque source manquante/vide retombe sur son fetcher client
+// (HN reste client-first : API à CORS natif, plus fraîche que le cron 2 h).
 async function actuFetchAll() {
+  const stat = await actuFetchStatic();
+  const has = a => Array.isArray(a) && a.length;
   const [hn, presse, trends, leaks] = await Promise.all([
-    actuFetchHN(), actuFetchPresse(), actuFetchTrends(), actuFetchLeaks(),
+    actuFetchHN().then(r => has(r) ? r : ((stat && stat.hn) || [])),
+    has(stat && stat.presse) ? Promise.resolve(stat.presse) : actuFetchPresse(),
+    has(stat && stat.trends) ? Promise.resolve(stat.trends) : actuFetchTrends(),
+    (stat && stat.leaks && has(stat.leaks.items)) ? Promise.resolve(stat.leaks) : actuFetchLeaks(),
   ]);
   const data = { fetched_at: Date.now(), hn, presse, trends, leaks };
   saveActu(data);

@@ -98,7 +98,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 3.5.5`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
 
 ### Actu
-- Section **Actu** dédiée (titre en bleu-indigo), **entre Artistes et Météo** — onglet en haut sur desktop, dans le menu « ⋯ » sur mobile. Agrégateur d'actualités **sans backend ni clé**, cache local (30 min) + bouton **↻ Actualiser**
+- Section **Actu** dédiée (titre en bleu-indigo), **entre Artistes et Météo** — onglet en haut sur desktop, dans le menu « ⋯ » sur mobile. Agrégateur d'actualités **sans backend ni clé**, cache local (30 min) + bouton **↻ Actualiser**. Les sources (presse, tendances, fuites) sont **pré-récupérées côté serveur par une GitHub Action** (toutes les 2 h → `data/actu.json`, lu directement par l'app) — les proxies CORS publics, peu fiables, ne servent plus que de repli
 - **📰 Techno · IA · Science** : les tops [Hacker News](https://news.ycombinator.com/) (titre + score + lien)
 - **🇫🇷 Presse FR** : actus IA / science / technologie via le flux Google News
 - **🔥 Tendances du jour · France** : top 10 des recherches tendance Google Trends *(les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends en substitut)*
