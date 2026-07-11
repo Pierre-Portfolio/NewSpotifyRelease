@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.0.3';
+const APP_VERSION = '5.0.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -372,10 +372,12 @@ function gdriveLogin() {
   try { localStorage.setItem('gdrive_state', nonce); } catch {}
   const params = new URLSearchParams({
     client_id: GDRIVE_CLIENT_ID, response_type: 'token', redirect_uri: REDIRECT_URI,
-    // + youtube.readonly : requis par la section Actu → Vidéos YouTube (abonnements).
-    // Un token émis AVANT l'ajout de ce scope → 401/403 sur /youtube/v3/subscriptions
+    // + youtube : requis par la section Actu → Vidéos YouTube (lecture des abonnements
+    // ET écriture playlist — le bouton 🕒 ajoute la vidéo dans la playlist « À regarder
+    // plus tard (Hub) » du compte ; l'API YouTube interdit la « Watch Later » NATIVE).
+    // Un token émis AVANT l'ajout de ce scope → 401/403 sur /youtube/v3/*
     // → l'UI de la section propose une reconnexion (consentement incrémental).
-    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/youtube.readonly',
+    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/youtube',
     include_granted_scopes: 'true', state: 'gdrive.' + nonce, // préfixe 'gdrive.' = discriminant, suffixe = nonce vérifié
   });
   // Au retour, rouvrir l'onglet d'où on est parti (À propos, Mes Actifs…) au lieu de Scrapping
@@ -3483,8 +3485,6 @@ function buildBackup() {
     modules: lsJson(MODULES_LS_KEY) || {},
     // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
     listens: lsJson(LISTEN_LOG_KEY) || [],
-    // Actu → vidéos YouTube « à regarder plus tard » (liste locale, indépendante de TV Time)
-    yt_watchlater: lsJson(YTSUB_WL_LS) || [],
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -3688,14 +3688,8 @@ function applyBackup(data) {
     try { localStorage.setItem(YT_KEY_LS, data.yt_key.trim()); } catch {}
   }
   if (data.maps && typeof data.maps === 'object') { put('spotifyplus_maps', data.maps); _mapsCache = null; }
-  // Actu → « À regarder plus tard » (YouTube) — FUSIONNÉ (union par id vidéo, local d'abord)
-  if (Array.isArray(data.yt_watchlater)) {
-    try {
-      const cur = loadYtWatchLater();
-      const seen = new Set(cur.map(v => v && v.id));
-      saveYtWatchLater(cur.concat(data.yt_watchlater.filter(v => v && v.id && !seen.has(v.id))));
-    } catch {}
-  }
+  // (l'ancienne clé yt_watchlater — liste locale « à regarder plus tard » — est ignorée :
+  // le bouton 🕒 écrit désormais directement dans la playlist YouTube du compte)
   // Paramétrage des modules (activés/désactivés) — REMPLACÉ si présent
   if (data.modules && typeof data.modules === 'object' && !Array.isArray(data.modules)) put(MODULES_LS_KEY, data.modules);
   // Finance : historique local des prix — FUSIONNÉ (pas remplacé) : union par série,
@@ -5351,7 +5345,7 @@ async function actuFetchAll() {
 
 // ── Actu → Vidéos YouTube (abonnements) ─────────────────────────
 // Le flux youtube.com/feed/subscriptions n'a AUCUNE API keyless : la liste des
-// abonnements est privée → OAuth Google (scope youtube.readonly ajouté à gdriveLogin,
+// abonnements est privée → OAuth Google (scope youtube ajouté à gdriveLogin,
 // même bouton « Connecter Google » que Drive/Mes Actifs). Récupération :
 //   1. /youtube/v3/subscriptions?mine=true (paginé, 1 unité/page de 50)
 //   2. pour chaque chaîne, sa playlist « uploads » (id UC… → UU…, AUCUNE requête
@@ -5360,11 +5354,17 @@ async function actuFetchAll() {
 // Coût ≈ nb de chaînes + qq unités — négligeable sur le quota 10 000/j de la clé YT.
 // Les appels passent par le Bearer OAuth (PAS la clé API : mine=true l'exige).
 // Cache localStorage TTL 30 min (re-fetchable → PAS dans buildBackup).
-// « À regarder plus tard » = liste LOCALE (spotifyplus_yt_watchlater) — n'ajoute
-// JAMAIS rien dans TV Time ; incluse dans buildBackup (fusion union par id).
+// « 🕒 Plus tard » = ajout DIRECT dans une playlist du compte YouTube de
+// l'utilisateur (« À regarder plus tard (Hub) », créée privée si absente).
+// ⚠ L'API YouTube INTERDIT d'écrire dans la « À regarder plus tard » NATIVE
+// (playlistId=WL retiré de l'API par Google en 2016) → playlist dédiée, visible
+// dans la bibliothèque YouTube comme n'importe quelle playlist. Nécessite le
+// scope youtube (écriture) sur le token Google. N'ajoute JAMAIS rien dans TV Time.
 const YTSUB_LS           = 'spotifyplus_yt_subs';        // cache { fetched_at, videos }
 const YTSUB_TTL          = 30 * 60 * 1000;
-const YTSUB_WL_LS        = 'spotifyplus_yt_watchlater';  // [{ id, title, channel, date, thumb, dur, addedAt }]
+const YTSUB_WL_NAME      = 'À regarder plus tard (Hub)'; // nom de la playlist YouTube dédiée
+const YTSUB_WL_ID_LS     = 'spotifyplus_yt_wl_playlist'; // id de la playlist (1 seule recherche)
+const YTSUB_WL_ADDED_LS  = 'spotifyplus_yt_wl_added';    // ids déjà ajoutés (✓ dans l'UI, cap 500)
 const YTSUB_MAX_CHANNELS = 250;                          // garde-fou quota
 const YTSUB_PER_CHANNEL  = 5;                            // vidéos récentes par chaîne
 const YTSUB_PAGE         = 12;                           // pas du lazyload infini
@@ -5376,10 +5376,11 @@ function loadYtSubs() {
   return _ytSubsCache;
 }
 function saveYtSubs(d) { _ytSubsCache = d; try { localStorage.setItem(YTSUB_LS, JSON.stringify(d)); } catch {} }
-function loadYtWatchLater() {
-  try { return JSON.parse(localStorage.getItem(YTSUB_WL_LS)) || []; } catch { return []; }
+// Ids déjà envoyés vers la playlist (simple mémo cosmétique pour afficher ✓)
+function loadYtWlAdded() {
+  try { return JSON.parse(localStorage.getItem(YTSUB_WL_ADDED_LS)) || []; } catch { return []; }
 }
-function saveYtWatchLater(list) { lsSet(YTSUB_WL_LS, JSON.stringify(list)); }
+function saveYtWlAdded(ids) { try { localStorage.setItem(YTSUB_WL_ADDED_LS, JSON.stringify(ids.slice(-500))); } catch {} }
 
 // GET /youtube/v3/{path} authentifié par le token OAuth Google (Bearer).
 // Retourne le JSON, ou { __error: 'AUTH' | 'SCOPE' | 'QUOTA' | 'NET' }.
@@ -5392,7 +5393,7 @@ async function ytSubApi(path, params = {}) {
     });
     if (res.status === 401) { gdriveLogout(); return { __error: 'AUTH' }; }
     if (res.status === 403) {
-      // 403 = scope manquant (token pré-youtube.readonly), API non activée ou quota épuisé
+      // 403 = scope manquant (token pré-scope youtube), API non activée ou quota épuisé
       let reason = '';
       try { const j = await res.json(); reason = j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason || ''; } catch {}
       return { __error: reason === 'quotaExceeded' || reason === 'rateLimitExceeded' ? 'QUOTA' : 'SCOPE' };
@@ -5400,6 +5401,73 @@ async function ytSubApi(path, params = {}) {
     if (!res.ok) return { __error: 'NET' };
     return await res.json();
   } catch { return { __error: 'NET' }; }
+}
+
+// POST /youtube/v3/{path} authentifié (écriture playlist). Mêmes erreurs typées que
+// ytSubApi + 'NOTFOUND' (playlist supprimée à la main → on la recrée).
+async function ytSubPost(path, params = {}, body = null) {
+  const token = gdriveToken();
+  if (!token) return { __error: 'AUTH' };
+  try {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : null,
+    });
+    if (res.status === 401) { gdriveLogout(); return { __error: 'AUTH' }; }
+    if (res.status === 403) {
+      let reason = '';
+      try { const j = await res.json(); reason = j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason || ''; } catch {}
+      return { __error: reason === 'quotaExceeded' || reason === 'rateLimitExceeded' ? 'QUOTA' : 'SCOPE' };
+    }
+    if (res.status === 404) return { __error: 'NOTFOUND' };
+    if (!res.ok) return { __error: 'NET' };
+    return await res.json();
+  } catch { return { __error: 'NET' }; }
+}
+
+// Id de la playlist « À regarder plus tard (Hub) » du compte : cache localStorage →
+// recherche parmi les playlists possédées → création (privée) si absente.
+async function ytWlPlaylistId(skipCache) {
+  if (!skipCache) {
+    const cached = localStorage.getItem(YTSUB_WL_ID_LS);
+    if (cached) return cached;
+  }
+  let pageToken = '';
+  for (let i = 0; i < 10; i++) {
+    const d = await ytSubApi('playlists', { part: 'snippet', mine: 'true', maxResults: '50', ...(pageToken ? { pageToken } : {}) });
+    if (d.__error) return d;
+    const hit = (d.items || []).find(p => p.snippet && p.snippet.title === YTSUB_WL_NAME);
+    if (hit) { try { localStorage.setItem(YTSUB_WL_ID_LS, hit.id); } catch {} return hit.id; }
+    pageToken = d.nextPageToken || '';
+    if (!pageToken) break;
+  }
+  const c = await ytSubPost('playlists', { part: 'snippet,status' }, {
+    snippet: { title: YTSUB_WL_NAME, description: 'Vidéos à regarder plus tard — ajoutées depuis le Hub (section Actu).' },
+    status: { privacyStatus: 'private' },
+  });
+  if (c.__error) return c;
+  if (!c.id) return { __error: 'NET' };
+  try { localStorage.setItem(YTSUB_WL_ID_LS, c.id); } catch {}
+  return c.id;
+}
+
+// Ajoute une vidéo dans la playlist « À regarder plus tard (Hub) » du compte YouTube.
+// Retourne { ok: true, playlistId } ou { __error }. Si la playlist cachée a été
+// supprimée à la main (404), on invalide le cache et on retente UNE fois (recréation).
+async function ytWatchLaterAdd(videoId) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const pid = await ytWlPlaylistId(attempt > 0);
+    if (pid && pid.__error) return pid;
+    if (!pid || typeof pid !== 'string') return { __error: 'NET' };
+    const r = await ytSubPost('playlistItems', { part: 'snippet' }, {
+      snippet: { playlistId: pid, resourceId: { kind: 'youtube#video', videoId } },
+    });
+    if (r.__error === 'NOTFOUND' && attempt === 0) { try { localStorage.removeItem(YTSUB_WL_ID_LS); } catch {} continue; }
+    if (r.__error) return r;
+    return { ok: true, playlistId: pid };
+  }
+  return { __error: 'NET' };
 }
 
 // Toutes les chaînes suivies → [{ id, title }] (paginé, cap YTSUB_MAX_CHANNELS)
@@ -5468,11 +5536,13 @@ async function ytSubsFetchVideos(force) {
   return data;
 }
 
-// Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » + « 🕒 À REGARDER PLUS TARD » de la section Actu.
+// Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » de la section Actu.
 // Propose les vidéos (lazyload infini) — n'ajoute RIEN dans TV Time.
+// 🕒 = ajout direct dans la playlist YouTube « À regarder plus tard (Hub) » du compte.
 function ActuYoutubeSection() {
   const [data, setData]       = React.useState(() => loadYtSubs());
-  const [wl, setWl]           = React.useState(() => loadYtWatchLater());
+  const [added, setAdded]     = React.useState(() => new Set(loadYtWlAdded()));
+  const [wlBusy, setWlBusy]   = React.useState(null);   // id vidéo en cours d'ajout
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState('');
   const [visible, setVisible] = React.useState(YTSUB_PAGE);
@@ -5509,19 +5579,23 @@ function ActuYoutubeSection() {
     return () => obs.disconnect();
   }, [visible, total]);
 
-  const wlIds = React.useMemo(() => new Set(wl.map(v => v.id)), [wl]);
-  const addWL = (v) => {
-    if (wlIds.has(v.id)) return;
-    const next = [{ ...v, addedAt: Date.now() }, ...wl];
-    setWl(next); saveYtWatchLater(next);
-  };
-  const removeWL = (id) => {
-    const next = wl.filter(v => v.id !== id);
-    setWl(next); saveYtWatchLater(next);
+  // Ajout dans la playlist YouTube du compte (séquentiel : un ajout à la fois)
+  const addWL = async (v) => {
+    if (added.has(v.id) || wlBusy) return;
+    setWlBusy(v.id); setErr('');
+    const r = await ytWatchLaterAdd(v.id);
+    if (r.__error === 'AUTH' || r.__error === 'SCOPE') setErr(r.__error);
+    else if (r.__error === 'QUOTA') setErr('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
+    else if (r.__error) setErr('Ajout impossible (réseau) — réessaie.');
+    else {
+      const next = new Set(added); next.add(v.id);
+      setAdded(next); saveYtWlAdded([...next]);
+    }
+    setWlBusy(null);
   };
 
   const fmtDur = m => m >= 60 ? `${Math.floor(m / 60)} h ${m % 60 ? (m % 60) + ' min' : ''}`.trim() : `${m} min`;
-  const vidRow = (v, saved, onAction, actionLabel, actionColor) => (
+  const vidRow = (v, saved, onAction, actionLabel, actionColor, busy) => (
     <div key={v.id} style={{ display:'flex', gap:10, alignItems:'center', padding:'7px 0', borderBottom:`1px solid ${C.border}55` }}>
       {v.thumb
         ? <img src={v.thumb} alt="" loading="lazy" style={{ width:74, height:42, objectFit:'cover', borderRadius:6, flexShrink:0, background:C.surface }} />
@@ -5534,10 +5608,10 @@ function ActuYoutubeSection() {
           {v.channel} · {actuAgo(v.date)}{v.dur ? ` · ${fmtDur(v.dur)}` : ''}
         </div>
       </div>
-      <button onClick={onAction} title={actionLabel} disabled={saved}
+      <button onClick={onAction} title={saved ? 'Déjà dans la playlist' : 'Ajouter à la playlist YouTube « ' + YTSUB_WL_NAME + ' »'} disabled={saved || busy}
         style={{ fontSize:10.5, color: saved ? C.dim : actionColor, background:'none', border:`1px solid ${saved ? C.border : actionColor + '66'}`,
-          borderRadius:6, padding:'4px 8px', cursor: saved ? 'default' : 'pointer', whiteSpace:'nowrap', flexShrink:0 }}>
-        {saved ? '✓' : actionLabel}
+          borderRadius:6, padding:'4px 8px', cursor: (saved || busy) ? 'default' : 'pointer', whiteSpace:'nowrap', flexShrink:0 }}>
+        {busy ? '…' : saved ? '✓' : actionLabel}
       </button>
     </div>
   );
@@ -5569,12 +5643,19 @@ function ActuYoutubeSection() {
         {err && <div style={{ fontSize:11, color:'#e05050', padding:'4px 0' }}>{err}</div>}
         {loading && !total && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Chargement des abonnements…</div>}
         {!loading && !total && !err && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune vidéo récente trouvée.</div>}
-        {shown.map(v => vidRow(v, wlIds.has(v.id), () => addWL(v), '🕒 Plus tard', YT_COLOR))}
+        {shown.map(v => vidRow(v, added.has(v.id), () => addWL(v), '🕒 Plus tard', YT_COLOR, wlBusy === v.id))}
         {/* Sentinelle du lazyload infini */}
         {visible < total && <div ref={sentinelRef} style={{ padding:'8px 0', textAlign:'center' }}>
           <button onClick={() => setVisible(v => v + YTSUB_PAGE)}
             style={{ fontSize:10.5, color:C.dim, background:'none', border:'none', cursor:'pointer' }}>▼ Charger plus…</button>
         </div>}
+        <div style={{ fontSize:9, color:C.dim, marginTop:8, lineHeight:1.4 }}>
+          🕒 ajoute la vidéo dans la playlist{' '}
+          {localStorage.getItem(YTSUB_WL_ID_LS)
+            ? <a href={'https://www.youtube.com/playlist?list=' + encodeURIComponent(localStorage.getItem(YTSUB_WL_ID_LS))} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a>
+            : <span>« {YTSUB_WL_NAME} »</span>}
+          {' '}de TON compte YouTube (créée privée au 1er ajout — l'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native).
+        </div>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:8 }}>
           <span style={{ fontSize:9, color:C.dim }}>{data && data.fetched_at ? `Mis à jour ${actuAgo(new Date(data.fetched_at).toISOString())}` : ''}</span>
           <button onClick={() => refresh(true)} disabled={loading}
@@ -5583,14 +5664,6 @@ function ActuYoutubeSection() {
           </button>
         </div>
       </>)}
-    </StatsCollapse>
-
-    {/* À regarder plus tard — liste locale, indépendante de TV Time */}
-    <StatsCollapse defaultOpen={false} color={YT_COLOR}
-      title={<span>🕒 À REGARDER PLUS TARD <span style={{ color:C.dim, fontWeight:400 }}>{wl.length ? `· ${wl.length}` : ''}</span></span>}>
-      {wl.length
-        ? wl.map(v => vidRow(v, false, () => removeWL(v.id), '× Retirer', '#e05050'))
-        : <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune vidéo enregistrée — utilise « 🕒 Plus tard » sur une vidéo de tes abonnements.</div>}
     </StatsCollapse>
   </>);
 }
