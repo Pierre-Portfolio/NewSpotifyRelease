@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.0.7';
+const APP_VERSION = '5.0.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4515,9 +4515,15 @@ function GoogleDriveSync({ mode = 'save' }) {
 // MODULE JEUX · LEAGUE OF LEGENDS (API Riot Games)
 // ════════════════════════════════════════════════
 // Stats de compte (niveau, rangs classés, maîtrises) + partie en cours (Spectator v5)
-// via l'API OFFICIELLE Riot (gratuite — clé générée sur developer.riotgames.com avec le
-// compte Riot du joueur ; la Development Key expire toutes les 24 h, la Personal Key est
-// permanente). ⚠ Riot n'envoie AUCUN en-tête CORS → les requêtes passent par les proxies
+// AVEC les rangs de chaque joueur (élo soloQ/flex, winrate, nb de games — league-v4
+// par participant, cache 15 min par puuid) via l'API OFFICIELLE Riot (gratuite).
+// ⚠ CHOIX D'API (recherche 07/2026) : op.gg / u.gg / porofessor n'ont AUCUNE API
+// publique (endpoints internes non documentés, Cloudflare, cassables sans préavis) —
+// la SEULE source viable pour la partie en cours reste Riot. La solution au problème
+// « clé à régénérer toutes les 24 h » est la PERSONAL API KEY (developer.riotgames.com
+// → Register Product → Personal) : PERMANENTE, gratuite, sans processus de validation,
+// mêmes endpoints. La Development Key (24 h) ne sert que de dépannage.
+// ⚠ Riot n'envoie AUCUN en-tête CORS → les requêtes passent par les proxies
 // CORS keyless déjà utilisés par Finance/Actu (codetabs / cors.eu.org / allorigins) — la
 // clé (query `api_key=`, les proxies ne relaient pas les headers) transite donc par eux :
 // acceptable pour une clé gratuite lecture seule, JAMAIS pour une clé de production.
@@ -4527,6 +4533,8 @@ const LOL_COLOR     = '#c89b3c';                    // or Riot
 const LOL_KEY_LS    = 'spotifyplus_lol_key';        // clé API Riot (comme TMDB/YouTube)
 const LOL_CFG_LS    = 'spotifyplus_lol_cfg';        // { riotId:'Nom#TAG', platform:'euw1' }
 const LOL_CACHE_LS  = 'spotifyplus_lol';            // profil caché (re-fetchable, TTL 1 h)
+const LOL_RANKS_LS  = 'spotifyplus_lol_ranks';      // rangs par puuid des joueurs croisés en partie (TTL 15 min)
+const LOL_RANKS_TTL = 900000;                       // 15 min — un ↻ pendant la même partie ne re-fetch pas les 10 joueurs
 const LOL_CHAMPS_LS = 'spotifyplus_lol_champs';     // map championId → nom (Data Dragon, TTL 7 j)
 const LOL_TTL       = 3600000;                      // 1 h — profil ; la partie en cours est toujours re-fetchée
 // Plateforme (serveur de jeu) → routing régional (account-v1 vit sur europe/americas/asia)
@@ -4631,6 +4639,32 @@ async function lolFetchLive(profile) {
   return g;
 }
 
+// Rangs classés (league-v4 by-puuid) de chaque joueur de la partie en cours — 1 requête
+// par joueur INCONNU seulement : cache localStorage par puuid (TTL 15 min LOL_RANKS_TTL),
+// donc un ↻ pendant la même partie ne re-fetch rien. 3 workers en parallèle (rate-limit
+// dev 20/s : large ; les proxies CORS encaissent). Retourne { puuid: entries[] }.
+async function lolFetchRanks(platform, puuids) {
+  let cache = {};
+  try { cache = JSON.parse(localStorage.getItem(LOL_RANKS_LS)) || {}; } catch {}
+  const nowTs = Date.now();
+  Object.keys(cache).forEach(k => { if (!cache[k] || nowTs - cache[k].fetchedAt > LOL_RANKS_TTL) delete cache[k]; });
+  const missing = puuids.filter(p => p && !cache[p]);
+  const base = `https://${platform}.api.riotgames.com`;
+  let i = 0;
+  const worker = async () => {
+    while (i < missing.length) {
+      const p = missing[i++];
+      const r = await lolApiGet(`${base}/lol/league/v4/entries/by-puuid/${p}`);
+      cache[p] = { fetchedAt: Date.now(), entries: Array.isArray(r) ? r : [] };
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  try { localStorage.setItem(LOL_RANKS_LS, JSON.stringify(cache)); } catch {}
+  const out = {};
+  puuids.forEach(p => { if (cache[p]) out[p] = cache[p].entries; });
+  return out;
+}
+
 // Sous-section « League of Legends » du collapse 🎮 JEUX (StatsPanel).
 function LolStatsSection() {
   const cfg0 = loadLolCfg() || {};
@@ -4641,13 +4675,14 @@ function LolStatsSection() {
   const [keyInput, setKeyInput] = React.useState('');
   const [data, setData]         = React.useState(null);
   const [live, setLive]         = React.useState(null);
+  const [ranks, setRanks]       = React.useState(null);   // { puuid: entries[] } — rangs des joueurs de la partie en cours
   const [champs, setChamps]     = React.useState(null);
   const [loading, setLoading]   = React.useState(false);
   const [err, setErr]           = React.useState('');
   const configured = !!(cfg && cfg.riotId && lolKey());
 
   const ERR_MSGS = {
-    KEY:      'Clé API Riot invalide ou expirée — les Development Keys expirent toutes les 24 h (⚙ pour la remplacer, régénération en 1 clic sur developer.riotgames.com).',
+    KEY:      'Clé API Riot invalide ou expirée. Astuce : passe à une Personal API Key PERMANENTE (developer.riotgames.com → Register Product → Personal) pour ne plus jamais la régénérer — les Development Keys, elles, expirent toutes les 24 h (⚙ pour remplacer la clé).',
     NOTFOUND: 'Riot ID introuvable — vérifie le format « Nom#TAG » et la région.',
     RIOTID:   'Format attendu : Nom#TAG (ex. Pierre#EUW).',
     NET:      'API Riot injoignable (proxies CORS saturés ou clé expirée ?) — réessaie dans un instant.',
@@ -4663,6 +4698,12 @@ function LolStatsSection() {
     const [lv, cm] = await Promise.all([lolFetchLive(p), lolChampMap()]);
     setLive(lv); setChamps(cm);
     setLoading(false);
+    // Rangs des 10 joueurs en arrière-plan (la carte EN PARTIE s'affiche tout de suite,
+    // les élos/winrates apparaissent dès qu'ils arrivent — cache 15 min par puuid)
+    if (lv && Array.isArray(lv.participants)) {
+      setRanks(null);
+      lolFetchRanks(p.platform, lv.participants.map(x => x.puuid)).then(setRanks);
+    }
   };
   React.useEffect(() => { if (configured) refresh(false); }, []);
 
@@ -4694,10 +4735,10 @@ function LolStatsSection() {
       <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
         {!configured && (
           <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
-            Stats via l'<b style={{ color:LOL_COLOR }}>API officielle Riot Games</b> (gratuite).<br/>
+            Stats via l'<b style={{ color:LOL_COLOR }}>API officielle Riot Games</b> (gratuite) — c'est la <b>seule</b> source qui expose la partie en cours (op.gg / u.gg n'ont pas d'API publique).<br/>
             1. Connecte-toi sur <b>developer.riotgames.com</b> avec ton compte Riot (celui de LoL — rien de nouveau à créer).<br/>
-            2. Copie la <b>Development API Key</b> du dashboard (⚠ expire toutes les 24 h, régénérable en 1 clic).<br/>
-            3. Optionnel : « Register Product » → <b>Personal API Key</b> pour une clé permanente.<br/>
+            2. <b style={{ color:LOL_COLOR }}>Register Product → Personal API Key</b> : clé <b>PERMANENTE</b> (n'expire jamais, validation automatique) — recommandé.<br/>
+            3. En dépannage : la <b>Development API Key</b> du dashboard (⚠ expire toutes les 24 h, régénérable en 1 clic).<br/>
             <span style={{ color:C.dim }}>La clé reste dans le navigateur (localStorage), comme tes clés TMDB/YouTube. Riot n'ayant pas de CORS, les requêtes passent par les proxies déjà utilisés par Finance/Actu.</span>
           </div>
         )}
@@ -4753,15 +4794,46 @@ function LolStatsSection() {
     const enemies = live.participants.filter(p => !me || p.teamId !== me.teamId);
     const queue = LOL_QUEUES[live.gameQueueConfigId] || live.gameMode || 'Partie';
     const mins = Math.max(0, Math.floor((live.gameLength || 0) / 60));
-    const iconsRow = list => (
-      <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
-        {list.map((p, i) => {
-          const src = champIcon(p.championId);
-          return src
-            ? <img key={i} src={src} alt="" title={champName(p.championId)} style={{ width:22, height:22, borderRadius:5, border:`1px solid ${C.border}` }} />
-            : <span key={i} title={champName(p.championId)} style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, border:`1px solid ${C.border}`, borderRadius:5, padding:'3px 5px' }}>{champName(p.championId)}</span>;
-        })}
-      </div>
+    // Ligne d'un rang (soloQ ou flex) : tier division LP · WR% coloré · nb de games
+    const rankLine = (e, tag) => {
+      if (!e) return null;
+      const total = e.wins + e.losses;
+      const wr = total ? Math.round((e.wins / total) * 100) : 0;
+      return (
+        <div key={tag || 's'} style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+          {tag && <span style={{ color:C.dim }}>{tag} </span>}
+          <span style={{ color:LOL_COLOR, fontWeight:700 }}>{(LOL_TIER_FR[e.tier] || e.tier)} {e.rank}</span> {e.leaguePoints} LP · <span style={{ color: wr >= 50 ? '#46c46a' : '#e05050' }}>{wr}%</span> · {fmtN(total)} games
+        </div>
+      );
+    };
+    // Ligne joueur : icône champion + pseudo + champion + élos soloQ/flex (winrate, games)
+    const playerRow = (p, i) => {
+      const entries = ranks && ranks[p.puuid];
+      const solo = entries && entries.find(e => e.queueType === 'RANKED_SOLO_5x5');
+      const flex = entries && entries.find(e => e.queueType === 'RANKED_FLEX_SR');
+      const name = ((p.riotId || '').split('#')[0] || '').trim();
+      const src = champIcon(p.championId);
+      const isMe = data && p.puuid === data.puuid;
+      return (
+        <div key={p.puuid || i} style={{ display:'flex', alignItems:'center', gap:8, padding:'3px 0' }}>
+          {src
+            ? <img src={src} alt="" title={champName(p.championId)} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${isMe ? LOL_COLOR : C.border}`, flexShrink:0 }} />
+            : <span style={{ width:26, textAlign:'center', flexShrink:0 }}>⚔️</span>}
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:10.5, fontWeight:700, color: isMe ? LOL_COLOR : C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {name || champName(p.championId)}{name ? <span style={{ color:C.dim, fontWeight:400 }}> · {champName(p.championId)}</span> : null}
+            </div>
+            {!ranks
+              ? <div style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>chargement du rang…</div>
+              : (!solo && !flex)
+                ? <div style={{ fontSize:9, color:C.muted }}>Non classé</div>
+                : <React.Fragment>{rankLine(solo, '')}{rankLine(flex, 'Flex')}</React.Fragment>}
+          </div>
+        </div>
+      );
+    };
+    const teamBlock = list => (
+      <div style={{ display:'flex', flexDirection:'column' }}>{list.map(playerRow)}</div>
     );
     return (
       <div style={{ ...card, border:`1px solid ${LOL_COLOR}60`, background:`${LOL_COLOR}0d`, display:'flex', flexDirection:'column', gap:8 }}>
@@ -4780,8 +4852,8 @@ function LolStatsSection() {
             </div>
           </div>
         )}
-        <div><div style={{ ...lab, marginBottom:4 }}>TON ÉQUIPE</div>{iconsRow(me ? [me, ...allies] : allies)}</div>
-        <div><div style={{ ...lab, marginBottom:4 }}>ADVERSAIRES</div>{iconsRow(enemies)}</div>
+        <div><div style={{ ...lab, marginBottom:4 }}>TON ÉQUIPE</div>{teamBlock(me ? [me, ...allies] : allies)}</div>
+        <div><div style={{ ...lab, marginBottom:4 }}>ADVERSAIRES</div>{teamBlock(enemies)}</div>
       </div>
     );
   };
