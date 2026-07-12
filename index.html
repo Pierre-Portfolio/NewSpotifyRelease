@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.2.7';
+const APP_VERSION = '5.2.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5281,6 +5281,12 @@ function StatsPanel() {
         <StatsCollapse title="⚔️ LEAGUE OF LEGENDS" color={LOL_COLOR}>
           <LolStatsSection />
         </StatsCollapse>
+        <StatsCollapse title="🏁 SPEEDRUN" color={SPEEDRUN_COLOR}>
+          <SpeedrunStatsSection />
+        </StatsCollapse>
+      </StatsCollapse>
+      <StatsCollapse title="🐙 GITHUB" color={DEPENDABOT_COLOR}>
+        <GithubStatsSection />
       </StatsCollapse>
     </div>
   );
@@ -10345,6 +10351,143 @@ async function ghFetchDependabot(force) {
   return out;
 }
 
+const GH_STATS_LS = 'spotifyplus_github_stats';        // profil GitHub caché (re-fetchable, TTL 30 min → PAS dans buildBackup)
+
+// Stats de profil GitHub « fun » via la MÊME API GraphQL (MÊME token que Dependabot) :
+// dépôts, étoiles reçues, forks, abonnés, contributions sur 1 an, langage préféré, série
+// de jours actifs (streak). 1 SEULE requête. Erreurs typées comme ghFetchDependabot.
+async function ghFetchProfile(force) {
+  const token = ghToken();
+  if (!token) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(GH_STATS_LS)); } catch {}
+  if (!force && cache && Date.now() - cache.fetchedAt < GH_TTL) return cache;
+  const query = `query{viewer{login name avatarUrl url createdAt followers{totalCount}following{totalCount}contributionsCollection{totalCommitContributions totalPullRequestContributions totalIssueContributions contributionCalendar{totalContributions weeks{contributionDays{contributionCount date}}}}repositories(first:100,ownerAffiliations:OWNER,isFork:false,orderBy:{field:STARGAZERS,direction:DESC}){totalCount nodes{name stargazerCount forkCount primaryLanguage{name}}}}}`;
+  let j;
+  try {
+    const r = await fetch('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    if (r.status === 401) return { error: 'KEY' };
+    if (!r.ok) return { error: 'NET' };
+    j = await r.json();
+  } catch { return { error: 'NET' }; }
+  if (j.errors && j.errors.length) return { error: j.errors[0].type === 'FORBIDDEN' ? 'SCOPE' : 'NET' };
+  const v = j.data && j.data.viewer;
+  if (!v) return { error: 'NET' };
+  const nodes = (v.repositories && v.repositories.nodes) || [];
+  const totalStars = nodes.reduce((s, n) => s + (n.stargazerCount || 0), 0);
+  const totalForks = nodes.reduce((s, n) => s + (n.forkCount || 0), 0);
+  const langCount = {};
+  nodes.forEach(n => { const l = n.primaryLanguage && n.primaryLanguage.name; if (l) langCount[l] = (langCount[l] || 0) + 1; });
+  const topLang = Object.keys(langCount).sort((a, b) => langCount[b] - langCount[a])[0] || '';
+  const topRepo = nodes.find(n => n.stargazerCount > 0) || null;
+  // Séries de jours actifs depuis le calendrier de contributions (365 derniers jours)
+  const cc = v.contributionsCollection || {};
+  const cal = cc.contributionCalendar || {};
+  const cdays = [];
+  (cal.weeks || []).forEach(w => (w.contributionDays || []).forEach(d => cdays.push(d)));
+  cdays.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  let maxStreak = 0, streakRun = 0;
+  cdays.forEach(d => { if (d.contributionCount > 0) { streakRun++; if (streakRun > maxStreak) maxStreak = streakRun; } else streakRun = 0; });
+  let curStreak = 0;
+  for (let i = cdays.length - 1; i >= 0; i--) { if (cdays[i].contributionCount > 0) curStreak++; else break; }
+  const out = {
+    fetchedAt: Date.now(), login: v.login, name: v.name || v.login, avatar: v.avatarUrl || '', url: v.url || '',
+    createdAt: v.createdAt || '', followers: (v.followers || {}).totalCount || 0, following: (v.following || {}).totalCount || 0,
+    repoCount: (v.repositories || {}).totalCount || 0, totalStars, totalForks, topLang,
+    topRepo: topRepo ? { name: topRepo.name, stars: topRepo.stargazerCount } : null,
+    contribYear: cal.totalContributions || 0, commits: cc.totalCommitContributions || 0,
+    prs: cc.totalPullRequestContributions || 0, issues: cc.totalIssueContributions || 0,
+    curStreak, maxStreak,
+  };
+  try { localStorage.setItem(GH_STATS_LS, JSON.stringify(out)); } catch {}
+  return out;
+}
+
+// Carte stat réutilisable (même gabarit que renderCard de StatsPanel) — sections GitHub/Speedrun.
+function statCardEl({ label, value, sub, icon, color }) {
+  return (
+    <div key={label} style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', alignItems:'center', gap:12 }}>
+      <div style={{ fontSize:20, width:32, textAlign:'center', flexShrink:0 }}>{icon}</div>
+      <div style={{ minWidth:0 }}>
+        <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim, marginBottom:2 }}>{label}</div>
+        <div style={{ fontSize:20, fontWeight:800, color, fontFamily:'DM Mono,monospace', lineHeight:1.1, wordBreak:'break-word' }}>{value}</div>
+        <div style={{ fontSize:9, color:C.muted, marginTop:2 }}>{sub}</div>
+      </div>
+    </div>
+  );
+}
+
+// Stats fun de mon compte GitHub (collapse 🐙 GITHUB de StatsPanel) — réutilise le token
+// Dependabot (Alertes → Veilles Techno). 0 config propre : si pas de token, on renvoie vers là.
+function GithubStatsSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const configured = !!ghToken();
+  const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
+
+  const ERR = {
+    KEY:   'Token GitHub invalide ou expiré — corrige-le dans Alertes → Veilles Techno → Dependabot.',
+    SCOPE: "Le token n'a pas les droits nécessaires — un PAT « classic » avec le scope repo suffit.",
+    NET:   'API GitHub injoignable — réessaie dans un instant.',
+  };
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await ghFetchProfile(force);
+    if (d.error) { setErr(ERR[d.error] || ERR.NET); if (d.error !== 'CONFIG') setData(null); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px' };
+  if (!configured) {
+    return (
+      <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+        Ces stats réutilisent ton <b style={{ color:DEPENDABOT_COLOR }}>token GitHub</b>.<br/>
+        Renseigne-le dans <b>Alertes → 🛰️ Veilles Techno → 🤖 Dependabot</b> et elles s'afficheront ici automatiquement.
+      </div>
+    );
+  }
+  const cards = data ? [
+    { label:'ÉTOILES REÇUES',   value: fmtN(data.totalStars),  sub:`sur ${fmtN(data.repoCount)} dépôt(s)`,       icon:'⭐', color:'#e3b341' },
+    { label:'DÉPÔTS',           value: fmtN(data.repoCount),   sub:'possédés (hors forks)',                       icon:'📦', color:DEPENDABOT_COLOR },
+    { label:'SÉRIE ACTIVE',     value: `${fmtN(data.curStreak)} j`, sub:`record : ${fmtN(data.maxStreak)} j d'affilée`, icon:'🔥', color:'#f0883e' },
+    { label:'CONTRIBUTIONS',    value: fmtN(data.contribYear), sub:'sur les 12 derniers mois',                    icon:'📈', color:'#46c46a' },
+    { label:'COMMITS (1 AN)',   value: fmtN(data.commits),     sub:`${fmtN(data.prs)} PR · ${fmtN(data.issues)} issue(s)`, icon:'💚', color:'#57a65a' },
+    { label:'ABONNÉS',          value: fmtN(data.followers),   sub:`${fmtN(data.following)} abonnement(s)`,       icon:'👥', color:'#7b8ff7' },
+    { label:'FORKS',            value: fmtN(data.totalForks),  sub:'de tes dépôts',                               icon:'🍴', color:'#8b949e' },
+    { label:'LANGAGE PRÉFÉRÉ',  value: data.topLang || '—',    sub:'le plus fréquent dans tes dépôts',            icon:'💬', color:'#b07fe8' },
+  ] : [];
+  if (data && data.topRepo) cards.push({ label:'DÉPÔT STAR', value: data.topRepo.name, sub:`${fmtN(data.topRepo.stars)} ⭐ — ton plus étoilé`, icon:'🌟', color:'#e3b341' });
+  const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+  const memberSince = data && data.createdAt ? new Date(data.createdAt).toLocaleDateString('fr-FR', { year:'numeric', month:'long' }) : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {loading && !data && <div style={{ ...card, fontSize:11, color:C.muted }}>⏳ Analyse de ton profil GitHub…</div>}
+      {err && <div style={{ ...card, fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {data && (
+        <div style={{ ...card, display:'flex', alignItems:'center', gap:10 }}>
+          {data.avatar && <img src={data.avatar} alt="" style={{ width:38, height:38, borderRadius:'50%', border:`1px solid ${DEPENDABOT_COLOR}60`, flexShrink:0 }} />}
+          <div style={{ minWidth:0 }}>
+            <a href={data.url} target="_blank" rel="noopener noreferrer" style={{ fontSize:13, fontWeight:800, color:C.text, textDecoration:'none' }}>{data.name} ↗</a>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>@{data.login}{memberSince ? ` · depuis ${memberSince}` : ''}</div>
+          </div>
+        </div>
+      )}
+      {cards.map(statCardEl)}
+      <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+        {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
+        <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
+      </div>
+    </div>
+  );
+}
+
 // Sous-section « 🤖 Dependabot » : dépôts GitHub avec des alertes de sécurité ouvertes.
 function DependabotSection() {
   const [data, setData]       = React.useState(null);
@@ -10514,6 +10657,117 @@ async function srFetchQueue(force) {
   const out = { fetchedAt: Date.now(), name, userName, userUrl, games: rows, totalPending, totalGames: games.length };
   try { localStorage.setItem(SR_CACHE_LS, JSON.stringify(out)); } catch {}
   return out;
+}
+
+const SR_STATS_LS = 'spotifyplus_speedrun_stats';      // stats speedrun cachées (re-fetchable, TTL 15 min → PAS dans buildBackup)
+
+// Stats « fun » de mon profil speedrun.com (MÊMES endpoints publics, MÊME pseudo) :
+// records du monde, podiums, personal bests, jeux courus, temps cumulé. Le champ `place`
+// des personal-bests donne le classement (1 = WR). Erreurs : 'CONFIG' | 'USER' | 'NET'.
+async function srFetchStats(force) {
+  const name = srUser();
+  if (!name) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(SR_STATS_LS)); } catch {}
+  if (!force && cache && cache.name === name && Date.now() - cache.fetchedAt < SR_TTL) return cache;
+  const u = await srGet(`${SR_API}/users/${encodeURIComponent(name)}`);
+  if (u && u.__status === 404) return { error: 'USER' };
+  if (!u || u.__status || !u.data || !u.data.id) return { error: 'NET' };
+  const uid = u.data.id;
+  const userName = (u.data.names && u.data.names.international) || name;
+  const userUrl  = u.data.weblink || '';
+  const signup   = u.data.signup || '';
+  // Personal bests (embed du jeu pour le nom + le jeu favori)
+  const pb = await srGet(`${SR_API}/users/${uid}/personal-bests?embed=game`);
+  if (!pb || pb.__status || !Array.isArray(pb.data)) return { error: 'NET' };
+  let wr = 0, podiums = 0, totalSec = 0, best = 0;
+  const gameCount = {};
+  pb.data.forEach(e => {
+    const place = e.place || 0;
+    if (place === 1) wr++;
+    if (place >= 1 && place <= 3) podiums++;
+    if (place >= 1 && (best === 0 || place < best)) best = place;
+    const t = e.run && e.run.times && e.run.times.primary_t;
+    if (t) totalSec += t;
+    const g = e.game && e.game.data;
+    const gname = g && g.names && g.names.international;
+    if (gname) gameCount[gname] = (gameCount[gname] || 0) + 1;
+  });
+  const gnames = Object.keys(gameCount);
+  const favGame = gnames.sort((a, b) => gameCount[b] - gameCount[a])[0] || '';
+  const out = {
+    fetchedAt: Date.now(), name, userName, userUrl, signup,
+    pbs: pb.data.length, wr, podiums, games: gnames.length, favGame, bestPlace: best, totalSec,
+  };
+  try { localStorage.setItem(SR_STATS_LS, JSON.stringify(out)); } catch {}
+  return out;
+}
+
+// Stats fun de mon compte speedrun.com (sous-collapse 🏁 SPEEDRUN de StatsPanel) — réutilise
+// le pseudo de la sous-section Speedrun (Alertes → 🎮 Jeux). Si pas de pseudo : on y renvoie.
+function SpeedrunStatsSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const configured = !!srUser();
+  const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
+  // Temps cumulé (secondes → « Xj Yh », ou « Xh Ymin » sous 24 h)
+  const fmtSec = s => {
+    s = Math.round(s || 0);
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    if (d > 0) return `${d}j ${h}h`;
+    if (h > 0) return `${h}h ${m}min`;
+    return `${m}min ${s % 60}s`;
+  };
+  const ERR = {
+    USER: "Pseudo speedrun.com introuvable — corrige-le dans Alertes → 🎮 Jeux → 🏁 Speedrun.",
+    NET:  'API speedrun.com injoignable — réessaie dans un instant.',
+  };
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await srFetchStats(force);
+    if (d.error) { setErr(ERR[d.error] || ERR.NET); if (d.error !== 'CONFIG') setData(null); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px' };
+  if (!configured) {
+    return (
+      <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+        Ces stats réutilisent ton <b style={{ color:SPEEDRUN_COLOR }}>pseudo speedrun.com</b>.<br/>
+        Renseigne-le dans <b>Alertes → 🎮 Jeux → 🏁 Speedrun</b> et elles s'afficheront ici automatiquement.
+      </div>
+    );
+  }
+  const cards = data ? [
+    { label:'RECORDS DU MONDE', value: fmtN(data.wr),      sub:'runs classées 1ᵉʳ 🥇',       icon:'🥇', color:'#e3b341' },
+    { label:'PODIUMS',          value: fmtN(data.podiums), sub:'top 3 (or/argent/bronze)',   icon:'🏆', color:SPEEDRUN_COLOR },
+    { label:'PERSONAL BESTS',   value: fmtN(data.pbs),     sub:'records perso enregistrés',  icon:'🎯', color:'#7b8ff7' },
+    { label:'JEUX COURUS',      value: fmtN(data.games),   sub:'avec au moins un PB',        icon:'🎮', color:'#b07fe8' },
+    { label:'TEMPS CUMULÉ',     value: fmtSec(data.totalSec), sub:'sur tous tes PB',         icon:'⏱', color:'#e07b54' },
+    { label:'MEILLEUR CLASSEMENT', value: data.bestPlace ? `#${fmtN(data.bestPlace)}` : '—', sub:'ta meilleure place', icon:'⭐', color:'#46c46a' },
+  ] : [];
+  if (data && data.favGame) cards.push({ label:'JEU FAVORI', value: data.favGame, sub:'le plus couru', icon:'🕹', color:SPEEDRUN_COLOR });
+  const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {loading && !data && <div style={{ ...card, fontSize:11, color:C.muted }}>⏳ Analyse de tes runs…</div>}
+      {err && <div style={{ ...card, fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {data && (
+        <div style={{ ...card, display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+          <a href={data.userUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize:12.5, fontWeight:800, color:C.text, textDecoration:'none' }}>{data.userName} ↗</a>
+          <span style={{ fontSize:11, fontWeight:800, color:SPEEDRUN_COLOR, fontFamily:'DM Mono,monospace' }}>{fmtN(data.pbs)} PB · {fmtN(data.games)} jeu{data.games > 1 ? 'x' : ''}</span>
+        </div>
+      )}
+      {cards.map(statCardEl)}
+      <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+        {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
+        <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
+      </div>
+    </div>
+  );
 }
 
 // Sous-section « 🏁 Speedrun » : runs en attente de validation là où je suis modérateur.
