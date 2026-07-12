@@ -218,26 +218,29 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **"Temps total de la session"** dans le panneau NextCall : temps restant pour finir les 100 artistes de la fenêtre (`(100 − scrapés) × délai moyen`)
 - **"Temps total restant"** dans le panneau NextCall : ETA pour scraper **tous** les artistes restants de la synchro (non plafonnée aux 100/24h)
 
-### Titres likés (onglet ❤ Likés)
-- Onglet **❤ Likés** sur mobile (entre "À écouter" et "Historique")
+### Musique (fusion Likés + Historique + Artistes)
+- Section **Musique** (violet), **entre TV Time et To Do** (desktop et menu ⋯ mobile, désactivable dans le Paramétrage) — regroupe les trois anciennes sections en **3 volets repliables** empilés : **❤ Likés**, **🕘 Historique**, **🎤 Artistes suivis** (avec compteurs)
+- Les anciens onglets dédiés (❤ Likés en onglet principal mobile, Historique, Artistes) ont été retirés — tout vit désormais dans Musique
+
+#### ❤ Likés
 - Like/unlike depuis le **player mobile**, depuis le **feed** (bouton ❤ sur chaque titre), ou depuis l'onglet Likés
 - **Sync initiale au login** : l'app vérifie automatiquement les likes Spotify pour les 300 premiers titres du feed (`/me/library/contains`, par lots de 40) — les titres likés avant cette session apparaissent directement dans l'onglet (1× par 24h max)
 - La liste est persistée dans la table `tracks` (colonne `liked`) et chargée au démarrage
 - Unliker retire le like sur Spotify ET met à jour la base locale
 - **⚠ Si tu étais déjà connecté avant la mise à jour** : les likes nécessitent désormais les permissions Spotify `user-library-read/modify` — déconnecte-toi puis reconnecte-toi une fois pour les accorder (l'app affiche une alerte si besoin)
 
-### Historique (onglet Historique)
+#### 🕘 Historique
 - Liste des **derniers titres écoutés** non purgés, le **plus récent en haut**
 - Chaque ligne affiche le titre, l'artiste, l'horodatage relatif de l'écoute (« il y a 5 min », « hier »…) et un bouton **réécouter**
-- Desktop : **onglet Historique** en haut · Mobile : onglet **Historique**
+- Dans le volet Historique de la section **Musique**
 - L'historique est vidé par le bouton **Purger les écoutes**
 
-### Artistes (section / onglet Artistes)
+#### 🎤 Artistes suivis
 - **Liste de tous les artistes scannés** lors des synchros, avec leurs métadonnées récupérées de Spotify (sans aucune requête supplémentaire)
 - Chaque artiste affiche : sa **pochette**, son **nom**, son **identifiant Spotify**, la **date du dernier scrapping** (relative), ses **genres**, sa **popularité** (★ 0-100), son nombre d'**abonnés**, son **nombre de scans**, le **total de titres ajoutés** et le **nombre de sorties trouvées au dernier scan** — plus un badge de statut (**✓ OK** / **⏳ Partiel** / **⚠ Erreur**) et un lien ↗ vers Spotify
 - Un artiste apparaît dès que ses albums ont été lus, **même si un rate-limit (429) interrompt le scan ensuite** : il s'affiche alors en **⏳ Partiel** (ses titres déjà trouvés sont ajoutés, et il sera repris au prochain scan sans rien rater)
 - **Filtres** comme le feed : recherche par nom ou id, filtre par statut (Tous / OK / **Partiel** / Erreur), tri (scan récent, **scan ancien**, nom A→Z, popularité, titres ajoutés, nombre de scans)
-- Desktop : bouton **Artistes** dans la barre du haut (à côté de Scrapping) · Mobile : onglet **Artistes**
+- Dans le volet Artistes de la section **Musique**
 
 ### Notifications
 - **Fin de session** (100 artistes/jour atteints) : notification navigateur envoyée automatiquement (permission demandée si nécessaire)
