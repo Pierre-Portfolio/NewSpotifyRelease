@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.2.3';
+const APP_VERSION = '5.2.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8362,10 +8362,16 @@ async function tvRefreshShows(items, force) {
   const out = new Map();
   if (!tmdbKey()) return out;
   const stale = items.filter(it => {
+    if (it.type === 'youtube') return false;   // YouTube : actualisé via ytCheckNewVideos / bouton ↻
+    if (it.type === 'tv') {
+      // Série 'done' : refetch UNIQUEMENT si elle a été « validée sans voir les épisodes
+      // manquants » (dropped=false, pas tout vu) → détecter un nouvel épisode diffusé et la
+      // réactiver (applyFresh). Une série « tout vu » ou « plus suivie » (dropped) n'est jamais refetch.
+      if (it.status === 'done' && (it.dropped || (it.watchedEps || 0) >= (it.totalEps || 0))) return false;
+      return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
+        && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
+    }
     if (it.status === 'done') return false;
-    if (it.type === 'youtube') return false;   // YouTube : actualisé via le bouton ↻ de sa fiche
-    if (it.type === 'tv') return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
-      && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
     // Films : suit uniquement la date des films PAS ENCORE VUS
     if (it.releaseDate === undefined) return true;                     // backfill (ajouté avant la feature)
     const upcoming = !it.releaseDate || tvDaysUntil(it.releaseDate) >= 0;
@@ -8901,7 +8907,19 @@ function TvTimePanel() {
     if (!m || m.size === 0) return;
     const cur = loadTvItems();
     // Refresh (métadonnées auto) : PAS empilé dans l'annulation (ce n'est pas une action user)
-    const next = cur.map(it => m.has(it.type + it.id) ? { ...it, ...m.get(it.type + it.id) } : it);
+    const next = cur.map(it => {
+      const f = m.get(it.type + it.id);
+      if (!f) return it;
+      const merged = { ...it, ...f };
+      // Série « validée sans voir les épisodes manquants » (done, non abandonnée, pas tout vu) :
+      // un nouvel épisode diffusé au-delà de ce qui était acté (`ackEps`) la repasse EN COURS.
+      if (it.type === 'tv' && it.status === 'done' && !it.dropped
+          && (it.watchedEps || 0) < (it.totalEps || 0)
+          && (f.totalEps || 0) > (it.ackEps != null ? it.ackEps : (it.totalEps || 0))) {
+        merged.status = 'watching'; merged.doneAt = undefined;
+      }
+      return merged;
+    });
     setItems(next); saveTvItems(next);
   };
 
@@ -9115,7 +9133,9 @@ function TvTimePanel() {
   // SANS poser `dropped` → ytCheckNewVideos repassera la chaîne « En cours » dès qu'une
   // nouvelle vidéo sort. Diffère de setStatus('done') (coche tout) et de unfollow (dropped).
   const ignoreUnwatched = item => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
-    { ...it, status: 'done', dropped: false, doneAt: Date.now() }));
+    // Séries : on mémorise le nb d'épisodes ACTÉS (`ackEps` = totalEps du moment) → un
+    // épisode DIFFUSÉ au-delà (nouvel épisode) la repassera EN COURS via applyFresh.
+    { ...it, status: 'done', dropped: false, doneAt: Date.now(), ...(it.type === 'tv' ? { ackEps: it.totalEps || 0 } : {}) }));
   // « Arrêter le visionnage » (depuis EN PAUSE) : passe en VUS mais CONSERVE la progression
   // actuelle — ne valide PAS les épisodes restants (contrairement au ✓ « tout vu »). Pose
   // `dropped` → la série est marquée « plus suivie » dans VUS (repasser en cours le lève).
@@ -9475,6 +9495,8 @@ function TvTimePanel() {
                   {it.type === 'tv' && <button onClick={() => setStatus(it, 'paused')} title="Mettre en pause (arrêter de regarder)" style={abtn('#f5b81f')}>⏸</button>}
                   {it.type === 'movie' && <button onClick={() => setStatus(it, 'towatch')} title="Repasser en À voir" style={abtn('#f5b81f')}>📌</button>}
                   <button onClick={() => setStatus(it, 'done')} title={it.type === 'tv' ? 'Série terminée (tout vu)' : it.type === 'youtube' ? 'Tout vu' : 'Film vu'} style={abtn('#4caf50')}>✓</button>
+                  {it.type === 'tv' && <button onClick={() => ignoreUnwatched(it)} title="Valider sans voir les épisodes manquants (passe en Vus ; un nouvel épisode diffusé la repasse En cours)" style={abtn('#3fa0d0')}>🙈</button>}
+                  {it.type === 'tv' && <button onClick={() => abandonSeries(it)} title="Ne plus suivre (passe en Vus sans valider les épisodes restants ; ne resurgit plus, même à la sortie d'un nouvel épisode)" style={abtn('#e07b39')}>🚫</button>}
                   <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                 </>
               )))}
@@ -9558,7 +9580,8 @@ function TvTimePanel() {
                       ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Rien en cours</div>
                       : ytWatching.map(it => row(it, progLabel(it),
                           <>
-                            <button onClick={() => setStatus(it, 'done')} title="Tout vu" style={abtn('#4caf50')}>✓</button>
+                            <button onClick={() => setStatus(it, 'done')} title="Valider — tout vu" style={abtn('#4caf50')}>✓</button>
+                            <button onClick={() => ignoreUnwatched(it)} title="Valider sans voir les vidéos manquantes (passe en Vus ; une nouvelle vidéo la repasse En cours)" style={abtn('#3fa0d0')}>🙈</button>
                             {unfollowBtn(it)}
                             <button onClick={() => removeItem(it)} title="Retirer" style={abtn('#e05050')}>×</button>
                           </>
