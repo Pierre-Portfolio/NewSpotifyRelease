@@ -201,8 +201,9 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Notification à l'ouverture de l'app** à 1 mois, 7 jours et 1 jour avant l'échéance, le jour même, ainsi que pour les rappels en retard (une fois par jour) + bandeau des rappels échus
 - **Ajout automatique au To do** : dès qu'un rappel arrive à **3 jours ou moins** de son échéance (ou est en retard), il est ajouté automatiquement dans le carrousel **« Aujourd'hui »** du To do (préfixé 🔔). Chaque échéance n'est ajoutée qu'une seule fois — modifier la date d'un rappel recrée l'ajout pour la nouvelle échéance
 - Dates mémorisées localement (aucun backend)
-- **🛰️ Veilles Techno** (sous la rubrique « Autre ») — sous-sections connectées à des APIs tierces :
+- **🛰️ Veilles Techno** (entre les rubriques « Administratif » et « Logement ») :
   - **🤖 Dependabot** : liste tes dépôts GitHub qui ont des **alertes de sécurité Dependabot ouvertes**, avec le décompte par sévérité (critiques / élevées / moyennes / faibles). Nécessite un **token GitHub perso** (PAT « classic » avec le scope `repo`, généré sur github.com/settings/tokens et saisi dans l'UI, stocké en localStorage comme les clés TMDB/YouTube) — les requêtes vont directement à l'API GitHub (CORS natif, aucun proxy)
+- **🎮 Jeux** (entre les rubriques « Sport » et « Anniversaire ») :
   - **🏁 Speedrun** : nombre de runs **en attente de validation** sur les jeux que tu **modères** sur speedrun.com, détaillé par jeu. Entre simplement ton **pseudo speedrun.com** — aucune clé API, tout passe par les endpoints publics (pseudo → jeux modérés → runs à valider)
 
 ### Quota de scraping : 100 artistes par fenêtre glissante de 24h

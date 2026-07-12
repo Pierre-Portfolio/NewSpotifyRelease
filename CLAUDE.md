@@ -423,7 +423,7 @@ Inclus dans `buildBackup`/`applyBackup` (clé `maps`, REMPLACÉ à la restaurati
 
 ## Module Veilles Techno (section Remember)
 
-**Collapse « 🛰️ Veilles Techno »** rendu dans `RappelPanel` **juste sous la rubrique « Autre »** (et avant « 🔔 Mes rappels »), couleur `VEILLE_COLOR = '#6ea8fe'`, uniquement dans la vue par rubriques (`!showUpcoming`). Il contient des sous-collapses connectés à des APIs tierces via un token/clé perso stocké en `localStorage` (comme TMDB/Riot).
+**Collapse « 🛰️ Veilles Techno »** rendu dans `RappelPanel` **ENTRE les rubriques « Administratif » et « Logement »** (injecté dans le `.map(RAPPEL_SECTIONS)` après `sec.key === 'administratif'`), couleur `VEILLE_COLOR = '#6ea8fe'`, uniquement dans la vue par rubriques (`!showUpcoming`). Il ne contient plus que **Dependabot** — la sous-section **Speedrun a déménagé dans le collapse « 🎮 Jeux »**, injecté **ENTRE « Sport » et « Anniversaire »** (`sec.key === 'sport'`, couleur `SPEEDRUN_COLOR`). Les sous-collapses se connectent à des APIs tierces via un token/clé perso stocké en `localStorage` (comme TMDB/Riot).
 
 ### Sous-section « 🤖 Dependabot » (`DependabotSection`, couleur `DEPENDABOT_COLOR = '#4b9fea'`)
 - **But** : lister les dépôts GitHub possédés qui ont des **alertes de sécurité Dependabot ouvertes**, avec le décompte par sévérité.
