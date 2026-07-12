@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.1.6';
+const APP_VERSION = '5.1.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4903,6 +4903,177 @@ function LolStatsSection() {
   );
 }
 
+// ════════════════════════════════════════════════
+// MODULE DEV · STATS GITHUB (collapse « 💻 DEV » en fin de StatsPanel)
+// Réutilise le PAT GitHub déjà configuré pour Dependabot (ghToken, localStorage
+// spotifyplus_github_token — API GraphQL, CORS natif → fetch direct, déjà en CSP).
+// 2 requêtes : viewer (profil + repos + contributions année en cours) puis, si
+// nécessaire, 1 requête à ALIAS PAR ANNÉE (contributionsCollection est borné à 1 an)
+// pour le total de contributions depuis la création du compte.
+// ════════════════════════════════════════════════
+const DEV_COLOR    = '#6ea8fe';
+const DEV_CACHE_LS = 'spotifyplus_devstats';   // cache re-fetchable (TTL 1 h) → PAS dans buildBackup
+const DEV_TTL      = 3600000;
+
+async function ghFetchDevStats(force) {
+  const token = ghToken();
+  if (!token) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(DEV_CACHE_LS)); } catch {}
+  if (!force && cache && Date.now() - cache.fetchedAt < DEV_TTL) return cache;
+  const gql = async (query) => {
+    const r = await fetch('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: { 'Authorization': 'bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    if (r.status === 401) return { __err: 'KEY' };
+    if (!r.ok) return { __err: 'NET' };
+    const j = await r.json();
+    if (j.errors && j.errors.length) return { __err: j.errors[0].type === 'FORBIDDEN' ? 'SCOPE' : 'NET' };
+    return j.data;
+  };
+  try {
+    const d1 = await gql(`query{viewer{login name createdAt followers{totalCount}
+      repositories(first:100,ownerAffiliations:OWNER,isFork:false,orderBy:{field:STARGAZERS,direction:DESC}){totalCount nodes{name stargazerCount forkCount primaryLanguage{name}}}
+      contributionsCollection{totalCommitContributions totalPullRequestContributions totalIssueContributions
+        contributionCalendar{totalContributions weeks{contributionDays{contributionCount date}}}}}}`);
+    if (d1.__err) return { error: d1.__err };
+    const v = d1.viewer;
+    const repos = v.repositories.nodes || [];
+    const totalStars = repos.reduce((s, r) => s + (r.stargazerCount || 0), 0);
+    const totalForks = repos.reduce((s, r) => s + (r.forkCount || 0), 0);
+    const topRepo = repos[0] && repos[0].stargazerCount > 0 ? { name: repos[0].name, stars: repos[0].stargazerCount } : null;
+    const langCount = {};
+    repos.forEach(r => { const l = r.primaryLanguage && r.primaryLanguage.name; if (l) langCount[l] = (langCount[l] || 0) + 1; });
+    const topLangs = Object.entries(langCount).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => ({ name, count }));
+    // Streaks + jour record depuis le calendrier de contributions (année glissante)
+    const days = [];
+    (v.contributionsCollection.contributionCalendar.weeks || []).forEach(w => (w.contributionDays || []).forEach(d => days.push(d)));
+    days.sort((a, b) => a.date < b.date ? -1 : 1);
+    let longest = 0, cur = 0, best = { date: null, count: 0 };
+    days.forEach(d => {
+      if (d.contributionCount > 0) { cur++; if (cur > longest) longest = cur; } else cur = 0;
+      if (d.contributionCount > best.count) best = { date: d.date, count: d.contributionCount };
+    });
+    // Streak ACTUEL : remonte depuis aujourd'hui (le jour courant sans contribution ne casse pas encore)
+    let current = 0;
+    for (let i = days.length - 1; i >= 0; i--) {
+      if (days[i].contributionCount > 0) current++;
+      else if (i === days.length - 1) continue;
+      else break;
+    }
+    // Total all-time : 1 alias contributionsCollection PAR ANNÉE depuis la création du compte
+    const y0 = new Date(v.createdAt).getFullYear();
+    const yNow = new Date().getFullYear();
+    let contribTotal = v.contributionsCollection.contributionCalendar.totalContributions;
+    let commitsTotal = v.contributionsCollection.totalCommitContributions;
+    if (yNow > y0) {
+      const aliases = [];
+      for (let y = y0; y < yNow; y++) aliases.push(`y${y}: contributionsCollection(from:"${y}-01-01T00:00:00Z",to:"${y}-12-31T23:59:59Z"){totalCommitContributions contributionCalendar{totalContributions}}`);
+      const d2 = await gql(`query{viewer{${aliases.join(' ')}}}`);
+      if (!d2.__err && d2.viewer) {
+        // Somme des années passées + l'année GLISSANTE en cours déjà comptée → on
+        // recompte proprement : années civiles passées + année civile en cours.
+        contribTotal = 0; commitsTotal = 0;
+        Object.values(d2.viewer).forEach(c => { contribTotal += c.contributionCalendar.totalContributions; commitsTotal += c.totalCommitContributions; });
+        const dCur = await gql(`query{viewer{contributionsCollection(from:"${yNow}-01-01T00:00:00Z"){totalCommitContributions contributionCalendar{totalContributions}}}}`);
+        if (!dCur.__err && dCur.viewer) {
+          contribTotal += dCur.viewer.contributionsCollection.contributionCalendar.totalContributions;
+          commitsTotal += dCur.viewer.contributionsCollection.totalCommitContributions;
+        }
+      }
+    }
+    const out = {
+      fetchedAt: Date.now(), login: v.login, name: v.name, createdAt: v.createdAt,
+      followers: v.followers.totalCount, repoCount: v.repositories.totalCount,
+      totalStars, totalForks, topRepo, topLangs,
+      contribYear: v.contributionsCollection.contributionCalendar.totalContributions,
+      commitsYear: v.contributionsCollection.totalCommitContributions,
+      prYear: v.contributionsCollection.totalPullRequestContributions,
+      issuesYear: v.contributionsCollection.totalIssueContributions,
+      contribTotal, commitsTotal, longestStreak: longest, currentStreak: current, bestDay: best,
+    };
+    try { localStorage.setItem(DEV_CACHE_LS, JSON.stringify(out)); } catch {}
+    return out;
+  } catch { return { error: 'NET' }; }
+}
+
+// Sous-section « 💻 DEV » (fin de StatsPanel) — fun facts GitHub via le PAT Dependabot.
+function DevStatsSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const configured = !!ghToken();
+
+  const ERR = {
+    KEY:   'Token GitHub invalide ou expiré — mets-le à jour dans Alertes → Veilles Techno → Dependabot (⚙).',
+    SCOPE: "Le token n'a pas les droits requis — un PAT « classic » avec le scope repo suffit.",
+    NET:   'API GitHub injoignable — réessaie dans un instant.',
+  };
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await ghFetchDevStats(force);
+    if (d.error) { setErr(ERR[d.error] || ''); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', alignItems:'center', gap:12 };
+  const lab  = { fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim, marginBottom:2 };
+  const statCard = (icon, label, value, sub) => (
+    <div key={label} style={card}>
+      <div style={{ fontSize:20, width:32, textAlign:'center', flexShrink:0 }}>{icon}</div>
+      <div style={{ minWidth:0 }}>
+        <div style={lab}>{label}</div>
+        <div style={{ fontSize:18, fontWeight:800, color:DEV_COLOR, fontFamily:'DM Mono,monospace', lineHeight:1.15 }}>{value}</div>
+        {sub && <div style={{ fontSize:9, color:C.muted, marginTop:2, fontFamily:'DM Mono,monospace' }}>{sub}</div>}
+      </div>
+    </div>
+  );
+
+  if (!configured) {
+    return (
+      <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+        Stats GitHub via ton <b style={{ color:DEV_COLOR }}>token perso</b> — c'est le même que Dependabot :
+        configure-le dans <b>Alertes → 🛰️ Veilles Techno → 🤖 Dependabot</b> (PAT « classic », scope repo), cette carte s'activera toute seule.
+      </div>
+    );
+  }
+  const sinceYear = data ? new Date(data.createdAt).getFullYear() : null;
+  const fmtDay = iso => { const d = new Date(iso + 'T00:00:00'); return isNaN(d.getTime()) ? iso : d.toLocaleDateString('fr-FR', { day:'numeric', month:'long', year:'numeric' }); };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {loading && !data && <div style={{ fontSize:10.5, color:C.muted, fontStyle:'italic' }}>Chargement des stats GitHub…</div>}
+      {data && (
+        <React.Fragment>
+          <div style={{ ...card }}>
+            <div style={{ fontSize:20, width:32, textAlign:'center', flexShrink:0 }}>🐙</div>
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:13, fontWeight:800, color:C.text }}>@{data.login}</div>
+              <div style={{ fontSize:10, color:DEV_COLOR, fontFamily:'DM Mono,monospace' }}>sur GitHub depuis {sinceYear} · {new Date().getFullYear() - sinceYear} ans</div>
+            </div>
+          </div>
+          {statCard('📦', 'DÉPÔTS', fmtN(data.repoCount), data.topRepo ? `top : ${data.topRepo.name} (${fmtN(data.topRepo.stars)} ★)` : null)}
+          {statCard('🧮', 'CONTRIBUTIONS DEPUIS TOUJOURS', fmtN(data.contribTotal), `dont ${fmtN(data.commitsTotal)} commits`)}
+          {statCard('🟩', 'CONTRIBUTIONS SUR 1 AN', fmtN(data.contribYear), `${fmtN(data.commitsYear)} commits · ${fmtN(data.prYear)} PR · ${fmtN(data.issuesYear)} issues`)}
+          {statCard('🔥', 'PLUS LONGUE SÉRIE', `${fmtN(data.longestStreak)} j`, `série en cours : ${fmtN(data.currentStreak)} j`)}
+          {data.bestDay && data.bestDay.date && statCard('📅', 'JOUR RECORD', `${fmtN(data.bestDay.count)} contributions`, fmtDay(data.bestDay.date))}
+          {statCard('⭐', 'STARS CUMULÉES', fmtN(data.totalStars), `${fmtN(data.totalForks)} forks · ${fmtN(data.followers)} followers`)}
+          {data.topLangs.length > 0 && statCard('💬', 'LANGAGES FAVORIS', data.topLangs.map(l => l.name).join(' · '), data.topLangs.map(l => `${l.count} dépôt${l.count > 1 ? 's' : ''}`).join(' · '))}
+        </React.Fragment>
+      )}
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <button onClick={() => refresh(true)} disabled={loading} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>{loading ? '…' : '↻ Actualiser'}</button>
+        {data && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginLeft:'auto' }}>sync {new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' })}</span>}
+      </div>
+    </div>
+  );
+}
+
 function StatsPanel() {
   const { listenStats: ls, now } = useStore();
   const fmtN = n => Number(n).toLocaleString('fr-FR');
@@ -5906,9 +6077,9 @@ function ActuPanel() {
               : empty('Indisponible (proxy CORS injoignable).')}
           </StatsCollapse>
 
-          {/* 2.4 Presse FR IA / Science (+ Hacker News en complément EN) */}
+          {/* 2.4 IA & Science (+ Hacker News en complément EN) */}
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
-            title={<span>🇫🇷 PRESSE FR · IA / SCIENCE <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
+            title={<span>🇫🇷 IA &amp; SCIENCE <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.presse && d.presse.length)
               ? d.presse.map((a, i) => row('pr' + i, a.link, a.title, a.source, actuAgo(a.date)))
               : empty('Indisponible (proxy CORS injoignable).')}
@@ -10527,7 +10698,7 @@ function RappelPanel() {
         </StatsCollapse>
         {/* Veilles Techno — ENTRE Administratif et Logement (APIs tierces : Dependabot) */}
         {sec.key === 'administratif' && (
-          <StatsCollapse title="🛰️ Veilles Techno" color={VEILLE_COLOR}>
+          <StatsCollapse title="🛰️ Veilles Techno" color={RAPPEL_PURPLE}>
             <StatsCollapse title="🤖 Dependabot" color={DEPENDABOT_COLOR}>
               <DependabotSection />
             </StatsCollapse>
@@ -10535,7 +10706,7 @@ function RappelPanel() {
         )}
         {/* Jeux — ENTRE Sport et Anniversaire (API publique speedrun.com) */}
         {sec.key === 'sport' && (
-          <StatsCollapse title="🎮 Jeux" color={SPEEDRUN_COLOR}>
+          <StatsCollapse title="🎮 Jeux" color={RAPPEL_PURPLE}>
             <StatsCollapse title="🏁 Speedrun" color={SPEEDRUN_COLOR}>
               <SpeedrunSection />
             </StatsCollapse>
@@ -11120,7 +11291,7 @@ function MobileApp() {
   });
   React.useEffect(() => { try { localStorage.setItem('spotifyplus_active_tab', tab); } catch {} }, [tab]);
   const [menuOpen, setMenuOpen] = React.useState(false);
-  const primaryTabs  = [['scrapping','Scrapping'],['ecouter','En attente']];
+  const primaryTabs  = [['scrapping','Scrapping'],['ecouter','En Attente']];
   // 3e élément = couleur du libellé. ORDRE ALPHABÉTIQUE voulu par l'utilisateur
   // (Actu → À propos) + ARC-EN-CIEL violet → indigo → bleu-indigo → bleu → cyan →
   // cyan-vert → vert-cyan → vert → jaune → ambre → orange → rouge (À propos).
