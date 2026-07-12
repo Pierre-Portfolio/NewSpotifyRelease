@@ -95,12 +95,12 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **△ Sync Google Drive (optionnelle)** : même principe que Dropbox, juste en dessous — connexion Google (OAuth 2.0 implicite, scopes `drive.file` pour la sauvegarde + `drive.readonly` en lecture seule pour l'onglet **Mes Actifs** de Finance) pour sauvegarder la **sauvegarde complète (« Tous »)** dans ton Drive, en **écrasant la version précédente**. Le token Google expire au bout d'~1h : le bouton repasse alors en « Connecter » (reconnexion en 1 clic). Nécessite un **ID client OAuth** créé sur console.cloud.google.com et collé dans `GDRIVE_CLIENT_ID` (tant qu'il est vide, la section affiche « non configurée »)
 - Réinitialisation automatique des compteurs mois/année au démarrage si la période a changé (basée sur le mois **local**, plus l'UTC)
 - Accessible sur mobile via l'onglet **À propos** (dernier du menu « ⋯ », en rouge)
-- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 3.5.5`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
+- **Numéro de version** affiché en gris sous le bouton « Purger les écoutes » (actuellement `Version 5.2.1`) — basé sur le nombre de commits du projet (format `MAJ.MIN.U` : derniers chiffres = patch/minor, le reste = major ; ex. 278 commits → `2.7.8`, 1001 → `10.0.1`)
 
 ### Actu
 - Section **Actu** dédiée (titre en bleu-indigo), **entre Artistes et Météo** — onglet en haut sur desktop, dans le menu « ⋯ » sur mobile. Agrégateur d'actualités **sans backend ni clé**, cache local (30 min) + bouton **↻ Actualiser**. Les sources (presse, tendances, fuites) sont **pré-récupérées côté serveur par une GitHub Action** (toutes les 2 h → `data/actu.json`, lu directement par l'app) — les proxies CORS publics, peu fiables, ne servent plus que de repli
 - **🔓 Dernières fuites de données** (en premier) : les **10 dernières** entrées de [bonjourlafuite.eu.org](https://bonjourlafuite.eu.org/) — repli automatique sur les dernières fuites mondiales de [Have I Been Pwned](https://haveibeenpwned.com/) si le site est injoignable
-- **📰 Actualité** (carte centrale) — 6 sous-sections repliables, dans l'ordre :
+- **📰 Actualité** (carte centrale) — 6 sous-sections repliables, dans l'ordre (les articles affichent une **vignette photo** quand le flux la fournit) :
   - **🔥 Tendances du jour** : top 10 des recherches tendance Google Trends France *(les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends en substitut)*
   - **🌍 Actu Mondial** : l'actualité internationale via Google News
   - **💹 Bourse & crypto** : l'actualité financière (bourse, crypto, CAC 40, Wall Street) via Google News

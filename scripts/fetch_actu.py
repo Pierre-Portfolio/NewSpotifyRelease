@@ -80,11 +80,24 @@ def parse_rss(xml, max_items=12):
             link = decode(lm.group(1))
         dm = re.search(r"<pubDate[^>]*>(.*?)</pubDate>", it, re.S | re.I)
         sm = re.search(r"<source[^>]*>(.*?)</source>", it, re.S | re.I)
+        # Photo de l'article si le flux la fournit (même logique que actuParseRss client)
+        image = ""
+        im = (re.search(r'<media:content[^>]+url="([^"]+)"', it, re.I)
+              or re.search(r'<media:thumbnail[^>]+url="([^"]+)"', it, re.I)
+              or re.search(r'<enclosure[^>]+url="([^"]+)"[^>]*type="image', it, re.I)
+              or re.search(r'<enclosure[^>]+type="image[^"]*"[^>]*url="([^"]+)"', it, re.I))
+        if im:
+            image = im.group(1)
+        if not image:
+            di = re.search(r'<img[^>]+src="([^"]+)"', it, re.I)
+            if di:
+                image = di.group(1)
         out.append({
             "title": title,
             "link": link,
             "date": dm.group(1).strip() if dm else None,
             "source": decode(sm.group(1)) if sm else "",
+            "image": decode(image),
         })
         if len(out) >= max_items:
             break
