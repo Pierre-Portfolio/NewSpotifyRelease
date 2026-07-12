@@ -192,7 +192,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Export / Import** d'une **sauvegarde chiffrée** (fichier `.json`) pour ne pas tout perdre en cas de perte de l'appareil et restaurer sur un autre
 - ⚠️ Le chiffrement protège contre une **fuite passive** du stockage (sauvegarde/dump volé), **pas** contre un logiciel malveillant déjà actif sur l'appareil. **Mot de passe maître oublié = données irrécupérables** (aucun backend, aucune réinitialisation possible)
 
-### Remember
+### Alertes (ex-Remember)
 - Section **Remember** dédiée (titre en orange) — desktop (onglet en haut) et onglet propre dans le menu « ⋯ » sur mobile
 - Sections fixes (repliables) : **Administratif** (Déclaration d'impôts, Carte d'identité, Passeport, Carte européenne), **Logement** (AG, Détecteur de fumée, Nettoyer hotte cuisine, Nettoyer VMC, Nettoyer aérations fenêtres), **Véhicule** (Contrôle technique, Assurance auto, Carte navigo, Permis de conduire), **Médecin** (Généraliste, Dentiste, Dépistage, Check Up complet, ORL, Ophtalmologiste, Dermatologue, Ostéopathe, Kiné, Mutuelle), **Travail** (Entretien annuel d'évaluation, Visite médicale du travail), **Finance** (Faire ses comptes, DCA), **Sport** (Licence Course à pied), **Anniversaire** (Papa, Maman, Fête des pères, Fête des mères, Cécile), **Autre** (Lunettes, Carte restaurant expiration)
 - **Rappels personnalisés** : ajoute ton propre rappel (libellé + date + **heure optionnelle**)
@@ -258,6 +258,10 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Boutons **précédent / play-pause / suivant** dans le feed
 - Bouton **loop / auto-avance** : alterne entre répéter le titre en cours et passer automatiquement au suivant
 - Bouton **+1:00** : avance de 1 minute dans le titre en cours
+
+### Ordre des sections & code couleur
+- **Ordre unique desktop + mobile** (onglets, menu ⋯, Paramétrage, accueil, page de connexion) : **Actu, Alertes, Bon Plan, Finance, Maps, Météo, Mot de Passe, Musique, To Do, TV Time, Stats, À propos** (Scrapping/Nouvelles sorties reste en tête)
+- **Arc-en-ciel** réparti sur cet ordre : violet (Actu) → indigo (Alertes) → bleu-indigo (Bon Plan) → bleu (Finance) → cyan (Maps) → cyan-vert (Météo) → vert-cyan (Mot de Passe) → vert (Musique) → jaune (To Do) → ambre (TV Time) → orange (Stats) → rouge (À propos) — appliqué aux menus, à la page de connexion, à l'accueil et aux titres des sections elles-mêmes
 
 ### Interface
 - **Desktop** : sidebar gauche (Lancer la synchro / logs / countdown) + contenu central. **Toutes les sections sont des onglets en haut**, à côté de Scrapping / Artistes (Historique, Actu, Météo, Finance, TV Time, To do, Maps, Mot de passe, Remember, Stats, À propos) — une seule section affichée à la fois (plus de colonne de droite)
