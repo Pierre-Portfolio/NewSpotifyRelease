@@ -203,6 +203,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - Dates mémorisées localement (aucun backend)
 - **🛰️ Veilles Techno** (entre les rubriques « Administratif » et « Logement ») :
   - **🤖 Dependabot** : liste tes dépôts GitHub qui ont des **alertes de sécurité Dependabot ouvertes**, avec le décompte par sévérité (critiques / élevées / moyennes / faibles). Nécessite un **token GitHub perso** (PAT « classic » avec le scope `repo`, généré sur github.com/settings/tokens et saisi dans l'UI, stocké en localStorage comme les clés TMDB/YouTube) — les requêtes vont directement à l'API GitHub (CORS natif, aucun proxy)
+- **Alertes de veille visibles** : comme le bandeau « X rappels à traiter », des bandeaux s'affichent en tête de Remember quand les APIs remontent quelque chose — « 🤖 X alertes Dependabot à traiter sur Y dépôts » et « 🏁 X runs speedrun à valider »
 - **🎮 Jeux** (entre les rubriques « Sport » et « Anniversaire ») :
   - **🏁 Speedrun** : nombre de runs **en attente de validation** sur les jeux que tu **modères** sur speedrun.com, détaillé par jeu. Entre simplement ton **pseudo speedrun.com** — aucune clé API, tout passe par les endpoints publics (pseudo → jeux modérés → runs à valider)
 
