@@ -183,33 +183,32 @@ def fetch_hn():
     return []
 
 
-DATE_RE = re.compile(
-    r"(\d{1,2}\s+(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|"
-    r"septembre|octobre|novembre|décembre|decembre)\s+\d{4})|(\d{4}-\d{2}-\d{2})|"
-    r"(\d{1,2}/\d{1,2}/\d{4})", re.I)
-
-
 def fetch_leaks():
     """bonjourlafuite (parseur heuristique, comme actuFetchLeaks) puis repli HIBP."""
     html = get_any("https://bonjourlafuite.eu.org/")
     if html:
-        body = re.sub(r"<script.*?</script>|<style.*?</style>|<head.*?</head>", " ", html, flags=re.S | re.I)
+        # Chaque fuite = un <h2> qui contient une ancre interne « #<nom>-AAAA-MM-JJ » (la date
+        # ISO est portée par l'ancre, PAS dans le texte du titre). Page antéchronologique →
+        # on garde les 10 premières.
         items, seen = [], set()
-        for b in re.findall(r"<(?:article|li|tr|h1|h2|h3|h4)[\s>].*?</(?:article|li|tr|h1|h2|h3|h4)>", body, re.S | re.I):
-            text = decode(b)
-            if not text or len(text) < 3 or len(text) > 220:
+        for inner in re.findall(r"<h2\b[^>]*>(.*?)</h2>", html, re.S | re.I):
+            dm = re.search(r'href="#[^"]*?(\d{4}-\d{2}-\d{2})"', inner, re.I)
+            if not dm:
+                continue
+            text = decode(inner)
+            if not text or len(text) < 2 or len(text) > 220:
                 continue
             key = text[:60].lower()
             if key in seen:
                 continue
             seen.add(key)
-            dm = DATE_RE.search(text)
-            hm = re.search(r'href="(https?:[^"]+)"', b, re.I)
-            items.append({"text": text, "date": dm.group(0) if dm else None,
-                          "link": hm.group(1) if hm else ""})
-        dated = [i for i in items if i["date"]]
-        if dated:
-            return {"items": dated[:10], "needsTuning": False}
+            anchor = re.search(r'href="(#[^"]+)"', inner, re.I)
+            items.append({"text": text, "date": dm.group(1),
+                          "link": "https://bonjourlafuite.eu.org/" + (anchor.group(1) if anchor else "")})
+            if len(items) >= 10:
+                break
+        if items:
+            return {"items": items, "needsTuning": False}
     try:
         breaches = json.loads(get_any("https://haveibeenpwned.com/api/v3/breaches") or "")
         rows = [b for b in breaches if b.get("Title") and (b.get("AddedDate") or b.get("BreachDate"))]

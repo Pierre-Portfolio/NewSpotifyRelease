@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.1.9';
+const APP_VERSION = '5.2.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2740,8 +2740,8 @@ function loadTileVisits() { try { return JSON.parse(localStorage.getItem(TILE_VI
 function recordTileVisit(key) { try { const v = loadTileVisits(); v[key] = tileTodayStr(); localStorage.setItem(TILE_VISITS_LS, JSON.stringify(v)); } catch {} }
 
 const HUB_CARDS = [
-  { emoji:'🔔', label:'Alertes',           desc:'Tes rappels & échéances',         color:'#6f7bf5', desktop:'remember',   mobile:'rappel'     },
   { emoji:'📰', label:'Actu',              desc:'News, presse, tendances',         color:'#b06cf5', desktop:'actu',       mobile:'actu'       },
+  { emoji:'🔔', label:'Alertes',           desc:'Tes rappels & échéances',         color:'#6f7bf5', desktop:'remember',   mobile:'rappel'     },
   { emoji:'🌦️', label:'Météo',             desc:'Prévisions par lieu',             color:'#35c5a8', desktop:'meteo',      mobile:'meteo'      },
   { emoji:'📈', label:'Finance',           desc:'Crypto, bourse, patrimoine',      color:'#4ea3f5', desktop:'finance',    mobile:'finance'    },
   { emoji:'🎵', label:'Musique',           desc:'Le feed de tes artistes suivis',  color:'#1ed760', desktop:'scrapping',  mobile:'scrapping'  },
@@ -2766,7 +2766,7 @@ function HubHome({ isMobile, onGo, disabled }) {
     cards = cards.filter(c => c.mobile !== 'statspanel');
     // Mobile : même séquence que le desktop — Alertes, Actu, Météo, Finance, Musique,
     // puis le reste inchangé (chaque tuile garde sa couleur d'origine)
-    const MOBILE_ORDER = ['rappel','actu','meteo','finance','scrapping','mdp','todo','tvtime','stats'];
+    const MOBILE_ORDER = ['actu','rappel','meteo','finance','scrapping','mdp','todo','tvtime','stats'];
     cards = [...cards].sort((a, b) => MOBILE_ORDER.indexOf(a.mobile) - MOBILE_ORDER.indexOf(b.mobile));
   }
   const padX  = isMobile ? 16 : 30;
@@ -5557,25 +5557,27 @@ async function actuFetchTrends() {
 // Fuites de données — bonjourlafuite.eu.org (pas d'API : HTML via proxy CORS, parseur heuristique)
 async function actuFetchLeaks() {
   const html = await corsFetchText('https://bonjourlafuite.eu.org/');
-  if (!html) return { items: [], needsTuning: false };
-  const body = html.replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<head[\s\S]*?<\/head>/gi, ' ');
-  const dateRe = /(\d{1,2}\s+(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\s+\d{4})|(\d{4}-\d{2}-\d{2})|(\d{1,2}\/\d{1,2}\/\d{4})/i;
-  const blocks = body.match(/<(?:article|li|tr|h1|h2|h3|h4)[\s>][\s\S]*?<\/(?:article|li|tr|h1|h2|h3|h4)>/gi) || [];
-  const items = [], seen = new Set();
-  for (const b of blocks) {
-    const text = actuDecode(b);
-    if (!text || text.length < 3 || text.length > 220) continue;
-    const key = text.slice(0, 60).toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const dm = text.match(dateRe);
-    const hm = b.match(/href="([^"]+)"/i);
-    const href = hm && /^https?:/.test(hm[1]) ? hm[1] : '';
-    items.push({ text, date: dm ? dm[0] : null, link: href });
+  if (html) {
+    // Chaque fuite = un <h2> qui contient une ancre interne « #<nom>-AAAA-MM-JJ » (la date ISO
+    // est portée par l'ancre, PAS dans le texte du titre) + un emoji de statut et le nom.
+    // La page est antéchronologique → on prend les 10 premières.
+    const items = [], seen = new Set();
+    const h2Re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
+    let m;
+    while ((m = h2Re.exec(html)) && items.length < 10) {
+      const inner = m[1];
+      const dm = inner.match(/href="#[^"]*?(\d{4}-\d{2}-\d{2})"/i);   // date ISO dans l'ancre
+      if (!dm) continue;
+      const text = actuDecode(inner);
+      if (!text || text.length < 2 || text.length > 220) continue;
+      const key = text.slice(0, 60).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const anchor = (inner.match(/href="(#[^"]+)"/i) || [])[1] || '';
+      items.push({ text, date: dm[1], link: 'https://bonjourlafuite.eu.org/' + anchor });
+    }
+    if (items.length) return { items, needsTuning: false };
   }
-  const dated = items.filter(i => i.date);      // on ne garde que les entrées vraiment datées (évite le bruit de nav)
-  if (dated.length) return { items: dated.slice(0, 10), needsTuning: false };
   // Repli : Have I Been Pwned — /api/v3/breaches est PUBLIC (sans clé, seul
   // breachedaccount exige une clé) et sert le CORS ; sinon via les proxies.
   // On trie par AddedDate desc et on ne CACHE que les 10 dernières (la liste
@@ -10576,6 +10578,16 @@ function RappelPanel() {
   const [cDate, setCDate]   = React.useState('');
   const [cTime, setCTime]   = React.useState('');
   const [showUpcoming, setShowUpcoming] = React.useState(false);   // false = affichage par rubriques (défaut)
+  // Heure OPTIONNELLE : masquée par défaut, on l'affiche/masque en cliquant sur le libellé.
+  // Amorcée avec les clés qui ont déjà une heure enregistrée (fixes + persos) pour qu'elle
+  // reste visible après un reload.
+  const [openTimes, setOpenTimes] = React.useState(() => {
+    const s = new Set();
+    const t = loadRappelTimes(); Object.keys(t).forEach(k => { if (t[k]) s.add(k); });
+    loadRemembers().forEach(c => { if (c.time) s.add(c.id); });
+    return s;
+  });
+  const toggleTime = key => setOpenTimes(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
 
   const setDate = (key, val) => {
     const next = { ...dates };
@@ -10642,10 +10654,11 @@ function RappelPanel() {
     <input type="date" value={val} onChange={onChange}
       style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 6px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
   );
-  // Heure OPTIONNELLE — affichée seulement quand une date est renseignée
+  // Heure OPTIONNELLE — révélée en cliquant sur le libellé, rendue 2× plus courte
+  // verticalement (padding vertical nul + hauteur réduite) que l'input date.
   const timeInput = (val, onChange) => (
     <input type="time" value={val} onChange={onChange} title="Heure (optionnel)"
-      style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 5px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
+      style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:5, padding:'0 5px', height:11, lineHeight:'11px', boxSizing:'border-box', fontSize:9, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
   );
 
   return (
@@ -10696,10 +10709,11 @@ function RappelPanel() {
             const b = rappelBadge(rappelDelta(val));
             return (
               <div key={ik} style={{ display:'flex', alignItems:'center', gap:8 }}>
-                <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{label}</div>
+                <div onClick={() => val && toggleTime(key)} title={val ? 'Cliquer pour afficher/masquer l’heure' : undefined}
+                  style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: val ? 'pointer' : 'default' }}>{label}</div>
                 <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                 {dateInput(val, e => setDate(key, e.target.value))}
-                {val && timeInput(times[key] || '', e => setTime(key, e.target.value))}
+                {val && openTimes.has(key) && timeInput(times[key] || '', e => setTime(key, e.target.value))}
               </div>
             );
           })}
@@ -10720,10 +10734,11 @@ function RappelPanel() {
               const b = rappelBadge(rappelDelta(val));
               return (
                 <div key={e.key} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
-                  <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{e.label}</div>
+                  <div onClick={() => val && toggleTime(e.key)} title={val ? 'Cliquer pour afficher/masquer l’heure' : undefined}
+                    style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: val ? 'pointer' : 'default' }}>{e.label}</div>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                   {dateInput(val, ev => setDate(e.key, ev.target.value))}
-                  {val && timeInput(times[e.key] || '', ev => setTime(e.key, ev.target.value))}
+                  {val && openTimes.has(e.key) && timeInput(times[e.key] || '', ev => setTime(e.key, ev.target.value))}
                 </div>
               );
             })}
@@ -10743,10 +10758,11 @@ function RappelPanel() {
               const b = rappelBadge(rappelDelta(c.date));
               return (
                 <div key={c.id} style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{c.label}</div>
+                  <div onClick={() => c.date && toggleTime(c.id)} title={c.date ? 'Cliquer pour afficher/masquer l’heure' : undefined}
+                    style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: c.date ? 'pointer' : 'default' }}>{c.label}</div>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                   {dateInput(c.date || '', e => setCustomDate(c.id, e.target.value))}
-                  {c.date && timeInput(c.time || '', e => setCustomTime(c.id, e.target.value))}
+                  {c.date && openTimes.has(c.id) && timeInput(c.time || '', e => setCustomTime(c.id, e.target.value))}
                   <button onClick={() => removeCustom(c.id)} title="Supprimer" style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
                 </div>
               );
