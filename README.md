@@ -99,11 +99,15 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 
 ### Actu
 - Section **Actu** dédiée (titre en bleu-indigo), **entre Artistes et Météo** — onglet en haut sur desktop, dans le menu « ⋯ » sur mobile. Agrégateur d'actualités **sans backend ni clé**, cache local (30 min) + bouton **↻ Actualiser**. Les sources (presse, tendances, fuites) sont **pré-récupérées côté serveur par une GitHub Action** (toutes les 2 h → `data/actu.json`, lu directement par l'app) — les proxies CORS publics, peu fiables, ne servent plus que de repli
-- **📰 Techno · IA · Science** : les tops [Hacker News](https://news.ycombinator.com/) (titre + score + lien)
-- **🇫🇷 Presse FR** : actus IA / science / technologie via le flux Google News
-- **🔥 Tendances du jour · France** : top 10 des recherches tendance Google Trends *(les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends en substitut)*
-- **🔓 Dernières fuites de données** : dernières entrées de [bonjourlafuite.eu.org](https://bonjourlafuite.eu.org/) — repli automatique sur les dernières fuites mondiales de [Have I Been Pwned](https://haveibeenpwned.com/) si le site est injoignable
-- **▶️ Vidéos YouTube · Abonnements** : les dernières vidéos publiées par les chaînes auxquelles vous êtes abonné (le flux [youtube.com/feed/subscriptions](https://www.youtube.com/feed/subscriptions)) — nécessite de **connecter son compte Google** (lecture seule, même bouton que la sauvegarde Drive). Liste en **chargement infini** (les vidéos suivantes apparaissent en scrollant), miniature + chaîne + ancienneté + durée, les Shorts (< 3 min) sont filtrés. Un bouton **« 🕒 Plus tard »** ajoute la vidéo **directement dans votre compte YouTube**, dans la playlist **« À regarder plus tard (Hub) »** (créée automatiquement, privée) — visible dans l'appli YouTube comme n'importe quelle playlist. *(L'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native — cette playlist dédiée est l'équivalent le plus proche.)* **Rien n'est ajouté dans TV Time**
+- **🔓 Dernières fuites de données** (en premier) : les **10 dernières** entrées de [bonjourlafuite.eu.org](https://bonjourlafuite.eu.org/) — repli automatique sur les dernières fuites mondiales de [Have I Been Pwned](https://haveibeenpwned.com/) si le site est injoignable
+- **📰 Actualité** (carte centrale) — 6 sous-sections repliables, dans l'ordre :
+  - **🔥 Tendances du jour** : top 10 des recherches tendance Google Trends France *(les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends en substitut)*
+  - **🌍 Actu Mondial** : l'actualité internationale via Google News
+  - **💹 Bourse & crypto** : l'actualité financière (bourse, crypto, CAC 40, Wall Street) via Google News
+  - **🇫🇷 Presse FR · IA / Science** : actus IA / science / technologie via Google News, complétées par les tops [Hacker News](https://news.ycombinator.com/) (EN)
+  - **🎮 Jeux** : l'actualité du jeu vidéo via Google News
+  - **🎭 Insolite** : l'actualité insolite via Google News
+- **▶️ Vidéos YouTube · Abonnements** (en dernier) : les dernières vidéos publiées par les chaînes auxquelles vous êtes abonné (le flux [youtube.com/feed/subscriptions](https://www.youtube.com/feed/subscriptions)) — nécessite de **connecter son compte Google** (lecture seule, même bouton que la sauvegarde Drive). Liste en **chargement infini** (les vidéos suivantes apparaissent en scrollant), miniature + chaîne + ancienneté + durée, les Shorts (< 3 min) sont filtrés. Un bouton **« 🕒 Plus tard »** ajoute la vidéo **directement dans votre compte YouTube**, dans la playlist **« À regarder plus tard (Hub) »** (créée automatiquement, privée) — visible dans l'appli YouTube comme n'importe quelle playlist. *(L'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native — cette playlist dédiée est l'équivalent le plus proche.)* **Rien n'est ajouté dans TV Time**
 
 ### Bon Plan
 - Section **Bon Plan** dédiée (titre en cyan-vert), **entre Finance et TV Time** — comparateur de prix, désactivable dans le Paramétrage

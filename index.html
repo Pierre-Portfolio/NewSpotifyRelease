@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '5.1.0';
+const APP_VERSION = '5.1.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5212,7 +5212,7 @@ function VosEcoutesPanel() {
 // aucune source keyless CORS) → Google Trends France en substitut.
 // ════════════════════════════════════════════════
 const ACTU_COLOR = '#5f8def';                 // entre Artistes (indigo) et Météo (bleu)
-const ACTU_LS    = 'spotifyplus_actu';        // cache { fetched_at, hn, presse, trends, leaks }
+const ACTU_LS    = 'spotifyplus_actu';        // cache { fetched_at, hn, presse, trends, leaks, monde, bourse, jeux, insolite }
 const ACTU_TTL   = 30 * 60 * 1000;            // re-fetch auto au-delà de 30 min
 
 let _actuCache;                                // cache mémoire
@@ -5306,20 +5306,13 @@ async function actuFetchHN() {
   } catch { return []; }
 }
 
-// Presse FR (IA / science / techno) via le flux RSS Google News (proxy CORS).
-// Repli si le flux « recherche » ne rend rien (throttle des proxies sur les URLs à
-// query) : flux « À la une » France (URL plus simple, mieux tolérée), puis le
-// topic SCIENCE_ET_TECHNOLOGIE éditorial.
-async function actuFetchPresse() {
-  const q = encodeURIComponent('intelligence artificielle OR science OR technologie');
-  const feeds = [
-    `https://news.google.com/rss/search?q=${q}&hl=fr&gl=FR&ceid=FR:fr`,
-    'https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr',
-    'https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=fr&gl=FR&ceid=FR:fr',
-  ];
+// Générique Google News RSS (proxy CORS) — cascade de flux, premier qui rend des
+// items. Sépare le suffixe «  - Source » des titres Google News. Sert Presse FR,
+// Actu Mondial, Bourse & crypto, Jeux et Insolite (mêmes formats de sortie).
+async function actuFetchGNews(feeds, max = 12) {
   for (const f of feeds) {
     const xml = await corsFetchText(f);
-    const items = actuParseRss(xml, 12);
+    const items = actuParseRss(xml, max);
     if (items.length) return items.map(a => {
       // Google News suffixe le titre par «  - Source » → on sépare
       const m = a.title.match(/^(.*)\s[-–]\s([^-–]+)$/);
@@ -5327,6 +5320,44 @@ async function actuFetchPresse() {
     });
   }
   return [];
+}
+const actuGNSearch = q => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=fr&gl=FR&ceid=FR:fr`;
+
+// Presse FR (IA / science / techno) via le flux RSS Google News (proxy CORS).
+// Repli si le flux « recherche » ne rend rien (throttle des proxies sur les URLs à
+// query) : flux « À la une » France (URL plus simple, mieux tolérée), puis le
+// topic SCIENCE_ET_TECHNOLOGIE éditorial.
+function actuFetchPresse() {
+  return actuFetchGNews([
+    actuGNSearch('intelligence artificielle OR science OR technologie'),
+    'https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr',
+    'https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=fr&gl=FR&ceid=FR:fr',
+  ]);
+}
+// Actu Mondial — topic WORLD éditorial (repli : À la une France)
+function actuFetchMonde() {
+  return actuFetchGNews([
+    'https://news.google.com/rss/headlines/section/topic/WORLD?hl=fr&gl=FR&ceid=FR:fr',
+    'https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr',
+  ]);
+}
+// Bourse & crypto — recherche financière (repli : topic BUSINESS éditorial)
+function actuFetchBourse() {
+  return actuFetchGNews([
+    actuGNSearch('bourse OR crypto OR bitcoin OR "CAC 40" OR "Wall Street"'),
+    'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=fr&gl=FR&ceid=FR:fr',
+  ]);
+}
+// Actualité Jeux (vidéo) — recherche dédiée (repli : gaming)
+function actuFetchJeuxNews() {
+  return actuFetchGNews([
+    actuGNSearch('"jeu vidéo" OR "jeux vidéo" OR PlayStation OR Xbox OR Nintendo OR Steam'),
+    actuGNSearch('gaming'),
+  ]);
+}
+// Actualité Insolite
+function actuFetchInsolite() {
+  return actuFetchGNews([actuGNSearch('insolite')]);
 }
 
 // Google Trends France — recherches tendance du jour (RSS via proxy CORS).
@@ -5373,10 +5404,10 @@ async function actuFetchLeaks() {
     items.push({ text, date: dm ? dm[0] : null, link: href });
   }
   const dated = items.filter(i => i.date);      // on ne garde que les entrées vraiment datées (évite le bruit de nav)
-  if (dated.length) return { items: dated.slice(0, 5), needsTuning: false };
+  if (dated.length) return { items: dated.slice(0, 10), needsTuning: false };
   // Repli : Have I Been Pwned — /api/v3/breaches est PUBLIC (sans clé, seul
   // breachedaccount exige une clé) et sert le CORS ; sinon via les proxies.
-  // On trie par AddedDate desc et on ne CACHE que les 5 dernières (la liste
+  // On trie par AddedDate desc et on ne CACHE que les 10 dernières (la liste
   // complète pèse lourd, elle n'est jamais stockée).
   const hibp = await actuFetchHibp();
   if (hibp.length) return { items: hibp, needsTuning: false, via: 'hibp' };
@@ -5397,7 +5428,7 @@ async function actuFetchHibp() {
   return list
     .filter(b => b && b.Title && (b.AddedDate || b.BreachDate))
     .sort((a, b) => String(b.AddedDate || b.BreachDate).localeCompare(String(a.AddedDate || a.BreachDate)))
-    .slice(0, 5)
+    .slice(0, 10)
     .map(b => ({
       text: `${b.Title}${b.PwnCount ? ` — ${Number(b.PwnCount).toLocaleString('fr-FR')} comptes` : ''}`,
       date: (b.BreachDate || b.AddedDate || '').slice(0, 10),
@@ -5421,19 +5452,24 @@ async function actuFetchStatic() {
   } catch { return null; }
 }
 
-// Récupère les 4 sources et met en cache. PRIORITÉ au JSON de la GitHub Action
+// Récupère les 8 sources et met en cache. PRIORITÉ au JSON de la GitHub Action
 // (zéro proxy) ; chaque source manquante/vide retombe sur son fetcher client
 // (HN reste client-first : API à CORS natif, plus fraîche que le cron 2 h).
 async function actuFetchAll() {
   const stat = await actuFetchStatic();
   const has = a => Array.isArray(a) && a.length;
-  const [hn, presse, trends, leaks] = await Promise.all([
+  const statOr = (key, fn) => has(stat && stat[key]) ? Promise.resolve(stat[key]) : fn();
+  const [hn, presse, trends, leaks, monde, bourse, jeux, insolite] = await Promise.all([
     actuFetchHN().then(r => has(r) ? r : ((stat && stat.hn) || [])),
-    has(stat && stat.presse) ? Promise.resolve(stat.presse) : actuFetchPresse(),
-    has(stat && stat.trends) ? Promise.resolve(stat.trends) : actuFetchTrends(),
+    statOr('presse', actuFetchPresse),
+    statOr('trends', actuFetchTrends),
     (stat && stat.leaks && has(stat.leaks.items)) ? Promise.resolve(stat.leaks) : actuFetchLeaks(),
+    statOr('monde', actuFetchMonde),
+    statOr('bourse', actuFetchBourse),
+    statOr('jeux', actuFetchJeuxNews),
+    statOr('insolite', actuFetchInsolite),
   ]);
-  const data = { fetched_at: Date.now(), hn, presse, trends, leaks };
+  const data = { fetched_at: Date.now(), hn, presse, trends, leaks, monde, bourse, jeux, insolite };
   saveActu(data);
   return data;
 }
@@ -5813,45 +5849,18 @@ function ActuPanel() {
       </div>
       {err && <div style={{ ...card, color:'#e05050', fontSize:12 }}>{err}</div>}
 
-      {/* Cartes repliables (fermées par défaut) — réutilise StatsCollapse */}
+      {/* Cartes repliables (fermées par défaut) — réutilise StatsCollapse.
+          ORDRE VOULU : 1) Fuites de données · 2) ACTUALITÉ (6 sous-sections :
+          Tendances du jour, Actu Mondial, Bourse & crypto, Presse FR IA/Science,
+          Jeux, Insolite) · 3) Vidéos YouTube en dernier. */}
       <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-        {/* Vidéos YouTube des abonnements + À regarder plus tard (fetch indépendant, OAuth Google) */}
-        <ActuYoutubeSection />
-
-        {/* Techno · IA · Science — Hacker News */}
-        <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
-          title={<span>📰 TECHNO · IA · SCIENCE <span style={{ color:C.dim, fontWeight:400 }}>· Hacker News</span></span>}>
-          {(d.hn && d.hn.length)
-            ? d.hn.map((a, i) => row('hn' + i, a.link, a.title, null, `▲ ${a.points}`, ACTU_COLOR))
-            : empty('Indisponible pour le moment.')}
-        </StatsCollapse>
-
-        {/* Presse FR */}
-        <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
-          title={<span>🇫🇷 PRESSE FR · IA / SCIENCE / TECH <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
-          {(d.presse && d.presse.length)
-            ? d.presse.map((a, i) => row('pr' + i, a.link, a.title, a.source, actuAgo(a.date)))
-            : empty('Indisponible (proxy CORS injoignable).')}
-        </StatsCollapse>
-
-        {/* Tendances Google France */}
-        <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
-          title={<span>🔥 TENDANCES DU JOUR · FRANCE <span style={{ color:C.dim, fontWeight:400 }}>· Google Trends</span></span>}>
-          {(d.trends && d.trends.length)
-            ? d.trends.map((t, i) => row('tr' + i, t.link,
-                <span><span style={{ color:ACTU_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', marginRight:6 }}>{t.rank}</span>{t.title}</span>,
-                null, t.traffic))
-            : empty('Indisponible (proxy CORS injoignable).')}
-          <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>Les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends France en substitut.</div>
-        </StatsCollapse>
-
-        {/* Dernières fuites de données */}
+        {/* 1. Dernières fuites de données (10 dernières) */}
         <StatsCollapse defaultOpen={false} color="#e05050"
           title={<span>🔓 DERNIÈRES FUITES DE DONNÉES</span>}>
           {(d.leaks && d.leaks.via === 'hibp') &&
             <div style={{ fontSize:9, color:C.dim, paddingBottom:4 }}>bonjourlafuite injoignable — dernières fuites mondiales via Have I Been Pwned :</div>}
           {(d.leaks && d.leaks.items && d.leaks.items.length)
-            ? d.leaks.items.map((l, i) => row('lk' + i, l.link || 'https://bonjourlafuite.eu.org/', l.text, null, l.date, '#e05050'))
+            ? d.leaks.items.slice(0, 10).map((l, i) => row('lk' + i, l.link || 'https://bonjourlafuite.eu.org/', l.text, null, l.date, '#e05050'))
             : <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>
                 {loading ? 'Chargement…'
                   : (d.leaks && d.leaks.needsTuning)
@@ -5865,6 +5874,71 @@ function ActuPanel() {
             <a href="https://bonjourlafuite.eu.org/" target="_blank" rel="noopener noreferrer" style={{ fontSize:9, color:C.dim, textDecoration:'none' }}>bonjourlafuite ↗</a>
           </div>
         </StatsCollapse>
+
+        {/* 2. ACTUALITÉ (ex « Techno · IA · Science ») — conteneur des 6 sous-sections */}
+        <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+          title={<span>📰 ACTUALITÉ</span>}>
+
+          {/* 2.1 Tendances du jour */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🔥 TENDANCES DU JOUR <span style={{ color:C.dim, fontWeight:400 }}>· Google Trends</span></span>}>
+            {(d.trends && d.trends.length)
+              ? d.trends.map((t, i) => row('tr' + i, t.link,
+                  <span><span style={{ color:ACTU_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', marginRight:6 }}>{t.rank}</span>{t.title}</span>,
+                  null, t.traffic))
+              : empty('Indisponible (proxy CORS injoignable).')}
+            <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>Les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends France en substitut.</div>
+          </StatsCollapse>
+
+          {/* 2.2 Actu Mondial */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🌍 ACTU MONDIAL <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
+            {(d.monde && d.monde.length)
+              ? d.monde.map((a, i) => row('mo' + i, a.link, a.title, a.source, actuAgo(a.date)))
+              : empty('Indisponible (proxy CORS injoignable).')}
+          </StatsCollapse>
+
+          {/* 2.3 Bourse & crypto */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>💹 BOURSE &amp; CRYPTO <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
+            {(d.bourse && d.bourse.length)
+              ? d.bourse.map((a, i) => row('bo' + i, a.link, a.title, a.source, actuAgo(a.date)))
+              : empty('Indisponible (proxy CORS injoignable).')}
+          </StatsCollapse>
+
+          {/* 2.4 Presse FR IA / Science (+ Hacker News en complément EN) */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🇫🇷 PRESSE FR · IA / SCIENCE <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
+            {(d.presse && d.presse.length)
+              ? d.presse.map((a, i) => row('pr' + i, a.link, a.title, a.source, actuAgo(a.date)))
+              : empty('Indisponible (proxy CORS injoignable).')}
+            {(d.hn && d.hn.length) ? (
+              <React.Fragment>
+                <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim, marginTop:8 }}>▲ HACKER NEWS (EN)</div>
+                {d.hn.map((a, i) => row('hn' + i, a.link, a.title, null, `▲ ${a.points}`, ACTU_COLOR))}
+              </React.Fragment>
+            ) : null}
+          </StatsCollapse>
+
+          {/* 2.5 Actualité Jeux */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🎮 JEUX <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
+            {(d.jeux && d.jeux.length)
+              ? d.jeux.map((a, i) => row('je' + i, a.link, a.title, a.source, actuAgo(a.date)))
+              : empty('Indisponible (proxy CORS injoignable).')}
+          </StatsCollapse>
+
+          {/* 2.6 Actualité Insolite */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🎭 INSOLITE <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
+            {(d.insolite && d.insolite.length)
+              ? d.insolite.map((a, i) => row('in' + i, a.link, a.title, a.source, actuAgo(a.date)))
+              : empty('Indisponible (proxy CORS injoignable).')}
+          </StatsCollapse>
+        </StatsCollapse>
+
+        {/* 3. Vidéos YouTube des abonnements + À regarder plus tard — EN DERNIER */}
+        <ActuYoutubeSection />
       </div>
 
       {d.fetched_at && <div style={{ fontSize:9, color:C.dim, textAlign:'center', marginTop:10 }}>Mis à jour {actuAgo(new Date(d.fetched_at).toISOString())}</div>}

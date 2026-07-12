@@ -91,14 +91,8 @@ def parse_rss(xml, max_items=12):
     return out
 
 
-def fetch_presse():
-    """Même cascade que actuFetchPresse : recherche → À la une → topic Science."""
-    q = urllib.parse.quote("intelligence artificielle OR science OR technologie")
-    feeds = [
-        f"https://news.google.com/rss/search?q={q}&hl=fr&gl=FR&ceid=FR:fr",
-        "https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr",
-        "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=fr&gl=FR&ceid=FR:fr",
-    ]
+def fetch_gnews(feeds):
+    """Générique Google News RSS (même logique que actuFetchGNews côté client)."""
     for f in feeds:
         items = parse_rss(get_any(f), 12)
         if items:
@@ -109,6 +103,48 @@ def fetch_presse():
                     a["source"] = a["source"] or m.group(2).strip()
             return items
     return []
+
+
+def gn_search(q):
+    return "https://news.google.com/rss/search?q=" + urllib.parse.quote(q) + "&hl=fr&gl=FR&ceid=FR:fr"
+
+
+def fetch_presse():
+    """Même cascade que actuFetchPresse : recherche → À la une → topic Science."""
+    return fetch_gnews([
+        gn_search("intelligence artificielle OR science OR technologie"),
+        "https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr",
+        "https://news.google.com/rss/headlines/section/topic/SCIENCE?hl=fr&gl=FR&ceid=FR:fr",
+    ])
+
+
+def fetch_monde():
+    """Actu Mondial — topic WORLD éditorial (repli : À la une France)."""
+    return fetch_gnews([
+        "https://news.google.com/rss/headlines/section/topic/WORLD?hl=fr&gl=FR&ceid=FR:fr",
+        "https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr",
+    ])
+
+
+def fetch_bourse():
+    """Bourse & crypto — recherche financière (repli : topic BUSINESS)."""
+    return fetch_gnews([
+        gn_search('bourse OR crypto OR bitcoin OR "CAC 40" OR "Wall Street"'),
+        "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=fr&gl=FR&ceid=FR:fr",
+    ])
+
+
+def fetch_jeux():
+    """Actualité Jeux (vidéo)."""
+    return fetch_gnews([
+        gn_search('"jeu vidéo" OR "jeux vidéo" OR PlayStation OR Xbox OR Nintendo OR Steam'),
+        gn_search("gaming"),
+    ])
+
+
+def fetch_insolite():
+    """Actualité Insolite."""
+    return fetch_gnews([gn_search("insolite")])
 
 
 def fetch_trends():
@@ -173,7 +209,7 @@ def fetch_leaks():
                           "link": hm.group(1) if hm else ""})
         dated = [i for i in items if i["date"]]
         if dated:
-            return {"items": dated[:5], "needsTuning": False}
+            return {"items": dated[:10], "needsTuning": False}
     try:
         breaches = json.loads(get_any("https://haveibeenpwned.com/api/v3/breaches") or "")
         rows = [b for b in breaches if b.get("Title") and (b.get("AddedDate") or b.get("BreachDate"))]
@@ -182,7 +218,7 @@ def fetch_leaks():
             "text": b["Title"] + (f" — {int(b['PwnCount']):,}".replace(",", " ") + " comptes" if b.get("PwnCount") else ""),
             "date": str(b.get("BreachDate") or b.get("AddedDate"))[:10],
             "link": "https://haveibeenpwned.com/PwnedWebsites#" + urllib.parse.quote(b.get("Name") or ""),
-        } for b in rows[:5]]
+        } for b in rows[:10]]
         if items:
             return {"items": items, "needsTuning": False, "via": "hibp"}
     except Exception as e:  # noqa: BLE001
@@ -198,10 +234,14 @@ def main():
         existing = {}
 
     sources = {
-        "presse": fetch_presse,
-        "trends": fetch_trends,
-        "hn":     fetch_hn,
-        "leaks":  fetch_leaks,
+        "presse":   fetch_presse,
+        "trends":   fetch_trends,
+        "hn":       fetch_hn,
+        "leaks":    fetch_leaks,
+        "monde":    fetch_monde,
+        "bourse":   fetch_bourse,
+        "jeux":     fetch_jeux,
+        "insolite": fetch_insolite,
     }
     out = {"updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     ok = 0
