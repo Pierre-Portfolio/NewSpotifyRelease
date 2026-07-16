@@ -80,6 +80,9 @@ def parse_rss(xml, max_items=12):
             link = decode(lm.group(1))
         dm = re.search(r"<pubDate[^>]*>(.*?)</pubDate>", it, re.S | re.I)
         sm = re.search(r"<source[^>]*>(.*?)</source>", it, re.S | re.I)
+        # URL du site source (attribut url de <source>, fourni par Google News) —
+        # sert au favicon de secours côté client quand l'article n'a pas de photo
+        su = re.search(r'<source[^>]+url="([^"]+)"', it, re.I)
         # Photo de l'article si le flux la fournit (même logique que actuParseRss client)
         image = ""
         im = (re.search(r'<media:content[^>]+url="([^"]+)"', it, re.I)
@@ -97,6 +100,7 @@ def parse_rss(xml, max_items=12):
             "link": link,
             "date": dm.group(1).strip() if dm else None,
             "source": decode(sm.group(1)) if sm else "",
+            "sourceUrl": htmllib.unescape(su.group(1)) if su else "",
             "image": decode(image),
         })
         if len(out) >= max_items:
