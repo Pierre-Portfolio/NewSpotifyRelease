@@ -53,7 +53,8 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 - **Bouton × par titre** : marque le titre **comme écouté** et le retire du feed → il apparaît dans l'**Historique** et compte dans les **stats d'écoute** (même effet que « Suivant »)
 - **↩ Annuler (undo)** : après un retrait (croix rouge ou swipe gauche), un **toast « Annuler » s'affiche 5 secondes** pour rattraper un clic accidentel — le titre revient dans le feed et les stats sont ré-ajustées
 - **Bouton ❤ par titre** : like/unlike directement depuis le feed (synchronisé Spotify + DB locale)
-- **Filtre** par type : Tous / Singles / Albums / Découvertes
+- **Filtre** par type : Tous / Singles / Albums / Spotify (titres « Découvertes de la semaine »)
+- **Tri par défaut : par artiste (A→Z)** — modifiable en Date d'ajout / Date de sortie
 - **Filtre artiste** : champ texte (insensible à la casse) combinable avec le filtre type et le tri
 - **⏰ Snooze** : bouton « réécouter plus tard » sur chaque titre — le renvoie en fin de liste (persistant)
 - **Filtre genre** : sélecteur alimenté par les genres des artistes scannés (top 30 par fréquence) — filtre les titres via les métadonnées artiste
