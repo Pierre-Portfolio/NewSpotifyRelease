@@ -44,7 +44,7 @@ REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
 SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
-### `APP_VERSION` (actuellement `'6.0.5'`)
+### `APP_VERSION` (actuellement `'6.0.6'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈601) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~601), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -84,7 +84,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 `syncInitialLikes()` : au `dbReady`, jusqu'à 300 tracks, `libraryContains` par batch de 40, TTL 24 h (`spotifyplus_likes_synced_at`).
 
 ### Découvertes de la semaine (`importDiscoverWeekly`)
-Cherche dans `/me/playlists` toutes les playlists « découvertes de la semaine »/« discover weekly ». **Priorité aux copies PERSO** (owner ≠ 'spotify', contenu lisible). `fetchPlaylistItems(id)` essaie `/items` PUIS `/tracks`. Insère en `release_type='discover_weekly'`. Deux cooldowns : succès → 7 j (`DW_LS_KEY`), échec → 6 h (`DW_FAIL_KEY`). ⚠ Le contenu des playlists éditoriales Spotify n'est souvent pas lisible → log explique le contournement (créer une copie perso).
+Cherche dans `/me/playlists` toutes les playlists « découvertes de la semaine »/« discover weekly ». **Priorité aux copies PERSO** (owner ≠ 'spotify', contenu lisible). `fetchPlaylistItems(id)` essaie `/items` PUIS `/tracks`. Insère en `release_type='discover_weekly'`. Deux cooldowns : succès → 7 j (`DW_LS_KEY`), échec → 6 h (`DW_FAIL_KEY`). ⚠ Le contenu des playlists éditoriales Spotify n'est souvent pas lisible → log explique le contournement (créer une copie perso). Recherche des candidates factorisée dans `dwFindCandidates()`. **Accès manuel** : bouton violet `DiscoverWeeklyButton` (`DW_PURPLE`) dans Scrapping SOUS les Logs (desktop + mobile) → `dwManualAccess(log)` ignore les cooldowns, log un diagnostic détaillé par playlist (lisible/403), relance l'import si contenu lisible (cooldowns levés), `reloadFeed()` (nouvelle méthode store, re-query avec filtres actifs) puis ouvre la playlist (ou la recherche Spotify) dans un nouvel onglet. Store expose aussi `log`.
 
 ---
 

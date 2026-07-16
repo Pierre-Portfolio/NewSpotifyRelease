@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.0.5';
+const APP_VERSION = '6.0.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1215,23 +1215,17 @@ async function fetchPlaylistItems(playlistId) {
   return { items: [] };
 }
 
-async function importDiscoverWeekly(addLog) {
-  const lastOk   = localStorage.getItem(DW_LS_KEY);
-  if (lastOk && Date.now() - parseInt(lastOk) < DW_MAX_AGE_MS) return;       // déjà importé récemment
-  const lastFail = localStorage.getItem(DW_FAIL_KEY);
-  if (lastFail && Date.now() - parseInt(lastFail) < DW_FAIL_AGE_MS) return;  // échec récent — petit cooldown
-  if (Date.now() < _rlUntil) return; // fenêtre rate-limit active — ne pas insister, retentera au prochain login
-
-  addLog('── Import Découvertes de la semaine ──', 'info');
-
-  // Collecter TOUTES les playlists dont le nom correspond (toutes pages) — pas seulement la
-  // première : depuis la migration Spotify, l'éditoriale (owner 'spotify') n'est plus lisible,
-  // mais une COPIE PERSO du même nom (owner = l'utilisateur) l'est. On veut pouvoir tenter les deux.
+// Collecte TOUTES les playlists dont le nom correspond à « Découvertes de la semaine »
+// (toutes pages) — pas seulement la première : depuis la migration Spotify, l'éditoriale
+// (owner 'spotify') n'est plus lisible, mais une COPIE PERSO du même nom (owner =
+// l'utilisateur) l'est. On veut pouvoir tenter les deux. Retourne { candidates } |
+// { rate_limited }. Partagé par l'import auto ET le bouton d'accès manuel.
+async function dwFindCandidates() {
   const candidates = [];
   let nextUrl = 'https://api.spotify.com/v1/me/playlists?limit=50';
   while (nextUrl) {
     const data = await apiGet(nextUrl);
-    if (data?.rate_limited) return; // fenêtre 429 — retentera au prochain login
+    if (data?.rate_limited) return { rate_limited: true, candidates };
     if (!data?.items) break;
     for (const p of data.items) {
       const n = (p.name || '').toLowerCase();
@@ -1241,6 +1235,21 @@ async function importDiscoverWeekly(addLog) {
     }
     nextUrl = data.next || null;
   }
+  return { candidates };
+}
+
+async function importDiscoverWeekly(addLog) {
+  const lastOk   = localStorage.getItem(DW_LS_KEY);
+  if (lastOk && Date.now() - parseInt(lastOk) < DW_MAX_AGE_MS) return;       // déjà importé récemment
+  const lastFail = localStorage.getItem(DW_FAIL_KEY);
+  if (lastFail && Date.now() - parseInt(lastFail) < DW_FAIL_AGE_MS) return;  // échec récent — petit cooldown
+  if (Date.now() < _rlUntil) return; // fenêtre rate-limit active — ne pas insister, retentera au prochain login
+
+  addLog('── Import Découvertes de la semaine ──', 'info');
+
+  const found = await dwFindCandidates();
+  if (found.rate_limited) return; // fenêtre 429 — retentera au prochain login
+  const candidates = found.candidates;
 
   if (!candidates.length) {
     addLog('⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
@@ -1293,6 +1302,43 @@ async function importDiscoverWeekly(addLog) {
   } else {
     addLog('Découvertes de la semaine : tous les titres sont déjà dans le feed', 'info');
   }
+}
+
+// Accès MANUEL à « Découvertes de la semaine » (bouton violet du Scrapping, sous les Logs) :
+// ignore les cooldowns, log un diagnostic détaillé (playlists trouvées, lisibles ou non),
+// relance l'import si un contenu est lisible, et retourne l'URL Spotify de la playlist à
+// ouvrir (ou de la recherche si introuvable) — null si rien à ouvrir.
+async function dwManualAccess(addLog) {
+  addLog('── Accès direct « Découvertes de la semaine » ──', 'info');
+  if (Date.now() < _rlUntil) {
+    addLog('⚠ Fenêtre rate-limit 429 active — réessaie après le compte à rebours.', 'warn');
+    return null;
+  }
+  const found = await dwFindCandidates();
+  if (found.rate_limited) { addLog('⚠ Rate-limit Spotify pendant la recherche des playlists — réessaie plus tard.', 'warn'); return null; }
+  const candidates = found.candidates;
+  if (!candidates.length) {
+    addLog('✗ Aucune playlist « Découvertes de la semaine » dans ta bibliothèque. Le like d\'un titre ne suffit pas : ouvre la playlist sur Spotify → « Ajouter à ta bibliothèque ». J\'ouvre la recherche Spotify…', 'warn');
+    return 'https://open.spotify.com/search/D%C3%A9couvertes%20de%20la%20semaine';
+  }
+  // Copies PERSO d'abord (contenu lisible), l'éditoriale Spotify en dernier
+  candidates.sort((a, b) => (a.owner?.id === 'spotify' ? 1 : 0) - (b.owner?.id === 'spotify' ? 1 : 0));
+  let readable = null;
+  for (const p of candidates) {
+    addLog(`Playlist trouvée : « ${p.name} » (owner : ${p.owner?.id || '?'}) — lecture du contenu…`, 'info');
+    const d = await fetchPlaylistItems(p.id);
+    if (d.rate_limited) { addLog('⚠ Rate-limit Spotify pendant la lecture — réessaie plus tard.', 'warn'); return p.external_urls?.spotify || null; }
+    if (d.items.length) { addLog(`✓ Contenu LISIBLE (${d.items.length} titres) — import lancé.`, 'ok'); readable = p; break; }
+    addLog(`✗ Contenu inaccessible (403/vide)${p.owner?.id === 'spotify' ? ' — playlist ÉDITORIALE Spotify, non lisible par les apps tierces depuis la migration 2026' : ''}.`, 'warn');
+  }
+  if (readable) {
+    // Cooldowns levés → importDiscoverWeekly refait la lecture et insère en base
+    try { localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
+    await importDiscoverWeekly(addLog);
+    return readable.external_urls?.spotify || null;
+  }
+  addLog('CONTOURNEMENT : sur Spotify, ouvre « Découvertes de la semaine » → menu ⋯ → « Ajouter à une autre playlist » → « Nouvelle playlist » (garde « découvertes » dans le nom) — cette COPIE PERSO sera lisible et importée automatiquement. J\'ouvre la playlist…', 'warn');
+  return candidates[0].external_urls?.spotify || null;
 }
 
 // Une release_date Spotify a une précision variable : 'day' ("2026-05-10"), 'month'
@@ -2477,6 +2523,13 @@ function StoreProvider({ children }) {
 
   const logout = () => { logoutClear(); window.location.reload(); };
 
+  // Recharge le feed depuis la DB avec les filtres actifs — utilisé après l'import manuel
+  // « Découvertes de la semaine » (bouton violet du Scrapping) pour voir les titres sans F5
+  const reloadFeed = React.useCallback(() => {
+    if (!dbReady) return;
+    setFeed(loadFeedFromDB({ artistSearch: artistSearch.trim(), filterType, sortBy, genre: genreFilter }));
+  }, [dbReady, artistSearch, filterType, sortBy, genreFilter]);
+
   // Réinitialise manuellement le quota 24h (compteur + fenêtre) — débloque une
   // synchro sans attendre l'expiration des 24h. Confirmation côté UI.
   const resetQuota = () => {
@@ -2497,6 +2550,7 @@ function StoreProvider({ children }) {
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked, restoreBackup,
+    log, reloadFeed,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
@@ -3329,6 +3383,35 @@ function LogsPanel({ compact=false }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// Bouton violet « Accéder à la playlist "Découverte de la semaine" » (Scrapping, sous
+// les Logs, desktop + mobile) : diagnostic + import manuel via dwManualAccess (résultats
+// détaillés dans les Logs juste au-dessus), puis ouverture de la playlist sur Spotify.
+const DW_PURPLE = '#b06cf5';
+function DiscoverWeeklyButton() {
+  const { log, dbReady, reloadFeed } = useStore();
+  const [busy, setBusy] = React.useState(false);
+  const run = async () => {
+    if (busy || !dbReady) return;
+    setBusy(true);
+    try {
+      const url = await dwManualAccess(log);
+      reloadFeed();   // les titres importés apparaissent sans F5
+      if (url) window.open(url, '_blank', 'noopener');
+    } catch (e) {
+      log('✗ Accès Découvertes impossible : ' + (e?.message || e), 'error');
+    }
+    setBusy(false);
+  };
+  return (
+    <button onClick={run} disabled={busy || !dbReady}
+      title="Cherche la playlist, teste si son contenu est lisible (détails dans les Logs), importe les titres lisibles puis ouvre la playlist sur Spotify"
+      style={{ width:'100%', background:`${DW_PURPLE}22`, border:`1px solid ${DW_PURPLE}66`, color: busy || !dbReady ? C.dim : DW_PURPLE,
+        borderRadius:8, padding:'8px 10px', fontSize:11, fontWeight:700, cursor: busy || !dbReady ? 'default' : 'pointer' }}>
+      {busy ? '↻ Accès en cours…' : 'Accéder à la playlist "Découverte de la semaine"'}
+    </button>
   );
 }
 
@@ -12519,6 +12602,7 @@ function MobileApp() {
             <ScrapingStatusPanel compact />
             <NextCallPanel compact />
             <LogsPanel compact />
+            <DiscoverWeeklyButton />
           </div>
         )}
         {tab === 'ecouter' && (
@@ -12710,6 +12794,7 @@ function WebApp() {
           <DateRangePanel />
           <NextCallPanel />
           <LogsPanel />
+          <DiscoverWeeklyButton />
         </div>
 
         <div style={{ flex:1, overflowY:'auto', padding:'22px 24px', minWidth:0 }}>

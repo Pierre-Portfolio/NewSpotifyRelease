@@ -19,7 +19,8 @@
 // v12 : bump de cache — mode Calculatrice dans Finance (entre Full et Mes Actifs).
 // v13 : bump de cache — refonte Bon Plan (promos du moment + liste de suivi).
 // v14 : bump de cache — demande d'accès Google auto (Actu/À propos) + garde layout mobile.
-const CACHE  = 'spotifyplus-v14';
+// v15 : bump de cache — bouton d'accès direct « Découvertes de la semaine » (Scrapping).
+const CACHE  = 'spotifyplus-v15';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 

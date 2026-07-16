@@ -26,8 +26,8 @@ Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (act
 - **Quota 100 artistes / fenêtre glissante de 24 h** : atteindre 100 ouvre un compte à rebours, avec date + countdown affichés (carte Artistes + panneau Synchronisation) ; bouton **🔄 Réinitialiser le quota** dans À propos
 - Notification navigateur en fin de session et quand le scraping redevient disponible
 
-### Découvertes de la semaine (import hebdo auto)
-Au login, la playlist Spotify « Découvertes de la semaine » est importée dans le feed (tag violet). Réessai 7 j après succès, 6 h après échec. ⚠ Depuis la migration Spotify de fév. 2026, le contenu des playlists éditoriales n'est pas toujours lisible : l'app le détecte, l'explique et retente (contournement = créer une copie perso de la playlist).
+### Découvertes de la semaine (import hebdo auto + accès direct)
+Au login, la playlist Spotify « Découvertes de la semaine » est importée dans le feed (tag violet). Réessai 7 j après succès, 6 h après échec. ⚠ Depuis la migration Spotify de fév. 2026, le contenu des playlists éditoriales n'est pas toujours lisible : l'app le détecte, l'explique et retente (contournement = créer une copie perso de la playlist). **Bouton violet « Accéder à la playlist "Découverte de la semaine" »** (Scrapping, sous les Logs) : teste l'accès immédiatement, écrit le diagnostic détaillé dans les Logs, importe ce qui est lisible et ouvre la playlist sur Spotify.
 
 ### Feed & player
 - File d'attente (jusqu'à 1000 titres affichés, bandeau si plus en base)
