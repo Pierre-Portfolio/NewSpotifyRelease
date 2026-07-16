@@ -11,7 +11,7 @@
      reste d'empêcher tout XSS (SRI + sql.js auto-hébergé + échappement de tout contenu importé).
      Pour fermer complètement ce vecteur : retirer ces 3 proxies (au prix du repli Stooq).
      'unsafe-inline'/'unsafe-eval' sont requis par Babel standalone ; 'wasm-unsafe-eval' par sql.js. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com https:; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://geocoding-api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://lol-api-summoner.op.gg https://lol-web-api.op.gg https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://hacker-news.firebaseio.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com https://www.speedrun.com https://haveibeenpwned.com https://www.cheapshark.com https://ledenicheur.fr; frame-src 'self' https://piece-jointe-carto.developpement-durable.gouv.fr; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com https://*.fbsbx.com https://image.tmdb.org https://i.ytimg.com https://*.ggpht.com https://*.googleusercontent.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://ddragon.leagueoflegends.com https:; connect-src 'self' https://ddragon.leagueoflegends.com https://api.spotify.com https://accounts.spotify.com https://api.themoviedb.org https://api.open-meteo.com https://geocoding-api.open-meteo.com https://api.bigdatacloud.net https://nominatim.openstreetmap.org https://photon.komoot.io https://api.coingecko.com https://api.frankfurter.app https://api.gold-api.com https://api.twelvedata.com https://www.alphavantage.co https://stooq.com https://lol-api-summoner.op.gg https://lol-web-api.op.gg https://api.codetabs.com https://cors.eu.org https://api.allorigins.win https://hn.algolia.com https://hacker-news.firebaseio.com https://api.dropboxapi.com https://content.dropboxapi.com https://www.googleapis.com https://api.github.com https://www.speedrun.com https://haveibeenpwned.com https://www.cheapshark.com https://ledenicheur.fr https://world.openfoodfacts.org; frame-src 'self' https://piece-jointe-carto.developpement-durable.gouv.fr; manifest-src 'self'; worker-src 'self'; base-uri 'self'; object-src 'none'">
 <title>Spotify+ — Nouvelles Sorties</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0a0a'/><circle cx='16' cy='16' r='10' fill='none' stroke='%231DB954' stroke-width='2'/><path d='M12 12 L21 16 L12 20 Z' fill='%231DB954'/></svg>">
@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.0.7';
+const APP_VERSION = '6.0.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -10569,6 +10569,69 @@ function foodTarget(p) {
   return Math.max(1200, Math.round(bmr * parseFloat(p.activity || '1.2') + goal[2]));
 }
 
+// Recherche nutritionnelle via Open Food Facts (base ouverte, GRATUITE, sans clé, CORS
+// natif — origine ajoutée à la CSP connect-src). Renvoie une liste
+// { name, brand, kcal100 } où kcal100 = calories pour 100 g/100 ml. Parsing défensif :
+// certains produits n'exposent que l'énergie en kJ (`energy_100g`) → conversion /4.184.
+const FOOD_SEARCH_CACHE = {};   // { query(lower) : results[] } — évite de re-fetcher en session
+async function foodSearchNutrition(query) {
+  const q = (query || '').trim();
+  if (q.length < 2) return [];
+  const key = q.toLowerCase();
+  if (FOOD_SEARCH_CACHE[key]) return FOOD_SEARCH_CACHE[key];
+  const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' +
+    encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=24' +
+    '&fields=product_name,product_name_fr,generic_name_fr,brands,nutriments';
+  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  if (!res.ok) throw new Error('openfoodfacts ' + res.status);
+  const data = await res.json();
+  const out = [];
+  const seen = new Set();
+  for (const p of (data.products || [])) {
+    const n = p.nutriments || {};
+    let kcal = n['energy-kcal_100g'];
+    if (kcal == null) kcal = n['energy-kcal'];
+    if (kcal == null && n['energy_100g'] != null) kcal = n['energy_100g'] / 4.184; // kJ → kcal
+    kcal = Math.round(parseFloat(kcal));
+    const name = (p.product_name_fr || p.product_name || p.generic_name_fr || '').trim();
+    if (!name || !kcal || kcal <= 0 || !isFinite(kcal)) continue;
+    const brand = (p.brands || '').split(',')[0].trim();
+    const dedupe = (name + '|' + brand + '|' + kcal).toLowerCase();
+    if (seen.has(dedupe)) continue;
+    seen.add(dedupe);
+    out.push({ name, brand, kcal100: kcal });
+    if (out.length >= 12) break;
+  }
+  FOOD_SEARCH_CACHE[key] = out;
+  return out;
+}
+
+// Une ligne de résultat : portion en grammes ajustable → calcule les kcal en direct,
+// bouton + ajoute le repas dans la catégorie sélectionnée.
+function FoodResultRow({ r, onAdd }) {
+  const [grams, setGrams] = React.useState('100');
+  const g = parseInt(grams, 10) || 0;
+  const kcal = Math.round(r.kcal100 * g / 100);
+  const inSt = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'4px 6px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', width:52, textAlign:'right' };
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px' }}>
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontSize:11, color:C.text, wordBreak:'break-word', lineHeight:1.2 }}>{r.name}</div>
+        <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+          {r.brand ? r.brand + ' · ' : ''}{r.kcal100} kcal/100 g
+        </div>
+      </div>
+      <input type="number" value={grams} onChange={e => setGrams(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter' && kcal > 0) onAdd(r, g, kcal); }}
+        style={inSt} title="Quantité en grammes" />
+      <span style={{ fontSize:9, color:C.dim }}>g</span>
+      <span style={{ fontSize:10, color:FOOD_COLOR, fontFamily:'DM Mono,monospace', width:56, textAlign:'right', flexShrink:0 }}>{kcal} kcal</span>
+      <button onClick={() => { if (kcal > 0) onAdd(r, g, kcal); }} title="Ajouter"
+        style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'2px 8px', cursor:'pointer', flexShrink:0 }}>+</button>
+    </div>
+  );
+}
+
 function NourriturePanel() {
   const [profile, setProfile] = React.useState(loadFoodProfile);
   const [meals, setMeals]     = React.useState(loadFoodMeals);
@@ -10578,6 +10641,9 @@ function NourriturePanel() {
   const [cat, setCat]         = React.useState('breakfast');
   const [name, setName]       = React.useState('');
   const [kcal, setKcal]       = React.useState('');
+  const [results, setResults] = React.useState(null);   // null = pas de recherche, [] = aucun résultat
+  const [searching, setSearching] = React.useState(false);
+  const [searchErr, setSearchErr] = React.useState('');
   const today = todoTodayStr();
   const target = foodTarget(profile);
   const todayMeals = meals[today] || [];
@@ -10606,9 +10672,32 @@ function NourriturePanel() {
     if (!v || v <= 0) return;
     const entry = { id: Date.now() + '_' + Math.random().toString(36).slice(2), name: name.trim() || 'Repas', kcal: v, cat };
     commitMeals({ ...meals, [today]: [...todayMeals, entry] });
-    setName(''); setKcal('');
+    setName(''); setKcal(''); setResults(null); setSearchErr('');
   };
   const removeMeal = id => commitMeals({ ...meals, [today]: todayMeals.filter(m => m.id !== id) });
+  // 🔎 Cherche les calories de l'aliment saisi via Open Food Facts.
+  const searchFood = async () => {
+    const q = name.trim();
+    if (q.length < 2 || searching) return;
+    setSearching(true); setSearchErr(''); setResults(null);
+    try {
+      const list = await foodSearchNutrition(q);
+      setResults(list);
+      if (!list.length) setSearchErr('Aucun aliment trouvé — saisis les kcal à la main.');
+    } catch (err) {
+      setSearchErr('Recherche indisponible — saisis les kcal à la main.');
+      setResults(null);
+    } finally {
+      setSearching(false);
+    }
+  };
+  // Ajoute directement un résultat (portion en grammes → kcal calculées).
+  const addFromResult = (r, grams, kcalVal) => {
+    const label = grams && grams !== 100 ? `${r.name} (${grams} g)` : r.name;
+    const entry = { id: Date.now() + '_' + Math.random().toString(36).slice(2), name: label, kcal: kcalVal, cat };
+    commitMeals({ ...meals, [today]: [...todayMeals, entry] });
+    setName(''); setKcal(''); setResults(null); setSearchErr('');
+  };
 
   const imc = profile && profile.weight && profile.height ? profile.weight / Math.pow(profile.height / 100, 2) : 0;
   const pct = target ? Math.min(100, Math.round(todayTotal / target * 100)) : 0;
@@ -10691,8 +10780,21 @@ function NourriturePanel() {
         </div>
         <div style={{ display:'flex', gap:6 }}>
           <input type="text" value={name} placeholder="Aliment / repas…" onChange={e => setName(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') addMeal(); }}
+            onKeyDown={e => { if (e.key === 'Enter') searchFood(); }}
             style={{ ...inputSt, flex:2, width:'auto', minWidth:0 }} />
+          <button onClick={searchFood} disabled={searching || name.trim().length < 2} title="Trouver les calories"
+            style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'0 10px', cursor: searching || name.trim().length < 2 ? 'default' : 'pointer', opacity: searching || name.trim().length < 2 ? 0.5 : 1, flexShrink:0 }}>{searching ? '…' : '🔎'}</button>
+        </div>
+        {/* Résultats Open Food Facts : calories auto par aliment, portion ajustable */}
+        {searchErr && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{searchErr}</div>}
+        {results && results.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:220, overflowY:'auto' }}>
+            {results.map((r, i) => <FoodResultRow key={i} r={r} onAdd={addFromResult} />)}
+          </div>
+        )}
+        {/* Saisie manuelle des kcal (repli si l'aliment n'est pas dans la base) */}
+        <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+          <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>ou à la main :</span>
           <input type="number" value={kcal} placeholder="kcal" onChange={e => setKcal(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') addMeal(); }}
             style={{ ...inputSt, flex:1, width:'auto', minWidth:0 }} />
