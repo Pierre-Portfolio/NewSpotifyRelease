@@ -17,7 +17,8 @@
 // v10 : bump de cache — module Nourriture (suivi calories façon Lifesum).
 // v11 : bump de cache — sous-collapse Cyber Secu dans Actu > Actualité.
 // v12 : bump de cache — mode Calculatrice dans Finance (entre Full et Mes Actifs).
-const CACHE  = 'spotifyplus-v12';
+// v13 : bump de cache — refonte Bon Plan (promos du moment + liste de suivi).
+const CACHE  = 'spotifyplus-v13';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
