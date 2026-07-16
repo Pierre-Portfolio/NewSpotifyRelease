@@ -44,7 +44,7 @@ REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
 SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
-### `APP_VERSION` (actuellement `'6.0.1'`)
+### `APP_VERSION` (actuellement `'6.0.2'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈601) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~601), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -199,7 +199,7 @@ Export : `EXPORT_SECTIONS` (12 boutons dans « ↧ EXPORTER » d'À propos) → 
 
 **À propos** (`VosEcoutesPanel`) : ⚙️ Paramétrage · ↧ Exporter (repliable) · DropboxSync/GoogleDriveSync (save) · ↥ Restaurer · Dropbox/Drive (restore) · 🔄 Réinit quota 24 h · 🗑 Purger · ⎋ Déconnecter (rouge) · « Version X ».
 
-**Actu** (`ActuPanel`, bleu-indigo) — collapses en **ordre ALPHABÉTIQUE** (titre, emoji ignoré) aux 2 niveaux : 📰 Actualité (6 sous-collapses : Actu Mondial, Bourse&crypto, IA&Science Google News + Hacker News, Insolite, Jeux, Tendances Google Trends) · 🔓 Dernières fuites de données (10, bonjourlafuite → repli HIBP) · 🚇 Réseaux de Transport Paris (iframe lazy `TRANSPORT_MAP_URL` — carte statique IDF hébergée par le ministère, URL millésimée à mettre à jour si 404 ; origine en `frame-src`) · ▶ Vidéos YouTube abonnements (`ActuYoutubeSection`, OAuth scope `youtube`, lazyload, bouton 🕒 → playlist « À regarder plus tard (Hub) »). Priorité `data/actu.json`, repli proxies CORS. Vignettes via `actuThumb` (photo article ou favicon). Cache 30 min. **PAS dans buildBackup.**
+**Actu** (`ActuPanel`, bleu-indigo) — collapses en **ordre ALPHABÉTIQUE** (titre, emoji ignoré) aux 2 niveaux : 📰 Actualité (7 sous-collapses : Actu Mondial, Bourse&crypto, IA&Science Google News + Hacker News, 🛡️ Cyber Secu (failles/ransomwares/cyberattaques Google News — **placé ENTRE IA et Insolite**, position demandée, prime sur l'alphabet), Insolite, Jeux, Tendances Google Trends) · 🔓 Dernières fuites de données (10, bonjourlafuite → repli HIBP) · 🚇 Réseaux de Transport Paris (iframe lazy `TRANSPORT_MAP_URL` — carte statique IDF hébergée par le ministère, URL millésimée à mettre à jour si 404 ; origine en `frame-src`) · ▶ Vidéos YouTube abonnements (`ActuYoutubeSection`, OAuth scope `youtube`, lazyload, bouton 🕒 → playlist « À regarder plus tard (Hub) »). Priorité `data/actu.json`, repli proxies CORS. Vignettes via `actuThumb` (photo article ou favicon). Cache 30 min. **PAS dans buildBackup.**
 
 **Météo** (`MeteoPanel`, bleu) : Light 3 j / Full 7 j (non persisté). Recherche ville (`geocodeCity`). 4 lieux (Voisins-le-Bretonneux, Massy, Boulogne-Billancourt, position actuelle via `reverseGeocode` chaîne BigDataCloud→Photon→Nominatim, fallback hors-ligne `nearestCityFR`/`FR_CITIES`). Open-Meteo (sans clé). Clic jour → `MeteoDetailModal` (détail horaire).
 
