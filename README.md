@@ -55,6 +55,9 @@ Comparateur de prix : **🎮 Jeux vidéo** (CheapShark, ~20 boutiques PC, prix �
 ### TV Time
 Suivi séries & films via **TMDB v3** (clé perso, sans plafond journalier). Recherche films+séries, ajout en À voir / En cours / Vu, **fiche détaillée** (progression saison par saison, épisodes cochables individuellement, spéciaux à part). Sections : En cours / En pause / À voir / Prochaines sorties / Vus. Labels 🍥 Manga / 🎨 Dessin animé. **▶️ Chaînes & playlists YouTube** (clé YouTube Data v3) : vidéos groupées par année, Shorts < 3 min filtrés, check auto des nouvelles vidéos. Économie de requêtes maximale (tout mis en cache à l'ajout). ↩ Retour en arrière (annule la dernière action).
 
+### Nourriture
+Suivi calories façon **Lifesum** : profil (poids, taille, âge, sexe, activité, objectif) → **besoin calorique quotidien** calculé (Mifflin-St Jeor) + IMC. Saisie des repas du jour par catégorie (petit-déj, déjeuner, dîner, encas), jauge de progression vers l'objectif, historique 14 jours. Les **totaux quotidiens** sont sauvegardés (et exportés), la **composition des repas reste locale** (jamais dans l'export).
+
 ### To do
 Tâches classées par échéance en carrousel (Quotidien, Aujourd'hui, semaine, mois, année, un jour). ⭐ favorites (« compliquées »). Le Quotidien repart chaque jour à 00 h.
 
@@ -68,7 +71,7 @@ Coffre d'identifiants **chiffré par un mot de passe maître** (AES-GCM 256 + PB
 Rappels datés (rubriques fixes Administratif/Logement/Véhicule/Médecin/Travail/Finance/Sport/Anniversaire/Autre + rappels persos), heure optionnelle, badges d'urgence, **notifications** (J-30/J-7/J-1/jour J + retards) et **ajout auto au To do** à ≤ 3 j. **🛰️ Veilles Techno** : 🤖 Dependabot (alertes de sécurité de tes dépôts GitHub, token perso) et 🏁 Speedrun (runs à valider sur les jeux que tu modères, pseudo public).
 
 ### Sauvegarde & données (À propos)
-- **Export / Import** JSON, complet **ou** partiel (11 exports séparés) — fusion prudente à la restauration (dates de scan jamais régressées, TV Time/Finance fusionnés…)
+- **Export / Import** JSON, complet **ou** partiel (12 exports séparés) — fusion prudente à la restauration (dates de scan jamais régressées, TV Time/Finance fusionnés…)
 - **Paramétrage des modules** : un interrupteur par module active/désactive son onglet en direct
 - **☁︎ Dropbox** (OAuth PKCE) et **△ Google Drive** (OAuth implicite) optionnels : sauvegarde complète écrasée à chaque envoi
 - Proposition de sauvegarde hebdomadaire, réinitialisation mois/année automatique (mois **local**)

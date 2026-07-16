@@ -12,7 +12,7 @@
 ## Vue d'ensemble
 PWA **sans backend** : toutes les données en local (sql.js SQLite WASM + IndexedDB), hébergée statiquement sur GitHub Pages. Chaque artiste suivi est scrappé depuis **sa propre** `last_scraped_at` (défaut `2026-03-15`). L'utilisateur parcourt son feed, écoute titre par titre ; en fin de titre → marqué écouté + auto-avance + disparition animée. Aucun ajout auto en playlist.
 
-C'est un **hub perso** multi-sections : Musique (feed), Actu, Météo, Finance (+ Mes Actifs), Bon Plan, TV Time, To do, Maps, Mot de passe, Remember/Alertes, Stats, League of Legends, GitHub/Speedrun.
+C'est un **hub perso** multi-sections : Musique (feed), Actu, Météo, Finance (+ Mes Actifs), Bon Plan, TV Time, Nourriture, To do, Maps, Mot de passe, Remember/Alertes, Stats, League of Legends, GitHub/Speedrun.
 
 ## Fichiers clés
 
@@ -44,8 +44,8 @@ REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
 SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
-### `APP_VERSION` (actuellement `'5.9.4'`)
-Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈594) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~594), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
+### `APP_VERSION` (actuellement `'6.0.1'`)
+Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈601) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~601), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
 `delayChoice` (10/20/30 s) + jitter : `delayChoice*1000 + Math.random()*2000 + 1000`.
@@ -167,19 +167,19 @@ Marquage écouté quand `now?.uri` change (URI précédente dans le feed & `dbRe
 Méthodes : `startSync({skipCount, resumeUrl, resumeOffset})` · `resumeSync()` · `togglePause()` · `purgeListened()` · `restoreBackup(data)` · `resetQuota()` · `removeFromFeed(uri)` · `setTrackLiked(uri, bool)` · `syncInitialLikes()` · `navigateFeed(dir)` · `markListened(uri)` · `resetFilters()` · `logout()` · `seek(ms)` · `setLoopEnabled(bool)` · `setModuleEnabled(id, bool)` · `setDelayChoice(n)`.
 
 ### Paramétrage des modules
-`TOGGLE_MODULES` = modules basculables `{id, label, icon, color, desktop, mobile}` (Actu/Météo/Finance/Bon Plan/TV Time/Musique/To do/Maps/Mot de passe/Remember/Stats ; Scrapping & À propos non basculables). `loadModuleToggles()`/`saveModuleToggles()` (localStorage `spotifyplus_modules`), `moduleEnabled(toggles, id)` (absent = activé, seul `false` désactive). UI = toggles dans « ⚙️ PARAMÉTRAGE » (À propos). Onglet actif désactivé → retour à `home`. Inclus dans buildBackup.
+`TOGGLE_MODULES` = modules basculables `{id, label, icon, color, desktop, mobile}` (Actu/Météo/Finance/Bon Plan/TV Time/Musique/Nourriture/To do/Maps/Mot de passe/Remember/Stats ; Scrapping & À propos non basculables). `loadModuleToggles()`/`saveModuleToggles()` (localStorage `spotifyplus_modules`), `moduleEnabled(toggles, id)` (absent = activé, seul `false` désactive). UI = toggles dans « ⚙️ PARAMÉTRAGE » (À propos). Onglet actif désactivé → retour à `home`. Inclus dans buildBackup.
 
 ---
 
 ## Sauvegarde / Restauration
 
-`buildBackup()` complet = `{ stats, artists, music (table tracks), todos, todos_done, rappels, rappels_time, remembers, tvtime (+ YouTube), tmdb_key, yt_key, maps, finance (historique prix), mdp_vault (chiffré), modules, listens }`. **Caches re-fetchables exclus** : actu, indices, dependabot, speedrun, lol, yt_subs, actifs, tv eps.
+`buildBackup()` complet = `{ stats, artists, music (table tracks), todos, todos_done, rappels, rappels_time, remembers, tvtime (+ YouTube), tmdb_key, yt_key, maps, finance (historique prix), food (profil + totaux kcal/jour, PAS la composition des repas), mdp_vault (chiffré), modules, listens }`. **Caches re-fetchables exclus** : actu, indices, dependabot, speedrun, lol, yt_subs, actifs, tv eps. **Exclu volontairement** : composition des repas Nourriture (`spotifyplus_food_meals`).
 
-`restoreBackup(data)` (complet OU partiel, clés absentes ignorées) : artists (dates jamais régressées, cumuls au MAX), music (listened/liked au MAX), stats (fusion cumuls), todos/rappels/remembers/maps REMPLACÉS, tvtime FUSIONNÉ (union `type+id`, progression la plus avancée), finance FUSIONNÉ (union série, densité 30 min, cap), listens FUSIONNÉ (union, cap 5000), tmdb_key/yt_key REMPLACÉES si non vides, mdp_vault REMPLACÉ (backup dans `spotifyplus_mdp_vault_prev`).
+`restoreBackup(data)` (complet OU partiel, clés absentes ignorées) : artists (dates jamais régressées, cumuls au MAX), music (listened/liked au MAX), stats (fusion cumuls), todos/rappels/remembers/maps REMPLACÉS, tvtime FUSIONNÉ (union `type+id`, progression la plus avancée), finance FUSIONNÉ (union série, densité 30 min, cap), food FUSIONNÉ (profil remplacé ; jours : le local gagne, jours absents complétés), listens FUSIONNÉ (union, cap 5000), tmdb_key/yt_key REMPLACÉES si non vides, mdp_vault REMPLACÉ (backup dans `spotifyplus_mdp_vault_prev`).
 
 **Dropbox** (`DROPBOX_APP_KEY` renseignée, PKCE offline) et **Google Drive** (`GDRIVE_CLIENT_ID`, OAuth **implicite** token ~1 h, scopes `drive.file`+`drive.readonly`+`youtube`) : sauvegardent/restaurent le backup complet (overwrite). ⚠ Anti-fixation Drive : `gdriveHandleRedirect()` vérifie préfixe `gdrive.` + nonce `gdrive_state`. Retour OAuth distingué par `state` (`dropbox`/`gdrive.<nonce>`) ; marqueur `spotifyplus_oauth_return` rouvre l'onglet d'origine. Proposition de sauvegarde hebdo (seul l'export complet « Tous » pose `spotifyplus_last_backup`).
 
-Export : `EXPORT_SECTIONS` (11 boutons dans « ↧ EXPORTER » d'À propos) → `downloadBackup(sec)`, fichier `spotifyplus-<key>-<date>.json`.
+Export : `EXPORT_SECTIONS` (12 boutons dans « ↧ EXPORTER » d'À propos) → `downloadBackup(sec)`, fichier `spotifyplus-<key>-<date>.json`.
 
 ---
 
@@ -187,7 +187,7 @@ Export : `EXPORT_SECTIONS` (11 boutons dans « ↧ EXPORTER » d'À propos) → 
 
 **Layout** : `WebApp` (desktop, sidebar gauche scraping + onglets en haut, une seule vue centrale) · `MobileApp` (barre haut : profil + 3 onglets principaux Scrapping/En attente/❤Likés + menu ⋯) · `CompactPlayer` (viewport court `innerHeight<500`) · `HubHome` (accueil connecté, cartes `HUB_CARDS`) · `Home` (login « Hub de Pierre »). Retour accueil = clic sur le profil. Défaut view/tab = `'home'`.
 
-**Ordre unique desktop+mobile** (onglets/menu/accueil/login) : Actu, Alertes, Bon Plan, Finance, Maps, Météo, Mot de Passe, Musique, To Do, TV Time, Stats, À propos (Scrapping en tête). **Arc-en-ciel** violet→rouge appliqué partout. ⚠ Les NOMS de constantes couleur sont historiques (`METEO_BLUE` est cyan-vert, `MDP_AMBER` vert-cyan…) — lire la valeur. ⚠ Tout nouvel onglet mobile DOIT avoir son bloc de rendu dans `MobileApp` (sinon page noire) en plus de l'entrée `allOverflowTabs`.
+**Ordre unique desktop+mobile** (onglets/menu/accueil/login) : Actu, Alertes, Bon Plan, Finance, Maps, Météo, Mot de Passe, Musique, Nourriture, To Do, TV Time, Stats, À propos (Scrapping en tête). **Arc-en-ciel** violet→rouge appliqué partout. ⚠ Les NOMS de constantes couleur sont historiques (`METEO_BLUE` est cyan-vert, `MDP_AMBER` vert-cyan…) — lire la valeur. ⚠ Tout nouvel onglet mobile DOIT avoir son bloc de rendu dans `MobileApp` (sinon page noire) en plus de l'entrée `allOverflowTabs`.
 
 **Feed** : `FeedList` (filtres type/genre/artiste + tri, bannières de date mobile, empty-state seulement si `feed.length===0 && !filtersOn`) · `FeedItem` (`React.memo` + props explicites, **ne consomme PAS `useStore`** ; `key={item.id}` = URI, jamais `id+i`) · swipe gauche=suppr / droite=prev.
 
@@ -208,6 +208,8 @@ Export : `EXPORT_SECTIONS` (11 boutons dans « ↧ EXPORTER » d'À propos) → 
 **Bon Plan** (`ComparePanel`, cyan-vert) : 🎮 Jeux (CheapShark, sans clé, prix ≈ EUR via `cmpUsdToEur`) · 🔎 Tous produits (leDénicheur best-effort scraping, pas d'API → lien direct). Rien dans buildBackup.
 
 **TV Time** (`TvTimePanel`, vert-cyan) : suivi séries/films via **TMDB v3** (clé perso `spotifyplus_tmdb_key`, pas de plafond journalier). `tmdbFetchItem` = 1 requête récupère tout, mis en cache (`spotifyplus_tvtime`) → compteurs/stats ne redemandent rien. `tvRefreshShows` (TTL 24 h) ré-interroge seulement les séries suivies non terminées. Item `{id, type:'movie'|'tv'|'youtube', title, poster, year, status:'towatch'|'watching'|'paused'|'done', ...}`. Source de vérité suivi = `tvWatchedSet` (clés `S{n}E{e}`, cochage individuel). Fiches `TvDetailModal`/`YtDetailModal` (saisons dépliables épisode par épisode, `/tv/{id}/season/{n}` caché 7 j). Sections repliables : En cours/En pause/À voir/Prochaines sorties/Vus. Handlers : `setStatus`, `withEps` (statut auto done/watching), `ignoreUnwatched` (🙈 valider sans voir → revient en cours à la prochaine sortie), `abandonSeries` (🚫/⏹ done+`dropped`), `undoLast` (↩ pile 30). Labels `manga`/`cartoon`. **YouTube** (clé `spotifyplus_yt_key`) : chaînes/playlists via lien, vidéos groupées par année, filtre Shorts `< 3 min` (tag `keepShorts` désactive), `unlimited` (cap 500 → 50k), check auto nouvelles vidéos au login (`ytCheckNewVideos`, TTL 6 h, skip `dropped`). FUSIONNÉ au backup (`mergeTvImport`).
+
+**Nourriture** (`NourriturePanel`, vert-jaune `FOOD_COLOR='#9bd93f'`, entre Musique et To Do) : suivi calories façon Lifesum. Profil `spotifyplus_food_profile` (poids/taille/âge/sexe/activité/objectif) → besoin quotidien **Mifflin-St Jeor** (`foodBmr`/`foodTarget`, plancher 1200 kcal, objectifs -500/0/+300) + IMC. Repas du jour par catégorie (`FOOD_CATS` petit-déj/déjeuner/dîner/encas) : composition dans `spotifyplus_food_meals` (**LOCAL uniquement, jamais exporté**, purge > 90 j dans `saveFoodMeals`), totaux quotidiens dans `spotifyplus_food_days` (`{date: kcal}`, exportés, clé backup `food`). Jauge du jour + historique 14 j (`_lastNDays`). `commitMeals` recalcule et persiste le total du jour à chaque ajout/suppression.
 
 **To do** (`TodoPanel`, vert) : `spotifyplus_todos`, buckets `TODO_BUCKETS` (Quotidien/Aujourd'hui/semaine/mois/année/un jour) en carrousel. ⭐ favorites. Quotidien : × = « valider pour aujourd'hui » (`doneDate`, repart le lendemain). Complétion → `recordTodoDone` (`spotifyplus_todos_done`, → `todoDoneStats()`).
 

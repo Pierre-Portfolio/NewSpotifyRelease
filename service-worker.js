@@ -14,7 +14,8 @@
 // (sections Actu/Bon plan) : un client ayant chargé l'app en plein milieu d'un
 // déploiement GitHub Pages pouvait garder un shell incohérent (écran noir) jusqu'à
 // expiration ; le bump force réinstallation + purge des anciens caches à l'activate.
-const CACHE  = 'spotifyplus-v9';
+// v10 : bump de cache — module Nourriture (suivi calories façon Lifesum).
+const CACHE  = 'spotifyplus-v10';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
