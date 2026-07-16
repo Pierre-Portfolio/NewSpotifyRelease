@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.0.2';
+const APP_VERSION = '6.0.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8004,6 +8004,139 @@ function MesActifsPanel() {
   );
 }
 
+// ── Calculatrice (mode 'calc' de Finance, entre Full et Mes Actifs) ──
+// Calculatrice de poche classique (accumulateur + opération en attente), 100 % locale
+// (aucun appel réseau, rien à persister). Clavier physique supporté quand le panneau
+// est monté. Pas d'eval : petite machine à états + calcApply.
+function calcApply(a, b, op) {
+  switch (op) {
+    case '+': return a + b;
+    case '−': return a - b;
+    case '×': return a * b;
+    case '÷': return b === 0 ? NaN : a / b;
+    default: return b;
+  }
+}
+// Format d'affichage : coupe le bruit des flottants (0.1+0.2 → 0.3), 'Erreur' si NaN/∞
+function calcFmt(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return 'Erreur';
+  return String(parseFloat(n.toPrecision(12)));
+}
+function FinanceCalcPanel() {
+  const [display, setDisplay] = React.useState('0');
+  const [acc, setAcc]         = React.useState(null);
+  const [op, setOp]           = React.useState(null);
+  const [fresh, setFresh]     = React.useState(true);   // prochaine saisie REMPLACE l'affichage
+  const [hist, setHist]       = React.useState([]);     // 5 derniers calculs (session)
+  const cur = () => parseFloat(display.replace(',', '.')) || 0;
+
+  const inputDigit = d => {
+    if (display === 'Erreur' || fresh) { setDisplay(d); setFresh(false); return; }
+    if (display.replace('-', '').replace('.', '').length >= 15) return;
+    setDisplay(display === '0' ? d : display + d);
+  };
+  const inputDot = () => {
+    if (display === 'Erreur' || fresh) { setDisplay('0.'); setFresh(false); return; }
+    if (!display.includes('.')) setDisplay(display + '.');
+  };
+  const doOp = o => {
+    if (display === 'Erreur') return;
+    if (op !== null && !fresh) {
+      const r = calcApply(acc, cur(), op);
+      setAcc(isFinite(r) ? r : null);
+      setDisplay(calcFmt(r));
+    } else {
+      setAcc(cur());
+    }
+    setOp(o); setFresh(true);
+  };
+  const equals = () => {
+    if (op === null || display === 'Erreur') return;
+    const b = cur();
+    const r = calcApply(acc, b, op);
+    setHist(h => [`${calcFmt(acc)} ${op} ${calcFmt(b)} = ${calcFmt(r)}`, ...h].slice(0, 5));
+    setDisplay(calcFmt(r)); setAcc(null); setOp(null); setFresh(true);
+  };
+  const clearAll = () => { setDisplay('0'); setAcc(null); setOp(null); setFresh(true); };
+  const backspace = () => {
+    if (fresh || display === 'Erreur') return;
+    const s = display.slice(0, -1);
+    setDisplay(!s || s === '-' ? '0' : s);
+  };
+  const negate  = () => { if (display !== 'Erreur' && display !== '0') setDisplay(display.startsWith('-') ? display.slice(1) : '-' + display); };
+  const percent = () => { if (display !== 'Erreur') { setDisplay(calcFmt(cur() / 100)); setFresh(true); } };
+
+  // Clavier physique (monté avec le panneau uniquement) — ignore les champs de saisie
+  React.useEffect(() => {
+    const onKey = e => {
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const k = e.key;
+      if (/^[0-9]$/.test(k)) inputDigit(k);
+      else if (k === '.' || k === ',') inputDot();
+      else if (k === '+') doOp('+');
+      else if (k === '-') doOp('−');
+      else if (k === '*') doOp('×');
+      else if (k === '/') { e.preventDefault(); doOp('÷'); }
+      else if (k === 'Enter' || k === '=') equals();
+      else if (k === 'Backspace') backspace();
+      else if (k === 'Escape') clearAll();
+      else if (k === '%') percent();
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  const KEYS = [
+    ['C', clearAll, 'fn'], ['⌫', backspace, 'fn'], ['%', percent, 'fn'], ['÷', () => doOp('÷'), 'op'],
+    ['7', () => inputDigit('7')], ['8', () => inputDigit('8')], ['9', () => inputDigit('9')], ['×', () => doOp('×'), 'op'],
+    ['4', () => inputDigit('4')], ['5', () => inputDigit('5')], ['6', () => inputDigit('6')], ['−', () => doOp('−'), 'op'],
+    ['1', () => inputDigit('1')], ['2', () => inputDigit('2')], ['3', () => inputDigit('3')], ['+', () => doOp('+'), 'op'],
+    ['±', negate], ['0', () => inputDigit('0')], ['.', inputDot], ['=', equals, 'eq'],
+  ];
+  const keyStyle = kind => ({
+    background: kind === 'eq' ? `${FINANCE_CYAN}33` : kind === 'op' ? `${FINANCE_CYAN}18` : C.surfaceHigh,
+    border: `1px solid ${kind ? FINANCE_CYAN + '55' : C.border}`,
+    color: kind ? FINANCE_CYAN : C.text,
+    borderRadius:8, padding:'12px 0', fontSize:16, fontWeight:700, cursor:'pointer',
+    fontFamily:'DM Mono,monospace', lineHeight:1, userSelect:'none',
+  });
+
+  return (
+    <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'12px', display:'flex', flexDirection:'column', gap:10, maxWidth:340 }}>
+      {/* Écran */}
+      <div style={{ background:'#111', border:`1px solid ${C.border}`, borderRadius:8, padding:'10px 12px', textAlign:'right' }}>
+        <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', minHeight:13 }}>
+          {op !== null ? `${calcFmt(acc)} ${op}` : ' '}
+        </div>
+        <div style={{ fontSize:26, fontWeight:800, color: display === 'Erreur' ? '#e05050' : FINANCE_CYAN, fontFamily:'DM Mono,monospace', wordBreak:'break-all', lineHeight:1.15 }}>
+          {display}
+        </div>
+      </div>
+      {/* Clavier */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:6 }}>
+        {KEYS.map(([lbl, fn, kind]) => (
+          <button key={lbl} onClick={fn} style={keyStyle(kind)}>{lbl}</button>
+        ))}
+      </div>
+      {/* Historique de session (5 derniers) */}
+      {hist.length > 0 && (
+        <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+          <div style={{ fontSize:9, fontWeight:700, color:C.dim, letterSpacing:'0.07em' }}>HISTORIQUE</div>
+          {hist.map((h, i) => (
+            <div key={i} style={{ fontSize:10, color: i === 0 ? C.muted : C.dim, fontFamily:'DM Mono,monospace', textAlign:'right' }}>{h}</div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+        clavier physique supporté · Échap = C
+      </div>
+    </div>
+  );
+}
+
 function FinancePanel() {
   // Lit l'état depuis le gestionnaire module-level `_finance` et se ré-rend à chaque
   // notification. `startFinanceLight()` (idempotent) est déclenché ICI au montage du
@@ -8021,10 +8154,12 @@ function FinancePanel() {
   // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, S&P 500,
   // NASDAQ-100, NVIDIA, Take-Two, EUR/USD). Mode Full : tout. Mode Mes Actifs : patrimoine
   // perso lu depuis le Google Sheets « Finance » du Drive (MesActifsPanel — remplace les
-  // sections marché, ne déclenche AUCUN appel des APIs de cours). ⚠ NON persisté : on
+  // sections marché, ne déclenche AUCUN appel des APIs de cours). Mode Calculatrice :
+  // calculatrice locale (FinanceCalcPanel, zéro réseau). ⚠ NON persisté : on
   // repart TOUJOURS en Light à chaque (re)chargement / reconnexion.
-  const [mode, setMode] = React.useState('light');   // 'light' | 'full' | 'actifs'
+  const [mode, setMode] = React.useState('light');   // 'light' | 'full' | 'calc' | 'actifs'
   const full   = mode === 'full';
+  const calc   = mode === 'calc';
   const actifs = mode === 'actifs';
   const modeBtn = active => ({
     background: active ? `${FINANCE_CYAN}22` : 'none',
@@ -8054,14 +8189,15 @@ function FinancePanel() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-      <div style={{ display:'flex', gap:4, justifyContent:'flex-end' }}>
+      <div style={{ display:'flex', gap:4, justifyContent:'flex-end', flexWrap:'wrap' }}>
         <button onClick={() => setMode('light')}  style={modeBtn(mode === 'light')}>Light</button>
         <button onClick={() => setMode('full')}   style={modeBtn(full)}>Full</button>
+        <button onClick={() => setMode('calc')}   style={modeBtn(calc)}>🧮 Calculatrice</button>
         <button onClick={() => setMode('actifs')} style={{ ...modeBtn(actifs), ...(actifs ? { background:`${ACTIFS_GOLD}22`, border:`1px solid ${ACTIFS_GOLD}66`, color:ACTIFS_GOLD } : {}) }}>Mes Actifs</button>
       </div>
       <style>{'@keyframes finspin{to{transform:rotate(360deg)}}'}</style>
 
-      {actifs ? <MesActifsPanel /> : (<>
+      {calc ? <FinanceCalcPanel /> : actifs ? <MesActifsPanel /> : (<>
 
       {loading && (
         <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 10px',

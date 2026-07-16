@@ -16,7 +16,8 @@
 // expiration ; le bump force réinstallation + purge des anciens caches à l'activate.
 // v10 : bump de cache — module Nourriture (suivi calories façon Lifesum).
 // v11 : bump de cache — sous-collapse Cyber Secu dans Actu > Actualité.
-const CACHE  = 'spotifyplus-v11';
+// v12 : bump de cache — mode Calculatrice dans Finance (entre Full et Mes Actifs).
+const CACHE  = 'spotifyplus-v12';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 

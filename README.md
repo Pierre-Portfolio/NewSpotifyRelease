@@ -49,6 +49,9 @@ Prévisions **Open-Meteo** (sans clé) — Light 3 j / Full 7 j. Recherche d'une
 ### Finance
 Données live via **APIs gratuites sans clé** (fiabilité variable). Light / Full / **Mes Actifs**. Crypto (CoinGecko), Indices NASDAQ-100/S&P 500/CAC 40 (via GitHub Action, same-origin), Stock picking (Twelve Data + repli Stooq), Matières (Pétrole/Sucre Alpha Vantage, Or/Argent gold-api), EUR/USD. **📈 Graphique au clic** sur n'importe quelle ligne (SVG maison, repli sur historique local échantillonné). **💰 Mes Actifs** = tableau de bord patrimoine lu depuis ton Google Sheets « Finance » du Drive (patrimoine net/brut, budget 50/30/20, comptes, pyramide, liberté financière…).
 
+### Calculatrice (dans Finance)
+Mode **🧮 Calculatrice** entre Full et Mes Actifs : calculatrice de poche 100 % locale (4 opérations, %, ±, historique des 5 derniers calculs), clavier physique supporté.
+
 ### Bon Plan
 Comparateur de prix : **🎮 Jeux vidéo** (CheapShark, ~20 boutiques PC, prix ≈ EUR) et **🔎 Tous produits** (leDénicheur, best-effort + lien direct).
 
