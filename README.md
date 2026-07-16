@@ -117,6 +117,7 @@ Application web PWA pour scanner les artistes Spotify suivis, détecter leurs no
 ### Météo
 - Section **Météo** dédiée (titre en bleu) — **onglet en haut** sur desktop, **onglet propre** dans le menu « ⋯ » sur mobile
 - **Bouton Light / Full** en haut à droite (comme la section Finance) : **Light = 3 jours** (aujourd'hui + 2, par défaut), **Full = 7 jours** (tuiles plus compactes)
+- **🔍 Recherche d'une ville** : un champ de recherche permet d'afficher la météo de **n'importe quelle ville** (géocodage via [Open-Meteo](https://open-meteo.com/), gratuit sans clé) — la ville trouvée apparaît **en haut de la liste**, avec un bouton × pour l'effacer
 - Prévisions pour **4 lieux** : **Voisins-le-Bretonneux**, **Massy**, **Boulogne-Billancourt**, puis **votre position actuelle** (géolocalisation du navigateur — affiche « Position non autorisée » si l'accès est refusé)
 - Le dernier lieu s'affiche **« Ma position (ville) »**, la ville étant détectée à partir des coordonnées GPS (reverse-geocoding via [BigDataCloud](https://www.bigdatacloud.com/), gratuit sans clé — repli sur « Ma position » si indisponible)
 - Chaque jour : icône météo + température max (en bleu) et min
