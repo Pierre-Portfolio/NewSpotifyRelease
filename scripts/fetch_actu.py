@@ -108,6 +108,127 @@ def parse_rss(xml, max_items=12):
     return out
 
 
+# ── Vraies images d'article ─────────────────────────────────────────────
+# Les flux Google News ne fournissent AUCUNE image et leurs liens sont des
+# redirections opaques (news.google.com/rss/articles/<id>). Pour afficher une
+# image qui REPRÉSENTE l'article (et pas un simple favicon), on :
+#   1. décode le lien Google News → URL réelle de l'article (page GN → attributs
+#      data-n-a-sg/ts → POST interne DotsSplashUi/batchexecute, technique
+#      « googlenewsdecoder » — aucun autre moyen : l'id AU_yqL… n'est plus
+#      décodable en base64 depuis mi-2023) ;
+#   2. lit l'og:image (ou twitter:image) de la page de l'article.
+# Résultats mis en cache dans actu.json (clé "images", id GN → URL d'image,
+# "" = article sans og:image, déjà tenté) : les flux bougent peu entre deux
+# runs (cron 2 h) → quelques décodages par run seulement. Échec réseau → pas
+# de cache (retenté au prochain run) ; échec définitif → le client garde son
+# repli favicon (actuThumb). Budget par run pour borner la durée de l'Action.
+GN_BATCH_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+IMG_BUDGET = 40          # décodages max par run (≈ 3 requêtes chacun)
+IMG_TIMEOUT = 8
+
+
+def _post(url, body, timeout=IMG_TIMEOUT):
+    req = urllib.request.Request(url, data=body.encode(), headers={
+        "User-Agent": UA,
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def gn_id(link):
+    m = re.search(r"news\.google\.com/rss/articles/([^?/&#]+)", link or "")
+    return m.group(1) if m else None
+
+
+def gn_decode(link, art_id):
+    """Lien Google News → URL réelle de l'article (None si indécodable)."""
+    page = _get(link, timeout=IMG_TIMEOUT)
+    sg = re.search(r'data-n-a-sg="([^"]+)"', page)
+    ts = re.search(r'data-n-a-ts="([^"]+)"', page)
+    if not (sg and ts):
+        return None
+    inner = json.dumps([
+        "garturlreq",
+        [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1,
+          None, None, None, None, None, 0, 1],
+         "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
+        art_id, int(ts.group(1)), sg.group(1),
+    ])
+    body = "f.req=" + urllib.parse.quote(json.dumps([[["Fbv4je", inner, None, "generic"]]]))
+    res = _post(GN_BATCH_URL, body)
+    # Réponse batchexecute : préfixe anti-XSSI « )]}' » puis blocs JSON préfixés
+    # de leur taille — on parse le 1er tableau rencontré (raw_decode tolère la suite).
+    i = res.find("[")
+    if i >= 0:
+        try:
+            outer, _ = json.JSONDecoder().raw_decode(res[i:])
+            for el in outer:
+                if isinstance(el, list) and len(el) > 2 and el[0] == "wrb.fr" and el[2]:
+                    dec = json.loads(el[2])
+                    if dec and dec[0] == "garturlres" and str(dec[1]).startswith("http"):
+                        return dec[1]
+        except Exception:  # noqa: BLE001 — repli regex ci-dessous
+            pass
+    m = re.search(r'\\"garturlres\\",\\"(https?://[^"\\]+)', res)
+    return m.group(1) if m else None
+
+
+def og_image(article_url):
+    """og:image / twitter:image de la page article (None si absente)."""
+    req = urllib.request.Request(article_url, headers={
+        "User-Agent": UA, "Accept": "text/html", "Accept-Language": "fr-FR,fr;q=0.9",
+    })
+    with urllib.request.urlopen(req, timeout=IMG_TIMEOUT) as r:
+        html = r.read(262144).decode("utf-8", "replace")   # 256 Ko suffisent pour le <head>
+        base = r.geturl()
+    for pat in (
+        r'<meta[^>]+(?:property|name)=["\']og:image(?::url)?["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+        r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)',
+    ):
+        m = re.search(pat, html, re.I)
+        if m:
+            url = urllib.parse.urljoin(base, htmllib.unescape(m.group(1)).strip())
+            if url.startswith("http"):
+                return url
+    return None
+
+
+def enrich_images(items, old_cache, new_cache, budget):
+    """Complète a["image"] des items Google News qui n'en ont pas (voir bloc ci-dessus)."""
+    for a in items:
+        aid = gn_id(a.get("link", ""))
+        if a.get("image"):
+            if aid:
+                new_cache[aid] = a["image"]
+            continue
+        if not aid:
+            continue                       # lien direct sans image de flux : favicon client
+        if aid in new_cache:               # même article déjà traité (autre section)
+            a["image"] = new_cache[aid]
+            continue
+        if aid in old_cache:               # résolu (ou tenté sans og:image) à un run précédent
+            a["image"] = old_cache[aid]
+            new_cache[aid] = old_cache[aid]
+            continue
+        if budget[0] <= 0:
+            continue                       # le prochain run (cache aidant) finira le travail
+        budget[0] -= 1
+        try:
+            real = gn_decode(a["link"], aid)
+            img = og_image(real) if real else None
+            a["image"] = img or ""
+            # Décodage OK mais pas d'og:image → "" caché (inutile de retenter) ;
+            # article indécodable/erreur réseau → PAS de cache, retenté au prochain run.
+            if real:
+                new_cache[aid] = img or ""
+        except Exception as e:  # noqa: BLE001 — transitoire : on retentera
+            print(f"   image {aid[:24]}…: {e}", file=sys.stderr)
+        time.sleep(0.5)                    # ménage le endpoint interne Google
+
+
 def fetch_gnews(feeds):
     """Générique Google News RSS (même logique que actuFetchGNews côté client)."""
     for f in feeds:
@@ -279,6 +400,21 @@ def main():
                 out[key] = existing[key]
             print(f"!! {key}: indisponible — valeur précédente conservée", file=sys.stderr)
         time.sleep(1)
+
+    # Vraies images d'article pour les sections Google News (voir enrich_images).
+    # Cache "images" reconstruit à chaque run : seuls les ids ENCORE présents dans
+    # les flux sont conservés → taille bornée (≤ 60 entrées).
+    old_cache = existing.get("images") or {}
+    new_cache = {}
+    budget = [IMG_BUDGET]
+    for key in ("presse", "monde", "bourse", "jeux", "insolite"):
+        if isinstance(out.get(key), list):
+            enrich_images(out[key], old_cache, new_cache, budget)
+    out["images"] = new_cache
+    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "bourse", "jeux", "insolite"))
+    withimg = sum(1 for k in ("presse", "monde", "bourse", "jeux", "insolite")
+                  for a in (out.get(k) or []) if a.get("image"))
+    print(f"images: {withimg}/{total} articles illustrés ({IMG_BUDGET - budget[0]} décodages ce run)")
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:

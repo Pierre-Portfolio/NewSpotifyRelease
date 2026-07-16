@@ -24,7 +24,7 @@ C'est un **hub perso** multi-sections : Musique (feed), Actu, Météo, Finance (
 | `vendor/sql-wasm.js` / `.wasm` | sql.js 1.10.2 auto-hébergé |
 | `vendor/leaflet.js` / `.css` | Leaflet 1.9.4 auto-hébergé, chargé **lazy** (`loadLeaflet()`) au 1er affichage de la carte Maps |
 | `icon-192.png` / `icon-512.png` | Icônes PWA (racine) |
-| `data/actu.json` | Sources Actu pré-fetchées par GitHub Action (`update-actu.yml`, cron 2 h) via `scripts/fetch_actu.py`. Lu par `actuFetchStatic()` same-origin ; > 24 h → repli fetchers client (proxies CORS) |
+| `data/actu.json` | Sources Actu pré-fetchées par GitHub Action (`update-actu.yml`, cron 2 h) via `scripts/fetch_actu.py`. Lu par `actuFetchStatic()` same-origin ; > 24 h → repli fetchers client (proxies CORS). **Images d'article** : les liens Google News (opaques, sans image) sont décodés côté Action (`gn_decode`, POST interne DotsSplashUi/batchexecute) → `og_image()` de la page réelle → champ `image` des items ; cache `images` (id GN → URL, `""` = tenté sans og:image) reconstruit à chaque run, budget `IMG_BUDGET=40` décodages/run, échec réseau retenté au run suivant. Client inchangé (`actuThumb` : image sinon favicon) |
 | `data/indices.json` | Vrais indices (NASDAQ-100/S&P 500/CAC 40) via `scripts/fetch_indices.py` (Stooq→Yahoo) + `update-indices.yml`. Lu same-origin (zéro proxy) |
 
 ## Stack & sécurité
