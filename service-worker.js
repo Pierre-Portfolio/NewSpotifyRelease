@@ -18,7 +18,8 @@
 // v11 : bump de cache — sous-collapse Cyber Secu dans Actu > Actualité.
 // v12 : bump de cache — mode Calculatrice dans Finance (entre Full et Mes Actifs).
 // v13 : bump de cache — refonte Bon Plan (promos du moment + liste de suivi).
-const CACHE  = 'spotifyplus-v13';
+// v14 : bump de cache — demande d'accès Google auto (Actu/À propos) + garde layout mobile.
+const CACHE  = 'spotifyplus-v14';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 

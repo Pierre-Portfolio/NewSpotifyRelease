@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.0.4';
+const APP_VERSION = '6.0.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -264,6 +264,10 @@ async function dropboxLogin() {
   });
   // Au retour, rouvrir l'onglet d'où on est parti (À propos, etc.) au lieu de Scrapping
   try { localStorage.setItem('spotifyplus_oauth_return', '1'); } catch {}
+  // Indice de layout : si on part d'un affichage MOBILE, le mémoriser 15 min — au retour,
+  // Chrome Android peut cocher « Version pour ordinateur » (viewport ~980px) et l'app
+  // basculerait à tort en layout desktop (voir useIsMobile).
+  try { if (window.innerWidth < 820) localStorage.setItem('spotifyplus_layout_hint', String(Date.now())); } catch {}
   window.location = `https://www.dropbox.com/oauth2/authorize?${params}`;
 }
 async function dropboxExchange(code) {
@@ -382,12 +386,30 @@ function gdriveLogin() {
   });
   // Au retour, rouvrir l'onglet d'où on est parti (À propos, Mes Actifs…) au lieu de Scrapping
   try { localStorage.setItem('spotifyplus_oauth_return', '1'); } catch {}
+  // Indice de layout : si on part d'un affichage MOBILE, le mémoriser 15 min — au retour,
+  // Chrome Android peut cocher « Version pour ordinateur » (viewport ~980px) et l'app
+  // basculerait à tort en layout desktop (voir useIsMobile).
+  try { if (window.innerWidth < 820) localStorage.setItem('spotifyplus_layout_hint', String(Date.now())); } catch {}
   window.location = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
 }
 // Retour du consentement Google : le token arrive dans le FRAGMENT (#access_token=…&state=gdrive),
 // jamais envoyé au serveur. Appelé tout en tête de l'init, avant le parsing des query params.
 function gdriveHandleRedirect() {
-  if (!window.location.hash || window.location.hash.indexOf('access_token') === -1) return;
+  if (!window.location.hash) return;
+  // Consentement REFUSÉ (#error=access_denied&state=gdrive.…) : on pose un cooldown 24 h
+  // (gdrive_declined) pour que la demande d'accès AUTOMATIQUE (gdriveAutoLogin, ouverture
+  // d'Actu/À propos) ne re-redirige pas en boucle vers Google. Le bouton manuel
+  // « Connecter Google » reste utilisable à tout moment.
+  if (window.location.hash.indexOf('error=') !== -1) {
+    const eh = new URLSearchParams(window.location.hash.slice(1));
+    if ((eh.get('state') || '').slice(0, 7) === 'gdrive.') {
+      try { localStorage.setItem('gdrive_declined', String(Date.now())); } catch {}
+      try { localStorage.removeItem('gdrive_state'); } catch {}
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    return;
+  }
+  if (window.location.hash.indexOf('access_token') === -1) return;
   const h = new URLSearchParams(window.location.hash.slice(1));
   const state = h.get('state') || '';
   // Discriminant provider : le state doit commencer par 'gdrive.' (sinon ce n'est pas notre retour Drive)
@@ -402,7 +424,21 @@ function gdriveHandleRedirect() {
   try {
     localStorage.setItem('gdrive_access', h.get('access_token'));
     localStorage.setItem('gdrive_expiry', String(Date.now() + (parseInt(h.get('expires_in') || '3600') || 3600) * 1000));
+    localStorage.removeItem('gdrive_declined');   // consentement accordé → plus de cooldown
   } catch {}
+}
+// Demande d'accès Google AUTOMATIQUE à l'ouverture d'Actu (vidéos YouTube direct) et
+// d'À propos (Drive) — même consentement pour les deux (scopes drive + youtube groupés).
+// Garde-fous : 1×/chargement de page (_gdriveAutoAsked), jamais si déjà connecté, et
+// cooldown 24 h après un refus (gdrive_declined, posé par gdriveHandleRedirect) pour ne
+// pas boucler vers Google si l'utilisateur annule le consentement.
+let _gdriveAutoAsked = false;
+function gdriveAutoLogin() {
+  if (_gdriveAutoAsked || !gdriveConfigured() || gdriveConnected()) return;
+  const declined = parseInt(localStorage.getItem('gdrive_declined') || '0') || 0;
+  if (Date.now() - declined < 24 * 3600 * 1000) return;
+  _gdriveAutoAsked = true;
+  gdriveLogin();
 }
 // Retrouve l'id du fichier de sauvegarde (cache localStorage → 1 seule recherche, puis PATCH direct)
 async function gdriveFindBackupId(token) {
@@ -2474,9 +2510,30 @@ function StoreProvider({ children }) {
 // HOOK
 // ════════════════════════════════════════════════
 function useIsMobile(bp = 820) {
-  const [m, setM] = React.useState(typeof window !== 'undefined' ? window.innerWidth < bp : false);
+  // ⚠ Chrome Android peut cocher « Version pour ordinateur » au retour du consentement
+  // Google (comportement navigateur, non désactivable côté page) : le viewport passe
+  // alors à ~980px et `innerWidth < bp` seul basculait l'app en layout desktop sur
+  // téléphone. Garde supplémentaire : appareil TACTILE à petit écran PHYSIQUE
+  // (screen.width/height ignorent le mode desktop) → layout mobile quand même.
+  const touchSmall = () => {
+    try {
+      return (navigator.maxTouchPoints > 0 || 'ontouchstart' in window) &&
+        Math.min(window.screen.width, window.screen.height) < bp;
+    } catch { return false; }
+  };
+  // 2e filet : indice posé AVANT une redirection OAuth quand on était en layout mobile
+  // (spotifyplus_layout_hint, valable 15 min) — couvre le cas où le mode desktop de
+  // Chrome fausse AUSSI screen.width.
+  const recentMobileHint = () => {
+    try {
+      const t = parseInt(localStorage.getItem('spotifyplus_layout_hint') || '0') || 0;
+      return t > 0 && Date.now() - t < 15 * 60000;
+    } catch { return false; }
+  };
+  const get = () => typeof window !== 'undefined' && (window.innerWidth < bp || touchSmall() || recentMobileHint());
+  const [m, setM] = React.useState(get);
   React.useEffect(() => {
-    const h = () => setM(window.innerWidth < bp);
+    const h = () => setM(get());
     window.addEventListener('resize', h);
     return () => window.removeEventListener('resize', h);
   }, [bp]);
@@ -5333,6 +5390,9 @@ function VosEcoutesPanel() {
   const { listenStats: ls, purgeListened, resetQuota, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, logout } = useStore();
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
+  // Ouverture d'À propos sans Google connecté → même demande d'accès directe qu'Actu
+  // (un seul consentement pour Drive ET YouTube). Garde-fous dans gdriveAutoLogin.
+  React.useEffect(() => { gdriveAutoLogin(); }, []);
   // Restauration d'une sauvegarde exportée (fichier JSON de buildBackup)
   const onRestoreFile = (ev) => {
     const f = ev.target.files && ev.target.files[0];
@@ -6084,6 +6144,10 @@ function ActuPanel() {
   const [data, setData]   = React.useState(() => loadActu());
   const [loading, setLoad] = React.useState(false);
   const [err, setErr]     = React.useState('');
+  // Ouverture d'Actu sans Google connecté → demande d'accès DIRECTE (consentement
+  // Drive+YouTube groupé) pour voir les vidéos YouTube sans clic supplémentaire.
+  // gdriveAutoLogin gère les garde-fous (déjà connecté / refus récent / 1×/chargement).
+  React.useEffect(() => { gdriveAutoLogin(); }, []);
 
   const refresh = React.useCallback(async () => {
     setLoad(true); setErr('');

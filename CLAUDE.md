@@ -44,7 +44,7 @@ REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
 SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
-### `APP_VERSION` (actuellement `'6.0.4'`)
+### `APP_VERSION` (actuellement `'6.0.5'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈601) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~601), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -177,7 +177,7 @@ Méthodes : `startSync({skipCount, resumeUrl, resumeOffset})` · `resumeSync()` 
 
 `restoreBackup(data)` (complet OU partiel, clés absentes ignorées) : artists (dates jamais régressées, cumuls au MAX), music (listened/liked au MAX), stats (fusion cumuls), todos/rappels/remembers/maps REMPLACÉS, tvtime FUSIONNÉ (union `type+id`, progression la plus avancée), finance FUSIONNÉ (union série, densité 30 min, cap), food FUSIONNÉ (profil remplacé ; jours : le local gagne, jours absents complétés), listens FUSIONNÉ (union, cap 5000), tmdb_key/yt_key REMPLACÉES si non vides, mdp_vault REMPLACÉ (backup dans `spotifyplus_mdp_vault_prev`).
 
-**Dropbox** (`DROPBOX_APP_KEY` renseignée, PKCE offline) et **Google Drive** (`GDRIVE_CLIENT_ID`, OAuth **implicite** token ~1 h, scopes `drive.file`+`drive.readonly`+`youtube`) : sauvegardent/restaurent le backup complet (overwrite). ⚠ Anti-fixation Drive : `gdriveHandleRedirect()` vérifie préfixe `gdrive.` + nonce `gdrive_state`. Retour OAuth distingué par `state` (`dropbox`/`gdrive.<nonce>`) ; marqueur `spotifyplus_oauth_return` rouvre l'onglet d'origine. Proposition de sauvegarde hebdo (seul l'export complet « Tous » pose `spotifyplus_last_backup`).
+**Dropbox** (`DROPBOX_APP_KEY` renseignée, PKCE offline) et **Google Drive** (`GDRIVE_CLIENT_ID`, OAuth **implicite** token ~1 h, scopes `drive.file`+`drive.readonly`+`youtube`) : sauvegardent/restaurent le backup complet (overwrite). ⚠ Anti-fixation Drive : `gdriveHandleRedirect()` vérifie préfixe `gdrive.` + nonce `gdrive_state`. Retour OAuth distingué par `state` (`dropbox`/`gdrive.<nonce>`) ; marqueur `spotifyplus_oauth_return` rouvre l'onglet d'origine. **Demande d'accès AUTO** : `gdriveAutoLogin()` appelé au mount d'`ActuPanel` ET de `VosEcoutesPanel` → redirige direct vers le consentement Google si non connecté (garde-fous : `_gdriveAutoAsked` 1×/chargement, cooldown 24 h `gdrive_declined` posé par `gdriveHandleRedirect` sur `#error=…&state=gdrive.…`, effacé au consentement). **Garde layout mobile** : Chrome Android peut cocher « Version pour ordinateur » au retour OAuth (viewport ~980px) → `useIsMobile` reste mobile si (tactile ET min(screen.w,h) < 820) OU indice `spotifyplus_layout_hint` (posé avant chaque redirect OAuth quand innerWidth < 820, valable 15 min). Proposition de sauvegarde hebdo (seul l'export complet « Tous » pose `spotifyplus_last_backup`).
 
 Export : `EXPORT_SECTIONS` (13 boutons dans « ↧ EXPORTER » d'À propos) → `downloadBackup(sec)`, fichier `spotifyplus-<key>-<date>.json`.
 
