@@ -195,7 +195,7 @@ Export : `EXPORT_SECTIONS` (13 boutons dans « ↧ EXPORTER » d'À propos) → 
 
 **Musique** (`MusiquePanel`, violet) : fusion 3 collapses `LikerPanel` (❤ Likés) / `HistoryPanel` (🕘 Historique) / `ArtistsPanel` (🎤 Artistes suivis). Anciens onglets dédiés supprimés (valeurs héritées mappées sur `musique`).
 
-**Stats** (`StatsPanel`) : collapses `StatsCollapse` imbriqués — 🎵 MUSIQUES (restantes + sous-collapses écoutées/temps/graphique) · ✅ TO DO · 🎬 FILMS (temps total + top 5 séries + nombre/temps/restant/terminées, YouTube fusionné) · 🗺️ MAPS · 🔔 REMEMBERS · 🎮 JEUX (LoL + Speedrun) · 🐙 GITHUB. `ListeningCharts`/`BarChart` (14 j, SVG maison) lit le **journal persistant** `spotifyplus_listens` (`recordListen`/`unrecordListen`, survit à la purge). `AdvancedStats` (top 5 artistes, répartition, moy/30 j — repart de zéro après purge). Helper `fmtMonthsDaysHours(ms)`.
+**Stats** (`StatsPanel`) : collapses `StatsCollapse` imbriqués — 🎵 MUSIQUES (restantes + sous-collapses écoutées/temps/graphique) · ✅ TO DO · 🎬 FILMS (temps total + top 5 séries + nombre/temps/restant/terminées, YouTube fusionné) · 🗺️ MAPS · 🔔 REMEMBERS · 🎮 JEUX (Speedrun + LoL) · 🐙 GITHUB. `ListeningCharts`/`BarChart` (14 j, SVG maison) lit le **journal persistant** `spotifyplus_listens` (`recordListen`/`unrecordListen`, survit à la purge). `AdvancedStats` (top 5 artistes, répartition, moy/30 j — repart de zéro après purge). Helper `fmtMonthsDaysHours(ms)`.
 
 **À propos** (`VosEcoutesPanel`) : ⚙️ Paramétrage · ↧ Exporter (repliable) · DropboxSync/GoogleDriveSync (save) · ↥ Restaurer · Dropbox/Drive (restore) · 🔄 Réinit quota 24 h · 🗑 Purger · ⎋ Déconnecter (rouge) · « Version X ».
 
