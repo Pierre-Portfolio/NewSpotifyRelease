@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.5.2';
+const APP_VERSION = '6.5.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4966,7 +4966,30 @@ async function opggGet(url) {
   return null;
 }
 
-// Riot ID → summoner op.gg { id, level, iconUrl, name, tag } | { error }
+// Classements « rang / total » exposés par les payloads op.gg (non documentés → parsing
+// TOLÉRANT, plusieurs noms de champs candidats par catégorie). `ladder_rank` (classement
+// LP global op.gg) est le seul régulièrement présent ; level/champions/maîtrises sont
+// parsés s'ils apparaissent, sinon null (l'UI affiche « — / — »).
+function opggProfileRanks(s) {
+  const pick = (...cands) => {
+    for (const c of cands) {
+      if (c && typeof c === 'object' && c.rank != null && (c.total != null || c.of != null)) {
+        const rank = +c.rank, total = +(c.total != null ? c.total : c.of);
+        if (isFinite(rank) && isFinite(total) && rank > 0 && total > 0) return { rank, total };
+      }
+    }
+    return null;
+  };
+  if (!s || typeof s !== 'object') return {};
+  return {
+    ladder:   pick(s.ladder_rank),
+    level:    pick(s.level_rank, s.summoner_level_rank),
+    champion: pick(s.champion_rank, s.champions_rank),
+    mastery:  pick(s.mastery_rank, s.mastery_score_rank, s.champion_mastery_rank),
+  };
+}
+
+// Riot ID → summoner op.gg { id, level, iconUrl, name, tag, ranks } | { error }
 async function opggFindSummoner(riotId, platform) {
   const region = LOL_OPGG_REGION[platform] || 'euw';
   const j = await opggGet(`https://lol-api-summoner.op.gg/api/v3/${region}/summoners?riot_id=${encodeURIComponent(riotId)}&hl=en_US`);
@@ -4978,7 +5001,7 @@ async function opggFindSummoner(riotId, platform) {
   const norm = s => String(s || '').trim().toLowerCase();
   const hit = arr.find(s => norm(s.game_name) === norm(n) && norm(s.tagline) === norm(t)) || arr[0];
   if (!hit || !hit.summoner_id) return { error: 'NOTFOUND' };
-  return { id: hit.summoner_id, level: hit.level || null, iconUrl: hit.profile_image_url || null, name: hit.game_name, tag: hit.tagline };
+  return { id: hit.summoner_id, level: hit.level || null, iconUrl: hit.profile_image_url || null, name: hit.game_name, tag: hit.tagline, ranks: opggProfileRanks(hit) };
 }
 
 // league_stats op.gg → entrées au format Riot (queueType/tier/rank/LP/wins/losses),
@@ -5001,13 +5024,13 @@ function opggLeagueToEntries(ls) {
   return out;
 }
 
-// Profil op.gg { level, iconUrl, entries[] } | null
+// Profil op.gg { level, iconUrl, entries[], ranks } | null
 async function opggSummary(platform, summonerId) {
   const region = LOL_OPGG_REGION[platform] || 'euw';
   const j = await opggGet(`https://lol-api-summoner.op.gg/api/${region}/summoners/${encodeURIComponent(summonerId)}/summary?hl=en_US`);
   const s = j && j.data && (j.data.summoner || j.data);
   if (!s || typeof s !== 'object') return null;
-  return { level: s.level || null, iconUrl: s.profile_image_url || null, entries: opggLeagueToEntries(s.league_stats) };
+  return { level: s.level || null, iconUrl: s.profile_image_url || null, entries: opggLeagueToEntries(s.league_stats), ranks: opggProfileRanks(s) };
 }
 
 // Partie en cours op.gg → forme normalisée { queueLabel, startedAt, participants:[{ puuid
@@ -5111,10 +5134,14 @@ async function lolFetchProfile(force) {
   if (!found.error) {
     const sum = await opggSummary(cfg.platform, found.id);
     if (sum) {
+      // Classements « rang / total » : le summary d'abord, la fiche de recherche en complément
+      const ranks = {};
+      for (const k of ['ladder', 'level', 'champion', 'mastery'])
+        ranks[k] = (sum.ranks && sum.ranks[k]) || (found.ranks && found.ranks[k]) || null;
       const out = {
         source: 'opgg', riotId: cfg.riotId, platform: cfg.platform, puuid: found.id, fetchedAt: Date.now(),
         level: sum.level || found.level, icon: null, iconUrl: sum.iconUrl || found.iconUrl,
-        ranked: sum.entries, mastery: [],
+        ranked: sum.entries, mastery: [], ranks,
       };
       try { localStorage.setItem(LOL_CACHE_LS, JSON.stringify(out)); } catch {}
       return out;
@@ -5347,8 +5374,10 @@ function LolStatsSection() {
     );
   };
 
-  // Carte « 🏅 MEILLEURS JOUEURS » (Top ≈ X % + classement estimé « ( rang / total ) ») —
-  // factorisée pour être affichée au-dessus de CHAQUE file classée (soloQ ET flex).
+  // Carte « 🏅 MEILLEURS JOUEURS » (Top ≈ X %) — factorisée pour être affichée au-dessus
+  // de CHAQUE file classée (soloQ ET flex). La ligne « classement : ( rang / total ) » a
+  // été RETIRÉE de la tuile (6.5.3) : tous les classements vivent dans le collapse
+  // 🏆 CLASSEMENT ci-dessous.
   // ⚠ LOL_TOP_PCT/LOL_RANKED_POP sont calibrées sur la distribution soloQ publiée :
   // pour la flex c'est la même estimation par palier (aucune distribution flex keyless).
   const topCard = (entry, tag) => {
@@ -5362,9 +5391,41 @@ function LolStatsSection() {
           <div style={{ fontSize:18, fontWeight:800, color:LOL_COLOR, fontFamily:'DM Mono,monospace', lineHeight:1.15 }}>
             Top ≈ {pct < 1 ? pct.toFixed(2) : pct} %
           </div>
-          <div style={{ fontSize:9, color:C.muted, marginTop:2, fontFamily:'DM Mono,monospace' }}>classement : ({lolEstimatedRank(entry).toLocaleString('fr-FR')} / {LOL_RANKED_POP.toLocaleString('fr-FR')})</div>
         </div>
       </div>
+    );
+  };
+
+  // Collapse « 🏆 CLASSEMENT » : TOUS les classements au format « rang / total ».
+  // SoloQ/Flex = estimation par palier (≈, mêmes helpers que l'ancienne ligne de tuile) ;
+  // ladder/champions/niveau/maîtrises = données op.gg si le payload les expose
+  // (opggProfileRanks, parsing tolérant), sinon « — / — » (rien n'est inventé).
+  const classementCollapse = () => {
+    const r = (data && data.ranks) || {};
+    const est = e => { const rk = e && lolEstimatedRank(e); return rk ? { rank: rk, total: LOL_RANKED_POP, approx: true } : null; };
+    const rows = [
+      ['🏆', 'Solo/Duo',  est(solo), solo ? 'estimation par palier (distribution soloQ publiée)' : 'non classé'],
+      ['🤝', 'Flexible',  est(flex), flex ? 'estimation par palier (même table que la soloQ)' : 'non classé'],
+      ['🎖️', 'Ladder op.gg (LP)', r.ladder,   'classement LP global op.gg'],
+      ['⚔️', 'Champions', r.champion, 'exposé seulement si l\'API op.gg keyless le renvoie'],
+      ['📈', 'Niveau',    r.level,    'exposé seulement si l\'API op.gg keyless le renvoie'],
+      ['✨', 'Maîtrises', r.mastery,  'exposé seulement si l\'API op.gg keyless le renvoie'],
+    ];
+    return (
+      <StatsCollapse defaultOpen={false} color={LOL_COLOR} title={<span>🏆 CLASSEMENT <span style={{ color:C.dim, fontWeight:400 }}>· rang / total</span></span>}>
+        {rows.map(([emo, lbl, v, hint]) => (
+          <div key={lbl} title={hint} style={{ display:'flex', alignItems:'center', gap:8, padding:'2px 0' }}>
+            <span style={{ width:22, textAlign:'center', flexShrink:0, fontSize:13 }}>{emo}</span>
+            <span style={{ flex:1, minWidth:0, fontSize:11, color:C.text, fontWeight:700 }}>{lbl}</span>
+            <span style={{ fontSize:11, fontFamily:'DM Mono,monospace', color: v ? LOL_COLOR : C.dim, flexShrink:0 }}>
+              {v ? `${v.approx ? '≈ ' : ''}${fmtN(v.rank)} / ${fmtN(v.total)}` : '— / —'}
+            </span>
+          </div>
+        ))}
+        <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+          ≈ = estimation par palier · « — / — » = classement non exposé par l'API op.gg sans clé
+        </div>
+      </StatsCollapse>
     );
   };
 
@@ -5479,6 +5540,8 @@ function LolStatsSection() {
               🎮 Aucune partie en cours
             </div>
           )}
+          {/* 🏆 Tous les classements « rang / total » (remplace la ligne retirée des tuiles Top %) */}
+          {classementCollapse()}
           {data.mastery.length > 0 && (
             <div style={{ ...card, display:'flex', flexDirection:'column', gap:8 }}>
               <div style={lab}>TOP MAÎTRISES</div>
