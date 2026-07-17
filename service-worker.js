@@ -24,7 +24,9 @@
 // v32 : bump de cache — lot 6.4.6 → 6.5.3 (fond blanc icônes fuites, Promos repliées,
 // recherche Nourriture résiliente + édition 7 j/historique 30 j, module Note,
 // calculatrice page de connexion, ordre GitHub, collapse Classement LoL).
-const CACHE  = 'spotifyplus-v32';
+// v33 : bump de cache — Note & Calculatrice intégrées à la grille de tuiles de la page
+// de connexion (mêmes chips animées que les autres modules, cliquables).
+const CACHE  = 'spotifyplus-v33';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
