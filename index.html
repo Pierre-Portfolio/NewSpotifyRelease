@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.5.5';
+const APP_VERSION = '6.5.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2937,10 +2937,23 @@ function JeuxPanel() {
 // Aire de jeu : rend le composant du jeu sélectionné. En cours de construction pour tous
 // tant que les jeux ne sont pas développés (message dédié).
 function GameHost({ game, label }) {
-  return <GameComingSoon label={label} />;
+  switch (game) {
+    case '2048':       return <Game2048 />;
+    case 'demineur':   return <GameDemineur />;
+    case 'flappy':     return <GameFlappy />;
+    case 'go':         return <GameGo />;
+    case 'inposteur':  return <GameInposteur />;
+    case 'morpion':    return <GameMorpion />;
+    case 'motus':      return <GameMotus />;
+    case 'osu':        return <GameOsu />;
+    case 'puissance4': return <GamePuissance4 />;
+    case 'snake':      return <GameSnake />;
+    case 'tierlist':   return <GameTierList />;
+    default:           return <GameComingSoon label={label} />;
+  }
 }
 
-// Placeholder « en cours de construction » (phase 1 : les 11 jeux).
+// Placeholder « en cours de construction » (repli si un jeu n'est pas encore développé).
 function GameComingSoon({ label }) {
   return (
     <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, textAlign:'center', padding:'46px 18px', background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, borderRadius:14, minHeight:220 }}>
@@ -2950,6 +2963,629 @@ function GameComingSoon({ label }) {
         Ce jeu est <b style={{ color:C.text }}>en cours de construction</b> 🛠️ — reviens bientôt pour y jouer !
       </div>
     </div>
+  );
+}
+
+// ── Helpers partagés des jeux ──
+function gameHi(id) { try { return +(localStorage.getItem('spotifyplus_game_hi_' + id) || 0) || 0; } catch { return 0; } }
+function setGameHi(id, v) { try { localStorage.setItem('spotifyplus_game_hi_' + id, String(v)); } catch {} }
+const gameBtn = (extra) => ({ background:`${GAMES_COLOR}18`, border:`1px solid ${GAMES_COLOR}55`, color:GAMES_COLOR, borderRadius:8, padding:'7px 13px', fontSize:12, fontWeight:700, cursor:'pointer', ...(extra || {}) });
+// Coquille commune : conseil + score/reset alignés, contenu centré.
+function GameWrap({ hint, bar, children }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      {hint && <div style={{ fontSize:11, color:C.muted, lineHeight:1.5 }}>{hint}</div>}
+      {bar && <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, flexWrap:'wrap' }}>{bar}</div>}
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:12 }}>{children}</div>
+    </div>
+  );
+}
+// Détection d'un swipe → direction ('up'|'down'|'left'|'right').
+function useSwipe(onSwipe) {
+  const ref = React.useRef({ x:0, y:0 });
+  return {
+    onTouchStart: e => { const t = e.touches[0]; ref.current = { x:t.clientX, y:t.clientY }; },
+    onTouchEnd: e => {
+      const t = e.changedTouches[0]; const dx = t.clientX - ref.current.x, dy = t.clientY - ref.current.y;
+      if (Math.abs(dx) < 24 && Math.abs(dy) < 24) return;
+      if (Math.abs(dx) > Math.abs(dy)) onSwipe(dx > 0 ? 'right' : 'left'); else onSwipe(dy > 0 ? 'down' : 'up');
+    },
+  };
+}
+
+// ════════ 2048 ════════
+const G2048_COLORS = { 0:'#242430', 2:'#4a4356', 4:'#5a4d6e', 8:'#7a5a9e', 16:'#8f5ab0', 32:'#a85ac0', 64:'#39b2d1', 128:'#2f9ec1', 256:'#2c8fb0', 512:'#2a80a0', 1024:'#f5b81f', 2048:'#f5813c' };
+function g2048Slide(row) {
+  const nums = row.filter(v => v); const out = []; let gained = 0;
+  for (let i = 0; i < nums.length; i++) {
+    if (i + 1 < nums.length && nums[i] === nums[i + 1]) { out.push(nums[i] * 2); gained += nums[i] * 2; i++; }
+    else out.push(nums[i]);
+  }
+  while (out.length < 4) out.push(0);
+  return { row: out, gained };
+}
+const g2048Rev = b => b.map(r => r.slice().reverse());
+const g2048Tr = b => b[0].map((_, c) => b.map(r => r[c]));
+function g2048Move(board, dir) {
+  let work = board, back = x => x;
+  if (dir === 'right') { work = g2048Rev(board); back = g2048Rev; }
+  else if (dir === 'up') { work = g2048Tr(board); back = g2048Tr; }
+  else if (dir === 'down') { work = g2048Rev(g2048Tr(board)); back = x => g2048Tr(g2048Rev(x)); }
+  let gained = 0;
+  const moved = work.map(r => { const s = g2048Slide(r); gained += s.gained; return s.row; });
+  const nb = back(moved);
+  const changed = JSON.stringify(nb) !== JSON.stringify(board);
+  return { board: nb, gained, changed };
+}
+function g2048Spawn(board) {
+  const cells = []; board.forEach((r, ri) => r.forEach((v, ci) => { if (!v) cells.push([ri, ci]); }));
+  if (!cells.length) return board;
+  const [r, c] = cells[Math.floor(Math.random() * cells.length)];
+  const nb = board.map(row => row.slice()); nb[r][c] = Math.random() < 0.9 ? 2 : 4; return nb;
+}
+function g2048Full(b) { return b.every(r => r.every(v => v)) && !['left','right','up','down'].some(d => g2048Move(b, d).changed); }
+function Game2048() {
+  const fresh = () => g2048Spawn(g2048Spawn([[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]]));
+  const [board, setBoard] = React.useState(fresh);
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('2048'));
+  const boardRef = React.useRef(board); React.useEffect(() => { boardRef.current = board; }, [board]);
+  const move = dir => {
+    const { board: nb, gained, changed } = g2048Move(boardRef.current, dir);
+    if (!changed) return;
+    const spawned = g2048Spawn(nb);
+    setBoard(spawned);
+    setScore(s => { const ns = s + gained; setBest(b => { const v = Math.max(b, ns); setGameHi('2048', v); return v; }); return ns; });
+  };
+  React.useEffect(() => {
+    const onKey = e => {
+      const m = { ArrowLeft:'left', ArrowRight:'right', ArrowUp:'up', ArrowDown:'down', a:'left', d:'right', w:'up', s:'down' }[e.key];
+      if (m) { e.preventDefault(); move(m); }
+    };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const swipe = useSwipe(move);
+  const over = g2048Full(board);
+  const restart = () => { setBoard(fresh()); setScore(0); };
+  return (
+    <GameWrap hint="Fusionne les tuiles identiques — flèches du clavier ou glissé du doigt. Objectif : 2048 !"
+      bar={<><span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span><button onClick={restart} style={gameBtn()}>↻ Rejouer</button></>}>
+      <div {...swipe} style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gridTemplateRows:'repeat(4,1fr)', gap:8, background:'#17171e', padding:8, borderRadius:12, width:'100%', maxWidth:320, aspectRatio:'1', touchAction:'none' }}>
+        {board.flat().map((v, i) => (
+          <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'center', borderRadius:8, background:G2048_COLORS[v] || '#f5813c', color:'#fff', fontWeight:800, fontSize: v >= 1000 ? 17 : 23, transition:'background 0.1s' }}>{v || ''}</div>
+        ))}
+      </div>
+      {over && <div style={{ fontSize:13, fontWeight:800, color:'#f5813c' }}>Partie terminée — {score} points</div>}
+    </GameWrap>
+  );
+}
+
+// ════════ Démineur ════════
+function demGen(N, mines, safe) {
+  const cells = Array.from({ length: N * N }, () => ({ mine:false, revealed:false, flag:false, count:0 }));
+  let placed = 0;
+  while (placed < mines) { const i = Math.floor(Math.random() * N * N); if (i === safe || cells[i].mine) continue; cells[i].mine = true; placed++; }
+  const nb = i => { const r = Math.floor(i / N), c = i % N, out = []; for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) { if (!dr && !dc) continue; const nr = r + dr, nc = c + dc; if (nr >= 0 && nr < N && nc >= 0 && nc < N) out.push(nr * N + nc); } return out; };
+  cells.forEach((cell, i) => { if (!cell.mine) cell.count = nb(i).filter(n => cells[n].mine).length; });
+  return { cells, nb };
+}
+function GameDemineur() {
+  const N = 9, MINES = 10;
+  const [cells, setCells] = React.useState(() => Array.from({ length: N * N }, () => ({ mine:false, revealed:false, flag:false, count:0 })));
+  const [started, setStarted] = React.useState(false);
+  const [state, setState] = React.useState('play');
+  const [flagMode, setFlagMode] = React.useState(false);
+  const nbRef = React.useRef(null);
+  const restart = () => { setCells(Array.from({ length: N * N }, () => ({ mine:false, revealed:false, flag:false, count:0 }))); setStarted(false); setState('play'); setFlagMode(false); };
+  const revealFlood = (arr, i, nb) => {
+    const stack = [i];
+    while (stack.length) { const cur = stack.pop(); const cell = arr[cur]; if (cell.revealed || cell.flag) continue; cell.revealed = true; if (cell.count === 0 && !cell.mine) nb(cur).forEach(n => { if (!arr[n].revealed) stack.push(n); }); }
+  };
+  const click = i => {
+    if (state !== 'play') return;
+    if (flagMode) { setCells(cs => cs.map((c, k) => k === i && !c.revealed ? { ...c, flag: !c.flag } : c)); return; }
+    let arr, nb;
+    if (!started) { const g = demGen(N, MINES, i); arr = g.cells; nb = g.nb; nbRef.current = nb; setStarted(true); }
+    else { arr = cells.map(c => ({ ...c })); nb = nbRef.current; }
+    if (arr[i].flag) return;
+    if (arr[i].mine) { arr.forEach(c => { if (c.mine) c.revealed = true; }); setCells(arr); setState('lost'); return; }
+    revealFlood(arr, i, nb);
+    setCells(arr);
+    if (arr.every(c => c.mine || c.revealed)) setState('won');
+  };
+  const flags = cells.filter(c => c.flag).length;
+  return (
+    <GameWrap hint={`Trouve les ${MINES} mines. Touche 🚩 pour poser/retirer un drapeau, sinon révèle la case.`}
+      bar={<><span style={{ fontSize:12, color:C.muted }}>💣 {MINES - flags}</span>
+        <div style={{ display:'flex', gap:6 }}>
+          <button onClick={() => setFlagMode(f => !f)} style={gameBtn(flagMode ? { background:`${GAMES_COLOR}33` } : {})}>🚩 {flagMode ? 'ON' : 'OFF'}</button>
+          <button onClick={restart} style={gameBtn()}>↻</button>
+        </div></>}>
+      <div style={{ display:'grid', gridTemplateColumns:`repeat(${N},1fr)`, gap:3, width:'100%', maxWidth:340, aspectRatio:'1' }}>
+        {cells.map((c, i) => (
+          <button key={i} onClick={() => click(i)} style={{ display:'flex', alignItems:'center', justifyContent:'center', borderRadius:4, border:'none', cursor:'pointer', fontWeight:800, fontSize:14, padding:0,
+            background: c.revealed ? (c.mine ? '#c0392b' : '#20202a') : '#3a3a48',
+            color: c.mine ? '#fff' : ['#888','#39b2d1','#3fae6a','#f5b81f','#f5813c','#e05050','#b06cf5','#fff','#fff'][c.count] }}>
+            {c.flag && !c.revealed ? '🚩' : c.revealed ? (c.mine ? '💣' : (c.count || '')) : ''}
+          </button>
+        ))}
+      </div>
+      {state !== 'play' && <div style={{ fontSize:14, fontWeight:800, color: state === 'won' ? '#3fae6a' : '#e05050' }}>{state === 'won' ? '🎉 Gagné !' : '💥 Perdu !'}</div>}
+    </GameWrap>
+  );
+}
+
+// ════════ Flappy Bird ════════
+function flappyDraw(ctx, s, W, H) {
+  ctx.fillStyle = '#0e1420'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#3fae6a';
+  s.pipes.forEach(p => { ctx.fillRect(p.x, 0, 46, p.top); ctx.fillRect(p.x, p.top + p.gap, 46, H - (p.top + p.gap) - 20); });
+  ctx.fillStyle = '#2a2320'; ctx.fillRect(0, H - 20, W, 20);
+  ctx.fillStyle = GAMES_COLOR; ctx.beginPath(); ctx.arc(70, s.y, 12, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(74, s.y - 3, 3, 0, Math.PI * 2); ctx.fill();
+}
+function GameFlappy() {
+  const W = 300, H = 440;
+  const canvasRef = React.useRef(null);
+  const g = React.useRef({ y: H / 2, v: 0, pipes: [], score: 0, t: 0 });
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('flappy'));
+  const [phase, setPhase] = React.useState('ready');
+  const reset = () => { g.current = { y: H / 2, v: 0, pipes: [], score: 0, t: 0 }; setScore(0); };
+  const flap = () => {
+    if (phase === 'ready') { reset(); setPhase('playing'); g.current.v = -7; }
+    else if (phase === 'playing') g.current.v = -7;
+    else { reset(); setPhase('ready'); }
+  };
+  React.useEffect(() => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && phase !== 'playing') flappyDraw(ctx, g.current, W, H); }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    const die = () => { if (!alive) return; alive = false; cancelAnimationFrame(raf); const sc = g.current.score; setBest(b => { const nb = Math.max(b, sc); setGameHi('flappy', nb); return nb; }); setPhase('dead'); };
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current; const ctx = canvasRef.current.getContext('2d');
+      s.v += 0.45; s.y += s.v; s.t++;
+      if (s.t % 92 === 0) { const top = 45 + Math.random() * (H - 45 - 130 - 40); s.pipes.push({ x: W, top, gap: 130, passed: false }); }
+      s.pipes.forEach(p => p.x -= 2.1); s.pipes = s.pipes.filter(p => p.x > -50);
+      for (const p of s.pipes) {
+        if (!p.passed && p.x + 46 < 70) { p.passed = true; s.score++; setScore(s.score); }
+        if (70 + 12 > p.x && 70 - 12 < p.x + 46 && (s.y - 12 < p.top || s.y + 12 > p.top + p.gap)) { die(); return; }
+      }
+      if (s.y + 12 > H - 20 || s.y - 12 < 0) { die(); return; }
+      flappyDraw(ctx, s, W, H); raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  React.useEffect(() => { const onKey = e => { if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); flap(); } }; window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey); }, [phase]);
+  return (
+    <GameWrap hint="Touche l'écran (ou Espace) pour battre des ailes et passer entre les tuyaux."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:300 }}>
+        <canvas ref={canvasRef} width={W} height={H} onPointerDown={flap} style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'manipulation', cursor:'pointer', display:'block' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={flap} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer' }}>
+            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? '💥 Perdu !' : '🐤 Flappy Bird'}</div>
+            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Go (2 joueurs) ════════
+function goNeighbors(i, N) { const r = Math.floor(i / N), c = i % N, out = []; if (r > 0) out.push(i - N); if (r < N - 1) out.push(i + N); if (c > 0) out.push(i - 1); if (c < N - 1) out.push(i + 1); return out; }
+function goGroup(b, i, N) { const color = b[i]; const seen = new Set([i]); const stack = [i]; let libs = 0; while (stack.length) { const cur = stack.pop(); for (const n of goNeighbors(cur, N)) { if (b[n] === 0) libs++; else if (b[n] === color && !seen.has(n)) { seen.add(n); stack.push(n); } } } return { stones: seen, libs }; }
+function GameGo() {
+  const N = 9;
+  const [board, setBoard] = React.useState(() => Array(N * N).fill(0));
+  const [turn, setTurn] = React.useState(1);
+  const [caps, setCaps] = React.useState({ 1: 0, 2: 0 });
+  const [passes, setPasses] = React.useState(0);
+  const [msg, setMsg] = React.useState('');
+  const koRef = React.useRef(-1);
+  const reset = () => { setBoard(Array(N * N).fill(0)); setTurn(1); setCaps({ 1:0, 2:0 }); setPasses(0); setMsg(''); koRef.current = -1; };
+  const place = i => {
+    if (board[i] !== 0) return;
+    if (i === koRef.current) { setMsg('Interdit (ko) — joue ailleurs'); return; }
+    const opp = turn === 1 ? 2 : 1;
+    const b = board.slice(); b[i] = turn;
+    let captured = 0, lastCap = -1;
+    for (const n of goNeighbors(i, N)) { if (b[n] === opp) { const { stones, libs } = goGroup(b, n, N); if (libs === 0) stones.forEach(s => { b[s] = 0; lastCap = s; captured++; }); } }
+    const self = goGroup(b, i, N);
+    if (self.libs === 0 && captured === 0) { setMsg('Interdit (suicide)'); return; }
+    koRef.current = (captured === 1 && self.stones.size === 1 && self.libs === 1) ? lastCap : -1;
+    setBoard(b);
+    if (captured) setCaps(c => ({ ...c, [turn]: c[turn] + captured }));
+    setTurn(opp); setPasses(0); setMsg(captured ? `${captured} capture(s) !` : '');
+  };
+  const pass = () => { const np = passes + 1; koRef.current = -1; setPasses(np); setMsg(np >= 2 ? '🏁 Deux passes — fin de partie, comptez !' : `${turn === 1 ? 'Noir ⚫' : 'Blanc ⚪'} passe`); setTurn(turn === 1 ? 2 : 1); };
+  const cell = 34, pad = 20, dim = (N - 1) * cell + pad * 2;
+  const xy = i => ({ x: pad + (i % N) * cell, y: pad + Math.floor(i / N) * cell });
+  const at = (r, c) => r * N + c;
+  const stars = [at(2,2), at(2,6), at(6,2), at(6,6), at(4,4)];
+  return (
+    <GameWrap hint="À 2 sur le même téléphone. Pose tes pierres à tour de rôle, capture les groupes sans liberté."
+      bar={<><span style={{ fontSize:12, color:C.muted }}>⚫ {caps[1]} · ⚪ {caps[2]}</span>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <span style={{ fontSize:12, fontWeight:800, color: turn === 1 ? C.text : '#aaa' }}>Au tour de {turn === 1 ? 'Noir ⚫' : 'Blanc ⚪'}</span>
+          <button onClick={pass} style={gameBtn()}>Passer</button>
+          <button onClick={reset} style={gameBtn()}>↻</button>
+        </div></>}>
+      <svg viewBox={`0 0 ${dim} ${dim}`} style={{ width:'100%', maxWidth:360, background:'#d8b26b', borderRadius:8, touchAction:'manipulation' }}>
+        {Array.from({ length: N }).map((_, k) => (
+          <g key={k}>
+            <line x1={pad} y1={pad + k * cell} x2={pad + (N - 1) * cell} y2={pad + k * cell} stroke="#5c4326" strokeWidth="1" />
+            <line x1={pad + k * cell} y1={pad} x2={pad + k * cell} y2={pad + (N - 1) * cell} stroke="#5c4326" strokeWidth="1" />
+          </g>
+        ))}
+        {stars.map(s => { const p = xy(s); return <circle key={'st' + s} cx={p.x} cy={p.y} r="3.5" fill="#5c4326" />; })}
+        {board.map((v, i) => { const p = xy(i); return (
+          <g key={i} onClick={() => place(i)} style={{ cursor:'pointer' }}>
+            <circle cx={p.x} cy={p.y} r={cell / 2} fill="transparent" />
+            {v !== 0 && <circle cx={p.x} cy={p.y} r={cell / 2 - 2} fill={v === 1 ? '#1a1a1a' : '#f7f7f7'} stroke="#00000055" strokeWidth="1" />}
+          </g>
+        ); })}
+      </svg>
+      {msg && <div style={{ fontSize:12.5, fontWeight:700, color:GAMES_COLOR }}>{msg}</div>}
+    </GameWrap>
+  );
+}
+
+// ════════ Inposteur (mot secret, style Undercover) ════════
+const INPOSTEUR_PAIRS = [['Chat','Tigre'],['Café','Thé'],['Plage','Piscine'],['Pizza','Burger'],['Voiture','Moto'],['Soleil','Lune'],['Guitare','Piano'],['Train','Bus'],['Pomme','Poire'],['Hiver','Automne'],['Football','Rugby'],['Montagne','Colline'],['Roi','Reine'],['Docteur','Infirmier'],['Chocolat','Vanille'],['Avion','Fusée'],['Mer','Océan'],['Livre','Cahier'],['Neige','Pluie'],['Lion','Chat']];
+function GameInposteur() {
+  const [phase, setPhase] = React.useState('setup');
+  const [count, setCount] = React.useState(4);
+  const [nbImp, setNbImp] = React.useState(1);
+  const [roles, setRoles] = React.useState([]);
+  const [cur, setCur] = React.useState(0);
+  const [shown, setShown] = React.useState(false);
+  const start = () => {
+    const pair = INPOSTEUR_PAIRS[Math.floor(Math.random() * INPOSTEUR_PAIRS.length)];
+    const flip = Math.random() < 0.5; const civ = flip ? pair[0] : pair[1], imp = flip ? pair[1] : pair[0];
+    const idxs = Array.from({ length: count }, (_, i) => i);
+    for (let i = idxs.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [idxs[i], idxs[j]] = [idxs[j], idxs[i]]; }
+    const impSet = new Set(idxs.slice(0, nbImp));
+    setRoles(Array.from({ length: count }, (_, i) => ({ impostor: impSet.has(i), word: impSet.has(i) ? imp : civ })));
+    setCur(0); setShown(false); setPhase('reveal');
+  };
+  const next = () => { if (cur + 1 >= count) { setPhase('discuss'); } else { setCur(cur + 1); setShown(false); } };
+  if (phase === 'setup') return (
+    <GameWrap hint="Jeu de soirée à faire tourner sur un seul téléphone : la plupart reçoivent le même mot, l'imposteur en a un autre proche. Décrivez votre mot à tour de rôle sans le dire, puis votez !">
+      <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', gap:14 }}>
+        <div>
+          <div style={{ fontSize:12, color:C.muted, marginBottom:6 }}>Nombre de joueurs : <b style={{ color:C.text }}>{count}</b></div>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>{[3,4,5,6,7,8].map(n => <button key={n} onClick={() => { setCount(n); if (nbImp >= n) setNbImp(1); }} style={gameBtn(count === n ? { background:`${GAMES_COLOR}33` } : {})}>{n}</button>)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize:12, color:C.muted, marginBottom:6 }}>Imposteurs : <b style={{ color:C.text }}>{nbImp}</b></div>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>{[1,2,3].filter(n => n < count).map(n => <button key={n} onClick={() => setNbImp(n)} style={gameBtn(nbImp === n ? { background:`${GAMES_COLOR}33` } : {})}>{n}</button>)}</div>
+        </div>
+        <button onClick={start} style={gameBtn({ padding:'11px', fontSize:13 })}>🎭 Distribuer les mots</button>
+      </div>
+    </GameWrap>
+  );
+  if (phase === 'reveal') return (
+    <GameWrap>
+      <div style={{ width:'100%', maxWidth:320, minHeight:200, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, borderRadius:14, padding:20, textAlign:'center' }}>
+        <div style={{ fontSize:14, fontWeight:800, color:GAMES_COLOR }}>Joueur {cur + 1} / {count}</div>
+        {!shown ? (
+          <><div style={{ fontSize:12, color:C.muted }}>Passe le téléphone au joueur {cur + 1}, puis révèle ton mot en secret.</div>
+          <button onClick={() => setShown(true)} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>👁️ Voir mon mot</button></>
+        ) : (
+          <><div style={{ fontSize:26, fontWeight:900, color:C.text }}>{roles[cur].word}</div>
+          <div style={{ fontSize:11, color:C.muted }}>Mémorise-le et ne le montre à personne.</div>
+          <button onClick={next} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{cur + 1 >= count ? '✅ Commencer à discuter' : '➡️ Joueur suivant'}</button></>
+        )}
+      </div>
+    </GameWrap>
+  );
+  if (phase === 'discuss') return (
+    <GameWrap hint="À l'oral : chacun décrit son mot par un indice, puis tout le monde vote pour démasquer le(s) imposteur(s).">
+      <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', alignItems:'center', gap:14 }}>
+        <div style={{ fontSize:15, fontWeight:800, color:C.text }}>🗣️ À vous de débattre !</div>
+        <button onClick={() => setPhase('result')} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>🎭 Révéler les imposteurs</button>
+      </div>
+    </GameWrap>
+  );
+  return (
+    <GameWrap>
+      <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ fontSize:14, fontWeight:800, color:GAMES_COLOR, textAlign:'center', marginBottom:4 }}>Résultat</div>
+        {roles.map((r, i) => (
+          <div key={i} style={{ display:'flex', justifyContent:'space-between', padding:'8px 12px', borderRadius:8, background: r.impostor ? '#e0505022' : `${GAMES_COLOR}12`, border:`1px solid ${r.impostor ? '#e0505055' : GAMES_COLOR + '33'}` }}>
+            <span style={{ fontSize:12.5, fontWeight:700, color:C.text }}>Joueur {i + 1}</span>
+            <span style={{ fontSize:12.5, fontWeight:800, color: r.impostor ? '#e05050' : GAMES_COLOR }}>{r.impostor ? '🎭 Imposteur' : '🙂 ' + r.word}</span>
+          </div>
+        ))}
+        <button onClick={() => setPhase('setup')} style={gameBtn({ padding:'10px', fontSize:13 })}>↻ Nouvelle partie</button>
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Morpion (2 joueurs) ════════
+const MORPION_WINS = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+function GameMorpion() {
+  const [cells, setCells] = React.useState(() => Array(9).fill(0));
+  const [turn, setTurn] = React.useState(1);
+  const winLine = MORPION_WINS.find(l => cells[l[0]] && cells[l[0]] === cells[l[1]] && cells[l[1]] === cells[l[2]]);
+  const winner = winLine ? cells[winLine[0]] : 0;
+  const draw = !winner && cells.every(c => c);
+  const play = i => { if (cells[i] || winner) return; const nc = cells.slice(); nc[i] = turn; setCells(nc); setTurn(turn === 1 ? 2 : 1); };
+  const reset = () => { setCells(Array(9).fill(0)); setTurn(1); };
+  const mark = v => v === 1 ? '✕' : v === 2 ? '◯' : '';
+  return (
+    <GameWrap hint="À 2 sur le même téléphone. Aligne 3 symboles pour gagner."
+      bar={<><span style={{ fontSize:12.5, fontWeight:800, color:C.text }}>{winner ? `🎉 ${mark(winner)} gagne !` : draw ? '🤝 Égalité' : `Au tour de ${mark(turn)}`}</span><button onClick={reset} style={gameBtn()}>↻ Rejouer</button></>}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gridTemplateRows:'repeat(3,1fr)', gap:8, width:'100%', maxWidth:260, aspectRatio:'1' }}>
+        {cells.map((v, i) => (
+          <button key={i} onClick={() => play(i)} style={{ display:'flex', alignItems:'center', justifyContent:'center', borderRadius:10, border:`1px solid ${C.border}`, cursor:'pointer', fontSize:40, fontWeight:800, background: winLine && winLine.includes(i) ? `${GAMES_COLOR}33` : C.surface, color: v === 1 ? GAMES_COLOR : '#f5813c' }}>{mark(v)}</button>
+        ))}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Motus (à la Wordle, mots FR de 6 lettres) ════════
+const MOTUS_WORDS = ['MAISON','JARDIN','SOLEIL','ORANGE','BANANE','VOYAGE','GARAGE','TIGRES','CHIENS','PLAGES','FORETS','NUAGES','ETOILE','PLANTE','FLEURS','POMMES','CERISE','RAISIN','OIGNON','PIMENT','SALADE','GATEAU','MIROIR','BOUGIE','CADEAU','CHAISE','LAMPES','PORTES','ROBOTS','AVIONS','TRAINS','BATEAU','MONTRE','LIVRES','CRAYON'];
+function motusEval(guess, secret) {
+  const res = Array(guess.length).fill('absent'); const s = secret.split(''); const used = Array(secret.length).fill(false);
+  for (let i = 0; i < guess.length; i++) if (guess[i] === s[i]) { res[i] = 'good'; used[i] = true; }
+  for (let i = 0; i < guess.length; i++) { if (res[i] === 'good') continue; const j = s.findIndex((ch, k) => !used[k] && ch === guess[i]); if (j >= 0) { res[i] = 'present'; used[j] = true; } }
+  return res;
+}
+const MOTUS_CLR = { good:'#3fae6a', present:'#f5b81f', absent:'#33333f' };
+function GameMotus() {
+  const LEN = 6, MAX = 6;
+  const [secret, setSecret] = React.useState(() => MOTUS_WORDS[Math.floor(Math.random() * MOTUS_WORDS.length)]);
+  const [guesses, setGuesses] = React.useState([]);
+  const [input, setInput] = React.useState(() => secret[0]);
+  const [state, setState] = React.useState('play');
+  const [err, setErr] = React.useState('');
+  const reset = () => { const w = MOTUS_WORDS[Math.floor(Math.random() * MOTUS_WORDS.length)]; setSecret(w); setGuesses([]); setInput(w[0]); setState('play'); setErr(''); };
+  const submit = () => {
+    if (state !== 'play') return;
+    if (input.length !== LEN) { setErr('Il faut ' + LEN + ' lettres'); return; }
+    const g = input; const ng = [...guesses, g]; setGuesses(ng); setErr('');
+    if (g === secret) setState('won'); else if (ng.length >= MAX) setState('lost'); else setInput(secret[0]);
+  };
+  const type = ch => { if (state !== 'play') return; setErr(''); setInput(v => v.length < LEN ? v + ch : v); };
+  const del = () => setInput(v => v.length > 1 ? v.slice(0, -1) : v);
+  React.useEffect(() => {
+    const onKey = e => { const k = e.key.toUpperCase(); if (/^[A-Z]$/.test(k)) type(k); else if (e.key === 'Backspace') del(); else if (e.key === 'Enter') submit(); };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  }, [state, input, guesses, secret]);
+  const letterState = {};
+  guesses.forEach(g => motusEval(g, secret).forEach((r, i) => { const c = g[i]; const rank = { absent:0, present:1, good:2 }; if (!(c in letterState) || rank[r] > rank[letterState[c]]) letterState[c] = r; }));
+  const rows = [];
+  for (let r = 0; r < MAX; r++) {
+    const g = guesses[r]; const isCur = r === guesses.length && state === 'play';
+    const evalR = g ? motusEval(g, secret) : null;
+    rows.push(
+      <div key={r} style={{ display:'grid', gridTemplateColumns:`repeat(${LEN},1fr)`, gap:5, width:'100%' }}>
+        {Array.from({ length: LEN }).map((_, c) => {
+          const ch = g ? g[c] : (isCur ? input[c] : ''); const st = evalR ? evalR[c] : null;
+          return <div key={c} style={{ aspectRatio:'1', display:'flex', alignItems:'center', justifyContent:'center', borderRadius:6, fontWeight:800, fontSize:20, color:'#fff', background: st ? MOTUS_CLR[st] : (isCur && c === 0 ? `${GAMES_COLOR}33` : '#20202a'), border: st ? 'none' : `1px solid ${C.border}` }}>{ch || ''}</div>;
+        })}
+      </div>
+    );
+  }
+  const KEYS = ['AZERTYUIOP','QSDFGHJKLM','WXCVBN'];
+  return (
+    <GameWrap hint="Devine le mot de 6 lettres. La 1re lettre est donnée. 🟩 bien placée · 🟧 mal placée."
+      bar={<><span style={{ fontSize:12, color:C.muted }}>Essai {Math.min(guesses.length + (state === 'play' ? 1 : 0), MAX)} / {MAX}</span><button onClick={reset} style={gameBtn()}>↻ Nouveau mot</button></>}>
+      <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', gap:5 }}>{rows}</div>
+      {err && <div style={{ fontSize:11.5, color:'#e05050' }}>{err}</div>}
+      {state === 'won' && <div style={{ fontSize:14, fontWeight:800, color:'#3fae6a' }}>🎉 Bravo !</div>}
+      {state === 'lost' && <div style={{ fontSize:14, fontWeight:800, color:'#e05050' }}>Perdu — c'était {secret}</div>}
+      <div style={{ width:'100%', maxWidth:340, display:'flex', flexDirection:'column', gap:5 }}>
+        {KEYS.map((row, ri) => (
+          <div key={ri} style={{ display:'flex', gap:4, justifyContent:'center' }}>
+            {ri === 2 && <button onClick={submit} style={{ flex:'1.4', background:`${GAMES_COLOR}33`, border:'none', borderRadius:6, color:'#fff', fontWeight:800, fontSize:11, cursor:'pointer', padding:'10px 0' }}>OK</button>}
+            {row.split('').map(k => <button key={k} onClick={() => type(k)} style={{ flex:1, background: letterState[k] ? MOTUS_CLR[letterState[k]] : '#33333f', border:'none', borderRadius:6, color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer', padding:'10px 0', minWidth:0 }}>{k}</button>)}
+            {ri === 2 && <button onClick={del} style={{ flex:'1.4', background:'#33333f', border:'none', borderRadius:6, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer', padding:'10px 0' }}>⌫</button>}
+          </div>
+        ))}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Osu (rythme / clic de cercles) ════════
+function GameOsu() {
+  const ROUND = 40;
+  const [circles, setCircles] = React.useState([]);
+  const [score, setScore] = React.useState(0);
+  const [combo, setCombo] = React.useState(0);
+  const [maxCombo, setMaxCombo] = React.useState(0);
+  const [hits, setHits] = React.useState(0);
+  const [misses, setMisses] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('osu'));
+  const [phase, setPhase] = React.useState('ready');
+  const [left, setLeft] = React.useState(ROUND);
+  const idRef = React.useRef(0);
+  const comboRef = React.useRef(0); React.useEffect(() => { comboRef.current = combo; }, [combo]);
+  const start = () => { setScore(0); setCombo(0); setMaxCombo(0); setHits(0); setMisses(0); setLeft(ROUND); setCircles([]); setPhase('playing'); };
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    const spawn = setInterval(() => {
+      const id = ++idRef.current; const x = 9 + Math.random() * 82, y = 14 + Math.random() * 72;
+      setCircles(cs => [...cs, { id, x, y }]);
+      setTimeout(() => setCircles(cs => { if (cs.some(c => c.id === id)) { setCombo(0); setMisses(m => m + 1); } return cs.filter(c => c.id !== id); }), 1100);
+    }, 780);
+    const tick = setInterval(() => setLeft(l => l - 1), 1000);
+    return () => { clearInterval(spawn); clearInterval(tick); };
+  }, [phase]);
+  React.useEffect(() => {
+    if (phase === 'playing' && left <= 0) { setPhase('done'); setCircles([]); setBest(b => { const nb = Math.max(b, score); setGameHi('osu', nb); return nb; }); }
+  }, [left, phase, score]);
+  const hit = (id, e) => { e.stopPropagation(); setCircles(cs => cs.filter(c => c.id !== id)); setHits(h => h + 1); const nc = comboRef.current + 1; setCombo(nc); setMaxCombo(m => Math.max(m, nc)); setScore(s => s + 100 + nc * 10); };
+  const acc = hits + misses ? Math.round(hits / (hits + misses) * 100) : 100;
+  return (
+    <GameWrap hint="Clique/touche chaque cercle avant qu'il disparaisse. Enchaîne les combos pour marquer plus !"
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Combo <b style={{ color:GAMES_COLOR }}>{combo}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      <style>{'@keyframes osuAppr{from{transform:scale(2.6);opacity:.85}to{transform:scale(1);opacity:.25}}'}</style>
+      <div style={{ position:'relative', width:'100%', maxWidth:380, aspectRatio:'4 / 3', background:'#141420', borderRadius:12, border:`1px solid ${C.border}`, overflow:'hidden', touchAction:'manipulation' }}>
+        {phase === 'playing' && <div style={{ position:'absolute', top:6, right:10, fontSize:12, fontWeight:800, color:'#fff', zIndex:2 }}>⏱ {left}s</div>}
+        {phase === 'playing' && circles.map(c => (
+          <div key={c.id} onPointerDown={e => hit(c.id, e)} style={{ position:'absolute', left:c.x + '%', top:c.y + '%', width:50, height:50, marginLeft:-25, marginTop:-25, borderRadius:'50%', background:GAMES_COLOR, border:'3px solid #fff', cursor:'pointer', touchAction:'manipulation' }}>
+            <span style={{ position:'absolute', inset:-13, borderRadius:'50%', border:`3px solid ${GAMES_COLOR}`, animation:'osuAppr 1.1s linear forwards', pointerEvents:'none' }} />
+          </div>
+        ))}
+        {phase !== 'playing' && (
+          <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, color:'#fff', textAlign:'center', padding:16 }}>
+            {phase === 'done' && <div style={{ fontSize:13, lineHeight:1.6 }}>Score <b style={{ color:GAMES_COLOR }}>{score}</b> · Précision <b>{acc}%</b> · Combo max <b>{maxCombo}</b></div>}
+            <button onClick={start} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{phase === 'done' ? '↻ Rejouer' : '▶ Démarrer'}</button>
+          </div>
+        )}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Puissance 4 (2 joueurs) ════════
+function p4Win(g, ROWS, COLS, color) {
+  const at = (r, c) => (r >= 0 && r < ROWS && c >= 0 && c < COLS) ? g[r * COLS + c] : -1;
+  const dirs = [[0,1],[1,0],[1,1],[1,-1]];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) { if (g[r * COLS + c] !== color) continue; for (const [dr, dc] of dirs) { let k = 1; while (k < 4 && at(r + dr * k, c + dc * k) === color) k++; if (k >= 4) return true; } }
+  return false;
+}
+function GamePuissance4() {
+  const ROWS = 6, COLS = 7;
+  const [grid, setGrid] = React.useState(() => Array(ROWS * COLS).fill(0));
+  const [turn, setTurn] = React.useState(1);
+  const [winner, setWinner] = React.useState(0);
+  const drop = c => {
+    if (winner) return;
+    let row = -1; for (let r = ROWS - 1; r >= 0; r--) if (grid[r * COLS + c] === 0) { row = r; break; }
+    if (row < 0) return;
+    const g = grid.slice(); g[row * COLS + c] = turn; setGrid(g);
+    if (p4Win(g, ROWS, COLS, turn)) setWinner(turn);
+    else if (g.every(v => v)) setWinner(-1);
+    else setTurn(turn === 1 ? 2 : 1);
+  };
+  const reset = () => { setGrid(Array(ROWS * COLS).fill(0)); setTurn(1); setWinner(0); };
+  const clr = v => v === 1 ? '#e05050' : v === 2 ? '#f5b81f' : '#1a1a24';
+  return (
+    <GameWrap hint="À 2 sur le même téléphone. Touche une colonne pour laisser tomber ton jeton. Aligne-en 4 !"
+      bar={<><span style={{ fontSize:12.5, fontWeight:800, color:C.text }}>{winner === -1 ? '🤝 Match nul' : winner ? `🎉 ${winner === 1 ? '🔴 Rouge' : '🟡 Jaune'} gagne !` : `Au tour de ${turn === 1 ? '🔴 Rouge' : '🟡 Jaune'}`}</span><button onClick={reset} style={gameBtn()}>↻</button></>}>
+      <div style={{ width:'100%', maxWidth:340, background:'#2a4a8a', borderRadius:12, padding:8 }}>
+        <div style={{ display:'grid', gridTemplateColumns:`repeat(${COLS},1fr)`, gap:6 }}>
+          {Array.from({ length: COLS }).map((_, c) => (
+            <div key={c} onClick={() => drop(c)} style={{ display:'flex', flexDirection:'column', gap:6, cursor:'pointer' }}>
+              {Array.from({ length: ROWS }).map((_, r) => (
+                <div key={r} style={{ aspectRatio:'1', borderRadius:'50%', background:clr(grid[r * COLS + c]), boxShadow:'inset 0 2px 4px rgba(0,0,0,0.4)' }} />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Snake ════════
+function GameSnake() {
+  const N = 15;
+  const rand = (snake) => { let f; do { f = { x: Math.floor(Math.random() * N), y: Math.floor(Math.random() * N) }; } while (snake.some(c => c.x === f.x && c.y === f.y)); return f; };
+  const init = [{ x:7, y:7 }, { x:6, y:7 }, { x:5, y:7 }];
+  const [snake, setSnake] = React.useState(init);
+  const [food, setFood] = React.useState({ x:11, y:7 });
+  const [dir, setDir] = React.useState({ x:1, y:0 });
+  const [running, setRunning] = React.useState(false);
+  const [over, setOver] = React.useState(false);
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('snake'));
+  const snakeRef = React.useRef(snake), dirRef = React.useRef(dir), foodRef = React.useRef(food);
+  React.useEffect(() => { snakeRef.current = snake; }, [snake]);
+  React.useEffect(() => { dirRef.current = dir; }, [dir]);
+  React.useEffect(() => { foodRef.current = food; }, [food]);
+  const turn = nd => { const d = dirRef.current; if (d.x + nd.x === 0 && d.y + nd.y === 0) return; dirRef.current = nd; setDir(nd); if (!running && !over) setRunning(true); };
+  const restart = () => { setSnake(init); setFood({ x:11, y:7 }); setDir({ x:1, y:0 }); dirRef.current = { x:1, y:0 }; setScore(0); setOver(false); setRunning(false); };
+  React.useEffect(() => {
+    if (!running) return;
+    const step = () => {
+      const s = snakeRef.current, d = dirRef.current; const head = { x: s[0].x + d.x, y: s[0].y + d.y };
+      if (head.x < 0 || head.y < 0 || head.x >= N || head.y >= N || s.some(c => c.x === head.x && c.y === head.y)) { setOver(true); setRunning(false); return; }
+      const f = foodRef.current; const ate = head.x === f.x && head.y === f.y;
+      const ns = [head, ...s]; if (!ate) ns.pop();
+      setSnake(ns);
+      if (ate) { setScore(v => { const nv = v + 1; setBest(b => { const mb = Math.max(b, nv); setGameHi('snake', mb); return mb; }); return nv; }); setFood(rand(ns)); }
+    };
+    const id = setInterval(step, 135); return () => clearInterval(id);
+  }, [running]);
+  React.useEffect(() => {
+    const onKey = e => { const m = { ArrowLeft:{x:-1,y:0}, ArrowRight:{x:1,y:0}, ArrowUp:{x:0,y:-1}, ArrowDown:{x:0,y:1}, a:{x:-1,y:0}, d:{x:1,y:0}, w:{x:0,y:-1}, s:{x:0,y:1} }[e.key]; if (m) { e.preventDefault(); turn(m); } };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  }, [running, over]);
+  const swipe = useSwipe(d => turn({ left:{x:-1,y:0}, right:{x:1,y:0}, up:{x:0,y:-1}, down:{x:0,y:1} }[d]));
+  const headKey = snake[0].y * N + snake[0].x;
+  const bodySet = new Set(snake.map(c => c.y * N + c.x));
+  return (
+    <GameWrap hint="Flèches, glissé ou pavé directionnel. Mange le fruit, évite les murs et ta queue."
+      bar={<><span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>{!running && !over && <button onClick={() => setRunning(true)} style={gameBtn()}>▶ Démarrer</button>}{over && <button onClick={restart} style={gameBtn()}>↻ Rejouer</button>}</>}>
+      <div {...swipe} style={{ display:'grid', gridTemplateColumns:`repeat(${N},1fr)`, gridTemplateRows:`repeat(${N},1fr)`, gap:1, width:'100%', maxWidth:340, aspectRatio:'1', background:'#12121a', padding:3, borderRadius:8, touchAction:'none' }}>
+        {Array.from({ length: N * N }).map((_, i) => {
+          const isFood = food.y * N + food.x === i;
+          return <div key={i} style={{ borderRadius:2, background: i === headKey ? '#fff' : bodySet.has(i) ? GAMES_COLOR : isFood ? '#e05050' : 'transparent' }} />;
+        })}
+      </div>
+      {over && <div style={{ fontSize:13, fontWeight:800, color:'#e05050' }}>💥 Perdu — {score} point(s)</div>}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,44px)', gridTemplateRows:'repeat(3,44px)', gap:4, justifyContent:'center' }}>
+        <span /><button onClick={() => turn({ x:0, y:-1 })} style={gameBtn({ padding:0 })}>▲</button><span />
+        <button onClick={() => turn({ x:-1, y:0 })} style={gameBtn({ padding:0 })}>◀</button><span /><button onClick={() => turn({ x:1, y:0 })} style={gameBtn({ padding:0 })}>▶</button>
+        <span /><button onClick={() => turn({ x:0, y:1 })} style={gameBtn({ padding:0 })}>▼</button><span />
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ TierList (classement local par tap) ════════
+const TIER_ROWS = [['S','#e05050'],['A','#f5813c'],['B','#f5b81f'],['C','#3fae6a'],['D','#39b2d1']];
+const TIERLIST_LS = 'spotifyplus_game_tierlist';
+function GameTierList() {
+  const [items, setItems] = React.useState(() => {
+    try { const v = JSON.parse(localStorage.getItem(TIERLIST_LS)); if (Array.isArray(v) && v.length) return v; } catch {}
+    return ['🍕 Pizza','🍔 Burger','🍣 Sushi','🌮 Tacos','🍜 Ramen','🥗 Salade','🍩 Donut','🍦 Glace'].map((label, i) => ({ id: i + 1, label, tier: null }));
+  });
+  const [sel, setSel] = React.useState(null);
+  const [text, setText] = React.useState('');
+  const nextId = React.useRef(Math.max(0, ...items.map(i => i.id)) + 1);
+  React.useEffect(() => { try { localStorage.setItem(TIERLIST_LS, JSON.stringify(items)); } catch {} }, [items]);
+  const place = tier => { if (sel == null) return; setItems(its => its.map(i => i.id === sel ? { ...i, tier } : i)); setSel(null); };
+  const add = () => { const t = text.trim(); if (!t) return; setItems(its => [...its, { id: nextId.current++, label: t, tier: null }]); setText(''); };
+  const del = () => { if (sel == null) return; setItems(its => its.filter(i => i.id !== sel)); setSel(null); };
+  const resetAll = () => { setItems(its => its.map(i => ({ ...i, tier: null }))); setSel(null); };
+  const chip = it => (
+    <button key={it.id} onClick={() => setSel(sel === it.id ? null : it.id)} style={{ background: sel === it.id ? `${GAMES_COLOR}` : C.surfaceHigh, color: sel === it.id ? '#fff' : C.text, border:`1px solid ${sel === it.id ? GAMES_COLOR : C.border}`, borderRadius:8, padding:'6px 10px', fontSize:12.5, fontWeight:600, cursor:'pointer', boxShadow: sel === it.id ? `0 0 0 2px ${GAMES_COLOR}66` : 'none' }}>{it.label}</button>
+  );
+  return (
+    <GameWrap hint={sel != null ? '👉 Touche une ligne (S/A/B/C/D) ou « Réserve » pour y placer l\'élément sélectionné.' : 'Touche un élément pour le sélectionner, puis touche une ligne pour le classer. Ajoute les tiens en bas.'}>
+      <div style={{ width:'100%', display:'flex', flexDirection:'column', gap:8 }}>
+        {TIER_ROWS.map(([t, color]) => (
+          <div key={t} onClick={() => place(t)} style={{ display:'flex', gap:8, minHeight:52, borderRadius:8, overflow:'hidden', cursor: sel != null ? 'pointer' : 'default', outline: sel != null ? `1px dashed ${GAMES_COLOR}66` : 'none' }}>
+            <div style={{ width:46, flexShrink:0, background:color, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:900, fontSize:20, color:'#1a1a1a' }}>{t}</div>
+            <div style={{ flex:1, display:'flex', flexWrap:'wrap', gap:6, alignContent:'flex-start', padding:6, background:C.surface, borderRadius:'0 8px 8px 0' }}>{items.filter(i => i.tier === t).map(chip)}</div>
+          </div>
+        ))}
+        <div onClick={() => place(null)} style={{ display:'flex', gap:8, minHeight:48, borderRadius:8, overflow:'hidden', cursor: sel != null ? 'pointer' : 'default', outline: sel != null ? `1px dashed ${GAMES_COLOR}66` : 'none' }}>
+          <div style={{ width:46, flexShrink:0, background:'#3a3a48', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:10, color:'#fff', textAlign:'center', lineHeight:1.1 }}>Ré-serve</div>
+          <div style={{ flex:1, display:'flex', flexWrap:'wrap', gap:6, alignContent:'flex-start', padding:6, background:C.surface, borderRadius:'0 8px 8px 0' }}>{items.filter(i => i.tier == null).map(chip)}</div>
+        </div>
+        <div style={{ display:'flex', gap:6, marginTop:2 }}>
+          <input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add(); }} placeholder="Ajouter un élément…" style={{ flex:1, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:'8px 10px', fontSize:12.5, outline:'none' }} />
+          <button onClick={add} style={gameBtn()}>+ Ajouter</button>
+        </div>
+        <div style={{ display:'flex', gap:6 }}>
+          <button onClick={del} disabled={sel == null} style={{ ...gameBtn({ background: sel == null ? 'none' : '#e0505018', border:`1px solid ${sel == null ? C.border : '#e0505055'}`, color: sel == null ? C.muted : '#e05050' }), cursor: sel == null ? 'default' : 'pointer' }}>🗑 Supprimer</button>
+          <button onClick={resetAll} style={gameBtn()}>↺ Vider le classement</button>
+        </div>
+      </div>
+    </GameWrap>
   );
 }
 

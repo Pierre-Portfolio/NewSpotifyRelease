@@ -27,7 +27,9 @@
 // v33 : bump de cache — Note & Calculatrice intégrées à la grille de tuiles de la page
 // de connexion (mêmes chips animées que les autres modules, cliquables).
 // v34 : bump de cache — nouvelle section Jeux (selectbox 11 mini-jeux, en cours de construction).
-const CACHE  = 'spotifyplus-v34';
+// v35 : bump de cache — les 11 mini-jeux sont développés et jouables (2048, Démineur, Flappy,
+// Go, Inposteur, Morpion, Motus, Osu, Puissance 4, Snake, TierList).
+const CACHE  = 'spotifyplus-v35';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
