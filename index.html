@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.2.7';
+const APP_VERSION = '6.2.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6137,8 +6137,8 @@ const YTSUB_WL_ADDED_LS  = 'spotifyplus_yt_wl_added';    // ids déjà ajoutés 
 const YTSUB_MAX_CHANNELS = 250;                          // garde-fou quota
 const YTSUB_PER_CHANNEL  = 5;                            // vidéos récentes par chaîne
 const YTSUB_PAGE         = 12;                           // pas du lazyload infini
-const YTSUB_MAX_SHOW     = 100;                           // on ne garde que les 100 vidéos les plus récentes
-const YTSUB_CACHE_V      = 2;                            // v2 = les Shorts sont conservés (onglets Vidéo/Short)
+const YTSUB_MAX_SHOW     = 100;                           // jusqu'à 100 vidéos longues ET 100 Shorts (par type)
+const YTSUB_CACHE_V      = 3;                            // v3 = 100 vidéos + 100 Shorts (cap par type). v2 = 100 au total
 
 let _ytSubsCache;
 function loadYtSubs() {
@@ -6296,18 +6296,22 @@ async function ytSubsFetchVideos(force) {
   // Durées (batch de 50) sur les ~300 plus récentes. Les Shorts (< YT_MIN_MINUTES) sont
   // CONSERVÉS (contrairement à TV Time) : la carte les sépare via ses onglets Vidéo/Short.
   // Durées stockées en SECONDES (durSec) — un Short de 25 s arrondi aux minutes tomberait à 0.
-  const top = vids.slice(0, 300);
+  const top = vids.slice(0, 400);
   const durMap = new Map();
   for (let i = 0; i < top.length; i += 50) {
     const d = await ytSubApi('videos', { part: 'contentDetails', id: top.slice(i, i + 50).map(v => v.id).join(',') });
     if (d && !d.__error && d.items) for (const v of d.items) durMap.set(v.id, ytParseDurationSec(v.contentDetails && v.contentDetails.duration));
   }
-  const videos = top
+  const withDur = top
     .map(v => { const sec = durMap.get(v.id) || 0; return { ...v, durSec: sec, dur: Math.round(sec / 60) }; })
-    // Ordre final GARANTI : vidéo sortie le plus récemment en premier (timestamp numérique, robuste)
-    .sort((a, b) => (new Date(b.date || 0).getTime() || 0) - (new Date(a.date || 0).getTime() || 0))
-    // On ne conserve que les YTSUB_MAX_SHOW (100) vidéos les plus récentes, tous abonnements confondus
-    .slice(0, YTSUB_MAX_SHOW);
+    // Ordre GARANTI : vidéo sortie le plus récemment en premier (timestamp numérique, robuste)
+    .sort((a, b) => (new Date(b.date || 0).getTime() || 0) - (new Date(a.date || 0).getTime() || 0));
+  // On conserve jusqu'à YTSUB_MAX_SHOW (100) vidéos longues ET 100 Shorts les plus récents
+  // (chaque onglet peut ainsi afficher jusqu'à 100 éléments), puis on refusionne par date.
+  const longs  = withDur.filter(v => !ytSubIsShort(v)).slice(0, YTSUB_MAX_SHOW);
+  const shorts = withDur.filter(v =>  ytSubIsShort(v)).slice(0, YTSUB_MAX_SHOW);
+  const videos = [...longs, ...shorts]
+    .sort((a, b) => (new Date(b.date || 0).getTime() || 0) - (new Date(a.date || 0).getTime() || 0));
   const data = { v: YTSUB_CACHE_V, fetched_at: Date.now(), videos };
   saveYtSubs(data);
   return data;
@@ -6355,8 +6359,9 @@ function ActuYoutubeSection() {
     if (!c || c.v !== YTSUB_CACHE_V || Date.now() - c.fetched_at > YTSUB_TTL) refresh(false);
   }, [connected, refresh]);
 
-  // Liste de l'onglet courant (Vidéo = ≥ 3 min, Short = < 3 min), capée à 100
-  const all      = ((data && data.videos) || []).slice(0, YTSUB_MAX_SHOW);
+  // Liste de l'onglet courant (Vidéo = ≥ 3 min, Short = < 3 min) — chaque type déjà
+  // capé à 100 côté fetch, donc chaque onglet peut afficher jusqu'à 100 éléments
+  const all      = (data && data.videos) || [];
   const nbShorts = all.filter(ytSubIsShort).length;
   const nbVideos = all.length - nbShorts;
   const list     = React.useMemo(
