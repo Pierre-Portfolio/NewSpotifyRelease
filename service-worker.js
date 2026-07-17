@@ -21,7 +21,7 @@
 // v14 : bump de cache — demande d'accès Google auto (Actu/À propos) + garde layout mobile.
 // v15 : bump de cache — bouton d'accès direct « Découvertes de la semaine » (Scrapping).
 // v16 : bump de cache — stats LoL via l'API op.gg sans clé (Riot en repli optionnel).
-const CACHE  = 'spotifyplus-v24';
+const CACHE  = 'spotifyplus-v25';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
