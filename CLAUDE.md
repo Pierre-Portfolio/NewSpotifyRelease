@@ -46,7 +46,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // Token pré-scope → 403 sur la file → log « déconnecte/reconnecte-toi » 1×/session (_dwCapDenied).
 ```
 
-### `APP_VERSION` (actuellement `'6.6.1'`)
+### `APP_VERSION` (actuellement `'6.6.2'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈601) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~601), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -197,7 +197,7 @@ Export : `EXPORT_SECTIONS` (14 boutons dans « ↧ EXPORTER » d'À propos) → 
 
 **Musique** (`MusiquePanel`, violet) : fusion 3 collapses `LikerPanel` (❤ Likés) / `HistoryPanel` (🕘 Historique) / `ArtistsPanel` (🎤 Artistes suivis). Anciens onglets dédiés supprimés (valeurs héritées mappées sur `musique`).
 
-**Stats** (`StatsPanel`) : collapses `StatsCollapse` imbriqués — 🎵 MUSIQUES (restantes + sous-collapses écoutées/temps/graphique) · ✅ TO DO · 🎬 FILMS (temps total + top 5 séries + nombre/temps/restant/terminées, YouTube fusionné) · 🗺️ MAPS · 🔔 REMEMBERS · 🎮 JEUX (Speedrun + LoL) · 🐙 GITHUB. `ListeningCharts`/`BarChart` (14 j, SVG maison) lit le **journal persistant** `spotifyplus_listens` (`recordListen`/`unrecordListen`, survit à la purge). `AdvancedStats` (top 5 artistes, répartition, moy/30 j — repart de zéro après purge). Helper `fmtMonthsDaysHours(ms)`.
+**Stats** (`StatsPanel`) : collapses `StatsCollapse` imbriqués — 🎵 MUSIQUES (restantes + sous-collapses écoutées/temps/graphique) · ✅ TO DO · 🎬 FILMS (temps total + top 5 séries + nombre/temps/restant/terminées, YouTube fusionné) · 🗺️ MAPS · 🔔 REMEMBERS · 🎮 JEUX (Speedrun + LoL + chess.com + **🕹️ Jeux Hub** en dernier) · 🐙 GITHUB. **🕹️ Jeux Hub** (`GamesHubStatsSection`, `GAMES_HUB_STATS`) : records LOCAUX des mini-jeux de la section Jeux (100% hors-ligne, zéro requête) — meilleur score 2048/Flappy/Osu/Snake + record (moins de coups) Memory via `gameHi('spotifyplus_game_hi_<id>')`, nb d'éléments classés TierList (`TIERLIST_LS`) ; carte `statCardEl` par jeu (« — » / « pas encore joué » si jamais joué), en-tête « N mini-jeux disponibles · M avec un record établi ». Les jeux sans record persistant (Bataille, Démineur, Go, Inposteur, Morpion, Motus, Puissance 4) ne sont pas listés. `ListeningCharts`/`BarChart` (14 j, SVG maison) lit le **journal persistant** `spotifyplus_listens` (`recordListen`/`unrecordListen`, survit à la purge). `AdvancedStats` (top 5 artistes, répartition, moy/30 j — repart de zéro après purge). Helper `fmtMonthsDaysHours(ms)`.
 
 **À propos** (`VosEcoutesPanel`) : ⚙️ Paramétrage · ↧ Exporter (repliable) · DropboxSync/GoogleDriveSync (save) · ↥ Restaurer · Dropbox/Drive (restore) · 🔄 Réinit quota 24 h · 🗑 Purger · ⎋ Déconnecter (rouge) · « Version X ».
 
