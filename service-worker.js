@@ -26,7 +26,8 @@
 // calculatrice page de connexion, ordre GitHub, collapse Classement LoL).
 // v33 : bump de cache — Note & Calculatrice intégrées à la grille de tuiles de la page
 // de connexion (mêmes chips animées que les autres modules, cliquables).
-const CACHE  = 'spotifyplus-v33';
+// v34 : bump de cache — nouvelle section Jeux (selectbox 11 mini-jeux, en cours de construction).
+const CACHE  = 'spotifyplus-v34';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 

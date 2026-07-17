@@ -10,7 +10,7 @@
 ## Aperçu
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
-Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, Météo, Finance, Bon Plan, TV Time, Note, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
+Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, Météo, Finance, Jeux, Bon Plan, TV Time, Note, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
 
 👉 **https://pierre-portfolio.github.io/NewSpotifyRelease/** — aucune installation, tout est statique sur GitHub Pages.
 
@@ -51,6 +51,9 @@ Données live via **APIs gratuites sans clé** (fiabilité variable). Light / Fu
 
 ### Calculatrice (dans Finance)
 Mode **🧮 Calculatrice** entre Full et Mes Actifs : calculatrice de poche 100 % locale (4 opérations, %, ±, historique des 5 derniers calculs), clavier physique supporté. Également **accessible dès la page de connexion** (tuile 🧮 Calculatrice de la grille de modules, aucune connexion Spotify requise).
+
+### Jeux
+🎮 **Ludothèque 100 % locale** (aucune connexion, aucun réseau) : un seul onglet avec une **selectbox en haut à droite** (alignée avec le titre) pour choisir parmi **11 mini-jeux** — **2048, Démineur, Flappy Bird, Go (à 2 joueurs), Inposteur, Morpion (à 2 joueurs), Motus, Osu, Puissance 4 (à 2 joueurs), Snake, TierList**. Les jeux à 2 joueurs se jouent **sur le même téléphone**. Le dernier jeu ouvert est mémorisé. Accessible aussi **dès la page de connexion** (tuile 🎮 Jeux de la grille de modules). *(En cours de construction — les jeux arrivent progressivement.)*
 
 ### Bon Plan
 Chasseur de bons plans (refonte) : **⭐ Ma liste** en premier (suivi de prix : ☆ sur n'importe quel jeu, **prix cible** optionnel → ✓ vert quand l'offre passe dessous, rafraîchi automatiquement, inclus dans la sauvegarde), **🔥 Promos du moment** (meilleures offres jeux PC du jour via CheapShark, filtres −50 % / −75 % / AAA, vignettes — section repliée par défaut), **🎮 Recherche jeux** (~20 boutiques PC, prix ≈ EUR, + liens de recherche directe **Steam · G2A · Instant Gaming · Eneba · Kinguin · Gamivo · CDKeys** sous chaque jeu déplié) et **🔎 Tous produits** (refonte : la recherche marche désormais via **4 API gratuites sans clé** — **Apple** (apps, musique, films, livres, avec prix + pochette, désormais via relais CORS car l'API Apple bloquait le navigateur), **Open Products Facts** (produits du quotidien), **Open Beauty Facts** (cosmétiques) et **Open Food Facts** (alimentaire) ; lien leDénicheur en repli pour l'électronique avec prix).
