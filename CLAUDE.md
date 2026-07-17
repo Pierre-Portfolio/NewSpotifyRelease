@@ -44,7 +44,7 @@ REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/'
 SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify'
 ```
 
-### `APP_VERSION` (actuellement `'6.0.8'`)
+### `APP_VERSION` (actuellement `'6.3.8'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈601) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~601), pas `git rev-list --count` de ce fork (~65)**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
