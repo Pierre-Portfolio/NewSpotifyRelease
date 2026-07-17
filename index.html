@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.3.4';
+const APP_VERSION = '6.3.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12077,6 +12077,7 @@ async function srFetchQueue(force) {
 }
 
 const SR_STATS_LS = 'spotifyplus_speedrun_stats';      // stats speedrun cachées (re-fetchable, TTL 15 min → PAS dans buildBackup)
+const SR_STATS_V  = 2;                                 // v2 = ajoute gameList (liste des jeux courus) → un cache v<2 est périmé
 
 // Stats « fun » de mon profil speedrun.com (MÊMES endpoints publics, MÊME pseudo) :
 // records du monde, podiums, personal bests, jeux courus, temps cumulé. Le champ `place`
@@ -12086,7 +12087,7 @@ async function srFetchStats(force) {
   if (!name) return { error: 'CONFIG' };
   let cache = null;
   try { cache = JSON.parse(localStorage.getItem(SR_STATS_LS)); } catch {}
-  if (!force && cache && cache.name === name && Date.now() - cache.fetchedAt < SR_TTL) return cache;
+  if (!force && cache && cache.v === SR_STATS_V && cache.name === name && Date.now() - cache.fetchedAt < SR_TTL) return cache;
   const u = await srGet(`${SR_API}/users/${encodeURIComponent(name)}`);
   if (u && u.__status === 404) return { error: 'USER' };
   if (!u || u.__status || !u.data || !u.data.id) return { error: 'NET' };
@@ -12111,10 +12112,12 @@ async function srFetchStats(force) {
     if (gname) gameCount[gname] = (gameCount[gname] || 0) + 1;
   });
   const gnames = Object.keys(gameCount);
-  const favGame = gnames.sort((a, b) => gameCount[b] - gameCount[a])[0] || '';
+  // Liste de tous les jeux courus (nom + nombre de PB), triée par nombre décroissant → sous-collapse « Jeux »
+  const gameList = gnames.map(n => ({ name: n, count: gameCount[n] })).sort((a, b) => b.count - a.count);
+  const favGame = (gameList[0] && gameList[0].name) || '';
   const out = {
-    fetchedAt: Date.now(), name, userName, userUrl, signup,
-    pbs: pb.data.length, wr, podiums, games: gnames.length, favGame, bestPlace: best, totalSec,
+    v: SR_STATS_V, fetchedAt: Date.now(), name, userName, userUrl, signup,
+    pbs: pb.data.length, wr, podiums, games: gnames.length, favGame, gameList, bestPlace: best, totalSec,
   };
   try { localStorage.setItem(SR_STATS_LS, JSON.stringify(out)); } catch {}
   return out;
@@ -12158,13 +12161,20 @@ function SpeedrunStatsSection() {
       </div>
     );
   }
-  const cards = data ? [
+  // 3 sous-collapses (demande utilisateur) :
+  //   🏆 Podium   → records du monde, podiums, personal bests
+  //   🎮 Jeux     → jeu favori + liste de tous les jeux courus (nb de PB)
+  //   ℹ️ Autre info → temps cumulé puis jeux courus
+  const podiumCards = data ? [
     { label:'RECORDS DU MONDE', value: fmtN(data.wr),      sub:'runs classées 1ᵉʳ 🥇',       icon:'🥇', color:'#e3b341' },
     { label:'PODIUMS',          value: fmtN(data.podiums), sub:'top 3 (or/argent/bronze)',   icon:'🏆', color:SPEEDRUN_COLOR },
     { label:'PERSONAL BESTS',   value: fmtN(data.pbs),     sub:'records perso enregistrés',  icon:'🎯', color:'#7b8ff7' },
-    { label:'TEMPS CUMULÉ',     value: fmtSec(data.totalSec), sub:'sur tous tes PB',         icon:'⏱', color:'#e07b54' },
   ] : [];
-  if (data && data.favGame) cards.push({ label:'JEU FAVORI', value: data.favGame, sub:'le plus couru', icon:'🕹', color:SPEEDRUN_COLOR });
+  const autreCards = data ? [
+    { label:'TEMPS CUMULÉ',     value: fmtSec(data.totalSec), sub:'sur tous tes PB',         icon:'⏱', color:'#e07b54' },
+    { label:'JEUX COURUS',      value: fmtN(data.games),   sub:'avec au moins un PB',        icon:'🎮', color:'#b07fe8' },
+  ] : [];
+  const gameList = (data && data.gameList) || [];
   const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -12176,7 +12186,38 @@ function SpeedrunStatsSection() {
           <span style={{ fontSize:11, fontWeight:800, color:SPEEDRUN_COLOR, fontFamily:'DM Mono,monospace' }}>{fmtN(data.pbs)} PB · {fmtN(data.games)} jeu{data.games > 1 ? 'x' : ''}</span>
         </div>
       )}
-      {cards.map(statCardEl)}
+      {data && (
+        <React.Fragment>
+          <StatsCollapse defaultOpen={true} color={SPEEDRUN_COLOR} title={<span>🏆 PODIUM</span>}>
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>{podiumCards.map(statCardEl)}</div>
+          </StatsCollapse>
+          <StatsCollapse defaultOpen={false} color={SPEEDRUN_COLOR}
+            title={<span>🎮 JEUX <span style={{ color:C.dim, fontWeight:400 }}>· {fmtN(data.games)}</span></span>}>
+            {data.favGame && (
+              <div style={{ ...card, marginBottom:8, display:'flex', alignItems:'center', gap:10 }}>
+                <div style={{ fontSize:20, width:28, textAlign:'center', flexShrink:0 }}>🕹</div>
+                <div style={{ minWidth:0 }}>
+                  <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim }}>JEU FAVORI</div>
+                  <div style={{ fontSize:13, fontWeight:800, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{data.favGame}</div>
+                </div>
+              </div>
+            )}
+            {gameList.length ? (
+              <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                {gameList.map((g, i) => (
+                  <div key={i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'5px 0', borderBottom:`1px solid ${C.border}55` }}>
+                    <span style={{ fontSize:11.5, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', minWidth:0 }}>{g.name}</span>
+                    <span style={{ fontSize:10.5, color:SPEEDRUN_COLOR, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{fmtN(g.count)} PB</span>
+                  </div>
+                ))}
+              </div>
+            ) : <div style={{ fontSize:11, color:C.dim }}>Aucun jeu couru.</div>}
+          </StatsCollapse>
+          <StatsCollapse defaultOpen={false} color={SPEEDRUN_COLOR} title={<span>ℹ️ AUTRE INFO</span>}>
+            <div style={{ display:'flex', flexDirection:'column', gap:8 }}>{autreCards.map(statCardEl)}</div>
+          </StatsCollapse>
+        </React.Fragment>
+      )}
       <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
         {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
         <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
