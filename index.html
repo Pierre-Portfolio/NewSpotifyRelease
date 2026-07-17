@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.2.9';
+const APP_VERSION = '6.3.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5897,6 +5897,29 @@ function actuFavicon(link) {
 // Image d'un item d'actu : photo du flux si fournie, sinon favicon de la source.
 const actuThumb = a => a.image || actuFavicon(a.sourceUrl || a.link);
 
+// Icône de l'ENTREPRISE concernée par une fuite de données (pas la source du flux) :
+// on devine son domaine à partir du titre / du slug de l'ancre, puis on affiche
+// son favicon via le service s2 de Google (déjà couvert par `img-src https:`).
+//  - HIBP fournit directement le domaine réel (l.domain) → exact.
+//  - bonjourlafuite fournit un slug d'ancre (l.slug, ex. « air-france ») → bon indice.
+//  - sinon on slugifie le début du titre (avant tout séparateur de description).
+function leakDomainGuess(l) {
+  if (l && l.domain) return l.domain;
+  const raw = (l && l.slug) || (l && l.text) || '';
+  let s = String(raw)
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2B00}-\u{2BFF}️]/gu, ' ') // emojis/statut
+    .split(/[—–:(|/]/)[0]                          // avant le 1er separateur de description (— – : ( | /)
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')        // sans accents
+    .trim().toLowerCase().replace(/[^a-z0-9]+/g, '');        // slug ASCII compact
+  return s ? s + '.com' : '';
+}
+function leakThumb(l) {
+  const dom = leakDomainGuess(l);
+  return dom
+    ? 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(dom) + '&sz=64'
+    : actuFavicon((l && l.link) || 'https://bonjourlafuite.eu.org/');
+}
+
 // Hacker News via l'API Algolia (CORS natif, sans clé) — page d'accueil (top tech/IA/science).
 // Repli : API OFFICIELLE HN (hacker-news.firebaseio.com, CORS natif, sans clé) —
 // topstories.json puis item/{id}.json (12 fetchs parallèles) si Algolia est down/throttle.
@@ -6038,7 +6061,10 @@ async function actuFetchLeaks() {
       if (seen.has(key)) continue;
       seen.add(key);
       const anchor = (inner.match(/href="(#[^"]+)"/i) || [])[1] || '';
-      items.push({ text, date: dm[1], link: 'https://bonjourlafuite.eu.org/' + anchor });
+      // slug de l'ancre (« #air-france-2024-10-26 » → « air-france ») = nom de l'entreprise,
+      // sert à retrouver son favicon (leakThumb)
+      const slug = anchor.replace(/^#/, '').replace(/-\d{4}-\d{2}-\d{2}.*$/, '');
+      items.push({ text, date: dm[1], link: 'https://bonjourlafuite.eu.org/' + anchor, slug });
     }
     if (items.length) return { items, needsTuning: false };
   }
@@ -6070,6 +6096,7 @@ async function actuFetchHibp() {
       text: `${b.Title}${b.PwnCount ? ` — ${Number(b.PwnCount).toLocaleString('fr-FR')} comptes` : ''}`,
       date: (b.BreachDate || b.AddedDate || '').slice(0, 10),
       link: 'https://haveibeenpwned.com/PwnedWebsites#' + encodeURIComponent(b.Name || ''),
+      domain: b.Domain || '',   // domaine réel du site piraté → favicon exact (leakThumb)
     }));
 }
 
@@ -6657,7 +6684,7 @@ function ActuPanel() {
           {(d.leaks && d.leaks.via === 'hibp') &&
             <div style={{ fontSize:9, color:C.dim, paddingBottom:4 }}>bonjourlafuite injoignable — dernières fuites mondiales via Have I Been Pwned :</div>}
           {(d.leaks && d.leaks.items && d.leaks.items.length)
-            ? d.leaks.items.slice(0, 10).map((l, i) => row('lk' + i, l.link || 'https://bonjourlafuite.eu.org/', l.text, null, l.date, '#e05050', actuFavicon(l.link || 'https://bonjourlafuite.eu.org/')))
+            ? d.leaks.items.slice(0, 10).map((l, i) => row('lk' + i, l.link || 'https://bonjourlafuite.eu.org/', l.text, null, l.date, '#e05050', leakThumb(l)))
             : <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>
                 {loading ? 'Chargement…'
                   : (d.leaks && d.leaks.needsTuning)
