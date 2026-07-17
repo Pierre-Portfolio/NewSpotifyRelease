@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.2.0';
+const APP_VERSION = '6.2.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6137,6 +6137,7 @@ const YTSUB_MAX_CHANNELS = 250;                          // garde-fou quota
 const YTSUB_PER_CHANNEL  = 5;                            // vidéos récentes par chaîne
 const YTSUB_PAGE         = 12;                           // pas du lazyload infini
 const YTSUB_MAX_SHOW     = 100;                           // on ne garde que les 100 vidéos les plus récentes
+const YTSUB_CACHE_V      = 2;                            // v2 = les Shorts sont conservés (onglets Vidéo/Short)
 
 let _ytSubsCache;
 function loadYtSubs() {
@@ -6260,11 +6261,12 @@ async function ytSubsListChannels() {
 // Retourne { fetched_at, videos } (mis en cache) ou { __error }.
 async function ytSubsFetchVideos(force) {
   const cached = loadYtSubs();
-  if (!force && cached && Date.now() - cached.fetched_at < YTSUB_TTL) return cached;
+  // Cache versionné : un cache pré-v2 (Shorts filtrés) est traité comme périmé
+  if (!force && cached && cached.v === YTSUB_CACHE_V && Date.now() - cached.fetched_at < YTSUB_TTL) return cached;
   const ls = await ytSubsListChannels();
   if (ls.__error) return ls;
   const channels = ls.subs;
-  if (!channels.length) { const data = { fetched_at: Date.now(), videos: [] }; saveYtSubs(data); return data; }
+  if (!channels.length) { const data = { v: YTSUB_CACHE_V, fetched_at: Date.now(), videos: [] }; saveYtSubs(data); return data; }
   const vids = [];
   let idx = 0;
   // 8 requêtes playlistItems en parallèle (une chaîne supprimée/sans upload → 404 ignoré)
@@ -6290,27 +6292,38 @@ async function ytSubsFetchVideos(force) {
   };
   await Promise.all(Array.from({ length: 8 }, worker));
   vids.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-  // Durées (batch de 50) sur les ~300 plus récentes → filtre Shorts (< YT_MIN_MINUTES, même règle que TV Time)
+  // Durées (batch de 50) sur les ~300 plus récentes. Les Shorts (< YT_MIN_MINUTES) sont
+  // CONSERVÉS (contrairement à TV Time) : la carte les sépare via ses onglets Vidéo/Short.
+  // Durées stockées en SECONDES (durSec) — un Short de 25 s arrondi aux minutes tomberait à 0.
   const top = vids.slice(0, 300);
   const durMap = new Map();
   for (let i = 0; i < top.length; i += 50) {
     const d = await ytSubApi('videos', { part: 'contentDetails', id: top.slice(i, i + 50).map(v => v.id).join(',') });
-    if (d && !d.__error && d.items) for (const v of d.items) durMap.set(v.id, ytParseDuration(v.contentDetails && v.contentDetails.duration));
+    if (d && !d.__error && d.items) for (const v of d.items) durMap.set(v.id, ytParseDurationSec(v.contentDetails && v.contentDetails.duration));
   }
   const videos = top
-    .map(v => ({ ...v, dur: durMap.get(v.id) || 0 }))
-    .filter(v => !durMap.has(v.id) || v.dur >= YT_MIN_MINUTES)
+    .map(v => { const sec = durMap.get(v.id) || 0; return { ...v, durSec: sec, dur: Math.round(sec / 60) }; })
     // Ordre final GARANTI : vidéo sortie le plus récemment en premier (timestamp numérique, robuste)
     .sort((a, b) => (new Date(b.date || 0).getTime() || 0) - (new Date(a.date || 0).getTime() || 0))
     // On ne conserve que les YTSUB_MAX_SHOW (100) vidéos les plus récentes, tous abonnements confondus
     .slice(0, YTSUB_MAX_SHOW);
-  const data = { fetched_at: Date.now(), videos };
+  const data = { v: YTSUB_CACHE_V, fetched_at: Date.now(), videos };
   saveYtSubs(data);
   return data;
 }
 
+// Durée ISO 8601 → SECONDES (ytParseDuration arrondit aux minutes : un Short de 25 s → 0).
+function ytParseDurationSec(iso) {
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
+  if (!m) return 0;
+  return (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0));
+}
+// Short = durée CONNUE et < YT_MIN_MINUTES. Une durée inconnue (0) reste une vidéo longue.
+function ytSubIsShort(v) { return !!v.durSec && v.durSec < YT_MIN_MINUTES * 60; }
+
 // Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » de la section Actu.
-// Propose les vidéos (lazyload infini) — n'ajoute RIEN dans TV Time.
+// Onglets Vidéo / Short en tête (40% de large chacun), lazyload infini par onglet.
+// N'ajoute RIEN dans TV Time.
 // 🕒 = ajout direct dans la playlist YouTube « À regarder plus tard (Hub) » du compte.
 function ActuYoutubeSection() {
   const [data, setData]       = React.useState(() => loadYtSubs());
@@ -6319,6 +6332,7 @@ function ActuYoutubeSection() {
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState('');
   const [visible, setVisible] = React.useState(YTSUB_PAGE);
+  const [ytTab, setYtTab]     = React.useState('video');   // 'video' (≥ 3 min) | 'short' (< 3 min)
   const [connected]           = React.useState(() => gdriveConnected());
   const sentinelRef           = React.useRef(null);
 
@@ -6337,21 +6351,36 @@ function ActuYoutubeSection() {
   React.useEffect(() => {
     if (!connected) return;
     const c = loadYtSubs();
-    if (!c || Date.now() - c.fetched_at > YTSUB_TTL) refresh(false);
+    if (!c || c.v !== YTSUB_CACHE_V || Date.now() - c.fetched_at > YTSUB_TTL) refresh(false);
   }, [connected, refresh]);
 
-  // Lazyload infini : sentinelle observée → +YTSUB_PAGE vidéos à chaque entrée dans le viewport
-  // (capé à YTSUB_MAX_SHOW = 100 même si un ancien cache en contenait davantage)
-  const total = Math.min((data && data.videos && data.videos.length) || 0, YTSUB_MAX_SHOW);
+  // Liste de l'onglet courant (Vidéo = ≥ 3 min, Short = < 3 min), capée à 100
+  const all      = ((data && data.videos) || []).slice(0, YTSUB_MAX_SHOW);
+  const nbShorts = all.filter(ytSubIsShort).length;
+  const nbVideos = all.length - nbShorts;
+  const list     = React.useMemo(
+    () => all.filter(v => ytSubIsShort(v) === (ytTab === 'short')),
+    [data, ytTab]);
+  const total    = list.length;
+
+  // Changement d'onglet → on repart de la 1re page
+  const pickTab = (t) => { if (t !== ytTab) { setYtTab(t); setVisible(YTSUB_PAGE); } };
+
+  // Lazyload infini : sentinelle observée → +YTSUB_PAGE vidéos dès qu'elle approche du bas.
+  // ⚠ Le contenu vit dans un conteneur scrollable (WebApp/MobileApp, overflowY:auto) →
+  // on observe DANS ce conteneur (root), pas dans le viewport, sinon l'auto-chargement
+  // en bas de scroll peut ne jamais se déclencher.
   React.useEffect(() => {
     const el = sentinelRef.current;
     if (!el || visible >= total) return;
+    let root = el.parentElement;
+    while (root && root !== document.body && !/(auto|scroll)/.test(getComputedStyle(root).overflowY)) root = root.parentElement;
     const obs = new IntersectionObserver(entries => {
       if (entries.some(e => e.isIntersecting)) setVisible(v => v + YTSUB_PAGE);
-    }, { rootMargin: '120px' });
+    }, { root: (root && root !== document.body) ? root : null, rootMargin: '250px' });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [visible, total]);
+  }, [visible, total, ytTab]);
 
   // Ajout dans la playlist YouTube du compte (séquentiel : un ajout à la fois)
   const addWL = async (v) => {
@@ -6368,10 +6397,11 @@ function ActuYoutubeSection() {
     setWlBusy(null);
   };
 
-  // Badge de durée façon YouTube (on n'a que les minutes : « 22:00 » / « 1:08:00 »)
-  const fmtDurBadge = m => {
-    if (m >= 60) return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:00`;
-    return `${m}:00`;
+  // Badge de durée façon YouTube — en SECONDES (« 0:25 » pour un Short, « 22:04 », « 1:08:00 »)
+  const fmtDurBadge = sec => {
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
   };
   // Carte vidéo façon feed YouTube : grande miniature 16:9 + badge durée en surimpression,
   // puis titre (2 lignes) et « chaîne · ancienneté » en dessous, bouton 🕒 en coin.
@@ -6385,10 +6415,10 @@ function ActuYoutubeSection() {
           <img src={hq} alt="" loading="lazy"
             onError={e => { if (v.thumb && e.target.src !== v.thumb) e.target.src = v.thumb; else e.target.style.display = 'none'; }}
             style={{ width:'100%', aspectRatio:'16 / 9', objectFit:'cover', display:'block' }} />
-          {v.dur ? (
+          {v.durSec || v.dur ? (
             <span style={{ position:'absolute', right:8, bottom:8, background:'rgba(0,0,0,.82)', color:'#fff',
               fontSize:11, fontWeight:600, padding:'1px 5px', borderRadius:5, fontFamily:'DM Mono,monospace', letterSpacing:.2 }}>
-              {fmtDurBadge(v.dur)}
+              {fmtDurBadge(v.durSec || v.dur * 60)}
             </span>
           ) : null}
         </a>
@@ -6412,10 +6442,19 @@ function ActuYoutubeSection() {
     );
   };
 
-  const shown = (data && data.videos || []).slice(0, Math.min(visible, total));
+  const shown = list.slice(0, Math.min(visible, total));
+  // Sélecteur Vidéo / Short — 40% de large par bouton
+  const tabBtn = (key, label, n) => (
+    <button onClick={() => pickTab(key)}
+      style={{ width:'40%', background: ytTab === key ? `${YT_COLOR}22` : 'none',
+        border:`1px solid ${ytTab === key ? YT_COLOR + '88' : C.border}`, color: ytTab === key ? YT_COLOR : C.dim,
+        borderRadius:8, padding:'6px 4px', fontSize:11.5, fontWeight: ytTab === key ? 600 : 400, cursor:'pointer' }}>
+      {label}{n ? <span style={{ fontWeight:400, opacity:0.75 }}> · {n}</span> : ''}
+    </button>
+  );
   return (<>
     <StatsCollapse defaultOpen={false} color={YT_COLOR}
-      title={<span>▶️ VIDÉOS YOUTUBE <span style={{ color:C.dim, fontWeight:400 }}>· Abonnements{total ? ` · ${total}` : ''}</span></span>}>
+      title={<span>▶️ VIDÉOS YOUTUBE <span style={{ color:C.dim, fontWeight:400 }}>· Abonnements{all.length ? ` · ${all.length}` : ''}</span></span>}>
       {!connected ? (
         <div style={{ fontSize:11.5, color:C.dim, lineHeight:1.5, padding:'4px 0' }}>
           Les abonnements YouTube sont privés — connecte ton compte Google pour lister les
@@ -6436,9 +6475,15 @@ function ActuYoutubeSection() {
           </div>
         </div>
       ) : (<>
+        <div style={{ display:'flex', gap:8, justifyContent:'center', padding:'2px 0 8px' }}>
+          {tabBtn('video', '▶️ Vidéo', nbVideos)}
+          {tabBtn('short', '🩳 Short', nbShorts)}
+        </div>
         {err && <div style={{ fontSize:11, color:'#e05050', padding:'4px 0' }}>{err}</div>}
-        {loading && !total && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Chargement des abonnements…</div>}
-        {!loading && !total && !err && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune vidéo récente trouvée.</div>}
+        {loading && !all.length && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Chargement des abonnements…</div>}
+        {!loading && !total && !err && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>
+          {ytTab === 'short' ? 'Aucun Short récent.' : 'Aucune vidéo récente trouvée.'}
+        </div>}
         {shown.map(v => vidCard(v, added.has(v.id), () => addWL(v), YT_COLOR, wlBusy === v.id))}
         {/* Sentinelle du lazyload infini */}
         {visible < total && <div ref={sentinelRef} style={{ padding:'8px 0', textAlign:'center' }}>
