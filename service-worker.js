@@ -30,7 +30,8 @@
 // v35 : bump de cache — les 11 mini-jeux sont développés et jouables (2048, Démineur, Flappy,
 // Go, Inposteur, Morpion, Motus, Osu, Puissance 4, Snake, TierList).
 // v36 : bump de cache — 2 jeux de plus dans Jeux : Memory (paires) et Bataille navale (vs IA).
-const CACHE  = 'spotifyplus-v36';
+// v37 : bump de cache — module « Nourriture » renommé « Santé » (libellé visible ; id `food` inchangé).
+const CACHE  = 'spotifyplus-v37';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
