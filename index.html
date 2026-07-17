@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.6.3';
+const APP_VERSION = '6.6.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3432,8 +3432,21 @@ function GameMotus() {
 }
 
 // ════════ Osu (rythme / clic de cercles) ════════
+// Manche de 60 s. 5 niveaux de difficulté → cadence d'apparition + durée de vie du cercle
+// (plus c'est dur, plus ça spawn vite et plus le cercle disparaît tôt). `size` = diamètre px.
+const OSU_ROUND = 60;
+const OSU_LEVELS = [
+  { id:1, label:'Très facile', spawn:1000, life:1600, size:58 },
+  { id:2, label:'Facile',      spawn:820,  life:1300, size:52 },
+  { id:3, label:'Normal',      spawn:660,  life:1050, size:48 },
+  { id:4, label:'Difficile',   spawn:520,  life:830,  size:42 },
+  { id:5, label:'Extrême',     spawn:400,  life:680,  size:36 },
+];
+const OSU_LEVEL_LS = 'spotifyplus_game_osu_level';
 function GameOsu() {
-  const ROUND = 40;
+  const [level, setLevel] = React.useState(() => { const v = +localStorage.getItem(OSU_LEVEL_LS); return v >= 1 && v <= 5 ? v : 3; });
+  React.useEffect(() => { try { localStorage.setItem(OSU_LEVEL_LS, String(level)); } catch {} }, [level]);
+  const lvl = OSU_LEVELS[level - 1];
   const [circles, setCircles] = React.useState([]);
   const [score, setScore] = React.useState(0);
   const [combo, setCombo] = React.useState(0);
@@ -3442,39 +3455,51 @@ function GameOsu() {
   const [misses, setMisses] = React.useState(0);
   const [best, setBest] = React.useState(() => gameHi('osu'));
   const [phase, setPhase] = React.useState('ready');
-  const [left, setLeft] = React.useState(ROUND);
+  const [left, setLeft] = React.useState(OSU_ROUND);
   const idRef = React.useRef(0);
   const comboRef = React.useRef(0); React.useEffect(() => { comboRef.current = combo; }, [combo]);
-  const start = () => { setScore(0); setCombo(0); setMaxCombo(0); setHits(0); setMisses(0); setLeft(ROUND); setCircles([]); setPhase('playing'); };
+  const start = () => { setScore(0); setCombo(0); setMaxCombo(0); setHits(0); setMisses(0); setLeft(OSU_ROUND); setCircles([]); setPhase('playing'); };
   React.useEffect(() => {
     if (phase !== 'playing') return;
+    const life = lvl.life;
     const spawn = setInterval(() => {
       const id = ++idRef.current; const x = 9 + Math.random() * 82, y = 14 + Math.random() * 72;
       setCircles(cs => [...cs, { id, x, y }]);
-      setTimeout(() => setCircles(cs => { if (cs.some(c => c.id === id)) { setCombo(0); setMisses(m => m + 1); } return cs.filter(c => c.id !== id); }), 1100);
-    }, 780);
+      setTimeout(() => setCircles(cs => { if (cs.some(c => c.id === id)) { setCombo(0); setMisses(m => m + 1); } return cs.filter(c => c.id !== id); }), life);
+    }, lvl.spawn);
     const tick = setInterval(() => setLeft(l => l - 1), 1000);
     return () => { clearInterval(spawn); clearInterval(tick); };
-  }, [phase]);
+  }, [phase, lvl.spawn, lvl.life]);
   React.useEffect(() => {
     if (phase === 'playing' && left <= 0) { setPhase('done'); setCircles([]); setBest(b => { const nb = Math.max(b, score); setGameHi('osu', nb); return nb; }); }
   }, [left, phase, score]);
-  const hit = (id, e) => { e.stopPropagation(); setCircles(cs => cs.filter(c => c.id !== id)); setHits(h => h + 1); const nc = comboRef.current + 1; setCombo(nc); setMaxCombo(m => Math.max(m, nc)); setScore(s => s + 100 + nc * 10); };
+  // Bonus de score proportionnel à la difficulté (les cercles plus durs rapportent plus).
+  const hit = (id, e) => { e.stopPropagation(); setCircles(cs => cs.filter(c => c.id !== id)); setHits(h => h + 1); const nc = comboRef.current + 1; setCombo(nc); setMaxCombo(m => Math.max(m, nc)); setScore(s => s + (60 + level * 40) + nc * 10); };
   const acc = hits + misses ? Math.round(hits / (hits + misses) * 100) : 100;
+  const sz = lvl.size, half = sz / 2;
   return (
     <GameWrap hint="Clique/touche chaque cercle avant qu'il disparaisse. Enchaîne les combos pour marquer plus !"
       bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Combo <b style={{ color:GAMES_COLOR }}>{combo}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
       <style>{'@keyframes osuAppr{from{transform:scale(2.6);opacity:.85}to{transform:scale(1);opacity:.25}}'}</style>
+      {/* Choix de la difficulté (verrouillé pendant une manche) */}
+      <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center', width:'100%', maxWidth:380 }}>
+        {OSU_LEVELS.map(l => {
+          const active = l.id === level;
+          return <button key={l.id} onClick={() => phase !== 'playing' && setLevel(l.id)} disabled={phase === 'playing'}
+            style={{ background: active ? `${GAMES_COLOR}22` : C.surface, border:`1px solid ${active ? GAMES_COLOR : C.border}`, color: active ? GAMES_COLOR : C.text, borderRadius:8, padding:'5px 10px', fontSize:11.5, fontWeight: active ? 800 : 600, cursor: phase === 'playing' ? 'default' : 'pointer', opacity: phase === 'playing' && !active ? 0.45 : 1 }}>{l.id}· {l.label}</button>;
+        })}
+      </div>
       <div style={{ position:'relative', width:'100%', maxWidth:380, aspectRatio:'4 / 3', background:'#141420', borderRadius:12, border:`1px solid ${C.border}`, overflow:'hidden', touchAction:'manipulation' }}>
         {phase === 'playing' && <div style={{ position:'absolute', top:6, right:10, fontSize:12, fontWeight:800, color:'#fff', zIndex:2 }}>⏱ {left}s</div>}
         {phase === 'playing' && circles.map(c => (
-          <div key={c.id} onPointerDown={e => hit(c.id, e)} style={{ position:'absolute', left:c.x + '%', top:c.y + '%', width:50, height:50, marginLeft:-25, marginTop:-25, borderRadius:'50%', background:GAMES_COLOR, border:'3px solid #fff', cursor:'pointer', touchAction:'manipulation' }}>
-            <span style={{ position:'absolute', inset:-13, borderRadius:'50%', border:`3px solid ${GAMES_COLOR}`, animation:'osuAppr 1.1s linear forwards', pointerEvents:'none' }} />
+          <div key={c.id} onPointerDown={e => hit(c.id, e)} style={{ position:'absolute', left:c.x + '%', top:c.y + '%', width:sz, height:sz, marginLeft:-half, marginTop:-half, borderRadius:'50%', background:GAMES_COLOR, border:'3px solid #fff', cursor:'pointer', touchAction:'manipulation' }}>
+            <span style={{ position:'absolute', inset:-13, borderRadius:'50%', border:`3px solid ${GAMES_COLOR}`, animation:`osuAppr ${lvl.life}ms linear forwards`, pointerEvents:'none' }} />
           </div>
         ))}
         {phase !== 'playing' && (
           <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, color:'#fff', textAlign:'center', padding:16 }}>
             {phase === 'done' && <div style={{ fontSize:13, lineHeight:1.6 }}>Score <b style={{ color:GAMES_COLOR }}>{score}</b> · Précision <b>{acc}%</b> · Combo max <b>{maxCombo}</b></div>}
+            <div style={{ fontSize:11.5, color:'#bbb' }}>Difficulté : <b style={{ color:GAMES_COLOR }}>{lvl.label}</b> · Manche de {OSU_ROUND}s</div>
             <button onClick={start} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{phase === 'done' ? '↻ Rejouer' : '▶ Démarrer'}</button>
           </div>
         )}
