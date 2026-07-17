@@ -105,13 +105,16 @@ const CLIENT_ID    = '672e41f0308f4378b4f2331844e08b20';
 const REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/';
 // user-library-read/modify : requis par les endpoints /me/library (migration Spotify fév. 2026).
 // Un compte connecté avant l'ajout de ces scopes doit se déconnecter/reconnecter pour les accorder.
-const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-modify-playback-state user-library-read user-library-modify';
+// ⚠ user-read-playback-state (6.4.5) : requis par GET /me/player/queue — capture des
+// Découvertes de la semaine par la lecture. Token émis AVANT cet ajout → 403 sur la file
+// d'attente tant que l'utilisateur ne s'est pas déconnecté/reconnecté (log explicite).
+const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-read-playback-state user-modify-playback-state user-library-read user-library-modify';
 const ESTIMATED_TOTAL = 1400;
 // Version de l'app : MAJ.MIN.U = nombre de commits du dépôt découpé en
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.4.4';
+const APP_VERSION = '6.4.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1294,7 +1297,7 @@ async function importDiscoverWeekly(addLog) {
     }
   }
   if (!tracksData) {
-    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible (403/vide). Depuis la migration Spotify, les playlists ÉDITORIALES Spotify (Découvertes, Radar…) ne sont plus lisibles par les apps tierces, même ajoutées à ta bibliothèque. CONTOURNEMENT : sur Spotify, ouvre la playlist → menu ⋯ → "Ajouter à une autre playlist" → "Nouvelle playlist" (garde "découvertes" dans le nom) → cette COPIE PERSO sera lisible et importée automatiquement. Nouvel essai dans 6 h.', 'warn');
+    addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible (403/vide). Depuis la migration Spotify, les playlists ÉDITORIALES Spotify (Découvertes, Radar…) ne sont plus lisibles par les apps tierces, même ajoutées à ta bibliothèque. LE PLUS SIMPLE : lance simplement la LECTURE de la playlist sur Spotify — les titres seront capturés automatiquement dans « En attente » pendant l\'écoute (file d\'attente du player). Alternative : menu ⋯ → "Ajouter à une autre playlist" → "Nouvelle playlist" (garde "découvertes" dans le nom) → cette COPIE PERSO sera lisible et importée automatiquement. Nouvel essai dans 6 h.', 'warn');
     localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // cooldown court, auto-réparant
     return;
   }
@@ -1375,8 +1378,73 @@ async function dwManualAccess(addLog) {
     await importDiscoverWeekly(addLog);
     return readable.external_urls?.spotify || null;
   }
-  addLog('CONTOURNEMENT : sur Spotify, ouvre « Découvertes de la semaine » → menu ⋯ → « Ajouter à une autre playlist » → « Nouvelle playlist » (garde « découvertes » dans le nom) — cette COPIE PERSO sera lisible et importée automatiquement. J\'ouvre la playlist…', 'warn');
+  addLog('LE PLUS SIMPLE : lance la LECTURE de la playlist que j\'ouvre — les titres seront capturés automatiquement dans « En attente » pendant l\'écoute (file d\'attente du player). Alternative : menu ⋯ → « Ajouter à une autre playlist » → « Nouvelle playlist » (garde « découvertes » dans le nom) — cette COPIE PERSO sera lisible et importée automatiquement. J\'ouvre la playlist…', 'warn');
   return candidates[0].external_urls?.spotify || null;
+}
+
+// ── CAPTURE DES DÉCOUVERTES PAR LA LECTURE (6.4.5) ──
+// Le CONTENU des playlists éditoriales Spotify est illisible par les apps tierces (403/vide),
+// mais leurs MÉTADONNÉES (nom) restent lisibles, et la FILE D'ATTENTE du player expose le
+// titre courant + les ~20 suivants pendant qu'on ÉCOUTE la playlist. Donc, à chaque tick du
+// poll player : si le contexte de lecture est une playlist dont le nom matche « Découvertes
+// de la semaine », on importe currently_playing + queue (GET /me/player/queue, scope
+// user-read-playback-state) en release_type='discover_weekly'. Re-capture max 1×/60 s tant
+// que l'écoute continue (les titres profonds de la playlist entrent dans la file au fil de
+// la lecture). Doublons impossibles : titre déjà en base (même écouté) skippé + purged_uris.
+// → il SUFFIT de lancer la playlist une fois par semaine (bouton violet) pour remplir
+// « En attente », plus besoin de copie perso. Renvoie le nb de titres ajoutés.
+const DW_NAME_RE   = /découvertes de la semaine|discover weekly/i;
+const _dwCtxIsDW   = {};      // playlist id → bool (cache session : nom déjà vérifié)
+let _dwCapLastAt   = 0;       // throttle 60 s entre deux lectures de la file
+let _dwCapDenied   = false;   // 403 sur la file (token pré-scope) → stop pour la session
+async function dwCaptureFromContext(contextUri, addLog) {
+  try {
+    if (_dwCapDenied || !_db || Date.now() < _rlUntil) return 0;
+    const m = /^spotify:playlist:([A-Za-z0-9]+)$/.exec(contextUri || '');
+    if (!m) return 0;
+    const pid = m[1];
+    if (_dwCtxIsDW[pid] === false || Date.now() - _dwCapLastAt < 60000) return 0;
+    if (_dwCtxIsDW[pid] !== true) {
+      const meta = await apiGet(`https://api.spotify.com/v1/playlists/${pid}?fields=name`);
+      if (!meta || meta.rate_limited) return 0;                   // erreur réseau/429 : on retentera
+      _dwCtxIsDW[pid] = DW_NAME_RE.test(meta.name || '');
+      if (!_dwCtxIsDW[pid]) return 0;
+    }
+    _dwCapLastAt = Date.now();
+    const q = await apiGet('https://api.spotify.com/v1/me/player/queue');
+    if (!q || q.rate_limited) return 0;
+    if (q.error && (q.error.status === 403 || q.error.status === 401)) {
+      _dwCapDenied = true;   // scope user-read-playback-state absent du token courant
+      addLog && addLog('⚠ Capture Découvertes impossible : Spotify exige une nouvelle permission (lecture de la file d\'attente). Déconnecte-toi puis reconnecte-toi pour l\'accorder.', 'warn');
+      return 0;
+    }
+    const tracks = [q.currently_playing, ...(Array.isArray(q.queue) ? q.queue : [])]
+      .filter(t => t && t.uri && !t.is_local && (!t.type || t.type === 'track'));
+    if (!tracks.length) return 0;
+    let purged = new Set();
+    try { purged = new Set(dbAll("SELECT spotify_uri FROM purged_uris").map(r => r.spotify_uri)); } catch {}
+    const today = new Date().toISOString().slice(0, 10);
+    const seen = new Set();
+    let added = 0;
+    for (const t of tracks) {
+      if (purged.has(t.uri) || seen.has(t.uri)) continue;
+      seen.add(t.uri);
+      try {
+        // Déjà en base (en attente, écouté ou liké) → ne pas compter ni réinsérer
+        if (dbGet("SELECT 1 AS x FROM tracks WHERE spotify_uri = ?", [t.uri])) continue;
+        dbRun(
+          "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [t.uri, (t.artists || []).map(a => a.name).join(', ') || '?', t.name || '?', 'Découvertes de la semaine', 'discover_weekly', today, (t.album && t.album.images && ((t.album.images[1] && t.album.images[1].url) || (t.album.images[0] && t.album.images[0].url))) || null, t.duration_ms || null]
+        );
+        added++;
+      } catch {}
+    }
+    if (added > 0) {
+      await saveDB();
+      addLog && addLog(`✓ Capture Découvertes de la semaine : ${added} titre(s) ajoutés à « En attente » via la file de lecture`, 'ok');
+    }
+    return added;
+  } catch { return 0; }
 }
 
 // Une release_date Spotify a une précision variable : 'day' ("2026-05-10"), 'month'
@@ -1709,6 +1777,10 @@ function StoreProvider({ children }) {
   }, []);
 
   // ── Poll lecture en cours toutes les 5s ──
+  // reloadFeedRef : la capture Découvertes (ci-dessous) doit recharger le feed avec les
+  // FILTRES ACTIFS, mais la closure du tick (deps [authState]) figerait un reloadFeed
+  // périmé → ref toujours pointée sur la dernière version (assignée à sa définition).
+  const reloadFeedRef = React.useRef(() => {});
   React.useEffect(() => {
     if (authState !== 'connected') return;
     let stop = false;
@@ -1719,6 +1791,12 @@ function StoreProvider({ children }) {
         // Fenêtre 429 active : garder l'état affiché tel quel — setNow(null) ferait
         // disparaître le player et polluerait les effets d'auto-avance alors que la musique joue
         if (r?.rate_limited) return;
+        // Capture « Découvertes de la semaine » par la LECTURE : l'utilisateur écoute une
+        // playlist → dwCaptureFromContext vérifie son nom (métadonnées lisibles) et importe
+        // la file d'attente (throttlé 1×/60 s, no-op sinon). Titres visibles sans F5.
+        if (!stop && r?.context?.type === 'playlist' && r?.item) {
+          dwCaptureFromContext(r.context.uri, log).then(n => { if (n > 0 && !stop) reloadFeedRef.current(); }).catch(() => {});
+        }
         if (!stop && r?.item) {
           const next = {
             title:    r.item.name,
@@ -2567,6 +2645,7 @@ function StoreProvider({ children }) {
     if (!dbReady) return;
     setFeed(loadFeedFromDB({ artistSearch: artistSearch.trim(), filterType, sortBy, genre: genreFilter }));
   }, [dbReady, artistSearch, filterType, sortBy, genreFilter]);
+  reloadFeedRef.current = reloadFeed;   // la capture Découvertes (poll player) lit la version à jour
 
   // Réinitialise manuellement le quota 24h (compteur + fenêtre) — débloque une
   // synchro sans attendre l'expiration des 24h. Confirmation côté UI.
@@ -3462,7 +3541,7 @@ function DiscoverWeeklyButton() {
   };
   return (
     <button onClick={run} disabled={busy || !dbReady}
-      title="Cherche la playlist, teste si son contenu est lisible (détails dans les Logs), importe les titres lisibles puis ouvre la playlist sur Spotify"
+      title="Cherche la playlist, importe les titres lisibles puis l'ouvre sur Spotify. Lance ensuite la LECTURE : les titres sont capturés automatiquement dans « En attente » pendant l'écoute (détails dans les Logs)"
       style={{ width:'100%', background:`${DW_PURPLE}22`, border:`1px solid ${DW_PURPLE}66`, color: busy || !dbReady ? C.dim : DW_PURPLE,
         borderRadius:8, padding:'8px 10px', fontSize:11, fontWeight:700, cursor: busy || !dbReady ? 'default' : 'pointer' }}>
       {busy ? '↻ Accès en cours…' : 'Accéder à la playlist "Découverte de la semaine"'}
