@@ -111,7 +111,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.3.5';
+const APP_VERSION = '6.3.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1194,10 +1194,22 @@ function loadArtistsFromDB() {
 // ════════════════════════════════════════════════
 // DÉCOUVERTES DE LA SEMAINE — import hebdo auto
 // ════════════════════════════════════════════════
-const DW_LS_KEY      = 'spotifyplus_dw_last_import';
-const DW_MAX_AGE_MS  = 7 * 24 * 60 * 60 * 1000; // 7 jours (cooldown après un import réussi)
+const DW_LS_KEY      = 'spotifyplus_dw_last_import'; // clé ISO semaine du dernier import réussi (ex. « 2026-W29 »)
 const DW_FAIL_KEY    = 'spotifyplus_dw_last_fail';
 const DW_FAIL_AGE_MS = 6 * 60 * 60 * 1000;      // 6 h (cooldown après un échec — auto-réparant)
+const DW_PID_KEY     = 'spotifyplus_dw_playlist_id'; // ID de la dernière playlist DW dont le contenu était LISIBLE
+
+// Clé ISO semaine « YYYY-Www » — les Découvertes de la semaine se rafraîchissent chaque
+// LUNDI, donc on ré-importe une fois par nouvelle semaine (au lieu d'un cooldown glissant
+// de 7 j qui dérivait du lundi de rafraîchissement).
+function dwWeekKey(d = new Date()) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = t.getUTCDay() || 7;                 // lundi=1 … dimanche=7
+  t.setUTCDate(t.getUTCDate() + 4 - day);         // jeudi de la semaine ISO courante
+  const yStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((t - yStart) / 86400000 + 1) / 7);
+  return `${t.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
 
 // Lit le contenu d'une playlist en tolérant l'état de migration de l'app Spotify :
 // essaie le nouvel endpoint /items PUIS l'ancien /tracks (certaines apps ont encore l'un
@@ -1239,36 +1251,47 @@ async function dwFindCandidates() {
 }
 
 async function importDiscoverWeekly(addLog) {
+  const thisWeek = dwWeekKey();
   const lastOk   = localStorage.getItem(DW_LS_KEY);
-  if (lastOk && Date.now() - parseInt(lastOk) < DW_MAX_AGE_MS) return;       // déjà importé récemment
+  if (lastOk === thisWeek) return;                                          // déjà importé cette semaine ISO
   const lastFail = localStorage.getItem(DW_FAIL_KEY);
   if (lastFail && Date.now() - parseInt(lastFail) < DW_FAIL_AGE_MS) return;  // échec récent — petit cooldown
   if (Date.now() < _rlUntil) return; // fenêtre rate-limit active — ne pas insister, retentera au prochain login
 
   addLog('── Import Découvertes de la semaine ──', 'info');
 
-  const found = await dwFindCandidates();
-  if (found.rate_limited) return; // fenêtre 429 — retentera au prochain login
-  const candidates = found.candidates;
+  const today = new Date().toISOString().slice(0, 10);
+  let tracksData = null, sourcePid = null;
 
-  if (!candidates.length) {
-    addLog('⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
-    localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // re-tentera dans 6 h
-    return;
+  // 1) Ré-lecture DIRECTE de la dernière playlist dont le contenu était lisible (copie perso) :
+  //    son ID est stable et son contenu se rafraîchit chaque semaine → import fiable et rapide,
+  //    sans re-balayer toutes les playlists.
+  const rememberedPid = localStorage.getItem(DW_PID_KEY);
+  if (rememberedPid) {
+    const d = await fetchPlaylistItems(rememberedPid);
+    if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
+    if (d.items.length) { tracksData = d; sourcePid = rememberedPid; }
   }
 
-  // Priorité aux copies PERSO (owner ≠ 'spotify' → contenu lisible), l'éditoriale en dernier.
-  candidates.sort((a, b) => (a.owner?.id === 'spotify' ? 1 : 0) - (b.owner?.id === 'spotify' ? 1 : 0));
-
-  const today = new Date().toISOString().slice(0, 10);
-  // Migration Spotify : /tracks → /items, et le contenu n'est renvoyé QUE pour les playlists
-  // possédées/collaboratives. On essaie chaque candidate (copie perso d'abord) via /items ET
-  // /tracks (fetchPlaylistItems) jusqu'à en trouver une dont le contenu est lisible.
-  let tracksData = null;
-  for (const pl of candidates) {
-    const d = await fetchPlaylistItems(pl.id);
-    if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
-    if (d.items.length) { tracksData = d; break; }
+  // 2) Sinon, recherche des candidates (copie perso d'abord, l'éditoriale — non lisible — en dernier).
+  if (!tracksData) {
+    const found = await dwFindCandidates();
+    if (found.rate_limited) return; // fenêtre 429 — retentera au prochain login
+    const candidates = found.candidates;
+    if (!candidates.length) {
+      addLog('⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
+      localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // re-tentera dans 6 h
+      return;
+    }
+    candidates.sort((a, b) => (a.owner?.id === 'spotify' ? 1 : 0) - (b.owner?.id === 'spotify' ? 1 : 0));
+    // Migration Spotify : /tracks → /items, et le contenu n'est renvoyé QUE pour les playlists
+    // possédées/collaboratives. On essaie chaque candidate via fetchPlaylistItems jusqu'à trouver
+    // un contenu lisible.
+    for (const pl of candidates) {
+      const d = await fetchPlaylistItems(pl.id);
+      if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
+      if (d.items.length) { tracksData = d; sourcePid = pl.id; break; }
+    }
   }
   if (!tracksData) {
     addLog('⚠ Contenu de "Découvertes de la semaine" inaccessible (403/vide). Depuis la migration Spotify, les playlists ÉDITORIALES Spotify (Découvertes, Radar…) ne sont plus lisibles par les apps tierces, même ajoutées à ta bibliothèque. CONTOURNEMENT : sur Spotify, ouvre la playlist → menu ⋯ → "Ajouter à une autre playlist" → "Nouvelle playlist" (garde "découvertes" dans le nom) → cette COPIE PERSO sera lisible et importée automatiquement. Nouvel essai dans 6 h.', 'warn');
@@ -1293,8 +1316,10 @@ async function importDiscoverWeekly(addLog) {
     } catch {}
   }
 
-  // Succès (contenu lu) : cooldown 7 j + on efface le marqueur d'échec
-  localStorage.setItem(DW_LS_KEY, Date.now().toString());
+  // Succès (contenu lu) : on marque la semaine ISO courante (ré-import à la prochaine semaine),
+  // on mémorise la playlist lisible pour la ré-lire directement, et on efface le marqueur d'échec
+  localStorage.setItem(DW_LS_KEY, thisWeek);
+  if (sourcePid) localStorage.setItem(DW_PID_KEY, sourcePid);
   localStorage.removeItem(DW_FAIL_KEY);
   if (added > 0) {
     await saveDB();
@@ -1344,8 +1369,9 @@ async function dwManualAccess(addLog) {
     addLog(`✗ Contenu inaccessible (403/vide)${p.owner?.id === 'spotify' ? ' — playlist ÉDITORIALE Spotify, non lisible par les apps tierces depuis la migration 2026' : ''}.`, 'warn');
   }
   if (readable) {
-    // Cooldowns levés → importDiscoverWeekly refait la lecture et insère en base
-    try { localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
+    // Contenu lisible → on la mémorise (ré-lecture directe chaque semaine), cooldowns levés,
+    // puis importDiscoverWeekly refait la lecture et insère en base.
+    try { localStorage.setItem(DW_PID_KEY, readable.id); localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
     await importDiscoverWeekly(addLog);
     return readable.external_urls?.spotify || null;
   }
