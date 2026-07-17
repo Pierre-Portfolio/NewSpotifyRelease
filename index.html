@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.4.7';
+const APP_VERSION = '6.4.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -11014,9 +11014,26 @@ async function foodSearchNutrition(query) {
   const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' +
     encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=24' +
     '&fields=product_name,product_name_fr,generic_name_fr,brands,nutriments';
-  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-  if (!res.ok) throw new Error('openfoodfacts ' + res.status);
-  const data = await res.json();
+  // ⚠ search.pl (Open Food Facts) est LENT et échoue souvent au 1er appel (timeout/5xx)
+  // → avant, chaque échec remontait « Recherche indisponible » et il fallait recliquer
+  // 2-3 fois la loupe. On réessaie donc TOUT SEUL : 2 tentatives directes (timeout 12 s,
+  // pause 800 ms entre les deux), puis repli proxies CORS (corsFetchText). On ne throw
+  // qu'après épuisement de toutes les pistes.
+  let data = null;
+  for (let attempt = 0; attempt < 2 && !data; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 800));
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+    try {
+      const res = await fetch(url, { headers: { 'Accept': 'application/json' }, ...(ctrl ? { signal: ctrl.signal } : {}) });
+      if (res.ok) { const j = await res.json(); if (j && Array.isArray(j.products)) data = j; }
+    } catch {}
+    finally { if (timer) clearTimeout(timer); }
+  }
+  if (!data) {
+    try { const t = await corsFetchText(url); const j = t && JSON.parse(t); if (j && Array.isArray(j.products)) data = j; } catch {}
+  }
+  if (!data) throw new Error('openfoodfacts injoignable');
   const out = [];
   const seen = new Set();
   for (const p of (data.products || [])) {
