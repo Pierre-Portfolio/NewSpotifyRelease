@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.6.4';
+const APP_VERSION = '6.6.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2904,6 +2904,7 @@ const GAMES = [
   { id:'demineur',   label:'Démineur',                players:1 },
   { id:'flappy',     label:'Flappy Bird',             players:1 },
   { id:'go',         label:'Go · 2 joueurs',          players:2 },
+  { id:'guitar',     label:'Guitar Hero',             players:1 },
   { id:'inposteur',  label:'Inposteur',               players:2 },
   { id:'memory',     label:'Memory',                  players:1 },
   { id:'morpion',    label:'Morpion · 2 joueurs',     players:2 },
@@ -2966,6 +2967,7 @@ function GameHost({ game, label }) {
     case 'demineur':   return <GameDemineur />;
     case 'flappy':     return <GameFlappy />;
     case 'go':         return <GameGo />;
+    case 'guitar':     return <GameGuitarHero />;
     case 'inposteur':  return <GameInposteur />;
     case 'memory':     return <GameMemory />;
     case 'morpion':    return <GameMorpion />;
@@ -3503,6 +3505,137 @@ function GameOsu() {
             <button onClick={start} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{phase === 'done' ? '↻ Rejouer' : '▶ Démarrer'}</button>
           </div>
         )}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Guitar Hero (rythme / notes qui tombent sur 4 couloirs) ════════
+// Manche de 60 s. 5 niveaux : plus c'est dur, plus les notes descendent vite et souvent.
+// Frappe une note quand elle atteint la zone du bas (touche D/F/J/K ou les 4 boutons tactiles).
+// Note manquée (passée la zone) → combo cassé + raté ; frappe à vide → combo cassé.
+const GH_ROUND = 60;
+const GH_LANES = 4;
+const GH_LANE_KEYS = ['d', 'f', 'j', 'k'];
+const GH_LANE_COLORS = ['#39b2d1', '#f5813c', '#3fae6a', '#c065d6'];
+const GH_HIT_Y = 88;   // centre de la zone de frappe (% de la hauteur)
+const GH_HIT_WIN = 11; // tolérance ± autour de la zone
+const GH_LEVELS = [
+  { id:1, label:'Très facile', speed:0.9, spawn:1150 },
+  { id:2, label:'Facile',      speed:1.2, spawn:920  },
+  { id:3, label:'Normal',      speed:1.6, spawn:720  },
+  { id:4, label:'Difficile',   speed:2.1, spawn:560  },
+  { id:5, label:'Extrême',     speed:2.7, spawn:430  },
+];
+const GH_LEVEL_LS = 'spotifyplus_game_gh_level';
+function GameGuitarHero() {
+  const [level, setLevel] = React.useState(() => { const v = +localStorage.getItem(GH_LEVEL_LS); return v >= 1 && v <= 5 ? v : 3; });
+  React.useEffect(() => { try { localStorage.setItem(GH_LEVEL_LS, String(level)); } catch {} }, [level]);
+  const lvl = GH_LEVELS[level - 1];
+  const [notes, setNotes] = React.useState([]);
+  const [score, setScore] = React.useState(0);
+  const [combo, setCombo] = React.useState(0);
+  const [maxCombo, setMaxCombo] = React.useState(0);
+  const [hits, setHits] = React.useState(0);
+  const [misses, setMisses] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('guitar'));
+  const [phase, setPhase] = React.useState('ready');
+  const [left, setLeft] = React.useState(GH_ROUND);
+  const [flash, setFlash] = React.useState([]); // surbrillances transitoires { lane, ok, k }
+  const idRef = React.useRef(0);
+  const notesRef = React.useRef([]); // source de vérité des notes (évite les closures périmées de la boucle)
+  const comboRef = React.useRef(0); React.useEffect(() => { comboRef.current = combo; }, [combo]);
+  // Toute mutation des notes passe par ici : met à jour le ref ET le state ensemble.
+  const applyNotes = fn => { const next = fn(notesRef.current); notesRef.current = next; setNotes(next); };
+
+  const start = () => { notesRef.current = []; setNotes([]); setScore(0); setCombo(0); setMaxCombo(0); setHits(0); setMisses(0); setLeft(GH_ROUND); setPhase('playing'); };
+
+  // Boucle de jeu (~30 fps) : descend les notes, compte celles qui passent la zone (ratées).
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    const speed = lvl.speed;
+    const loop = setInterval(() => {
+      let missed = 0;
+      applyNotes(ns => {
+        const kept = [];
+        for (const n of ns) { const y = n.y + speed; if (y > GH_HIT_Y + GH_HIT_WIN + 4) missed++; else kept.push({ ...n, y }); }
+        return kept;
+      });
+      if (missed) { setMisses(m => m + missed); setCombo(0); }
+    }, 33);
+    const spawn = setInterval(() => { const lane = Math.floor(Math.random() * GH_LANES); applyNotes(ns => [...ns, { id: ++idRef.current, lane, y: -8 }]); }, lvl.spawn);
+    const tick = setInterval(() => setLeft(l => l - 1), 1000);
+    return () => { clearInterval(loop); clearInterval(spawn); clearInterval(tick); };
+  }, [phase, lvl.speed, lvl.spawn]);
+
+  React.useEffect(() => {
+    if (phase === 'playing' && left <= 0) { setPhase('done'); notesRef.current = []; setNotes([]); setBest(b => { const nb = Math.max(b, score); setGameHi('guitar', nb); return nb; }); }
+  }, [left, phase, score]);
+
+  const flashLane = (lane, ok) => { const k = Math.random(); setFlash(f => [...f, { lane, ok, k }]); setTimeout(() => setFlash(f => f.filter(x => x.k !== k)), 130); };
+  const strike = lane => {
+    if (phase !== 'playing') return;
+    const cands = notesRef.current.filter(n => n.lane === lane && Math.abs(n.y - GH_HIT_Y) <= GH_HIT_WIN);
+    if (cands.length) {
+      cands.sort((a, b) => Math.abs(a.y - GH_HIT_Y) - Math.abs(b.y - GH_HIT_Y));
+      const target = cands[0];
+      applyNotes(ns => ns.filter(n => n.id !== target.id));
+      setHits(h => h + 1);
+      const nc = comboRef.current + 1; setCombo(nc); setMaxCombo(m => Math.max(m, nc));
+      setScore(s => s + 100 + nc * 10);
+      flashLane(lane, true);
+    } else { setCombo(0); flashLane(lane, false); } // frappe à vide → combo cassé
+  };
+
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    const onKey = e => { const i = GH_LANE_KEYS.indexOf(e.key.toLowerCase()); if (i >= 0) { e.preventDefault(); strike(i); } };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  }, [phase]);
+
+  const acc = hits + misses ? Math.round(hits / (hits + misses) * 100) : 100;
+  const laneW = 100 / GH_LANES;
+  return (
+    <GameWrap hint="Frappe chaque note quand elle atteint la zone du bas — touches D F J K ou les 4 boutons. Enchaîne les combos !"
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Combo <b style={{ color:GAMES_COLOR }}>{combo}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      {/* Choix de la difficulté (verrouillé pendant une manche) */}
+      <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center', width:'100%', maxWidth:340 }}>
+        {GH_LEVELS.map(l => {
+          const active = l.id === level;
+          return <button key={l.id} onClick={() => phase !== 'playing' && setLevel(l.id)} disabled={phase === 'playing'}
+            style={{ background: active ? `${GAMES_COLOR}22` : C.surface, border:`1px solid ${active ? GAMES_COLOR : C.border}`, color: active ? GAMES_COLOR : C.text, borderRadius:8, padding:'5px 10px', fontSize:11.5, fontWeight: active ? 800 : 600, cursor: phase === 'playing' ? 'default' : 'pointer', opacity: phase === 'playing' && !active ? 0.45 : 1 }}>{l.id}· {l.label}</button>;
+        })}
+      </div>
+      <div style={{ position:'relative', width:'100%', maxWidth:340, aspectRatio:'3 / 4', background:'#141420', borderRadius:12, border:`1px solid ${C.border}`, overflow:'hidden', touchAction:'manipulation' }}>
+        {/* séparateurs de couloirs */}
+        {Array.from({ length: GH_LANES - 1 }).map((_, i) => (
+          <div key={i} style={{ position:'absolute', top:0, bottom:0, left:`${(i + 1) * laneW}%`, width:1, background:C.border }} />
+        ))}
+        {/* zone de frappe */}
+        <div style={{ position:'absolute', left:0, right:0, top:`${GH_HIT_Y - GH_HIT_WIN}%`, height:`${GH_HIT_WIN * 2}%`, background:'rgba(255,255,255,0.05)', borderTop:'2px solid rgba(255,255,255,0.35)', borderBottom:'2px solid rgba(255,255,255,0.35)', pointerEvents:'none' }} />
+        {/* flashs de frappe */}
+        {flash.map(f => (
+          <div key={f.k} style={{ position:'absolute', top:0, bottom:0, left:`${f.lane * laneW}%`, width:`${laneW}%`, background: f.ok ? `${GH_LANE_COLORS[f.lane]}44` : '#e0505033', pointerEvents:'none' }} />
+        ))}
+        {/* notes */}
+        {phase === 'playing' && notes.map(n => (
+          <div key={n.id} style={{ position:'absolute', top:`${n.y}%`, left:`${n.lane * laneW + 1.5}%`, width:`${laneW - 3}%`, height:'5.5%', borderRadius:6, background:GH_LANE_COLORS[n.lane], border:'2px solid #fff', boxShadow:`0 0 8px ${GH_LANE_COLORS[n.lane]}`, pointerEvents:'none' }} />
+        ))}
+        {phase === 'playing' && <div style={{ position:'absolute', top:6, right:10, fontSize:12, fontWeight:800, color:'#fff', zIndex:3 }}>⏱ {left}s</div>}
+        {phase !== 'playing' && (
+          <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, color:'#fff', textAlign:'center', padding:16 }}>
+            {phase === 'done' && <div style={{ fontSize:13, lineHeight:1.6 }}>Score <b style={{ color:GAMES_COLOR }}>{score}</b> · Précision <b>{acc}%</b> · Combo max <b>{maxCombo}</b></div>}
+            <div style={{ fontSize:11.5, color:'#bbb' }}>Difficulté : <b style={{ color:GAMES_COLOR }}>{lvl.label}</b> · Manche de {GH_ROUND}s</div>
+            <button onClick={start} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{phase === 'done' ? '↻ Rejouer' : '▶ Démarrer'}</button>
+          </div>
+        )}
+      </div>
+      {/* boutons de frappe tactiles */}
+      <div style={{ display:'flex', gap:6, width:'100%', maxWidth:340 }}>
+        {GH_LANE_COLORS.map((col, i) => (
+          <button key={i} onPointerDown={e => { e.preventDefault(); strike(i); }} disabled={phase !== 'playing'}
+            style={{ flex:1, height:54, borderRadius:10, border:`2px solid ${col}`, background:`${col}22`, color:'#fff', fontWeight:800, fontSize:16, cursor: phase === 'playing' ? 'pointer' : 'default', touchAction:'manipulation', opacity: phase === 'playing' ? 1 : 0.5 }}>{GH_LANE_KEYS[i].toUpperCase()}</button>
+        ))}
       </div>
     </GameWrap>
   );
@@ -13290,6 +13423,7 @@ const GAMES_HUB_STATS = [
   { id:'2048',   label:'2048',        icon:'🔢', metric:'meilleur score' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
+  { id:'guitar', label:'Guitar Hero', icon:'🎸', metric:'meilleur score' },
   { id:'snake',  label:'Snake',       icon:'🐍', metric:'meilleur score' },
   { id:'memory', label:'Memory',      icon:'🧠', metric:'record (moins de coups)' },
 ];
