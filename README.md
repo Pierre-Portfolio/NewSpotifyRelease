@@ -10,7 +10,7 @@
 ## Aperçu
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
-Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, Météo, Finance, Bon Plan, TV Time, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
+Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, Météo, Finance, Bon Plan, TV Time, Note, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
 
 👉 **https://pierre-portfolio.github.io/NewSpotifyRelease/** — aucune installation, tout est statique sur GitHub Pages.
 
@@ -61,6 +61,9 @@ Suivi séries & films via **TMDB v3** (clé perso, sans plafond journalier). Rec
 ### Nourriture
 Suivi calories façon **Lifesum** : profil (poids, taille, âge, sexe, activité, objectif) → **besoin calorique quotidien** calculé (Mifflin-St Jeor) + IMC. Saisie des repas du jour par catégorie (petit-déj, déjeuner, dîner, encas), jauge de progression vers l'objectif, **historique 30 jours** des calories. **Édition rétroactive** : les repas des **7 derniers jours** restent modifiables (chips de jour dans la section + ✏️ dans l'historique). **🔎 Calories automatiques** : tape le nom d'un aliment ou d'un plat, l'app cherche ses calories dans la base ouverte **Open Food Facts** (gratuit, sans compte) et affiche les résultats — la recherche **réessaie toute seule** si la base répond mal (plus besoin de recliquer la loupe plusieurs fois) ; ajuste la **quantité en grammes** et les kcal se calculent tout seuls ; une **croix ×** efface la recherche en cours. La section **Aujourd'hui est repliable** (le total kcal du jour reste visible replié). La saisie manuelle des kcal reste possible en repli. Les **totaux quotidiens** sont sauvegardés (et exportés), la **composition des repas reste locale** (jamais dans l'export).
 
+### Note
+Prise de **notes 100 % locale**, accessible depuis les onglets **et dès la page de connexion** (bouton 🗒️ — aucune connexion Spotify requise). Chaque note peut être **chiffrée individuellement par mot de passe** (AES-GCM 256 + PBKDF2, comme le coffre Mot de Passe) : le titre reste lisible dans la liste, le contenu est verrouillé 🔒. Notes exportables/importables (les chiffrées restent chiffrées dans la sauvegarde), module désactivable dans le Paramétrage. ⚠ Mot de passe d'une note oublié = contenu irrécupérable.
+
 ### To do
 Tâches classées par échéance en carrousel (Quotidien, Aujourd'hui, semaine, mois, année, un jour). ⭐ favorites (« compliquées »). Le Quotidien repart chaque jour à 00 h.
 
@@ -74,7 +77,7 @@ Coffre d'identifiants **chiffré par un mot de passe maître** (AES-GCM 256 + PB
 Rappels datés (rubriques fixes Administratif/Logement/Véhicule/Médecin/Travail/Finance/Sport/Anniversaire/Autre + rappels persos), heure optionnelle, badges d'urgence, **notifications** (J-30/J-7/J-1/jour J + retards) et **ajout auto au To do** à ≤ 3 j. **🛰️ Veilles Techno** : 🤖 Dependabot (alertes de sécurité de tes dépôts GitHub, token perso) et 🏁 Speedrun (runs à valider sur les jeux que tu modères, pseudo public).
 
 ### Sauvegarde & données (À propos)
-- **Export / Import** JSON, complet **ou** partiel (13 exports séparés) — fusion prudente à la restauration (dates de scan jamais régressées, TV Time/Finance fusionnés…)
+- **Export / Import** JSON, complet **ou** partiel (14 exports séparés) — fusion prudente à la restauration (dates de scan jamais régressées, TV Time/Finance fusionnés…)
 - **Paramétrage des modules** : un interrupteur par module active/désactive son onglet en direct
 - **☁︎ Dropbox** (OAuth PKCE) et **△ Google Drive** (OAuth implicite) optionnels : sauvegarde complète écrasée à chaque envoi
 - Proposition de sauvegarde hebdomadaire, réinitialisation mois/année automatique (mois **local**)
