@@ -58,6 +58,9 @@ Mode **🧮 Calculatrice** entre Full et Mes Actifs : calculatrice de poche 100 
 ### Vêtement
 👕 Nouveau module — **vide pour le moment**, le contenu arrivera bientôt. Activable/désactivable dans le Paramétrage comme les autres modules.
 
+### Frigo Massy
+🧊 Nouveau module — **vide pour le moment**, le contenu arrivera bientôt. Activable/désactivable dans le Paramétrage comme les autres modules.
+
 ### Bon Plan
 Chasseur de bons plans (refonte) : **⭐ Ma liste** en premier (suivi de prix : ☆ sur n'importe quel jeu, **prix cible** optionnel → ✓ vert quand l'offre passe dessous, rafraîchi automatiquement, inclus dans la sauvegarde), **🔥 Promos du moment** (meilleures offres jeux PC du jour via CheapShark, filtres −50 % / −75 % / AAA, vignettes — section repliée par défaut), **🎮 Recherche jeux** (~20 boutiques PC, prix ≈ EUR, + liens de recherche directe **Steam · G2A · Instant Gaming · Eneba · Kinguin · Gamivo · CDKeys** sous chaque jeu déplié) et **🔎 Tous produits** (refonte : la recherche marche désormais via **4 API gratuites sans clé** — **Apple** (apps, musique, films, livres, avec prix + pochette, désormais via relais CORS car l'API Apple bloquait le navigateur), **Open Products Facts** (produits du quotidien), **Open Beauty Facts** (cosmétiques) et **Open Food Facts** (alimentaire) ; lien leDénicheur en repli pour l'électronique avec prix).
 

@@ -32,7 +32,8 @@
 // v36 : bump de cache — 2 jeux de plus dans Jeux : Memory (paires) et Bataille navale (vs IA).
 // v37 : bump de cache — module « Nourriture » renommé « Santé » (libellé visible ; id `food` inchangé).
 // v38 : bump de cache — nouveau module « Vêtement » (vide pour le moment).
-const CACHE  = 'spotifyplus-v38';
+// v39 : bump de cache — nouveau module « Frigo Massy » (vide pour le moment).
+const CACHE  = 'spotifyplus-v39';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css'];
 
