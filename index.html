@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.2.8';
+const APP_VERSION = '7.2.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1513,6 +1513,11 @@ function StoreProvider({ children }) {
   const setModuleEnabled = React.useCallback((id, on) => {
     setModuleToggles(prev => { const next = { ...prev, [id]: !!on }; saveModuleToggles(next); return next; });
   }, []);
+  // Visibilité des modules sur l'accueil connecté (homepage desktop) — persistée en localStorage
+  const [homeModules, setHomeModules] = React.useState(() => loadHomeModules());
+  const setModuleOnHome = React.useCallback((id, on) => {
+    setHomeModules(prev => { const next = { ...prev, [id]: !!on }; saveHomeModules(next); return next; });
+  }, []);
   const feedRef                   = React.useRef([]);
   const prevPositionRef           = React.useRef(0);
   const prevDurationRef           = React.useRef(0);
@@ -2666,6 +2671,7 @@ function StoreProvider({ children }) {
     seek,
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
+    homeModules, setModuleOnHome,
     dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
@@ -4907,16 +4913,29 @@ const HUB_CARDS = [
 const HUB_NO_DOT = new Set(['stats', 'mdp', 'tvtime']);
 
 function HubHome({ isMobile, onGo, disabled }) {
-  const { user, blockedUntil, quotaUntil } = useStore();
+  const { user, blockedUntil, quotaUntil, moduleToggles, homeModules } = useStore();
   const first = ((user?.display_name || user?.id || 'Pierre').split(' ')[0]) || 'Pierre';
-  const keyOf = c => isMobile ? c.mobile : c.desktop;
-  let cards = HUB_CARDS.filter(c => !(disabled && disabled.has(keyOf(c))));
+  // Cartes normalisées : { emoji, label, color, goKey, mobileKey }
+  let cards;
   if (isMobile) {
-    // Mobile : la tuile « Stats » et « Musique » sont retirées de l'accueil (Stats via le
-    // menu ⋯ ; Musique déjà dans la barre du haut)
-    cards = cards.filter(c => c.mobile !== 'statspanel' && c.mobile !== 'musique');
+    // Mobile : layout inchangé (2 colonnes) à partir de HUB_CARDS — la tuile « Stats » et
+    // « Musique » sont retirées de l'accueil (Stats via le menu ⋯ ; Musique déjà en barre du haut)
+    let mc = HUB_CARDS.filter(c => !(disabled && disabled.has(c.mobile)));
+    mc = mc.filter(c => c.mobile !== 'statspanel' && c.mobile !== 'musique');
     const MOBILE_ORDER = ['actu','rappel','meteo','maps','finance','compare','food','mdp','todo','tvtime','stats'];
-    cards = [...cards].sort((a, b) => MOBILE_ORDER.indexOf(a.mobile) - MOBILE_ORDER.indexOf(b.mobile));
+    mc = [...mc].sort((a, b) => MOBILE_ORDER.indexOf(a.mobile) - MOBILE_ORDER.indexOf(b.mobile));
+    cards = mc.map(c => ({ emoji:c.emoji, label:c.label, color:c.color, goKey:c.mobile, mobileKey:c.mobile }));
+  } else {
+    // Desktop : TOUS les modules basculables souhaités sur l'accueil (bouton 🏠 du Paramétrage),
+    // Musique en premier puis ordre ALPHABÉTIQUE (demande utilisateur), grille 3 colonnes.
+    const dc = TOGGLE_MODULES.filter(m =>
+      moduleEnabled(moduleToggles, m.id) && moduleOnHome(homeModules, m.id) && !(disabled && disabled.has(m.desktop)));
+    dc.sort((a, b) => {
+      if (a.id === 'musique') return -1;
+      if (b.id === 'musique') return 1;
+      return a.label.localeCompare(b.label, 'fr');
+    });
+    cards = dc.map(m => ({ emoji:m.icon, label:m.label, color:m.color, goKey:m.desktop, mobileKey:m.desktop }));
   }
   const padX  = isMobile ? 16 : 30;
   const fill  = !isMobile;   // desktop : remplir la hauteur pour tout voir sans scroll
@@ -4940,12 +4959,12 @@ function HubHome({ isMobile, onGo, disabled }) {
     }
   };
   return (
-    <div style={{ position:'relative', minHeight:'100%', height: fill?'100%':undefined, boxSizing:'border-box', display: fill?'flex':'block', flexDirection:'column', padding:`${isMobile?8.5:10}px ${padX}px ${isMobile?28:20}px`, overflow:'hidden' }}>
+    <div style={{ position:'relative', minHeight:'100%', height: fill?'100%':undefined, boxSizing:'border-box', display: fill?'flex':'block', flexDirection:'column', padding:`${isMobile?8.5:10}px ${padX}px ${isMobile?28:20}px`, overflow: isMobile?'hidden':'auto' }}>
       {/* Blobs colorés (même ambiance que la page de login) — le blob vert bas-gauche est
           masqué sur mobile (demande utilisateur) */}
       <div className="hub-blob" style={{ width:'34vmax', height:'34vmax', top:'-16vmax', right:'-10vmax', background:'#6f7bf5', opacity:0.26 }} />
       {!isMobile && <div className="hub-blob" style={{ width:'30vmax', height:'30vmax', bottom:'-18vmax', left:'-8vmax', background:'#1ed760', opacity:0.20, animationDelay:'-6s' }} />}
-      <div style={{ position:'relative', zIndex:1, maxWidth: isMobile?760:1040, width:'100%', margin:'0 auto', display: fill?'flex':'block', flexDirection:'column', flex: fill?1:undefined, minHeight:0, justifyContent: fill?'center':undefined }}>
+      <div style={{ position:'relative', zIndex:1, maxWidth: isMobile?760:960, width:'100%', margin:'0 auto', display: fill?'flex':'block', flexDirection:'column', flex: fill?1:undefined, minHeight:0, justifyContent: fill?'safe center':undefined }}>
         {/* Section du haut : le texte s'illumine au survol de la souris (desktop) */}
         <div onMouseEnter={hoverGlow(true)} onMouseLeave={hoverGlow(false)}
           style={{ fontFamily:'DM Mono,monospace', fontSize: isMobile?9:11, letterSpacing:'0.18em', color:'#8a8a9a', marginBottom:8, transition:'color 0.2s, text-shadow 0.2s', display:'inline-block', cursor: isMobile?'default':'default' }}>
@@ -4954,25 +4973,24 @@ function HubHome({ isMobile, onGo, disabled }) {
         <h1 className="hub-title" onMouseEnter={hoverGlow(true)} onMouseLeave={hoverGlow(false)} style={{ fontSize: isMobile?'clamp(30px,9vw,42px)':'clamp(32px,4vw,48px)', fontWeight:900, letterSpacing:'-0.03em', lineHeight:0.95, margin:0, transition:'filter 0.2s' }}>Hub de Pierre</h1>
         <p onMouseEnter={hoverGlow(true)} onMouseLeave={hoverGlow(false)} style={{ fontSize: isMobile?12:14, color:'#b7b7c4', margin: fill?'8px 0 0':'10px 0 0', transition:'color 0.2s, text-shadow 0.2s', display:'inline-block' }}>Salut {first} 👋 — où veux-tu aller ?</p>
 
-        {/* Disposition : 2 colonnes sur mobile, 5 colonnes (× 3 rangées) sur desktop — tuiles
-            compactes logo + titre. Ordre fixé par HUB_CARDS. Desktop : grille centrée
-            verticalement → tout visible sans scroll. */}
-        <div style={{ marginTop: isMobile?18:16, display:'grid', gridTemplateColumns: isMobile?'repeat(2, minmax(0, 1fr))':'repeat(5, minmax(0, 1fr))', gap: isMobile?10:12 }}>
+        {/* Disposition : 2 colonnes sur mobile, 3 colonnes sur desktop — tuiles compactes logo
+            + titre. Desktop : Musique puis ordre alphabétique, grille centrée verticalement. */}
+        <div style={{ marginTop: isMobile?18:16, display:'grid', gridTemplateColumns: isMobile?'repeat(2, minmax(0, 1fr))':'repeat(3, minmax(0, 1fr))', gap: isMobile?10:12 }}>
           {cards.map((c, i) => {
             // Mobile : « À propos » = barre pleine largeur, ~3× plus courte, icône + libellé seuls
-            const aboutBar = isMobile && c.mobile === 'stats';
+            const aboutBar = isMobile && c.mobileKey === 'stats';
             // Mobile : pastille verte
             //  - Nouvelles sorties (scrapping) → uniquement si le scrapping est PRÊT
             //  - onglets HUB_NO_DOT (À propos, Mot de passe, TV Time) → jamais de pastille
             //  - autres → si l'onglet n'a pas été ouvert depuis 00h aujourd'hui
             const showDot = isMobile && (
-              c.mobile === 'scrapping'
+              c.mobileKey === 'scrapping'
                 ? scrapReady
-                : (!HUB_NO_DOT.has(c.mobile) && visits && visits[keyOf(c)] !== todayStr)
+                : (!HUB_NO_DOT.has(c.mobileKey) && visits && visits[c.mobileKey] !== todayStr)
             );
-            const dotTitle = c.mobile === 'scrapping' ? 'Scrapping prêt' : "Pas encore ouvert aujourd'hui";
+            const dotTitle = c.mobileKey === 'scrapping' ? 'Scrapping prêt' : "Pas encore ouvert aujourd'hui";
             return (
-            <button key={c.desktop} className="hub-card" onClick={() => onGo(keyOf(c))}
+            <button key={c.goKey} className="hub-card" onClick={() => onGo(c.goKey)}
               style={{ position:'relative', animationDelay:`${0.04 * i}s`, textAlign:'center', cursor:'pointer', background:`linear-gradient(150deg, ${c.color}22, ${c.color}09)`, border:`1px solid ${c.color}44`, borderRadius:16, padding: aboutBar?'9px 16px':(isMobile?'16px 14px':'16px 12px'), display:'flex', flexDirection: aboutBar?'row':'column', alignItems:'center', gridColumn: aboutBar?'1 / -1':undefined, justifyContent:'center', gap: aboutBar?10:8, overflow:'hidden', transition:'transform 0.16s, box-shadow 0.16s, border-color 0.16s', color:C.text }}
               onMouseEnter={e => { e.currentTarget.style.transform='translateY(-4px)'; e.currentTarget.style.boxShadow=`0 14px 32px ${c.color}33`; e.currentTarget.style.borderColor=`${c.color}99`; }}
               onMouseLeave={e => { e.currentTarget.style.transform='none'; e.currentTarget.style.boxShadow='none'; e.currentTarget.style.borderColor=`${c.color}44`; }}>
@@ -5617,6 +5635,14 @@ function loadModuleToggles() {
 function saveModuleToggles(v) { lsSet(MODULES_LS_KEY, JSON.stringify(v)); }
 // Un module est activé par défaut (clé absente = activé) ; seul `false` explicite le désactive.
 function moduleEnabled(toggles, id) { return !toggles || toggles[id] !== false; }
+// Visibilité de chaque module sur l'accueil connecté (HubHome desktop) — persistée à part.
+// Clé absente = affiché par défaut ; seul `false` explicite le retire de la homepage.
+const HOME_MODULES_LS_KEY = 'spotifyplus_home_modules';
+function loadHomeModules() {
+  try { return JSON.parse(localStorage.getItem(HOME_MODULES_LS_KEY)) || {}; } catch { return {}; }
+}
+function saveHomeModules(v) { lsSet(HOME_MODULES_LS_KEY, JSON.stringify(v)); }
+function moduleOnHome(homeToggles, id) { return !homeToggles || homeToggles[id] !== false; }
 
 // ── Export / sauvegarde des données ──
 // Objet de sauvegarde : stats d'écoute, dernières dates de scrap des artistes, to do.
@@ -7848,7 +7874,7 @@ function StatsPanel() {
 
 // À PROPOS — export / restauration / Dropbox / réinit quota / purge / version.
 function VosEcoutesPanel() {
-  const { listenStats: ls, purgeListened, resetQuota, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, logout } = useStore();
+  const { listenStats: ls, purgeListened, resetQuota, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, logout } = useStore();
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
   // Ouverture d'À propos sans Google connecté → même demande d'accès directe qu'Actu
@@ -7882,15 +7908,24 @@ function VosEcoutesPanel() {
       {/* Ordre : Paramétrage → Exporter → Sauvegardes cloud → Restaurations (JSON puis cloud) → quota → purge */}
       <StatsCollapse title="⚙️ PARAMÉTRAGE" color="#8ab4ff">
         <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
-          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Ce réglage est inclus dans l'export/import de tes données.
+          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Le bouton 🏠 (à droite) affiche/masque le module sur l'accueil. Ce réglage est inclus dans l'export/import de tes données.
         </div>
         {TOGGLE_MODULES.map(m => {
-          const on = moduleEnabled(moduleToggles, m.id);
+          const on   = moduleEnabled(moduleToggles, m.id);
+          // « Afficher sur l'accueil » : coloré si activé ET souhaité, grisé sinon (module
+          // désactivé → forcément absent de l'accueil, bouton inactif)
+          const home = on && moduleOnHome(homeModules, m.id);
           return (
-            <div key={m.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10, padding:'7px 4px', borderBottom:`1px solid ${C.border}` }}>
-              <span style={{ fontSize:12, fontWeight:600, color: on ? m.color : C.dim, display:'flex', alignItems:'center', gap:7 }}>
+            <div key={m.id} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'7px 4px', borderBottom:`1px solid ${C.border}` }}>
+              <span style={{ fontSize:12, fontWeight:600, color: on ? m.color : C.dim, display:'flex', alignItems:'center', gap:7, minWidth:0, flex:1 }}>
                 <span style={{ opacity: on ? 1 : 0.4 }}>{m.icon}</span> {m.label}
               </span>
+              <button onClick={() => on && setModuleOnHome(m.id, !moduleOnHome(homeModules, m.id))} disabled={!on}
+                title={!on ? 'Active le module pour l’afficher sur l’accueil' : (home ? 'Affiché sur l’accueil — cliquer pour masquer' : 'Masqué de l’accueil — cliquer pour afficher')}
+                aria-pressed={home}
+                style={{ width:26, height:22, borderRadius:7, border:`1px solid ${home ? m.color : C.border}`, cursor: on ? 'pointer' : 'default', flexShrink:0, padding:0, fontSize:12, lineHeight:1, background: home ? m.color+'26' : 'transparent', color: home ? m.color : C.dim, opacity: on ? (home ? 1 : 0.55) : 0.3, transition:'all 0.15s' }}>
+                🏠
+              </button>
               <button onClick={() => setModuleEnabled(m.id, !on)} role="switch" aria-checked={on}
                 title={on ? 'Désactiver' : 'Activer'}
                 style={{ position:'relative', width:38, height:22, borderRadius:11, border:'none', cursor:'pointer', flexShrink:0, padding:0, background: on ? m.color : C.border, transition:'background 0.15s' }}>
