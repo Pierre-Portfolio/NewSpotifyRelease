@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.3.0';
+const APP_VERSION = '7.3.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4690,10 +4690,25 @@ const VET_TYPES = [
 const VET_LIEUX = ['Saint-Quentin-en-Yvelines', 'Massy'];
 const VET_ETATS = ['Neuf', 'Bon état', 'Usé', 'Abîmé'];
 const vetTypeLabel = t => (VET_TYPES.find(x => x[0] === t) || [,'Vêtement'])[1];
+const vetNewId = () => Date.now() + '' + Math.floor(Math.random() * 1000);
+const vetBlankItem = t => ({ id: vetNewId(), name: '', type: t, photo: null, etat: 'Bon état', lieu: VET_LIEUX[0] });
+// counts est DÉRIVÉ des fiches : autant de fiches d'un type = son compteur d'inventaire.
+const vetCounts = items => { const c = {}; items.forEach(it => { c[it.type] = (c[it.type] || 0) + 1; }); return c; };
 function vetLoad() {
   try {
     const d = JSON.parse(localStorage.getItem(VET_LS));
-    if (d && typeof d === 'object') return { counts: d.counts || {}, items: Array.isArray(d.items) ? d.items : [] };
+    if (d && typeof d === 'object') {
+      const items = Array.isArray(d.items) ? d.items.slice() : [];
+      const counts = d.counts || {};
+      // Migration : un compteur d'inventaire sans autant de fiches → on complète avec des
+      // fiches vides du type (les anciens inventaires deviennent des lignes du 2e collapse).
+      VET_TYPES.forEach(([t]) => {
+        const have = items.filter(it => it.type === t).length;
+        const want = Math.max(+counts[t] || 0, have);
+        for (let k = have; k < want; k++) items.push(vetBlankItem(t));
+      });
+      return { counts: vetCounts(items), items };
+    }
   } catch {}
   return { counts: {}, items: [] };
 }
@@ -4723,14 +4738,30 @@ function VetementPanel() {
   const [data, setData]     = React.useState(() => vetLoad());
   const [confirmId, setConfirmId] = React.useState(null);   // fiche en attente de confirmation de suppression
   const save = next => { setData(next); vetSave(next); };
-  const setCount = (t, delta) => { const c = { ...data.counts }; c[t] = Math.max(0, (+c[t] || 0) + delta); save({ ...data, counts: c }); };
-  const setCountVal = (t, v) => { const n = Math.max(0, Math.min(9999, parseInt(v, 10) || 0)); const c = { ...data.counts }; c[t] = n; save({ ...data, counts: c }); };
-  const addItem = () => save({ ...data, items: [...data.items, { id: Date.now() + '' + Math.floor(Math.random() * 1000), name: '', type: 'tshirt', photo: null, etat: 'Bon état', lieu: VET_LIEUX[0] }] });
-  const updItem = (id, patch) => save({ ...data, items: data.items.map(it => it.id === id ? { ...it, ...patch } : it) });
-  const delItem = id => { setConfirmId(null); save({ ...data, items: data.items.filter(it => it.id !== id) }); };
+  // Les fiches sont la source de vérité ; le compteur d'inventaire en est le simple décompte.
+  const saveItems = items => save({ counts: vetCounts(items), items });
+  // +1 dans l'inventaire → crée une fiche (une ligne dans le 2e collapse) ; −1 → retire la
+  // fiche la plus récente de ce type.
+  const setCount = (t, delta) => {
+    if (delta > 0) { saveItems([...data.items, vetBlankItem(t)]); return; }
+    const items = data.items.slice();
+    for (let i = items.length - 1; i >= 0; i--) { if (items[i].type === t) { items.splice(i, 1); break; } }
+    saveItems(items);
+  };
+  const setCountVal = (t, v) => {
+    const n = Math.max(0, Math.min(9999, parseInt(v, 10) || 0));
+    let items = data.items.slice();
+    const cur = items.filter(it => it.type === t).length;
+    if (n > cur) { for (let k = cur; k < n; k++) items.push(vetBlankItem(t)); }
+    else if (n < cur) { let rm = cur - n; for (let i = items.length - 1; i >= 0 && rm > 0; i--) { if (items[i].type === t) { items.splice(i, 1); rm--; } } }
+    saveItems(items);
+  };
+  const updItem = (id, patch) => saveItems(data.items.map(it => it.id === id ? { ...it, ...patch } : it));
+  const delItem = id => { setConfirmId(null); saveItems(data.items.filter(it => it.id !== id)); };
   const onPhoto = async (id, file) => { if (!file) return; const p = await vetPhoto(file); if (p) updItem(id, { photo: p }); };
 
-  const totalCount = VET_TYPES.reduce((s, [t]) => s + (+data.counts[t] || 0), 0);
+  const counts = vetCounts(data.items);
+  const totalCount = data.items.length;
   const selStyle = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', width:'100%' };
   const fieldLabel = txt => <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:C.dim, marginBottom:4 }}>{txt}</div>;
 
@@ -4738,13 +4769,13 @@ function VetementPanel() {
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
       {/* 1. Inventaire — combien de chaque type */}
       <StatsCollapse title={`👕 INVENTAIRE${totalCount ? ' · ' + totalCount : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
-        <div style={{ fontSize:11, color:C.dim, marginBottom:2 }}>Combien tu as de chaque type de vêtement.</div>
+        <div style={{ fontSize:11, color:C.dim, marginBottom:2 }}>Combien tu as de chaque type de vêtement. Chaque +1 crée une fiche à remplir dans « Mes vêtements » ci-dessous.</div>
         {VET_TYPES.map(([t, lbl]) => (
           <div key={t} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'4px 0', borderBottom:`1px solid ${C.border}44` }}>
             <span style={{ fontSize:12.5, color:C.text }}>{lbl}</span>
             <div style={{ display:'flex', alignItems:'center', gap:6, flexShrink:0 }}>
               <button onClick={() => setCount(t, -1)} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:'pointer', fontSize:15, lineHeight:1 }}>−</button>
-              <input type="number" value={+data.counts[t] || 0} onChange={e => setCountVal(t, e.target.value)}
+              <input type="number" value={+counts[t] || 0} onChange={e => setCountVal(t, e.target.value)}
                 style={{ width:46, textAlign:'center', background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'4px 2px', fontSize:13, fontWeight:700, color:VETEMENT_COLOR, outline:'none', fontFamily:'inherit', colorScheme:'dark' }} />
               <button onClick={() => setCount(t, +1)} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${VETEMENT_COLOR}66`, background:`${VETEMENT_COLOR}18`, color:VETEMENT_COLOR, cursor:'pointer', fontSize:15, lineHeight:1 }}>+</button>
             </div>
@@ -4752,58 +4783,62 @@ function VetementPanel() {
         ))}
       </StatsCollapse>
 
-      {/* 2. Fiches vêtements — un sous-collapse par vêtement (photo, état, lieu, suppression) */}
+      {/* 2. Mes vêtements — PILOTÉ par l'inventaire : vide au départ, un sous-collapse par
+          TYPE présent (T-shirt, Chaussettes…), contenant une fiche par unité comptée. */}
       <StatsCollapse title={`🧥 MES VÊTEMENTS${data.items.length ? ' · ' + data.items.length : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
-        <button onClick={addItem} style={{ background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:8, padding:'8px 12px', fontSize:12, fontWeight:700, cursor:'pointer' }}>➕ Ajouter un vêtement</button>
-        {!data.items.length && <div style={{ fontSize:11, color:C.dim }}>Aucune fiche pour l'instant.</div>}
-        {data.items.map(it => {
-          const titleNode = (
-            <span style={{ display:'flex', alignItems:'center', gap:7, minWidth:0 }}>
-              {it.photo
-                ? <img src={it.photo} alt="" style={{ width:22, height:22, borderRadius:4, objectFit:'cover', flexShrink:0 }} />
-                : <span style={{ fontSize:14, flexShrink:0 }}>👕</span>}
-              <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.name || vetTypeLabel(it.type)}</span>
-              <span style={{ fontSize:9.5, color:C.dim, flexShrink:0 }}>· {it.lieu === VET_LIEUX[1] ? 'Massy' : 'SQY'}</span>
-            </span>
-          );
+        {!data.items.length && <div style={{ fontSize:11, color:C.dim }}>Vide pour l'instant. Ajoute des vêtements avec les boutons + de l'inventaire ci-dessus : chaque type apparaîtra ici avec une fiche par unité à remplir.</div>}
+        {VET_TYPES.map(([t, lbl]) => {
+          const group = data.items.filter(it => it.type === t);
+          if (!group.length) return null;
           return (
-            <StatsCollapse key={it.id} title={titleNode} color={VETEMENT_COLOR}>
-              <div style={{ display:'flex', gap:12, flexWrap:'wrap' }}>
-                <div style={{ flexShrink:0 }}>
-                  {fieldLabel('PHOTO')}
-                  {it.photo && <img src={it.photo} alt="" style={{ width:110, height:110, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}`, display:'block', marginBottom:6 }} />}
-                  <label style={{ display:'inline-block', background:C.surface, border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, cursor:'pointer' }}>
-                    {it.photo ? '🔄 Changer' : '📷 Ajouter une photo'}
-                    <input type="file" accept="image/*" onChange={e => { onPhoto(it.id, e.target.files[0]); e.target.value = ''; }} style={{ display:'none' }} />
-                  </label>
-                  {it.photo && <button onClick={() => updItem(it.id, { photo: null })} style={{ marginLeft:6, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.muted, cursor:'pointer' }}>Retirer</button>}
-                </div>
-                <div style={{ flex:1, minWidth:150, display:'flex', flexDirection:'column', gap:8 }}>
-                  <div>{fieldLabel('NOM')}
-                    <input type="text" value={it.name} placeholder={vetTypeLabel(it.type)} onChange={e => updItem(it.id, { name: e.target.value })} style={selStyle} /></div>
-                  <div>{fieldLabel('TYPE')}
-                    <select value={it.type} onChange={e => updItem(it.id, { type: e.target.value })} style={selStyle}>
-                      {VET_TYPES.map(([t, lbl]) => <option key={t} value={t}>{lbl}</option>)}
-                    </select></div>
-                  <div>{fieldLabel('ÉTAT')}
-                    <select value={it.etat} onChange={e => updItem(it.id, { etat: e.target.value })} style={selStyle}>
-                      {VET_ETATS.map(e => <option key={e} value={e}>{e}</option>)}
-                    </select></div>
-                  <div>{fieldLabel('OÙ EST-IL ?')}
-                    <select value={it.lieu} onChange={e => updItem(it.id, { lieu: e.target.value })} style={selStyle}>
-                      {VET_LIEUX.map(l => <option key={l} value={l}>{l}</option>)}
-                    </select></div>
-                </div>
-              </div>
-              {confirmId === it.id ? (
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'#e0505015', border:'1px solid #e0505055', borderRadius:8, padding:'8px 10px' }}>
-                  <span style={{ fontSize:11.5, color:'#ff8a8a', flex:1 }}>Le jeter / supprimer cette fiche ?</span>
-                  <button onClick={() => delItem(it.id)} style={{ background:'#e05050', border:'none', borderRadius:6, padding:'5px 12px', fontSize:11, fontWeight:700, color:'#fff', cursor:'pointer' }}>Oui, supprimer</button>
-                  <button onClick={() => setConfirmId(null)} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 12px', fontSize:11, color:C.muted, cursor:'pointer' }}>Annuler</button>
-                </div>
-              ) : (
-                <button onClick={() => setConfirmId(it.id)} style={{ alignSelf:'flex-start', background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'5px 12px', fontSize:11, color:'#e05050', cursor:'pointer' }}>✕ Supprimer (je le jette)</button>
-              )}
+            <StatsCollapse key={t} title={`${lbl} · ${group.length}`} color={VETEMENT_COLOR} defaultOpen={false}>
+              {group.map(it => {
+                const titleNode = (
+                  <span style={{ display:'flex', alignItems:'center', gap:7, minWidth:0 }}>
+                    {it.photo
+                      ? <img src={it.photo} alt="" style={{ width:22, height:22, borderRadius:4, objectFit:'cover', flexShrink:0 }} />
+                      : <span style={{ fontSize:14, flexShrink:0 }}>👕</span>}
+                    <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.name || lbl}</span>
+                    <span style={{ fontSize:9.5, color:C.dim, flexShrink:0 }}>· {it.lieu === VET_LIEUX[1] ? 'Massy' : 'SQY'}</span>
+                  </span>
+                );
+                return (
+                  <StatsCollapse key={it.id} title={titleNode} color={VETEMENT_COLOR}>
+                    <div style={{ display:'flex', gap:12, flexWrap:'wrap' }}>
+                      <div style={{ flexShrink:0 }}>
+                        {fieldLabel('PHOTO')}
+                        {it.photo && <img src={it.photo} alt="" style={{ width:110, height:110, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}`, display:'block', marginBottom:6 }} />}
+                        <label style={{ display:'inline-block', background:C.surface, border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, cursor:'pointer' }}>
+                          {it.photo ? '🔄 Changer' : '📷 Ajouter une photo'}
+                          <input type="file" accept="image/*" onChange={e => { onPhoto(it.id, e.target.files[0]); e.target.value = ''; }} style={{ display:'none' }} />
+                        </label>
+                        {it.photo && <button onClick={() => updItem(it.id, { photo: null })} style={{ marginLeft:6, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.muted, cursor:'pointer' }}>Retirer</button>}
+                      </div>
+                      <div style={{ flex:1, minWidth:150, display:'flex', flexDirection:'column', gap:8 }}>
+                        <div>{fieldLabel('NOM')}
+                          <input type="text" value={it.name} placeholder={lbl} onChange={e => updItem(it.id, { name: e.target.value })} style={selStyle} /></div>
+                        <div>{fieldLabel('ÉTAT')}
+                          <select value={it.etat} onChange={e => updItem(it.id, { etat: e.target.value })} style={selStyle}>
+                            {VET_ETATS.map(e => <option key={e} value={e}>{e}</option>)}
+                          </select></div>
+                        <div>{fieldLabel('OÙ EST-IL ?')}
+                          <select value={it.lieu} onChange={e => updItem(it.id, { lieu: e.target.value })} style={selStyle}>
+                            {VET_LIEUX.map(l => <option key={l} value={l}>{l}</option>)}
+                          </select></div>
+                      </div>
+                    </div>
+                    {confirmId === it.id ? (
+                      <div style={{ display:'flex', alignItems:'center', gap:8, background:'#e0505015', border:'1px solid #e0505055', borderRadius:8, padding:'8px 10px' }}>
+                        <span style={{ fontSize:11.5, color:'#ff8a8a', flex:1 }}>Le jeter / supprimer cette fiche ? (l'inventaire diminuera de 1)</span>
+                        <button onClick={() => delItem(it.id)} style={{ background:'#e05050', border:'none', borderRadius:6, padding:'5px 12px', fontSize:11, fontWeight:700, color:'#fff', cursor:'pointer' }}>Oui, supprimer</button>
+                        <button onClick={() => setConfirmId(null)} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 12px', fontSize:11, color:C.muted, cursor:'pointer' }}>Annuler</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConfirmId(it.id)} style={{ alignSelf:'flex-start', background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'5px 12px', fontSize:11, color:'#e05050', cursor:'pointer' }}>✕ Supprimer (je le jette)</button>
+                    )}
+                  </StatsCollapse>
+                );
+              })}
             </StatsCollapse>
           );
         })}
