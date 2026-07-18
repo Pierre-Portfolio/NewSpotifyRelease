@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.3.1';
+const APP_VERSION = '7.3.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -9143,18 +9143,41 @@ async function cmpGameDeals(gameID) {
 }
 // Repli quand CheapShark ne trouve rien : recherche STEAM (storesearch) → prix RÉEL en EUR.
 // Steam n'a pas d'en-tête CORS → passe par les proxies (corsFetchText). `price.final` = centimes.
+// ⚠ storesearch n'inclut PAS toujours le prix (souvent absent même pour un jeu payant) → on
+// complète via appdetails (`price_overview.final`) pour les items sans prix : c'est ce qui
+// faisait apparaître « — » partout (« ne fonctionne pas »).
+async function cmpSteamPrice(appid) {
+  try {
+    const txt = await corsFetchText('https://store.steampowered.com/api/appdetails?appids=' + appid + '&cc=FR&l=french&filters=price_overview');
+    if (!txt) return undefined;                       // échec réseau → prix inconnu
+    const d = JSON.parse(txt);
+    const e = d && d[appid];
+    if (!e || !e.success) return undefined;
+    if (!e.data || !e.data.price_overview) return 0;  // succès sans price_overview = gratuit
+    const po = e.data.price_overview;
+    return typeof po.final === 'number' ? po.final : undefined;
+  } catch { return undefined; }
+}
 async function cmpSteamSearch(q) {
   try {
     const txt = await corsFetchText('https://store.steampowered.com/api/storesearch/?term=' + encodeURIComponent(q) + '&l=french&cc=FR');
-    if (!txt) return null;
+    if (!txt) return null;                             // proxies injoignables → null (hard fail)
     const d = JSON.parse(txt);
     if (!d || !Array.isArray(d.items)) return [];
-    return d.items.slice(0, 12).map(it => ({
+    const items = d.items.slice(0, 10).map(it => ({
       appid: it.id,
       name: it.name,
       thumb: it.tiny_image || null,
       priceCents: it.price && typeof it.price.final === 'number' ? it.price.final : null,
     }));
+    // Complète les prix manquants via appdetails (en parallèle, borné aux 8 premiers).
+    await Promise.all(items.slice(0, 8).map(async it => {
+      if (it.priceCents == null && it.appid) {
+        const p = await cmpSteamPrice(it.appid);
+        if (p !== undefined) it.priceCents = p;
+      }
+    }));
+    return items;
   } catch { return null; }
 }
 
@@ -9472,7 +9495,7 @@ function CompareGames({ isWatched, toggleWatch }) {
     if (!res || !res.length) {
       setSteamLoading(true);
       const st = await cmpSteamSearch(query);
-      setSteam(st || []);
+      setSteam(st);   // null = proxies injoignables ; [] = aucun jeu ; [...] = résultats
       setSteamLoading(false);
     }
   };
@@ -9498,14 +9521,14 @@ function CompareGames({ isWatched, toggleWatch }) {
       </div>
       {err && <div style={{ fontSize:11, color:'#e05050', padding:'2px 0 6px' }}>{err}</div>}
       {loading && <div style={{ fontSize:11, color:C.dim, padding:'2px 0 6px' }}>Chargement…</div>}
-      {games && !games.length && !loading && <div style={{ fontSize:11, color:C.dim }}>Aucun jeu trouvé sur CheapShark{steamLoading ? ' — recherche du prix sur Steam…' : (steam && steam.length ? ' — prix trouvés sur Steam :' : ' — essaie les boutiques ci-dessous.')}</div>}
+      {games && !games.length && !loading && <div style={{ fontSize:11, color:C.dim }}>Aucun jeu trouvé sur CheapShark{steamLoading ? ' — recherche du prix sur Steam…' : (steam === null ? ' — Steam injoignable (réseau), essaie les boutiques ci-dessous.' : (steam && steam.length ? ' — prix trouvés sur Steam :' : ' — essaie les boutiques ci-dessous.'))}</div>}
       {/* Repli Steam : prix RÉEL en EUR quand CheapShark ne connaît pas le jeu */}
       {games && !games.length && !loading && steam && steam.map(s => (
         <a key={s.appid} href={'https://store.steampowered.com/app/' + s.appid + '/'} target="_blank" rel="noopener noreferrer"
           style={{ display:'flex', gap:8, alignItems:'center', padding:'6px 0', borderBottom:`1px solid ${C.border}55`, textDecoration:'none' }}>
           {s.thumb && <img src={s.thumb} alt="" loading="lazy" style={{ width:44, height:20, objectFit:'cover', borderRadius:4, flexShrink:0, background:'#111' }} />}
           <div style={{ flex:1, minWidth:0, fontSize:12.5, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.name}</div>
-          <span style={{ fontSize:11.5, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>{s.priceCents != null ? cmpFmtEur(s.priceCents / 100) : '—'}</span>
+          <span style={{ fontSize:11.5, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>{s.priceCents == null ? '—' : (s.priceCents === 0 ? 'Gratuit' : cmpFmtEur(s.priceCents / 100))}</span>
         </a>
       ))}
       {games && !games.length && !loading && steam && steam.length > 0 && <div style={{ fontSize:9, color:C.dim, marginTop:4 }}>Prix Steam (EUR, boutique officielle) · clic = ouvrir la page Steam</div>}
