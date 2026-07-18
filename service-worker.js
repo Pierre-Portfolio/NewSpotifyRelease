@@ -33,9 +33,12 @@
 // v37 : bump de cache — module « Nourriture » renommé « Santé » (libellé visible ; id `food` inchangé).
 // v38 : bump de cache — nouveau module « Vêtement » (vide pour le moment).
 // v39 : bump de cache — nouveau module « Frigo Massy » (vide pour le moment).
-const CACHE  = 'spotifyplus-v44';
+// v45 : bump de cache — vrai Motus (portage du projet perso) + données de mots
+// vendor/motus-words.js / motus-dico.js (chargées lazy, précachées pour l'offline).
+const CACHE  = 'spotifyplus-v45';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
-                './vendor/leaflet.js', './vendor/leaflet.css'];
+                './vendor/leaflet.js', './vendor/leaflet.css',
+                './vendor/motus-words.js', './vendor/motus-dico.js'];
 
 self.addEventListener('install', e => {
   self.skipWaiting();

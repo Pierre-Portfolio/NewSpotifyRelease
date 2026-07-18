@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.6.5';
+const APP_VERSION = '6.6.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3368,64 +3368,218 @@ function GameMorpion() {
   );
 }
 
-// ════════ Motus (à la Wordle, mots FR de 6 lettres) ════════
-const MOTUS_WORDS = ['MAISON','JARDIN','SOLEIL','ORANGE','BANANE','VOYAGE','GARAGE','TIGRES','CHIENS','PLAGES','FORETS','NUAGES','ETOILE','PLANTE','FLEURS','POMMES','CERISE','RAISIN','OIGNON','PIMENT','SALADE','GATEAU','MIROIR','BOUGIE','CADEAU','CHAISE','LAMPES','PORTES','ROBOTS','AVIONS','TRAINS','BATEAU','MONTRE','LIVRES','CRAYON'];
-function motusEval(guess, secret) {
-  const res = Array(guess.length).fill('absent'); const s = secret.split(''); const used = Array(secret.length).fill(false);
-  for (let i = 0; i < guess.length; i++) if (guess[i] === s[i]) { res[i] = 'good'; used[i] = true; }
-  for (let i = 0; i < guess.length; i++) { if (res[i] === 'good') continue; const j = s.findIndex((ch, k) => !used[k] && ch === guess[i]); if (j >= 0) { res[i] = 'present'; used[j] = true; } }
+// ════════ Motus (portage du projet perso Pierre-Portfolio/Motus) ════════
+// Le VRAI Motus à la française : 6 essais, 1re lettre offerte et verrouillée, longueur
+// au choix (6-9 lettres) × 5 difficultés (fréquence d'usage réelle), 850 mots à deviner,
+// validation des propositions contre un dictionnaire ~125 000 mots, code couleur
+// authentique (🟥 carré rouge = bien placé, 🟡 ROND jaune = mal placé, 🟦 bleu = absent),
+// gestion correcte des lettres en double, clavier AZERTY virtuel + clavier physique,
+// animation de retournement case par case et secousse sur mot invalide.
+// ⚠ Données LOURDES (dico ~1,1 Mo) → PAS inline : vendor/motus-words.js +
+// vendor/motus-dico.js chargés en lazy au 1er affichage (pattern loadLeaflet), posent
+// window.MOTUS_WORDS / window.MOTUS_DICO (Set par longueur). Précachés par le SW.
+const MOTUS_UI = { ok:'#e8453c', present:'#f4c430', absent:'#1b2350', accent:'#ff7a3d', accent2:'#ffb13d', cell:'rgba(255,255,255,0.05)', cellBorder:'rgba(255,255,255,0.14)' };
+const MOTUS_MAX = 6;
+const MOTUS_DIFFS = [
+  ['tres_facile',    'Très facile',    '#2bd4c0'],
+  ['facile',         'Facile',         '#69d43a'],
+  ['moyen',          'Moyen',          '#f4c430'],
+  ['difficile',      'Difficile',      '#ff7a3d'],
+  ['tres_difficile', 'Très difficile', '#e8453c'],
+];
+let _motusDataP = null;
+function loadMotusData() {
+  if (window.MOTUS_WORDS && window.MOTUS_DICO) return Promise.resolve();
+  if (_motusDataP) return _motusDataP;
+  const inject = src => new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error('échec ' + src));
+    document.head.appendChild(s);
+  });
+  _motusDataP = Promise.all([inject('./vendor/motus-words.js'), inject('./vendor/motus-dico.js')])
+    .catch(e => { _motusDataP = null; throw e; });   // ré-essayable après échec réseau
+  return _motusDataP;
+}
+// 2 passes + comptage : une lettre n'est « présente » qu'autant de fois qu'elle
+// apparaît réellement dans la réponse (gestion des doubles du Motus original).
+function motusEval(word, answer) {
+  const res = Array(word.length).fill('absent'); const counts = {};
+  for (const ch of answer) counts[ch] = (counts[ch] || 0) + 1;
+  for (let i = 0; i < word.length; i++) if (word[i] === answer[i]) { res[i] = 'ok'; counts[word[i]]--; }
+  for (let i = 0; i < word.length; i++) { if (res[i] === 'ok') continue; if (counts[word[i]] > 0) { res[i] = 'present'; counts[word[i]]--; } }
   return res;
 }
-const MOTUS_CLR = { good:'#3fae6a', present:'#f5b81f', absent:'#33333f' };
 function GameMotus() {
-  const LEN = 6, MAX = 6;
-  const [secret, setSecret] = React.useState(() => MOTUS_WORDS[Math.floor(Math.random() * MOTUS_WORDS.length)]);
-  const [guesses, setGuesses] = React.useState([]);
-  const [input, setInput] = React.useState(() => secret[0]);
-  const [state, setState] = React.useState('play');
-  const [err, setErr] = React.useState('');
-  const reset = () => { const w = MOTUS_WORDS[Math.floor(Math.random() * MOTUS_WORDS.length)]; setSecret(w); setGuesses([]); setInput(w[0]); setState('play'); setErr(''); };
-  const submit = () => {
-    if (state !== 'play') return;
-    if (input.length !== LEN) { setErr('Il faut ' + LEN + ' lettres'); return; }
-    const g = input; const ng = [...guesses, g]; setGuesses(ng); setErr('');
-    if (g === secret) setState('won'); else if (ng.length >= MAX) setState('lost'); else setInput(secret[0]);
+  const [ready, setReady]   = React.useState(() => !!(window.MOTUS_WORDS && window.MOTUS_DICO));
+  const [loadErr, setLoadErr] = React.useState(false);
+  const [phase, setPhase]   = React.useState('home');  // home | play | won | lost
+  const [len, setLen]       = React.useState(7);
+  const [diff, setDiff]     = React.useState('facile');
+  const [answer, setAnswer] = React.useState('');
+  const [guesses, setGuesses] = React.useState([]);    // mots validés (révélés)
+  const [input, setInput]   = React.useState('');      // tentative en cours (1re lettre offerte)
+  const [msg, setMsg]       = React.useState('');
+  const [shake, setShake]   = React.useState(0);       // incrément → relance l'anim de secousse
+  const [revealing, setRevealing] = React.useState(false); // anim de retournement en cours → saisie bloquée
+  const msgTimer = React.useRef(null);
+  const endTimer = React.useRef(null);
+  const fetchData = () => { setLoadErr(false); loadMotusData().then(() => setReady(true)).catch(() => setLoadErr(true)); };
+  React.useEffect(() => { if (!ready) fetchData(); return () => { clearTimeout(msgTimer.current); clearTimeout(endTimer.current); }; }, []);
+  const flash = t => { setMsg(t); clearTimeout(msgTimer.current); msgTimer.current = setTimeout(() => setMsg(''), 1600); };
+  const start = () => {
+    const list = (window.MOTUS_WORDS && window.MOTUS_WORDS[len] && window.MOTUS_WORDS[len][diff]) || [];
+    if (!list.length) return;
+    const w = list[Math.floor(Math.random() * list.length)];
+    setAnswer(w); setGuesses([]); setInput(w[0]); setMsg(''); setRevealing(false); setPhase('play');
   };
-  const type = ch => { if (state !== 'play') return; setErr(''); setInput(v => v.length < LEN ? v + ch : v); };
-  const del = () => setInput(v => v.length > 1 ? v.slice(0, -1) : v);
+  const type = ch => { if (phase !== 'play' || revealing) return; setInput(v => v.length < len ? v + ch : v); };
+  const del  = () => { if (phase !== 'play' || revealing) return; setInput(v => v.length > 1 ? v.slice(0, -1) : v); }; // jamais la lettre offerte
+  const submit = () => {
+    if (phase !== 'play' || revealing) return;
+    if (input.length < len) { flash('Complétez le mot'); setShake(s => s + 1); return; }
+    const dicoSet = window.MOTUS_DICO && window.MOTUS_DICO[len];
+    if (dicoSet && !dicoSet.has(input) && input !== answer) { flash('Mot inconnu du dictionnaire'); setShake(s => s + 1); return; }
+    const word = input; const ng = [...guesses, word];
+    setGuesses(ng); setInput(''); setRevealing(true);
+    // Fin de partie / ligne suivante APRÈS le retournement case par case (220 ms/case)
+    endTimer.current = setTimeout(() => {
+      setRevealing(false);
+      if (word === answer) setPhase('won');
+      else if (ng.length >= MOTUS_MAX) setPhase('lost');
+      else setInput(answer[0]);
+    }, len * 220 + 300);
+  };
+  // Clavier physique (uniquement en jeu — pas depuis l'accueil du jeu)
   React.useEffect(() => {
-    const onKey = e => { const k = e.key.toUpperCase(); if (/^[A-Z]$/.test(k)) type(k); else if (e.key === 'Backspace') del(); else if (e.key === 'Enter') submit(); };
+    if (phase !== 'play') return;
+    const onKey = e => {
+      if (e.key === 'Enter' || e.key === 'Backspace' || /^[A-Za-z]$/.test(e.key)) {
+        e.preventDefault();
+        if (e.key === 'Enter') submit(); else if (e.key === 'Backspace') del(); else type(e.key.toUpperCase());
+      }
+    };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
-  }, [state, input, guesses, secret]);
+  }, [phase, revealing, input, guesses, answer, len]);
+  // Couleur des touches : jamais de rétrogradation (ok > present > absent)
+  const RANK = { absent:0, present:1, ok:2 };
   const letterState = {};
-  guesses.forEach(g => motusEval(g, secret).forEach((r, i) => { const c = g[i]; const rank = { absent:0, present:1, good:2 }; if (!(c in letterState) || rank[r] > rank[letterState[c]]) letterState[c] = r; }));
+  guesses.forEach(g => motusEval(g, answer).forEach((r, i) => { const c = g[i]; if (!(c in letterState) || RANK[r] > RANK[letterState[c]]) letterState[c] = r; }));
+  const diffLabel = (MOTUS_DIFFS.find(d => d[0] === diff) || [])[1] || diff;
+
+  // ── Écran d'accueil du jeu : longueur + difficulté + Jouer ──
+  if (phase === 'home') return (
+    <GameWrap hint="Trouvez le mot mystère : une lettre offerte, six essais. 🟥 bien placée · 🟡 présente mal placée · 🟦 absente. Chaque proposition doit être un vrai mot français.">
+      <div style={{ width:'100%', maxWidth:340, display:'flex', flexDirection:'column', gap:14 }}>
+        <div>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em', color:C.muted, marginBottom:6 }}>LONGUEUR DU MOT</div>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:6 }}>
+            {[6,7,8,9].map(n => (
+              <button key={n} onClick={() => setLen(n)}
+                style={{ padding:'10px 4px', borderRadius:10, cursor:'pointer', fontSize:12.5, fontWeight:700, color: len === n ? '#2a1400' : C.text,
+                  background: len === n ? `linear-gradient(135deg, ${MOTUS_UI.accent}, ${MOTUS_UI.accent2})` : MOTUS_UI.cell,
+                  border:`1px solid ${len === n ? MOTUS_UI.accent : MOTUS_UI.cellBorder}` }}>{n} lettres</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em', color:C.muted, marginBottom:6 }}>DIFFICULTÉ</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+            {MOTUS_DIFFS.map(([id, label, color], i) => (
+              <button key={id} onClick={() => setDiff(id)}
+                style={{ display:'flex', alignItems:'center', gap:9, padding:'10px 12px', borderRadius:10, cursor:'pointer', fontSize:12.5, fontWeight:600, textAlign:'left', color:C.text,
+                  background: diff === id ? 'rgba(255,122,61,0.16)' : MOTUS_UI.cell,
+                  border:`1px solid ${diff === id ? MOTUS_UI.accent : MOTUS_UI.cellBorder}` }}>
+                {/* Jauge de difficulté (1→5 crans) reprise du jeu original */}
+                <span style={{ width:34, height:8, borderRadius:4, flexShrink:0, background:`linear-gradient(90deg, ${color} ${(i + 1) * 20}%, rgba(255,255,255,0.12) ${(i + 1) * 20}%)` }} />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {loadErr ? (
+          <div style={{ textAlign:'center', display:'flex', flexDirection:'column', gap:8 }}>
+            <div style={{ fontSize:11.5, color:'#e05050' }}>Impossible de charger les mots (réseau ?)</div>
+            <button onClick={fetchData} style={gameBtn()}>↻ Réessayer</button>
+          </div>
+        ) : (
+          <button onClick={start} disabled={!ready}
+            style={{ padding:'13px', border:'none', borderRadius:12, cursor: ready ? 'pointer' : 'default', fontSize:14, fontWeight:800, color:'#2a1400',
+              background: ready ? `linear-gradient(135deg, ${MOTUS_UI.accent}, ${MOTUS_UI.accent2})` : '#3a3a48', opacity: ready ? 1 : 0.7 }}>
+            {ready ? 'Jouer' : '⏳ Chargement du dictionnaire…'}
+          </button>
+        )}
+      </div>
+    </GameWrap>
+  );
+
+  // ── Écran de jeu : grille + clavier ──
+  const curRow = guesses.length;   // index de la ligne en cours de saisie
+  const cellFont = len >= 9 ? 15 : len >= 8 ? 17 : 19;
   const rows = [];
-  for (let r = 0; r < MAX; r++) {
-    const g = guesses[r]; const isCur = r === guesses.length && state === 'play';
-    const evalR = g ? motusEval(g, secret) : null;
+  for (let r = 0; r < MOTUS_MAX; r++) {
+    const g = guesses[r];
+    const isCur = r === curRow && phase === 'play' && !revealing;
+    const isLastRevealed = g && r === guesses.length - 1 && revealing;
+    const verdict = g ? motusEval(g, answer) : null;
     rows.push(
-      <div key={r} style={{ display:'grid', gridTemplateColumns:`repeat(${LEN},1fr)`, gap:5, width:'100%' }}>
-        {Array.from({ length: LEN }).map((_, c) => {
-          const ch = g ? g[c] : (isCur ? input[c] : ''); const st = evalR ? evalR[c] : null;
-          return <div key={c} style={{ aspectRatio:'1', display:'flex', alignItems:'center', justifyContent:'center', borderRadius:6, fontWeight:800, fontSize:20, color:'#fff', background: st ? MOTUS_CLR[st] : (isCur && c === 0 ? `${GAMES_COLOR}33` : '#20202a'), border: st ? 'none' : `1px solid ${C.border}` }}>{ch || ''}</div>;
+      <div key={r === curRow ? `r${r}-s${shake}` : r}
+        style={{ display:'grid', gridTemplateColumns:`repeat(${len},1fr)`, gap:5, width:'100%', animation: isCur && shake ? 'motusShake .4s' : 'none' }}>
+        {Array.from({ length: len }).map((_, c) => {
+          const ch = g ? g[c] : (isCur ? (input[c] || '') : '');
+          const v = verdict ? verdict[c] : null;
+          const cursor = isCur && c === input.length && c > 0;
+          return (
+            <div key={c} style={{
+              aspectRatio:'1', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:cellFont,
+              borderRadius: v === 'present' ? '50%' : 8,   // ROND jaune du Motus original
+              color: v === 'present' ? '#2a1400' : '#fff',
+              background: v ? MOTUS_UI[v] : (isCur && c === 0 ? 'rgba(255,122,61,0.22)' : MOTUS_UI.cell),
+              border: v ? 'none' : `1px solid ${cursor ? MOTUS_UI.accent : MOTUS_UI.cellBorder}`,
+              boxShadow: cursor ? 'inset 0 0 0 2px rgba(255,122,61,0.3)' : 'none',
+              animation: isLastRevealed ? `motusFlip .5s ease both ${c * 220}ms` : 'none',
+            }}>{ch}</div>
+          );
         })}
       </div>
     );
   }
-  const KEYS = ['AZERTYUIOP','QSDFGHJKLM','WXCVBN'];
+  const KEYS = ['AZERTYUIOP', 'QSDFGHJKLM', 'WXCVBN'];
+  const keyClr = k => letterState[k] === 'ok' ? { background:MOTUS_UI.ok, color:'#fff' }
+    : letterState[k] === 'present' ? { background:MOTUS_UI.present, color:'#2a1400' }
+    : letterState[k] === 'absent' ? { background:MOTUS_UI.absent, color:'#8a90b8' }
+    : { background:'#33333f', color:'#fff' };
   return (
-    <GameWrap hint="Devine le mot de 6 lettres. La 1re lettre est donnée. 🟩 bien placée · 🟧 mal placée."
-      bar={<><span style={{ fontSize:12, color:C.muted }}>Essai {Math.min(guesses.length + (state === 'play' ? 1 : 0), MAX)} / {MAX}</span><button onClick={reset} style={gameBtn()}>↻ Nouveau mot</button></>}>
-      <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', gap:5 }}>{rows}</div>
-      {err && <div style={{ fontSize:11.5, color:'#e05050' }}>{err}</div>}
-      {state === 'won' && <div style={{ fontSize:14, fontWeight:800, color:'#3fae6a' }}>🎉 Bravo !</div>}
-      {state === 'lost' && <div style={{ fontSize:14, fontWeight:800, color:'#e05050' }}>Perdu — c'était {secret}</div>}
-      <div style={{ width:'100%', maxWidth:340, display:'flex', flexDirection:'column', gap:5 }}>
+    <GameWrap
+      bar={<>
+        <span style={{ fontSize:12, color:C.muted }}>
+          <b style={{ color:MOTUS_UI.accent }}>{len} lettres</b> · {diffLabel} · Essai {Math.min(curRow + (phase === 'play' && !revealing ? 1 : 0), MOTUS_MAX)} / {MOTUS_MAX}
+        </span>
+        <span style={{ display:'flex', gap:6 }}>
+          <button onClick={() => setPhase('home')} style={gameBtn()}>← Menu</button>
+          <button onClick={start} style={gameBtn()}>↻ Nouveau mot</button>
+        </span>
+      </>}>
+      <style>{'@keyframes motusFlip{from{transform:rotateX(90deg)}to{transform:rotateX(0)}}@keyframes motusShake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}'}</style>
+      <div style={{ width:'100%', maxWidth: Math.min(360, len * 52), display:'flex', flexDirection:'column', gap:5 }}>{rows}</div>
+      {msg && <div style={{ fontSize:11.5, fontWeight:700, color:'#f4c430' }}>{msg}</div>}
+      {(phase === 'won' || phase === 'lost') && (
+        <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', alignItems:'center', gap:8, padding:'14px 16px', borderRadius:14, background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, textAlign:'center' }}>
+          <div style={{ fontSize:30 }}>{phase === 'won' ? '🎉' : '😶'}</div>
+          <div style={{ fontSize:15, fontWeight:900, color: phase === 'won' ? '#3fae6a' : '#e05050' }}>{phase === 'won' ? `Bravo ! Trouvé en ${guesses.length} essai${guesses.length > 1 ? 's' : ''}.` : 'Perdu…'}</div>
+          <div style={{ fontSize:11, color:C.muted }}>Le mot était</div>
+          <div style={{ fontSize:20, fontWeight:900, letterSpacing:'0.12em', color:MOTUS_UI.accent }}>{answer}</div>
+          <div style={{ display:'flex', gap:6, marginTop:4 }}>
+            <button onClick={start} style={gameBtn()}>↻ Nouveau mot</button>
+            <button onClick={() => setPhase('home')} style={gameBtn()}>← Menu</button>
+          </div>
+        </div>
+      )}
+      <div style={{ width:'100%', maxWidth:380, display:'flex', flexDirection:'column', gap:5 }}>
         {KEYS.map((row, ri) => (
           <div key={ri} style={{ display:'flex', gap:4, justifyContent:'center' }}>
-            {ri === 2 && <button onClick={submit} style={{ flex:'1.4', background:`${GAMES_COLOR}33`, border:'none', borderRadius:6, color:'#fff', fontWeight:800, fontSize:11, cursor:'pointer', padding:'10px 0' }}>OK</button>}
-            {row.split('').map(k => <button key={k} onClick={() => type(k)} style={{ flex:1, background: letterState[k] ? MOTUS_CLR[letterState[k]] : '#33333f', border:'none', borderRadius:6, color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer', padding:'10px 0', minWidth:0 }}>{k}</button>)}
-            {ri === 2 && <button onClick={del} style={{ flex:'1.4', background:'#33333f', border:'none', borderRadius:6, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer', padding:'10px 0' }}>⌫</button>}
+            {ri === 2 && <button onClick={submit} style={{ flex:'1.6', background:`linear-gradient(135deg, ${MOTUS_UI.accent}, ${MOTUS_UI.accent2})`, border:'none', borderRadius:7, color:'#2a1400', fontWeight:800, fontSize:10.5, cursor:'pointer', padding:'11px 0' }}>ENTRÉE</button>}
+            {row.split('').map(k => <button key={k} onClick={() => type(k)} style={{ flex:1, border:'none', borderRadius:7, fontWeight:700, fontSize:13, cursor:'pointer', padding:'11px 0', minWidth:0, ...keyClr(k) }}>{k}</button>)}
+            {ri === 2 && <button onClick={del} style={{ flex:'1.6', background:'#33333f', border:'none', borderRadius:7, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer', padding:'11px 0' }}>⌫</button>}
           </div>
         ))}
       </div>
