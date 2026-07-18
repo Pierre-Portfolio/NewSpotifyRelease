@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.2.6';
+const APP_VERSION = '7.2.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8996,6 +8996,22 @@ async function cmpGameDeals(gameID) {
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
+// Repli quand CheapShark ne trouve rien : recherche STEAM (storesearch) → prix RÉEL en EUR.
+// Steam n'a pas d'en-tête CORS → passe par les proxies (corsFetchText). `price.final` = centimes.
+async function cmpSteamSearch(q) {
+  try {
+    const txt = await corsFetchText('https://store.steampowered.com/api/storesearch/?term=' + encodeURIComponent(q) + '&l=french&cc=FR');
+    if (!txt) return null;
+    const d = JSON.parse(txt);
+    if (!d || !Array.isArray(d.items)) return [];
+    return d.items.slice(0, 12).map(it => ({
+      appid: it.id,
+      name: it.name,
+      thumb: it.tiny_image || null,
+      priceCents: it.price && typeof it.price.final === 'number' ? it.price.final : null,
+    }));
+  } catch { return null; }
+}
 
 // ── « Tous produits » — REFONTE v2 (6.4.4) : la v1 (iTunes en fetch direct) ne marchait
 // PAS — l'API iTunes Search n'envoie AUCUN en-tête CORS (elle date de l'ère JSONP), le
@@ -9296,15 +9312,24 @@ function CompareGames({ isWatched, toggleWatch }) {
   const [eur, setEur]         = React.useState(null);   // taux USD→EUR
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState('');
+  const [steam, setSteam]     = React.useState(null);   // repli Steam (prix réel) si CheapShark vide
+  const [steamLoading, setSteamLoading] = React.useState(false);
 
   const search = async () => {
     const query = q.trim();
     if (!query) return;
-    setLoading(true); setErr(''); setSel(null); setDeals(null);
+    setLoading(true); setErr(''); setSel(null); setDeals(null); setSteam(null);
     const res = await cmpGameSearch(query);
     if (res === null) setErr('CheapShark injoignable — réessaie plus tard.');
     setGames(res || []);
     setLoading(false);
+    // Aucun résultat CheapShark → on va chercher le prix directement chez Steam.
+    if (!res || !res.length) {
+      setSteamLoading(true);
+      const st = await cmpSteamSearch(query);
+      setSteam(st || []);
+      setSteamLoading(false);
+    }
   };
   const pick = async (g) => {
     setSel(g.gameID); setDeals(null); setLoading(true);
@@ -9328,7 +9353,17 @@ function CompareGames({ isWatched, toggleWatch }) {
       </div>
       {err && <div style={{ fontSize:11, color:'#e05050', padding:'2px 0 6px' }}>{err}</div>}
       {loading && <div style={{ fontSize:11, color:C.dim, padding:'2px 0 6px' }}>Chargement…</div>}
-      {games && !games.length && !loading && <div style={{ fontSize:11, color:C.dim }}>Aucun jeu trouvé sur CheapShark — essaie les boutiques ci-dessous.</div>}
+      {games && !games.length && !loading && <div style={{ fontSize:11, color:C.dim }}>Aucun jeu trouvé sur CheapShark{steamLoading ? ' — recherche du prix sur Steam…' : (steam && steam.length ? ' — prix trouvés sur Steam :' : ' — essaie les boutiques ci-dessous.')}</div>}
+      {/* Repli Steam : prix RÉEL en EUR quand CheapShark ne connaît pas le jeu */}
+      {games && !games.length && !loading && steam && steam.map(s => (
+        <a key={s.appid} href={'https://store.steampowered.com/app/' + s.appid + '/'} target="_blank" rel="noopener noreferrer"
+          style={{ display:'flex', gap:8, alignItems:'center', padding:'6px 0', borderBottom:`1px solid ${C.border}55`, textDecoration:'none' }}>
+          {s.thumb && <img src={s.thumb} alt="" loading="lazy" style={{ width:44, height:20, objectFit:'cover', borderRadius:4, flexShrink:0, background:'#111' }} />}
+          <div style={{ flex:1, minWidth:0, fontSize:12.5, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.name}</div>
+          <span style={{ fontSize:11.5, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>{s.priceCents != null ? cmpFmtEur(s.priceCents / 100) : '—'}</span>
+        </a>
+      ))}
+      {games && !games.length && !loading && steam && steam.length > 0 && <div style={{ fontSize:9, color:C.dim, marginTop:4 }}>Prix Steam (EUR, boutique officielle) · clic = ouvrir la page Steam</div>}
       {(games || []).map(g => (
         <div key={g.gameID}>
           <div onClick={() => sel === g.gameID ? (setSel(null), setDeals(null)) : pick(g)}
