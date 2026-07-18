@@ -35,7 +35,9 @@
 // v39 : bump de cache — nouveau module « Frigo Massy » (vide pour le moment).
 // v45 : bump de cache — vrai Motus (portage du projet perso) + données de mots
 // vendor/motus-words.js / motus-dico.js (chargées lazy, précachées pour l'offline).
-const CACHE  = 'spotifyplus-v45';
+// v46 : bump de cache — vraie TierList à images (portage du projet perso LocalTierList,
+// clé partagée tierlist-v1, drag & drop tactile).
+const CACHE  = 'spotifyplus-v46';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

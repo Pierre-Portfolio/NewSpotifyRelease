@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '6.6.6';
+const APP_VERSION = '6.6.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3892,45 +3892,233 @@ function GameSnake() {
   );
 }
 
-// ════════ TierList (classement local par tap) ════════
-const TIER_ROWS = [['S','#e05050'],['A','#f5813c'],['B','#f5b81f'],['C','#3fae6a'],['D','#39b2d1']];
-const TIERLIST_LS = 'spotifyplus_game_tierlist';
-function GameTierList() {
-  const [items, setItems] = React.useState(() => {
-    try { const v = JSON.parse(localStorage.getItem(TIERLIST_LS)); if (Array.isArray(v) && v.length) return v; } catch {}
-    return ['🍕 Pizza','🍔 Burger','🍣 Sushi','🌮 Tacos','🍜 Ramen','🥗 Salade','🍩 Donut','🍦 Glace'].map((label, i) => ({ id: i + 1, label, tier: null }));
+// ════════ TierList (portage du projet perso Pierre-Portfolio/LocalTierList) ════════
+// Vraie tier list à IMAGES, remplace l'ancienne version à chips texte : upload multiple →
+// images redimensionnées 150×150 (recadrage cover) + compressées WebP 0.8 (repli JPEG 0.85)
+// en data URL, DRAG & DROP unifié souris+tactile (Pointer Events, seuil 8 px avant drag —
+// un simple tap ne déplace rien), auto-scroll près des bords du CONTENEUR SCROLLABLE du
+// hub pendant un drag (pas window : le contenu vit dans le <div overflowY:auto>), rangs
+// entièrement personnalisables en mode édition (renommer, couleur, supprimer → ses images
+// retournent en réserve, ajouter), tap sur une image en mode édition = suppression (confirm).
+// ⚠ Persistance clé `tierlist-v1` — MÊME clé et MÊME format que l'app autonome
+// LocalTierList (pierre-portfolio.github.io = même origine → sauvegarde PARTAGÉE entre le
+// hub et l'app d'origine, voulu). Écritures via lsSet (alerte quota centralisée), debounce
+// 300 ms UNIQUEMENT pour les inputs nom/couleur. PAS dans buildBackup (data URLs lourdes).
+const TIERLIST_LS = 'tierlist-v1';
+const TL_IMG_SIZE = 150, TL_DRAG_THRESHOLD = 8, TL_SCROLL_MARGIN = 80;
+const TL_DEFAULT_TIERS = [['S','#7fff7f'],['A','#ffff7f'],['B','#ffbf7f'],['C','#ff7f7f']];
+// Restauration défensive : le localStorage n'est pas fiable (data URL image obligatoire,
+// couleur validée par regex, tableaux vérifiés) — gardes reprises du projet d'origine.
+function tlValidImg(d) { return !!(d && typeof d.s === 'string' && d.s.startsWith('data:image/')); }
+function tlLoad() {
+  try {
+    const d = JSON.parse(localStorage.getItem(TIERLIST_LS));
+    if (d && Array.isArray(d.tiers)) return {
+      tiers: d.tiers.map(t => ({
+        n: String((t && t.n) != null ? t.n : ''),
+        c: /^#[0-9a-fA-F]{6}$/.test(t && t.c) ? t.c : '#6b7280',
+        imgs: (Array.isArray(t && t.imgs) ? t.imgs : []).filter(tlValidImg).map(i => ({ s: i.s, a: String(i.a || 'image') })),
+      })),
+      pool: (Array.isArray(d.pool) ? d.pool : []).filter(tlValidImg).map(i => ({ s: i.s, a: String(i.a || 'image') })),
+    };
+  } catch {}
+  return { tiers: TL_DEFAULT_TIERS.map(([n, c]) => ({ n, c, imgs: [] })), pool: [] };
+}
+// Fichier → data URL 150×150 recadrée « cover », WebP (repli JPEG si l'encodeur manque).
+// Jamais de reject : une image illisible renvoie null et la boucle d'upload continue.
+function tlFileToDataURL(file) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      try {
+        const cv = document.createElement('canvas'); cv.width = cv.height = TL_IMG_SIZE;
+        const cx = cv.getContext('2d');
+        const r = Math.max(TL_IMG_SIZE / img.width, TL_IMG_SIZE / img.height);
+        const w = img.width * r, h = img.height * r;
+        cx.drawImage(img, (TL_IMG_SIZE - w) / 2, (TL_IMG_SIZE - h) / 2, w, h);
+        let out = cv.toDataURL('image/webp', 0.8);
+        if (!out.startsWith('data:image/webp')) out = cv.toDataURL('image/jpeg', 0.85);
+        resolve(out);
+      } catch { resolve(null); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); console.warn('TierList : image illisible', file.name); resolve(null); };
+    img.src = url;
   });
-  const [sel, setSel] = React.useState(null);
-  const [text, setText] = React.useState('');
-  const nextId = React.useRef(Math.max(0, ...items.map(i => i.id)) + 1);
-  React.useEffect(() => { try { localStorage.setItem(TIERLIST_LS, JSON.stringify(items)); } catch {} }, [items]);
-  const place = tier => { if (sel == null) return; setItems(its => its.map(i => i.id === sel ? { ...i, tier } : i)); setSel(null); };
-  const add = () => { const t = text.trim(); if (!t) return; setItems(its => [...its, { id: nextId.current++, label: t, tier: null }]); setText(''); };
-  const del = () => { if (sel == null) return; setItems(its => its.filter(i => i.id !== sel)); setSel(null); };
-  const resetAll = () => { setItems(its => its.map(i => ({ ...i, tier: null }))); setSel(null); };
-  const chip = it => (
-    <button key={it.id} onClick={() => setSel(sel === it.id ? null : it.id)} style={{ background: sel === it.id ? `${GAMES_COLOR}` : C.surfaceHigh, color: sel === it.id ? '#fff' : C.text, border:`1px solid ${sel === it.id ? GAMES_COLOR : C.border}`, borderRadius:8, padding:'6px 10px', fontSize:12.5, fontWeight:600, cursor:'pointer', boxShadow: sel === it.id ? `0 0 0 2px ${GAMES_COLOR}66` : 'none' }}>{it.label}</button>
+}
+// Conteneur scrollable ancêtre (le <div overflowY:auto> de WebApp/MobileApp) pour l'auto-scroll.
+function tlScrollParent(el) {
+  for (let p = el && el.parentElement; p; p = p.parentElement) {
+    const o = getComputedStyle(p).overflowY;
+    if ((o === 'auto' || o === 'scroll') && p.scrollHeight > p.clientHeight) return p;
+  }
+  return null;
+}
+function GameTierList() {
+  const [data, setData] = React.useState(tlLoad);
+  const [edit, setEdit] = React.useState(false);
+  const rootRef = React.useRef(null);
+  const dragRef = React.useRef(null);      // { zone, idx, id, el, x, y, sx, sy, active, raf }
+  const hoverRef = React.useRef(null);     // zone .tier/.pool actuellement surlignée
+  const saveTimer = React.useRef(null);
+  const dataRef = React.useRef(data); React.useEffect(() => { dataRef.current = data; }, [data]);
+  // save() immédiat pour toute action ponctuelle (drop, suppression, upload, rangs…)
+  const commit = next => { setData(next); lsSet(TIERLIST_LS, JSON.stringify(next)); };
+  // saveSoon() 300 ms UNIQUEMENT pour la frappe nom/couleur (règle du projet d'origine)
+  const commitSoon = next => { setData(next); clearTimeout(saveTimer.current); saveTimer.current = setTimeout(() => lsSet(TIERLIST_LS, JSON.stringify(next)), 300); };
+  React.useEffect(() => () => clearTimeout(saveTimer.current), []);
+  // zone 'pool' ou index de tier → tableau d'images correspondant
+  const zoneImgs = (d, z) => z === 'pool' ? d.pool : d.tiers[z].imgs;
+  const moveImg = (from, idx, to) => {
+    const d = dataRef.current;
+    const src = zoneImgs(d, from); const img = src[idx];
+    if (!img || String(from) === String(to)) return;
+    const next = {
+      tiers: d.tiers.map((t, i) => ({ ...t, imgs: t.imgs.filter((_, k) => !(String(from) === String(i) && k === idx)).concat(String(to) === String(i) ? [img] : []) })),
+      pool: d.pool.filter((_, k) => !(from === 'pool' && k === idx)).concat(to === 'pool' ? [img] : []),
+    };
+    commit(next);
+  };
+  const delImg = (zone, idx) => {
+    const d = dataRef.current;
+    commit({
+      tiers: d.tiers.map((t, i) => String(zone) === String(i) ? { ...t, imgs: t.imgs.filter((_, k) => k !== idx) } : t),
+      pool: zone === 'pool' ? d.pool.filter((_, k) => k !== idx) : d.pool,
+    });
+  };
+  // ── Drag & drop Pointer Events (listeners document pendant le drag) ──
+  const clearHover = () => { if (hoverRef.current) { hoverRef.current.style.outline = 'none'; hoverRef.current = null; } };
+  const dropTargetAt = (x, y) => { const el = document.elementFromPoint(x, y); return el && el.closest('[data-tl-zone]'); };
+  // ⚠ Ne JAMAIS toucher width/height ici : ils viennent du style JSX (75px) et React ne
+  // les ré-écrirait pas après un reset à '' (son diff croit qu'ils sont déjà posés).
+  const resetDragStyle = el => { ['position','zIndex','left','top','opacity','transform','boxShadow','pointerEvents'].forEach(p => { el.style[p] = ''; }); };
+  const onImgDown = (e, zone, idx) => {
+    if (dragRef.current || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    const el = e.currentTarget;
+    try { el.setPointerCapture(e.pointerId); } catch {}   // pointeur parfois déjà relâché (tap bref)
+    dragRef.current = { zone, idx, id: e.pointerId, el, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, active: false, raf: null };
+  };
+  React.useEffect(() => {
+    const positionDragged = d => { d.el.style.left = (d.x - 37) + 'px'; d.el.style.top = (d.y - 37) + 'px'; };
+    const updateHover = d => {
+      const t = dropTargetAt(d.x, d.y);
+      if (t !== hoverRef.current) { clearHover(); if (t) { t.style.outline = '2px solid #3b82f6'; t.style.outlineOffset = '-3px'; hoverRef.current = t; } }
+    };
+    // Auto-scroll rAF : près du bord haut/bas du conteneur scrollable, vitesse proportionnelle
+    const autoScroll = () => {
+      const d = dragRef.current;
+      if (!d || !d.active) return;
+      const sc = tlScrollParent(rootRef.current);
+      if (sc) {
+        const r = sc.getBoundingClientRect();
+        if (d.y < r.top + TL_SCROLL_MARGIN) sc.scrollTop -= (r.top + TL_SCROLL_MARGIN - d.y) / 4;
+        else if (d.y > r.bottom - TL_SCROLL_MARGIN) sc.scrollTop += (d.y - (r.bottom - TL_SCROLL_MARGIN)) / 4;
+        updateHover(d);
+      }
+      d.raf = requestAnimationFrame(autoScroll);
+    };
+    const onMove = e => {
+      const d = dragRef.current;
+      if (!d || e.pointerId !== d.id) return;
+      d.x = e.clientX; d.y = e.clientY;
+      if (!d.active) {
+        if (Math.hypot(d.x - d.sx, d.y - d.sy) < TL_DRAG_THRESHOLD) return;   // tap potentiel
+        d.active = true;
+        const s = d.el.style;
+        s.position = 'fixed'; s.zIndex = 1000; s.opacity = 0.7; s.transform = 'scale(1.15)';
+        s.boxShadow = '0 6px 18px rgba(0,0,0,0.6)'; s.pointerEvents = 'none';
+        d.raf = requestAnimationFrame(autoScroll);
+      }
+      positionDragged(d); updateHover(d);
+    };
+    const onUp = e => {
+      const d = dragRef.current;
+      if (!d || e.pointerId !== d.id) return;
+      dragRef.current = null;                      // TOUJOURS en tête : jamais de drag fantôme
+      if (d.raf) cancelAnimationFrame(d.raf);
+      clearHover();
+      if (d.active) {
+        // Cible AVANT de retirer le style (pointer-events:none → elementFromPoint voit dessous)
+        const t = e.type === 'pointerup' ? dropTargetAt(d.x, d.y) : null;
+        resetDragStyle(d.el);
+        if (t) moveImg(d.zone, d.idx, t.dataset.tlZone === 'pool' ? 'pool' : +t.dataset.tlZone);
+      } else if (e.type === 'pointerup' && document.body.contains(d.el) && d.el.closest('[data-tl-edit]')) {
+        // Tap en mode édition = suppression (avec confirmation)
+        if (window.confirm('Supprimer cette image ?')) delImg(d.zone, d.idx);
+      }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+    const noDrag = e => e.preventDefault();
+    document.addEventListener('dragstart', noDrag);
+    return () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      document.removeEventListener('dragstart', noDrag);
+    };
+  }, []);
+  // ── Upload (séquentiel : une image illisible n'empêche pas les suivantes) ──
+  const onUpload = async e => {
+    const files = [...(e.target.files || [])];
+    e.target.value = '';                            // permet de ré-uploader le même fichier
+    const added = [];
+    for (const f of files) { const s = await tlFileToDataURL(f); if (s) added.push({ s, a: f.name }); }
+    if (added.length) commit({ ...dataRef.current, pool: [...dataRef.current.pool, ...added] });
+  };
+  // ── Rangs (mode édition) ──
+  const setTier = (i, patch, soon) => {
+    const d = dataRef.current;
+    const next = { ...d, tiers: d.tiers.map((t, k) => k === i ? { ...t, ...patch } : t) };
+    (soon ? commitSoon : commit)(next);
+  };
+  const delTier = i => {
+    const d = dataRef.current;   // ses images retournent dans la réserve (pas supprimées)
+    commit({ tiers: d.tiers.filter((_, k) => k !== i), pool: [...d.pool, ...d.tiers[i].imgs] });
+  };
+  const addTier = () => commit({ ...dataRef.current, tiers: [...dataRef.current.tiers, { n: 'Nouveau', c: '#6b7280', imgs: [] }] });
+  const resetAll = () => {
+    if (!window.confirm('Tout réinitialiser ? (rangs par défaut, toutes les images supprimées)')) return;
+    try { localStorage.removeItem(TIERLIST_LS); } catch {}
+    setData({ tiers: TL_DEFAULT_TIERS.map(([n, c]) => ({ n, c, imgs: [] })), pool: [] });
+  };
+  const imgEl = (im, zone, idx) => (
+    <img key={zone + '-' + idx} src={im.s} alt={im.a} draggable={false}
+      onPointerDown={e => onImgDown(e, zone, idx)} onContextMenu={e => e.preventDefault()}
+      style={{ width:75, height:75, objectFit:'cover', borderRadius:6, cursor:'grab', touchAction:'none', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }} />
   );
+  const totalImgs = data.tiers.reduce((n, t) => n + t.imgs.length, 0) + data.pool.length;
   return (
-    <GameWrap hint={sel != null ? '👉 Touche une ligne (S/A/B/C/D) ou « Réserve » pour y placer l\'élément sélectionné.' : 'Touche un élément pour le sélectionner, puis touche une ligne pour le classer. Ajoute les tiens en bas.'}>
-      <div style={{ width:'100%', display:'flex', flexDirection:'column', gap:8 }}>
-        {TIER_ROWS.map(([t, color]) => (
-          <div key={t} onClick={() => place(t)} style={{ display:'flex', gap:8, minHeight:52, borderRadius:8, overflow:'hidden', cursor: sel != null ? 'pointer' : 'default', outline: sel != null ? `1px dashed ${GAMES_COLOR}66` : 'none' }}>
-            <div style={{ width:46, flexShrink:0, background:color, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:900, fontSize:20, color:'#1a1a1a' }}>{t}</div>
-            <div style={{ flex:1, display:'flex', flexWrap:'wrap', gap:6, alignContent:'flex-start', padding:6, background:C.surface, borderRadius:'0 8px 8px 0' }}>{items.filter(i => i.tier === t).map(chip)}</div>
+    <GameWrap hint="Ta vraie tier list à images : 📥 uploade des images (stockées 100 % en local), puis glisse-les dans les rangs — au doigt ou à la souris. ⚙️ Mode Édition pour renommer/recolorer/supprimer les rangs (et supprimer une image d'un tap).">
+      <div ref={rootRef} data-tl-edit={edit ? '1' : undefined} style={{ width:'100%', display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', justifyContent:'center' }}>
+          <label style={gameBtn({ display:'inline-flex', alignItems:'center' })}>
+            📥 Images<input type="file" multiple accept="image/*" onChange={onUpload} style={{ display:'none' }} />
+          </label>
+          <button onClick={() => setEdit(v => !v)} style={gameBtn(edit ? { background:'#10b98133', border:'1px solid #10b98188', color:'#10b981' } : {})}>⚙️ Mode Édition</button>
+          {edit && <button onClick={addTier} style={gameBtn()}>➕ Ajouter un rang</button>}
+          {edit && <button onClick={resetAll} style={gameBtn({ background:'#e0505018', border:'1px solid #e0505055', color:'#e05050' })}>♻️ Réinitialiser</button>}
+        </div>
+        {edit && <div style={{ fontSize:11, color:'#fbbf24', textAlign:'center' }}>Mode édition : touche une image pour la supprimer.</div>}
+        {data.tiers.map((t, i) => (
+          <div key={i} data-tl-zone={i} style={{ display:'flex', minHeight:90, borderRadius:10, overflow:'hidden', background:C.surface, border:`1px solid ${edit ? C.border : 'transparent'}` }}>
+            <div style={{ width:74, flexShrink:0, background:t.c, display:'flex', alignItems:'center', justifyContent:'center', textAlign:'center', fontWeight:800, fontSize:16, color:'#1a1a1a', padding:5, overflowWrap:'anywhere', textShadow:'1px 1px 2px rgba(255,255,255,0.25)' }}>{t.n}</div>
+            <div style={{ flex:1, display:'flex', flexWrap:'wrap', gap:8, padding:10, minHeight:90, alignContent:'flex-start' }}>{t.imgs.map((im, k) => imgEl(im, i, k))}</div>
+            {edit && (
+              <div style={{ width:118, flexShrink:0, background:C.surfaceHigh, padding:8, display:'flex', flexDirection:'column', gap:6, borderLeft:`1px solid ${C.border}` }}>
+                <input value={t.n} onChange={e => setTier(i, { n: e.target.value }, true)} style={{ width:'100%', padding:'5px 6px', borderRadius:4, border:`1px solid ${C.border}`, background:C.surface, color:C.text, fontSize:12, boxSizing:'border-box' }} />
+                <input type="color" value={t.c} onChange={e => setTier(i, { c: e.target.value }, true)} style={{ width:'100%', height:28, padding:0, border:'none', background:'none', cursor:'pointer' }} />
+                <button onClick={() => delTier(i)} style={{ background:'#e05050', color:'#fff', border:'none', borderRadius:4, padding:5, fontSize:11, fontWeight:700, cursor:'pointer' }}>Supprimer</button>
+              </div>
+            )}
           </div>
         ))}
-        <div onClick={() => place(null)} style={{ display:'flex', gap:8, minHeight:48, borderRadius:8, overflow:'hidden', cursor: sel != null ? 'pointer' : 'default', outline: sel != null ? `1px dashed ${GAMES_COLOR}66` : 'none' }}>
-          <div style={{ width:46, flexShrink:0, background:'#3a3a48', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:10, color:'#fff', textAlign:'center', lineHeight:1.1 }}>Ré-serve</div>
-          <div style={{ flex:1, display:'flex', flexWrap:'wrap', gap:6, alignContent:'flex-start', padding:6, background:C.surface, borderRadius:'0 8px 8px 0' }}>{items.filter(i => i.tier == null).map(chip)}</div>
-        </div>
-        <div style={{ display:'flex', gap:6, marginTop:2 }}>
-          <input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add(); }} placeholder="Ajouter un élément…" style={{ flex:1, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:'8px 10px', fontSize:12.5, outline:'none' }} />
-          <button onClick={add} style={gameBtn()}>+ Ajouter</button>
-        </div>
-        <div style={{ display:'flex', gap:6 }}>
-          <button onClick={del} disabled={sel == null} style={{ ...gameBtn({ background: sel == null ? 'none' : '#e0505018', border:`1px solid ${sel == null ? C.border : '#e0505055'}`, color: sel == null ? C.muted : '#e05050' }), cursor: sel == null ? 'default' : 'pointer' }}>🗑 Supprimer</button>
-          <button onClick={resetAll} style={gameBtn()}>↺ Vider le classement</button>
+        <div style={{ fontSize:12, color:C.muted, fontWeight:700, marginTop:4 }}>Réserve d'images {totalImgs > 0 && <span style={{ color:C.dim, fontWeight:400 }}>· {totalImgs} image(s) au total</span>}</div>
+        <div data-tl-zone="pool" style={{ background:C.surface, minHeight:110, padding:12, borderRadius:12, display:'flex', flexWrap:'wrap', gap:10, border:`2px dashed ${C.border}`, alignContent:'flex-start' }}>
+          {data.pool.map((im, k) => imgEl(im, 'pool', k))}
+          {!totalImgs && <div style={{ fontSize:11, color:C.dim, alignSelf:'center', margin:'0 auto' }}>Aucune image — commence par 📥 Images.</div>}
         </div>
       </div>
     </GameWrap>
@@ -13582,14 +13770,16 @@ const GAMES_HUB_STATS = [
   { id:'memory', label:'Memory',      icon:'🧠', metric:'record (moins de coups)' },
 ];
 function GamesHubStatsSection() {
+  // TierList v2 (portage LocalTierList) : format { tiers:[{imgs:[…]}], pool:[…] } —
+  // « classé » = image placée dans un rang (la réserve ne compte pas).
   let tierCount = 0;
-  try { const v = JSON.parse(localStorage.getItem(TIERLIST_LS)); if (Array.isArray(v)) tierCount = v.filter(i => i && i.tier).length; } catch {}
+  try { const v = JSON.parse(localStorage.getItem(TIERLIST_LS)); if (v && Array.isArray(v.tiers)) tierCount = v.tiers.reduce((n, t) => n + ((t && t.imgs && t.imgs.length) || 0), 0); } catch {}
   const played = GAMES_HUB_STATS.filter(g => gameHi(g.id) > 0).length + (tierCount > 0 ? 1 : 0);
   const cards = GAMES_HUB_STATS.map(g => {
     const v = gameHi(g.id);
     return { label: g.label.toUpperCase(), value: v > 0 ? String(v) : '—', sub: v > 0 ? g.metric : 'pas encore joué', icon: g.icon, color: GAMES_COLOR };
   });
-  cards.push({ label:'TIERLIST', value: tierCount > 0 ? String(tierCount) : '—', sub: tierCount > 0 ? 'éléments classés' : 'aucun élément classé', icon:'🏆', color: GAMES_COLOR });
+  cards.push({ label:'TIERLIST', value: tierCount > 0 ? String(tierCount) : '—', sub: tierCount > 0 ? 'images classées' : 'aucune image classée', icon:'🏆', color: GAMES_COLOR });
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ fontSize:11, color:C.muted, lineHeight:1.5 }}>
