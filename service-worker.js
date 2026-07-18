@@ -37,7 +37,9 @@
 // vendor/motus-words.js / motus-dico.js (chargées lazy, précachées pour l'offline).
 // v46 : bump de cache — vraie TierList à images (portage du projet perso LocalTierList,
 // clé partagée tierlist-v1, drag & drop tactile).
-const CACHE  = 'spotifyplus-v46';
+// v47 : bump de cache — nouveau jeu UnderCoverDraw (dessin & déduction 3-8 joueurs,
+// portage du projet perso, 344 couples de mots inline).
+const CACHE  = 'spotifyplus-v47';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
