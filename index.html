@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.2.3';
+const APP_VERSION = '7.2.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4515,16 +4515,138 @@ function FrigoPanel() {
 }
 
 // ════════════════════════════════════════════════
-// VÊTEMENT — module (vide pour le moment, contenu à venir)
+// VÊTEMENT — inventaire (compteurs par type) + fiches vêtements (photo, état, lieu).
+// 100 % local (localStorage VET_LS), PAS dans buildBackup (photos = data URLs lourdes,
+// comme TierList). Photos redimensionnées (contain 260 px, WebP → repli JPEG).
 // ════════════════════════════════════════════════
 const VETEMENT_COLOR = '#f59a2e';
+const VET_LS = 'spotifyplus_vetements';
+const VET_TYPES = [
+  ['tshirt','T-shirt'], ['chemise','Chemise'], ['pull','Pull'], ['sweat','Sweat'],
+  ['veste','Veste'], ['manteau','Manteau'], ['pantalon','Pantalon'], ['jean','Jean'],
+  ['short','Short'], ['sousvet','Sous-vêtements'], ['chaussettes','Chaussettes'], ['chaussures','Chaussures'],
+];
+const VET_LIEUX = ['Saint-Quentin-en-Yvelines', 'Massy'];
+const VET_ETATS = ['Neuf', 'Bon état', 'Usé', 'Abîmé'];
+const vetTypeLabel = t => (VET_TYPES.find(x => x[0] === t) || [,'Vêtement'])[1];
+function vetLoad() {
+  try {
+    const d = JSON.parse(localStorage.getItem(VET_LS));
+    if (d && typeof d === 'object') return { counts: d.counts || {}, items: Array.isArray(d.items) ? d.items : [] };
+  } catch {}
+  return { counts: {}, items: [] };
+}
+function vetSave(d) { lsSet(VET_LS, JSON.stringify(d)); }
+// Photo : contain dans 260 px (préserve le ratio, pas de recadrage), WebP 0.8 → repli JPEG.
+function vetPhoto(file) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      try {
+        const MAX = 260, r = Math.min(1, MAX / Math.max(img.width, img.height));
+        const w = Math.round(img.width * r), h = Math.round(img.height * r);
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        let out = cv.toDataURL('image/webp', 0.8);
+        if (!out.startsWith('data:image/webp')) out = cv.toDataURL('image/jpeg', 0.85);
+        resolve(out);
+      } catch { resolve(null); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
 function VetementPanel() {
+  const [data, setData]     = React.useState(() => vetLoad());
+  const [confirmId, setConfirmId] = React.useState(null);   // fiche en attente de confirmation de suppression
+  const save = next => { setData(next); vetSave(next); };
+  const setCount = (t, delta) => { const c = { ...data.counts }; c[t] = Math.max(0, (+c[t] || 0) + delta); save({ ...data, counts: c }); };
+  const setCountVal = (t, v) => { const n = Math.max(0, Math.min(9999, parseInt(v, 10) || 0)); const c = { ...data.counts }; c[t] = n; save({ ...data, counts: c }); };
+  const addItem = () => save({ ...data, items: [...data.items, { id: Date.now() + '' + Math.floor(Math.random() * 1000), name: '', type: 'tshirt', photo: null, etat: 'Bon état', lieu: VET_LIEUX[0] }] });
+  const updItem = (id, patch) => save({ ...data, items: data.items.map(it => it.id === id ? { ...it, ...patch } : it) });
+  const delItem = id => { setConfirmId(null); save({ ...data, items: data.items.filter(it => it.id !== id) }); };
+  const onPhoto = async (id, file) => { if (!file) return; const p = await vetPhoto(file); if (p) updItem(id, { photo: p }); };
+
+  const totalCount = VET_TYPES.reduce((s, [t]) => s + (+data.counts[t] || 0), 0);
+  const selStyle = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', width:'100%' };
+  const fieldLabel = txt => <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:C.dim, marginBottom:4 }}>{txt}</div>;
+
   return (
-    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, textAlign:'center', padding:'46px 18px', background:`${VETEMENT_COLOR}10`, border:`1px solid ${VETEMENT_COLOR}33`, borderRadius:14, minHeight:200 }}>
-      <div style={{ fontSize:42 }}>👕</div>
-      <div style={{ fontSize:13, color:C.muted, lineHeight:1.6, maxWidth:320 }}>
-        Module <b style={{ color:C.text }}>vide pour le moment</b> — le contenu arrivera bientôt. 🧵
-      </div>
+    <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+      {/* 1. Inventaire — combien de chaque type */}
+      <StatsCollapse title={`👕 INVENTAIRE${totalCount ? ' · ' + totalCount : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
+        <div style={{ fontSize:11, color:C.dim, marginBottom:2 }}>Combien tu as de chaque type de vêtement.</div>
+        {VET_TYPES.map(([t, lbl]) => (
+          <div key={t} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'4px 0', borderBottom:`1px solid ${C.border}44` }}>
+            <span style={{ fontSize:12.5, color:C.text }}>{lbl}</span>
+            <div style={{ display:'flex', alignItems:'center', gap:6, flexShrink:0 }}>
+              <button onClick={() => setCount(t, -1)} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${C.border}`, background:C.surface, color:C.text, cursor:'pointer', fontSize:15, lineHeight:1 }}>−</button>
+              <input type="number" value={+data.counts[t] || 0} onChange={e => setCountVal(t, e.target.value)}
+                style={{ width:46, textAlign:'center', background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'4px 2px', fontSize:13, fontWeight:700, color:VETEMENT_COLOR, outline:'none', fontFamily:'inherit', colorScheme:'dark' }} />
+              <button onClick={() => setCount(t, +1)} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${VETEMENT_COLOR}66`, background:`${VETEMENT_COLOR}18`, color:VETEMENT_COLOR, cursor:'pointer', fontSize:15, lineHeight:1 }}>+</button>
+            </div>
+          </div>
+        ))}
+      </StatsCollapse>
+
+      {/* 2. Fiches vêtements — un sous-collapse par vêtement (photo, état, lieu, suppression) */}
+      <StatsCollapse title={`🧥 MES VÊTEMENTS${data.items.length ? ' · ' + data.items.length : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
+        <button onClick={addItem} style={{ background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:8, padding:'8px 12px', fontSize:12, fontWeight:700, cursor:'pointer' }}>➕ Ajouter un vêtement</button>
+        {!data.items.length && <div style={{ fontSize:11, color:C.dim }}>Aucune fiche pour l'instant.</div>}
+        {data.items.map(it => {
+          const titleNode = (
+            <span style={{ display:'flex', alignItems:'center', gap:7, minWidth:0 }}>
+              {it.photo
+                ? <img src={it.photo} alt="" style={{ width:22, height:22, borderRadius:4, objectFit:'cover', flexShrink:0 }} />
+                : <span style={{ fontSize:14, flexShrink:0 }}>👕</span>}
+              <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.name || vetTypeLabel(it.type)}</span>
+              <span style={{ fontSize:9.5, color:C.dim, flexShrink:0 }}>· {it.lieu === VET_LIEUX[1] ? 'Massy' : 'SQY'}</span>
+            </span>
+          );
+          return (
+            <StatsCollapse key={it.id} title={titleNode} color={VETEMENT_COLOR}>
+              <div style={{ display:'flex', gap:12, flexWrap:'wrap' }}>
+                <div style={{ flexShrink:0 }}>
+                  {fieldLabel('PHOTO')}
+                  {it.photo && <img src={it.photo} alt="" style={{ width:110, height:110, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}`, display:'block', marginBottom:6 }} />}
+                  <label style={{ display:'inline-block', background:C.surface, border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, cursor:'pointer' }}>
+                    {it.photo ? '🔄 Changer' : '📷 Ajouter une photo'}
+                    <input type="file" accept="image/*" onChange={e => { onPhoto(it.id, e.target.files[0]); e.target.value = ''; }} style={{ display:'none' }} />
+                  </label>
+                  {it.photo && <button onClick={() => updItem(it.id, { photo: null })} style={{ marginLeft:6, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.muted, cursor:'pointer' }}>Retirer</button>}
+                </div>
+                <div style={{ flex:1, minWidth:150, display:'flex', flexDirection:'column', gap:8 }}>
+                  <div>{fieldLabel('NOM')}
+                    <input type="text" value={it.name} placeholder={vetTypeLabel(it.type)} onChange={e => updItem(it.id, { name: e.target.value })} style={selStyle} /></div>
+                  <div>{fieldLabel('TYPE')}
+                    <select value={it.type} onChange={e => updItem(it.id, { type: e.target.value })} style={selStyle}>
+                      {VET_TYPES.map(([t, lbl]) => <option key={t} value={t}>{lbl}</option>)}
+                    </select></div>
+                  <div>{fieldLabel('ÉTAT')}
+                    <select value={it.etat} onChange={e => updItem(it.id, { etat: e.target.value })} style={selStyle}>
+                      {VET_ETATS.map(e => <option key={e} value={e}>{e}</option>)}
+                    </select></div>
+                  <div>{fieldLabel('OÙ EST-IL ?')}
+                    <select value={it.lieu} onChange={e => updItem(it.id, { lieu: e.target.value })} style={selStyle}>
+                      {VET_LIEUX.map(l => <option key={l} value={l}>{l}</option>)}
+                    </select></div>
+                </div>
+              </div>
+              {confirmId === it.id ? (
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'#e0505015', border:'1px solid #e0505055', borderRadius:8, padding:'8px 10px' }}>
+                  <span style={{ fontSize:11.5, color:'#ff8a8a', flex:1 }}>Le jeter / supprimer cette fiche ?</span>
+                  <button onClick={() => delItem(it.id)} style={{ background:'#e05050', border:'none', borderRadius:6, padding:'5px 12px', fontSize:11, fontWeight:700, color:'#fff', cursor:'pointer' }}>Oui, supprimer</button>
+                  <button onClick={() => setConfirmId(null)} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 12px', fontSize:11, color:C.muted, cursor:'pointer' }}>Annuler</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmId(it.id)} style={{ alignSelf:'flex-start', background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'5px 12px', fontSize:11, color:'#e05050', cursor:'pointer' }}>✕ Supprimer (je le jette)</button>
+              )}
+            </StatsCollapse>
+          );
+        })}
+      </StatsCollapse>
     </div>
   );
 }
