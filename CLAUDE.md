@@ -12,7 +12,7 @@
 ## Vue d'ensemble
 PWA **sans backend** : toutes les données en local (sql.js SQLite WASM + IndexedDB), hébergée statiquement sur GitHub Pages. Chaque artiste suivi est scrappé depuis **sa propre** `last_scraped_at` (défaut `2026-03-15`). L'utilisateur parcourt son feed, écoute titre par titre ; en fin de titre → marqué écouté + auto-avance + disparition animée. Aucun ajout auto en playlist.
 
-C'est un **hub perso** multi-sections : Musique (feed), Actu, Météo, Finance (+ Mes Actifs), Bon Plan, TV Time, Note, Santé, Vêtement, Frigo Massy, To do, Maps, Mot de passe, Remember/Alertes, Stats, League of Legends, GitHub/Speedrun.
+C'est un **hub perso** multi-sections : Musique (feed), Actu, Météo, Finance (+ Mes Actifs), Bon Plan, TV Time, Note, Santé, Vêtement, Frigo, To do, Maps, Mot de passe, Remember/Alertes, Stats, League of Legends, GitHub/Speedrun.
 
 ## Fichiers clés
 
@@ -47,7 +47,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // Token pré-scope → 403 sur la file → log « déconnecte/reconnecte-toi » 1×/session (_dwCapDenied).
 ```
 
-### `APP_VERSION` (actuellement `'7.2.4'`)
+### `APP_VERSION` (actuellement `'7.2.5'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -170,7 +170,7 @@ Marquage écouté quand `now?.uri` change (URI précédente dans le feed & `dbRe
 Méthodes : `startSync({skipCount, resumeUrl, resumeOffset})` · `resumeSync()` · `togglePause()` · `purgeListened()` · `restoreBackup(data)` · `resetQuota()` · `removeFromFeed(uri)` · `setTrackLiked(uri, bool)` · `syncInitialLikes()` · `navigateFeed(dir)` · `markListened(uri)` · `resetFilters()` · `logout()` · `seek(ms)` · `setLoopEnabled(bool)` · `setModuleEnabled(id, bool)` · `setDelayChoice(n)`.
 
 ### Paramétrage des modules
-`TOGGLE_MODULES` = modules basculables `{id, label, icon, color, desktop, mobile}` (Actu/Météo/Finance/Frigo Massy/Jeux/Bon Plan/TV Time/Musique/Note/Santé/Sport/Vêtement/To do/Maps/Mot de passe/Remember/Stats ; Scrapping & À propos non basculables). `loadModuleToggles()`/`saveModuleToggles()` (localStorage `spotifyplus_modules`), `moduleEnabled(toggles, id)` (absent = activé, seul `false` désactive). UI = toggles dans « ⚙️ PARAMÉTRAGE » (À propos). Onglet actif désactivé → retour à `home`. Inclus dans buildBackup.
+`TOGGLE_MODULES` = modules basculables `{id, label, icon, color, desktop, mobile}` (Actu/Météo/Finance/Frigo/Jeux/Bon Plan/TV Time/Musique/Note/Santé/Sport/Vêtement/To do/Maps/Mot de passe/Remember/Stats ; Scrapping & À propos non basculables). `loadModuleToggles()`/`saveModuleToggles()` (localStorage `spotifyplus_modules`), `moduleEnabled(toggles, id)` (absent = activé, seul `false` désactive). UI = toggles dans « ⚙️ PARAMÉTRAGE » (À propos). Onglet actif désactivé → retour à `home`. Inclus dans buildBackup.
 
 ---
 
@@ -190,7 +190,7 @@ Export : `EXPORT_SECTIONS` (14 boutons dans « ↧ EXPORTER » d'À propos) → 
 
 **Layout** : `WebApp` (desktop, sidebar gauche scraping + onglets en haut, une seule vue centrale) · `MobileApp` (barre haut : profil + 3 onglets principaux Scrapping/En attente/❤Likés + menu ⋯) · `CompactPlayer` (viewport court `innerHeight<500`) · `HubHome` (accueil connecté, cartes `HUB_CARDS`) · `Home` (login « Hub de Pierre »). Retour accueil = clic sur le profil. Défaut view/tab = `'home'`.
 
-**Ordre unique desktop+mobile** (onglets/menu/accueil/login) : Actu, Alertes, Bon Plan, Finance, Frigo Massy, Jeux, Maps, Météo, Mot de Passe, Musique, Note, Santé, Sport, To Do, TV Time, Vêtement, Stats, À propos (Scrapping en tête). ⚠ Le module « Santé » (ex-Nourriture) garde sa **position** (id/composant internes inchangés = `food`/`NourriturePanel`) — seul le libellé visible a changé, il n'est donc pas re-trié à la lettre S. **Arc-en-ciel** violet→rouge appliqué partout. ⚠ Les NOMS de constantes couleur sont historiques (`METEO_BLUE` est cyan-vert, `MDP_AMBER` vert-cyan…) — lire la valeur. ⚠ Tout nouvel onglet mobile DOIT avoir son bloc de rendu dans `MobileApp` (sinon page noire) en plus de l'entrée `allOverflowTabs`.
+**Ordre unique desktop+mobile** (onglets/menu/accueil/login) : Actu, Alertes, Bon Plan, Finance, Frigo, Jeux, Maps, Météo, Mot de Passe, Musique, Note, Santé, Sport, To Do, TV Time, Vêtement, Stats, À propos (Scrapping en tête). ⚠ Le module « Santé » (ex-Nourriture) garde sa **position** (id/composant internes inchangés = `food`/`NourriturePanel`) — seul le libellé visible a changé, il n'est donc pas re-trié à la lettre S. **Arc-en-ciel** violet→rouge appliqué partout. ⚠ Les NOMS de constantes couleur sont historiques (`METEO_BLUE` est cyan-vert, `MDP_AMBER` vert-cyan…) — lire la valeur. ⚠ Tout nouvel onglet mobile DOIT avoir son bloc de rendu dans `MobileApp` (sinon page noire) en plus de l'entrée `allOverflowTabs`.
 
 **Feed** : `FeedList` (filtres type/genre/artiste + tri, bannières de date mobile, empty-state seulement si `feed.length===0 && !filtersOn`) · `FeedItem` (`React.memo` + props explicites, **ne consomme PAS `useStore`** ; `key={item.id}` = URI, jamais `id+i`) · swipe gauche=suppr / droite=prev.
 
@@ -216,7 +216,7 @@ Export : `EXPORT_SECTIONS` (14 boutons dans « ↧ EXPORTER » d'À propos) → 
 
 **Vêtement** (`VetementPanel`, orange `VETEMENT_COLOR='#f59a2e'`, entre TV Time et Stats) — **7.2.4** : garde-robe 100 % locale (`spotifyplus_vetements` = `{counts, items}`, `vetLoad`/`vetSave` via `lsSet`). 2 collapses : **👕 Inventaire** (compteur ± par type — `VET_TYPES` T-shirt/Chemise/Pull/Sweat/Veste/Manteau/Pantalon/Jean/Short/Sous-vêtements/Chaussettes/Chaussures) · **🧥 Mes vêtements** (bouton ➕ Ajouter → une **fiche par vêtement** en sous-collapse `StatsCollapse` : nom, type, **photo** (`vetPhoto` = contain 260 px WebP→JPEG data URL), **état** `VET_ETATS` (Neuf/Bon état/Usé/Abîmé), **lieu** `VET_LIEUX` (Saint-Quentin-en-Yvelines / Massy), et **✕ Supprimer avec confirmation** « je le jette »). Basculable (`TOGGLE_MODULES` id `vetement`), présent partout comme un module normal (onglet desktop `navItems`, menu mobile `allOverflowTabs` + bloc de rendu `MobileApp`, `SECTION`, chip de la grille `HUB_FEATURES`). PAS sur l'accueil connecté (`HUB_CARDS`). PAS dans buildBackup (photos = data URLs lourdes, comme TierList).
 
-**Frigo Massy** (`FrigoPanel`, bleu `FRIGO_COLOR='#47a8de'`, entre Finance et Jeux) : module **vide pour le moment** (placeholder « contenu à venir »). Même intégration qu'un module normal (id `frigo` : `TOGGLE_MODULES`, `navItems`, `allOverflowTabs` + bloc `MobileApp`, `SECTION`, chip `HUB_FEATURES`). PAS sur `HUB_CARDS`, PAS dans buildBackup.
+**Frigo** (`FrigoPanel`, bleu `FRIGO_COLOR='#47a8de'`, entre Finance et Jeux ; **renommé « Frigo Massy » → « Frigo » en 7.2.5**) : gestion du frigo 100 % locale (`spotifyplus_frigo` = `{sections:{principal,congel,placard}}`, `frigoLoad`/`frigoSave` via `lsSet`). **3 collapses** = `FRIGO_SECTIONS` (titres corrigés : **Compartiment principal** ex-« Partiment principal », **Congélateur** ex-« surgeler », **Placard**), chacun un `FrigoSection` : ajout d'ingrédient (nom + **date de péremption** optionnelle), édition inline de la date, suppression ✕. Statut de péremption via `frigoExpStatus` (expired/soon ≤ 3 j/ok). **Section Alertes auto (`FrigoAlertSection`)** : ajoutée EN DERNIER dans `RappelPanel`, lecture seule, dérive de `frigoDueItems()` (aliments périmés ou ≤ 3 j) → générée/vidée automatiquement selon le contenu du Frigo. Intégration module normale (id `frigo` : `TOGGLE_MODULES`, `navItems`, `allOverflowTabs` + bloc `MobileApp`, `SECTION`, chip `HUB_FEATURES`). PAS sur `HUB_CARDS`, PAS dans buildBackup.
 
 **Sport** (`SportPanel`, lime `SPORT_COLOR='#c3d93f'`, entre Santé et To Do) : module **en construction** (placeholder). Même intégration qu'un module normal (id `sport` : `TOGGLE_MODULES`, `navItems`, `allOverflowTabs` + bloc `MobileApp`, `SECTION`, chip `HUB_FEATURES`). PAS sur `HUB_CARDS`, PAS dans buildBackup.
 
