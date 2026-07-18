@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.2.9';
+const APP_VERSION = '7.3.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4402,16 +4402,50 @@ function bnPlace(N, sizes) {
 function GameBataille() {
   const blank = () => Array(BN_N * BN_N).fill(null);
   const mk = () => bnPlace(BN_N, BN_SIZES);
+  const emptyFleet = () => ({ occ: new Set(), ships: [] });
   // fleets[p] = flotte du joueur p ; shots[p] = tirs du joueur p sur la flotte adverse.
-  const [fleets, setFleets] = React.useState(() => [mk(), mk()]);
+  const [fleets, setFleets] = React.useState(() => [emptyFleet(), emptyFleet()]);
   const [shots, setShots]   = React.useState(() => [blank(), blank()]);
   const [phase, setPhase]   = React.useState('place0'); // place0 | place1 | pass | play | over
   const [turn, setTurn]     = React.useState(0);         // joueur qui tire
   const [winner, setWinner] = React.useState(null);
+  // Placement manuel : orientation courante + case survolée (aperçu du navire à poser)
+  const [placeOrient, setPlaceOrient] = React.useState('h'); // 'h' | 'v'
+  const [hoverCell, setHoverCell]     = React.useState(null);
 
-  const restart = () => { setFleets([mk(), mk()]); setShots([blank(), blank()]); setPhase('place0'); setTurn(0); setWinner(null); };
+  const restart = () => { setFleets([emptyFleet(), emptyFleet()]); setShots([blank(), blank()]); setPhase('place0'); setTurn(0); setWinner(null); setPlaceOrient('h'); setHoverCell(null); };
   const reroll  = p => setFleets(f => { const n = f.slice(); n[p] = mk(); return n; });
   const sunkAgainst = p => fleets[1 - p].ships.filter(s => s.cells.every(x => shots[p][x] === 'hit')).length;
+
+  // ── Placement manuel : chaque joueur pose SES navires case par case ──
+  // Cellules occupées par un navire de taille `size` ancré en `anchor` (coin haut/gauche).
+  const shipCells = (anchor, size, orient) => {
+    const r = Math.floor(anchor / BN_N), c = anchor % BN_N, cells = [];
+    for (let k = 0; k < size; k++) {
+      const rr = r + (orient === 'v' ? k : 0), cc = c + (orient === 'h' ? k : 0);
+      if (rr >= BN_N || cc >= BN_N) return null;
+      cells.push(rr * BN_N + cc);
+    }
+    return cells;
+  };
+  const placeShip = (p, anchor) => {
+    const fl = fleets[p], size = BN_SIZES[fl.ships.length];
+    if (size == null) return;                       // flotte déjà complète
+    const cells = shipCells(anchor, size, placeOrient);
+    if (!cells || cells.some(x => fl.occ.has(x))) return;   // hors grille ou chevauchement
+    setFleets(f => {
+      const n = f.slice(), occ = new Set(fl.occ);
+      cells.forEach(x => occ.add(x));
+      n[p] = { occ, ships: [...fl.ships, { size, cells }] };
+      return n;
+    });
+  };
+  const undoShip  = p => setFleets(f => {
+    const fl = f[p]; if (!fl.ships.length) return f;
+    const n = f.slice(), ships = fl.ships.slice(), removed = ships.pop(), occ = new Set(fl.occ);
+    removed.cells.forEach(x => occ.delete(x));
+    n[p] = { occ, ships }; return n;
+  });
 
   const fire = i => {
     if (phase !== 'play' || shots[turn][i] != null) return;
@@ -4443,19 +4477,50 @@ function GameBataille() {
     </div>
   );
 
+  // Grille de placement manuel : navires posés + aperçu du navire courant sous le curseur.
+  const placeGrid = p => {
+    const fl = fleets[p], size = BN_SIZES[fl.ships.length];
+    const preview = (hoverCell != null && size != null) ? shipCells(hoverCell, size, placeOrient) : null;
+    const okPreview = preview && !preview.some(x => fl.occ.has(x));
+    const previewSet = new Set(preview || []);
+    return (
+      <div style={{ display:'grid', gridTemplateColumns:`repeat(${BN_N},1fr)`, gap:2, width:'100%', maxWidth:300 }}>
+        {Array.from({ length: BN_N * BN_N }).map((_, i) => {
+          const ship = fl.occ.has(i);
+          let bg = ship ? BN_COLORS[p] : '#16324f';
+          if (previewSet.has(i)) bg = okPreview ? `${BN_COLORS[p]}aa` : '#e0505088';
+          return <div key={i}
+            onClick={() => placeShip(p, i)}
+            onMouseEnter={() => setHoverCell(i)}
+            onMouseLeave={() => setHoverCell(c => c === i ? null : c)}
+            style={{ aspectRatio:'1', borderRadius:3, background:bg, border:`1px solid ${C.border}`, cursor: size != null ? 'pointer' : 'default' }} />;
+        })}
+      </div>
+    );
+  };
+
   const restartBtn = <button onClick={restart} style={gameBtn()}>↻ Rejouer</button>;
 
-  // ── Placement des flottes (chacun son tour, auto-placé + 🎲 re-tirage) ──
+  // ── Placement des flottes (chacun son tour, POSE MANUELLE case par case) ──
   if (phase === 'place0' || phase === 'place1') {
     const p = phase === 'place0' ? 0 : 1;
+    const placed = fleets[p].ships.length, total = BN_SIZES.length, done = placed >= total;
+    const nextSize = BN_SIZES[placed];
     return (
-      <GameWrap hint="À 2 sur le même téléphone. Chacun place sa flotte (tir aléatoire, re-tire avec 🎲), puis on tire à tour de rôle en se passant l'appareil."
+      <GameWrap hint="À 2 sur le même téléphone. Chacun place SA flotte case par case (touche une case pour poser le navire, tourne-le avec 🔄), puis on tire à tour de rôle en se passant l'appareil."
         bar={<><span style={{ fontSize:12.5, fontWeight:800, color:BN_COLORS[p] }}>⚓ Joueur {p + 1} : place ta flotte</span>{restartBtn}</>}>
         <div style={{ width:'100%', maxWidth:300, display:'flex', flexDirection:'column', gap:8 }}>
-          {ownGrid(p)}
+          <div style={{ fontSize:12, color:C.muted, textAlign:'center' }}>
+            {done ? '✅ Flotte complète !' : <>Place ton navire de <b style={{ color:BN_COLORS[p] }}>{nextSize} cases</b> · {placed}/{total} posés</>}
+          </div>
+          {placeGrid(p)}
           <div style={{ display:'flex', gap:8 }}>
-            <button onClick={() => reroll(p)} style={gameBtn({ flex:1 })}>🎲 Replacer</button>
-            <button onClick={() => setPhase(p === 0 ? 'place1' : 'pass')} style={gameBtn({ flex:1, background:`${BN_COLORS[p]}33` })}>✅ Flotte prête</button>
+            <button onClick={() => setPlaceOrient(o => o === 'h' ? 'v' : 'h')} disabled={done} style={gameBtn({ flex:1, opacity: done ? 0.4 : 1 })}>🔄 {placeOrient === 'h' ? 'Horizontal' : 'Vertical'}</button>
+            <button onClick={() => undoShip(p)} disabled={!placed} style={gameBtn({ flex:1, opacity: placed ? 1 : 0.4 })}>↺ Annuler</button>
+          </div>
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={() => reroll(p)} style={gameBtn({ flex:1 })}>🎲 Aléatoire</button>
+            <button onClick={() => { setPhase(p === 0 ? 'place1' : 'pass'); setHoverCell(null); setPlaceOrient('h'); }} disabled={!done} style={gameBtn({ flex:1, background: done ? `${BN_COLORS[p]}33` : undefined, opacity: done ? 1 : 0.4 })}>✅ Flotte prête</button>
           </div>
         </div>
       </GameWrap>
