@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.2.5';
+const APP_VERSION = '7.2.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12166,6 +12166,10 @@ function TvTimePanel() {
   const [ytMsg, setYtMsg]         = React.useState('');
   const [showYtKey, setShowYtKey] = React.useState(false);
   const [ytKeyInput, setYtKeyInput] = React.useState('');
+  // Vidéos déjà ajoutées à la playlist YouTube « À regarder plus tard (Hub) » (même set
+  // local que la section Actu → évite les doublons et grise le bouton quand tout est déjà ajouté).
+  const [wlAdded, setWlAdded]   = React.useState(() => new Set(loadYtWlAdded()));
+  const [wlBusyId, setWlBusyId] = React.useState(null);
   const [ytRefreshingId, setYtRefreshingId] = React.useState(null);
   const hasYtKey = !!ytKey();
   // Sections repliables (header cliquable + chevron) — seule EN COURS ouverte par défaut
@@ -12453,6 +12457,29 @@ function TvTimePanel() {
   const unfollow = item => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
     { ...it, status: 'done', dropped: true, doneAt: Date.now() }));
 
+  // Vidéos NON vues d'une chaîne/playlist YouTube (candidates à l'ajout en playlist).
+  const ytUnwatchedIds = it => { const seen = new Set(it.watchedIds || []); return (it.videos || []).filter(v => !seen.has(v.id)).map(v => v.id); };
+  // Ajoute toutes les vidéos restantes (non vues ET pas déjà dans la playlist) à la playlist
+  // YouTube « À regarder plus tard (Hub) ». Réutilise le set local wlAdded → skip les doublons.
+  const queueRemaining = async it => {
+    if (wlBusyId) return;
+    const todo = ytUnwatchedIds(it).filter(id => !wlAdded.has(id));
+    if (!todo.length) return;
+    setWlBusyId(it.id);
+    const done = new Set(wlAdded);
+    let err = '';
+    for (const id of todo) {
+      const r = await ytWatchLaterAdd(id);
+      if (r && r.__error) { err = r.__error; break; }
+      done.add(id);
+    }
+    setWlAdded(done); saveYtWlAdded([...done]);
+    setWlBusyId(null);
+    if (err === 'AUTH' || err === 'SCOPE') alert('YouTube : reconnecte-toi (accès playlist requis) pour ajouter les vidéos.');
+    else if (err === 'QUOTA') alert('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
+    else if (err) alert('Ajout impossible (réseau) — réessaie.');
+  };
+
   const addItem = async (r, status) => {
     if (busy) return;
     const exist = items.find(it => it.id === r.id && it.type === r.media_type);
@@ -12633,6 +12660,18 @@ function TvTimePanel() {
     <button key="unfollow" onClick={() => unfollow(it)}
       title="Arrêter de suivre — passe en Vus avec les vidéos déjà vues, ne resurgira plus avec de nouvelles vidéos"
       style={abtn('#f5b81f')}>⏹</button>);
+  // Bouton 🕒 (chaînes YouTube EN COURS) : ajoute les vidéos restantes à la playlist
+  // « À regarder plus tard (Hub) ». Grisé quand toutes les restantes y sont déjà (ou aucune).
+  const wlBtn = it => {
+    const remaining = ytUnwatchedIds(it);
+    const toAdd = remaining.filter(id => !wlAdded.has(id));
+    const busy = wlBusyId === it.id;
+    const disabled = busy || !toAdd.length;
+    return (
+      <button key="wl" onClick={() => queueRemaining(it)} disabled={disabled}
+        title={!remaining.length ? 'Aucune vidéo restante' : !toAdd.length ? 'Toutes les vidéos restantes sont déjà dans la playlist' : `Ajouter les ${toAdd.length} vidéo(s) restante(s) à « ${YTSUB_WL_NAME} »`}
+        style={{ ...abtn(disabled ? C.dim : YT_COLOR), opacity: disabled ? 0.4 : 1, cursor: disabled ? 'default' : 'pointer' }}>{busy ? '…' : '🕒'}</button>);
+  };
 
   return (
     <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
@@ -12886,6 +12925,7 @@ function TvTimePanel() {
                       : ytWatching.map(it => row(it, progLabel(it),
                           <>
                             <button onClick={() => setStatus(it, 'done')} title="Valider — tout vu" style={abtn('#4caf50')}>✓</button>
+                            {wlBtn(it)}
                             <button onClick={() => ignoreUnwatched(it)} title="Valider sans voir les vidéos manquantes (passe en Vus ; une nouvelle vidéo la repasse En cours)" style={abtn('#3fa0d0')}>🙈</button>
                             {unfollowBtn(it)}
                             <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
