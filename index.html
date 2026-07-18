@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.2.7';
+const APP_VERSION = '7.2.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6818,25 +6818,29 @@ const LOL_ROMAN = { 1:'I', 2:'II', 3:'III', 4:'IV' };
 
 // GET op.gg : fetch DIRECT d'abord (les API op.gg servent du CORS pour leur front),
 // puis les proxies CORS. Retourne le JSON parsé ou null (réseau/HTML d'erreur).
+// ⚠ Timeout par tentative (AbortController) : certains hôtes op.gg (lol-web-api) sont
+// injoignables via proxies et bloquaient 30 s+ chacun → la détection de partie « ne
+// répondait jamais ». 8 s max par tentative, on passe à la suivante.
 async function opggGet(url) {
-  try {
-    const r = await fetch(url);
-    const t = await r.text();
-    if (t && t.trim()) { try { return JSON.parse(t); } catch {} }
-  } catch {}
+  const fetchT = async u => {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 8000) : null;
+    try {
+      const r = await fetch(u, ctrl ? { signal: ctrl.signal } : undefined);
+      const t = await r.text();
+      if (t && t.trim()) { try { return JSON.parse(t); } catch {} }
+    } catch {}
+    finally { if (timer) clearTimeout(timer); }
+    return undefined;
+  };
+  const direct = await fetchT(url);   // hôtes op.gg à CORS ouvert (lol-api-summoner) → OK direct
+  if (direct !== undefined) return direct;
   const tries = [
     'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url),
     'https://cors.eu.org/' + url,
     'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
   ];
-  for (const u of tries) {
-    try {
-      const r = await fetch(u);
-      const t = await r.text();
-      if (!t || !t.trim()) continue;
-      try { return JSON.parse(t); } catch { continue; }
-    } catch {}
-  }
+  for (const u of tries) { const j = await fetchT(u); if (j !== undefined) return j; }
   return null;
 }
 
@@ -6913,15 +6917,20 @@ async function opggSummary(platform, summonerId) {
 async function opggSpectate(platform, summonerId) {
   const region = LOL_OPGG_REGION[platform] || 'euw';
   const sid = encodeURIComponent(summonerId);
+  // ⚠ Endpoint ACTUEL (7.2.8) : `.../api/{region}/spectates/{id}` sur lol-api-summoner.op.gg
+  // (hôte à CORS ouvert). Hors partie → 404 « data not found » (route existante = j sans
+  // participants → null). Les anciennes URLs étaient MORTES (lol-web-api injoignable via
+  // proxies ; l'autre = 404 « route could not be found »), d'où la non-détection des parties.
   const urls = [
+    `https://lol-api-summoner.op.gg/api/${region}/spectates/${sid}?hl=en_US`,
     `https://lol-web-api.op.gg/api/v1.0/internal/bypass/spectates/${region}/${sid}?hl=en_US`,
-    `https://lol-api-summoner.op.gg/api/${region}/summoners/${sid}/spectates?hl=en_US`,
   ];
-  let sawJson = false;
   for (const u of urls) {
     const j = await opggGet(u);
-    if (!j) continue;
-    sawJson = true;
+    if (!j) continue;   // URL injoignable → on tente la suivante
+    // op.gg a répondu (JSON) → réponse AUTORITATIVE : on ne tente PAS l'URL suivante
+    // (sinon on attendait 16 s sur l'hôte mort lol-web-api alors que le joueur n'est pas
+    // en partie). Avec participants = en partie ; sans (ex. « data not found ») = pas en partie.
     const d = j.data || j;
     const parts = d && (d.participants || (d.spectate && d.spectate.participants));
     if (Array.isArray(parts) && parts.length) {
@@ -6936,8 +6945,9 @@ async function opggSpectate(platform, summonerId) {
         })),
       };
     }
+    return null;   // JSON reçu sans participants = pas en partie (réponse fiable, on s'arrête)
   }
-  return sawJson ? null : { error: true };
+  return { error: true };   // aucune URL n'a répondu → repli Riot possible
 }
 
 // Map championId (numérique) → { name, id (clé texte pour l'icône) } via Data Dragon.
