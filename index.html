@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.4.2';
+const APP_VERSION = '7.4.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7101,10 +7101,14 @@ const LOL_ROMAN = { 1:'I', 2:'II', 3:'III', 4:'IV' };
 // ⚠ Timeout par tentative (AbortController) : certains hôtes op.gg (lol-web-api) sont
 // injoignables via proxies et bloquaient 30 s+ chacun → la détection de partie « ne
 // répondait jamais ». 8 s max par tentative, on passe à la suivante.
-async function opggGet(url) {
+// opts (optionnel) : { directOnly:true → pas de cascade de proxies (borne l'attente sur un
+// hôte potentiellement injoignable), timeout:ms → délai d'abort par tentative (défaut 8 s) }.
+async function opggGet(url, opts) {
+  const timeout = (opts && opts.timeout) || 8000;
+  const directOnly = !!(opts && opts.directOnly);
   const fetchT = async u => {
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 8000) : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
     try {
       const r = await fetch(u, ctrl ? { signal: ctrl.signal } : undefined);
       const t = await r.text();
@@ -7115,6 +7119,7 @@ async function opggGet(url) {
   };
   const direct = await fetchT(url);   // hôtes op.gg à CORS ouvert (lol-api-summoner) → OK direct
   if (direct !== undefined) return direct;
+  if (directOnly) return null;        // repli borné : on ne tente pas les proxies
   const tries = [
     'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url),
     'https://cors.eu.org/' + url,
@@ -7194,40 +7199,69 @@ async function opggSummary(platform, summonerId) {
 // Partie en cours op.gg → forme normalisée { queueLabel, startedAt, participants:[{ puuid
 // (= summoner_id op.gg, clé opaque compat UI), riotId, championId, teamId 100|200 }] }.
 // null = pas en partie (JSON reçu sans participants) · { error:true } = endpoints injoignables.
+// Extrait un tableau de participants où qu'il soit dans un payload op.gg (formes non
+// documentées, susceptibles de changer). Cherche `participants` à plusieurs niveaux + le cas
+// `teams:[{participants:[…]}]`. Retourne null si rien trouvé.
+function opggSpectateParts(r) {
+  if (!r || typeof r !== 'object') return null;
+  if (Array.isArray(r.participants) && r.participants.length) return r.participants;
+  if (r.spectate && Array.isArray(r.spectate.participants) && r.spectate.participants.length) return r.spectate.participants;
+  if (r.game && Array.isArray(r.game.participants) && r.game.participants.length) return r.game.participants;
+  if (Array.isArray(r.teams)) {
+    const out = [];
+    r.teams.forEach(t => { if (t && Array.isArray(t.participants)) t.participants.forEach(p => out.push(p)); });
+    if (out.length) return out;
+  }
+  return null;
+}
+// Normalise un payload op.gg de partie en cours → { queueLabel, startedAt, participants[] } | null.
+function opggSpectateNormalize(j) {
+  const roots = [j, j.data, j.data && j.data.spectate, j.data && j.data.game, j.spectate, j.game];
+  let d = null, parts = null;
+  for (const r of roots) { const p = opggSpectateParts(r); if (p) { d = r; parts = p; break; } }
+  if (!parts) return null;
+  const qi = d.queue_info || (d.game && d.game.queue_info) || {};
+  const created = d.created_at || d.game_start_time || (d.game && d.game.created_at) || null;
+  return {
+    queueLabel: (qi.queue_translate || qi.game_type) || 'Partie',
+    startedAt: created ? Date.parse(created) : null,
+    participants: parts.map(p => {
+      const sm = p.summoner || {};
+      return {
+        puuid: sm.summoner_id || p.summoner_id || sm.id || p.puuid || null,
+        riotId: sm.game_name != null ? `${sm.game_name || '?'}#${sm.tagline || ''}` : (p.riot_id || p.riotId || ''),
+        championId: p.champion_id != null ? p.champion_id : (p.championId != null ? p.championId : null),
+        teamId: p.team_key != null ? (String(p.team_key).toUpperCase() === 'RED' ? 200 : 100)
+              : (p.team_id != null ? p.team_id : (p.teamId != null ? p.teamId : 100)),
+      };
+    }),
+  };
+}
 async function opggSpectate(platform, summonerId) {
   const region = LOL_OPGG_REGION[platform] || 'euw';
   const sid = encodeURIComponent(summonerId);
-  // ⚠ Endpoint ACTUEL (7.2.8) : `.../api/{region}/spectates/{id}` sur lol-api-summoner.op.gg
-  // (hôte à CORS ouvert). Hors partie → 404 « data not found » (route existante = j sans
-  // participants → null). Les anciennes URLs étaient MORTES (lol-web-api injoignable via
-  // proxies ; l'autre = 404 « route could not be found »), d'où la non-détection des parties.
-  const urls = [
-    `https://lol-api-summoner.op.gg/api/${region}/spectates/${sid}?hl=en_US`,
-    `https://lol-web-api.op.gg/api/v1.0/internal/bypass/spectates/${region}/${sid}?hl=en_US`,
+  // Les endpoints op.gg (non documentés) bougent → on essaie PLUSIEURS formes AVANT de conclure
+  // « pas en partie » : un endpoint périmé peut répondre un JSON sans participants alors qu'un
+  // autre voit la partie. Le 1er hôte (lol-api-summoner, CORS ouvert) passe par la cascade
+  // complète direct+proxies ; les hôtes de repli (lol-web-api, souvent injoignables) sont
+  // limités à un fetch DIRECT court (`directOnly`, timeout 5 s) pour NE PAS figer l'UI plusieurs
+  // dizaines de secondes quand le joueur n'est pas en partie.
+  const attempts = [
+    { u: `https://lol-api-summoner.op.gg/api/${region}/spectates/${sid}?hl=en_US` },
+    { u: `https://lol-web-api.op.gg/api/v1.0/internal/bypass/spectates/${region}/${sid}?hl=en_US`, o: { directOnly: true, timeout: 5000 } },
+    { u: `https://lol-web-api.op.gg/api/${region}/spectates/${sid}?hl=en_US`, o: { directOnly: true, timeout: 5000 } },
   ];
-  for (const u of urls) {
-    const j = await opggGet(u);
-    if (!j) continue;   // URL injoignable → on tente la suivante
-    // op.gg a répondu (JSON) → réponse AUTORITATIVE : on ne tente PAS l'URL suivante
-    // (sinon on attendait 16 s sur l'hôte mort lol-web-api alors que le joueur n'est pas
-    // en partie). Avec participants = en partie ; sans (ex. « data not found ») = pas en partie.
-    const d = j.data || j;
-    const parts = d && (d.participants || (d.spectate && d.spectate.participants));
-    if (Array.isArray(parts) && parts.length) {
-      return {
-        queueLabel: (d.queue_info && (d.queue_info.queue_translate || d.queue_info.game_type)) || 'Partie',
-        startedAt: d.created_at ? Date.parse(d.created_at) : null,
-        participants: parts.map(p => ({
-          puuid: (p.summoner && p.summoner.summoner_id) || p.summoner_id || null,
-          riotId: p.summoner ? `${p.summoner.game_name || '?'}#${p.summoner.tagline || ''}` : (p.riot_id || ''),
-          championId: p.champion_id != null ? p.champion_id : p.championId,
-          teamId: p.team_key != null ? (String(p.team_key).toUpperCase() === 'RED' ? 200 : 100) : (p.teamId || 100),
-        })),
-      };
-    }
-    return null;   // JSON reçu sans participants = pas en partie (réponse fiable, on s'arrête)
+  let sawJson = false;
+  for (const a of attempts) {
+    const j = await opggGet(a.u, a.o);
+    if (!j) continue;                        // hôte injoignable → suivant
+    sawJson = true;
+    const g = opggSpectateNormalize(j);
+    if (g) return g;                         // partie trouvée → on s'arrête
+    // JSON reçu SANS participants sur cet endpoint : peut être un endpoint périmé, on tente
+    // quand même les suivants avant de conclure « pas en partie ».
   }
-  return { error: true };   // aucune URL n'a répondu → repli Riot possible
+  return sawJson ? null : { error: true };   // aucun JSON → repli Riot possible
 }
 
 // Map championId (numérique) → { name, id (clé texte pour l'icône) } via Data Dragon.
