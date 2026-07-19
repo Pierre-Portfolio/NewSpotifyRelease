@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.4.4';
+const APP_VERSION = '7.4.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7102,15 +7102,21 @@ const LOL_ROMAN = { 1:'I', 2:'II', 3:'III', 4:'IV' };
 // injoignables via proxies et bloquaient 30 s+ chacun → la détection de partie « ne
 // répondait jamais ». 8 s max par tentative, on passe à la suivante.
 // opts (optionnel) : { directOnly:true → pas de cascade de proxies (borne l'attente sur un
-// hôte potentiellement injoignable), timeout:ms → délai d'abort par tentative (défaut 8 s) }.
+// hôte potentiellement injoignable), timeout:ms → délai d'abort par tentative (défaut 8 s),
+// noStore:true → { cache:'no-store' } pour court-circuiter le cache HTTP (données toujours
+// fraîches, ex. partie en cours : détecter un changement de partie) }.
 async function opggGet(url, opts) {
   const timeout = (opts && opts.timeout) || 8000;
   const directOnly = !!(opts && opts.directOnly);
+  const noStore = !!(opts && opts.noStore);
   const fetchT = async u => {
     const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
     try {
-      const r = await fetch(u, ctrl ? { signal: ctrl.signal } : undefined);
+      const init = {};
+      if (ctrl) init.signal = ctrl.signal;
+      if (noStore) init.cache = 'no-store';
+      const r = await fetch(u, Object.keys(init).length ? init : undefined);
       const t = await r.text();
       if (t && t.trim()) { try { return JSON.parse(t); } catch {} }
     } catch {}
@@ -7247,9 +7253,9 @@ async function opggSpectate(platform, summonerId) {
   // limités à un fetch DIRECT court (`directOnly`, timeout 5 s) pour NE PAS figer l'UI plusieurs
   // dizaines de secondes quand le joueur n'est pas en partie.
   const attempts = [
-    { u: `https://lol-api-summoner.op.gg/api/${region}/spectates/${sid}?hl=en_US` },
-    { u: `https://lol-web-api.op.gg/api/v1.0/internal/bypass/spectates/${region}/${sid}?hl=en_US`, o: { directOnly: true, timeout: 5000 } },
-    { u: `https://lol-web-api.op.gg/api/${region}/spectates/${sid}?hl=en_US`, o: { directOnly: true, timeout: 5000 } },
+    { u: `https://lol-api-summoner.op.gg/api/${region}/spectates/${sid}?hl=en_US`, o: { noStore: true } },
+    { u: `https://lol-web-api.op.gg/api/v1.0/internal/bypass/spectates/${region}/${sid}?hl=en_US`, o: { directOnly: true, timeout: 5000, noStore: true } },
+    { u: `https://lol-web-api.op.gg/api/${region}/spectates/${sid}?hl=en_US`, o: { directOnly: true, timeout: 5000, noStore: true } },
   ];
   let sawJson = false;
   for (const a of attempts) {
@@ -7520,18 +7526,24 @@ function LolStatsSection() {
     if (loading) return;
     setLoading(true); setErr('');
     const p = await lolFetchProfile(force);
-    if (p.error) { setErr(ERR_MSGS[p.error] || ERR_MSGS.NET); setLoading(false); return; }
-    setData(p);
+    // But d'« Actualiser » : re-vérifier la partie EN COURS (as-tu changé/lancé une partie ?).
+    // Si le profil hoquette mais qu'on en a déjà un chargé, on GARDE l'affichage et on re-teste
+    // quand même le spectate avec ce profil — un raté réseau sur le profil ne doit pas empêcher
+    // la re-détection de partie. Erreur bloquante seulement si on n'a AUCUN profil à montrer.
+    const prof = p.error ? data : p;
+    if (!prof) { setErr(ERR_MSGS[p.error] || ERR_MSGS.NET); setLoading(false); return; }
+    if (!p.error) setData(p);
     setLiveSearching(true);   // petit texte « recherche d'une partie en cours » pendant le fetch spectate
-    const [lv, cm] = await Promise.all([lolFetchLive(p), lolChampMap()]);
+    const [lv, cm] = await Promise.all([lolFetchLive(prof), lolChampMap()]);
     setLive(lv); setChamps(cm);
     setLiveSearching(false);
     setLoading(false);
     // Rangs des 10 joueurs en arrière-plan (la carte EN PARTIE s'affiche tout de suite,
-    // les élos/winrates apparaissent dès qu'ils arrivent — cache 15 min par puuid)
+    // les élos/winrates apparaissent dès qu'ils arrivent — cache 15 min par puuid). Un
+    // changement de partie = de nouveaux puuid → re-fetch automatique des nouveaux joueurs.
     if (lv && Array.isArray(lv.participants)) {
       setRanks(null);
-      lolFetchRanks(p, lv).then(setRanks);
+      lolFetchRanks(prof, lv).then(setRanks);
     }
   };
   React.useEffect(() => { if (configured) refresh(false); }, []);
