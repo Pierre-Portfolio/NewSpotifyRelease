@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.4.3';
+const APP_VERSION = '7.4.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7264,6 +7264,44 @@ async function opggSpectate(platform, summonerId) {
   return sawJson ? null : { error: true };   // aucun JSON → repli Riot possible
 }
 
+// DIAGNOSTIC (bouton 🩺 de la section LoL) : interroge CHAQUE endpoint spectate op.gg et
+// renvoie la réponse brute (statut HTTP, taille, extrait, nb de participants normalisés) —
+// direct puis proxy CORS de secours. Sert à identifier, EN PARTIE, l'endpoint réellement
+// valide + la forme du payload (op.gg est injoignable depuis l'environnement de dev, donc
+// impossible à sonder autrement). Purement lecture, aucun effet de bord.
+async function opggSpectateDiagnose(platform, summonerId) {
+  const region = LOL_OPGG_REGION[platform] || 'euw';
+  const sid = encodeURIComponent(summonerId);
+  const urls = [
+    `https://lol-api-summoner.op.gg/api/${region}/spectates/${sid}?hl=en_US`,
+    `https://lol-web-api.op.gg/api/v1.0/internal/bypass/spectates/${region}/${sid}?hl=en_US`,
+    `https://lol-web-api.op.gg/api/${region}/spectates/${sid}?hl=en_US`,
+  ];
+  const probe = async (u, via) => {
+    const rec = { url: u, via, status: null, len: 0, snippet: '', parts: null, err: '' };
+    const target = via === 'proxy' ? 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(u) : u;
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), via === 'proxy' ? 9000 : 6000) : null;
+    try {
+      const r = await fetch(target, ctrl ? { signal: ctrl.signal } : undefined);
+      rec.status = r.status;
+      const txt = await r.text();
+      rec.len = txt.length;
+      rec.snippet = txt.slice(0, 500);
+      try { const j = JSON.parse(txt); const norm = opggSpectateNormalize(j); rec.parts = norm ? norm.participants.length : 0; } catch {}
+    } catch (e) { rec.err = String((e && e.name) || e || 'err'); }
+    finally { if (timer) clearTimeout(timer); }
+    return rec;
+  };
+  const out = [];
+  for (const u of urls) {
+    const d = await probe(u, 'direct');
+    out.push(d);
+    if (d.err || d.status == null) out.push(await probe(u, 'proxy'));   // repli proxy si le direct échoue (CORS)
+  }
+  return out;
+}
+
 // Map championId (numérique) → { name, id (clé texte pour l'icône) } via Data Dragon.
 // CORS natif, sans clé — caché 7 j en localStorage + cache mémoire session.
 let _lolChampsCache = null;
@@ -7466,6 +7504,8 @@ function LolStatsSection() {
   const [loading, setLoading]   = React.useState(false);
   const [liveSearching, setLiveSearching] = React.useState(false);   // recherche de partie en cours (spectate)
   const [err, setErr]           = React.useState('');
+  const [diag, setDiag]         = React.useState(null);              // résultat du bouton 🩺 Diag (debug spectate)
+  const [diagLoading, setDiagLoading] = React.useState(false);
   const configured = !!(cfg && cfg.riotId);   // la clé Riot n'est plus requise (op.gg sans clé)
 
   const ERR_MSGS = {
@@ -7495,6 +7535,15 @@ function LolStatsSection() {
     }
   };
   React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  // 🩺 Diagnostic spectate : interroge chaque endpoint op.gg et affiche la réponse brute.
+  const runDiag = async () => {
+    if (!data || diagLoading) return;
+    setDiagLoading(true); setDiag(null);
+    try { setDiag(await opggSpectateDiagnose(data.platform, data.puuid)); }
+    catch (e) { setDiag([{ url: '(exception)', via: 'direct', status: null, len: 0, snippet: '', parts: null, err: String(e) }]); }
+    setDiagLoading(false);
+  };
 
   const saveCfg = () => {
     const riotId = idInput.trim();
@@ -7755,11 +7804,28 @@ function LolStatsSection() {
           )}
         </React.Fragment>
       )}
-      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
         <button onClick={() => refresh(true)} disabled={loading} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>{loading ? '…' : '↻ Actualiser'}</button>
         <button onClick={() => { setShowCfg(true); setIdInput((cfg && cfg.riotId) || ''); setPlatInput((cfg && cfg.platform) || 'euw1'); }} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>⚙</button>
+        {data && data.source === 'opgg' && (
+          <button onClick={runDiag} disabled={diagLoading} title="Teste chaque endpoint op.gg de partie en cours et affiche la réponse brute (à faire PENDANT une partie)"
+            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>{diagLoading ? '…' : '🩺 Diag partie'}</button>
+        )}
         {data && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginLeft:'auto' }}>sync {new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' })}</span>}
       </div>
+      {diag && (
+        <div style={{ ...card, fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, maxHeight:280, overflow:'auto', whiteSpace:'pre-wrap', wordBreak:'break-all' }}>
+          <div style={{ color:LOL_COLOR, fontWeight:700, marginBottom:4 }}>DIAG spectate · sid={String((data && data.puuid) || '').slice(0, 14)}… · {data && data.platform}</div>
+          {diag.map((r, i) => (
+            <div key={i} style={{ marginBottom:6, paddingTop: i ? 4 : 0, borderTop: i ? `1px solid ${C.border}` : 'none' }}>
+              <div style={{ color:C.text }}>{r.via} · HTTP {r.status == null ? '—' : r.status} · {r.len} car · parts={r.parts == null ? '?' : String(r.parts)}{r.err ? ` · ERR ${r.err}` : ''}</div>
+              <div style={{ color:C.dim, fontSize:8.5, marginBottom:2 }}>{r.url}</div>
+              {r.snippet ? <div>{r.snippet}</div> : null}
+            </div>
+          ))}
+          <div style={{ color:C.dim, marginTop:4, fontSize:8.5 }}>« parts » = participants détectés par le parseur. Colle ce bloc si aucune partie n'est trouvée alors que tu es en jeu.</div>
+        </div>
+      )}
     </div>
   );
 }
