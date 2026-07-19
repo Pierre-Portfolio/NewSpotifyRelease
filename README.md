@@ -87,8 +87,8 @@ Rappels datés (rubriques fixes Administratif/Logement/Véhicule/Médecin/Travai
 
 ### Sauvegarde & données (À propos)
 - **Export / Import** JSON, complet **ou** partiel (14 exports séparés) — fusion prudente à la restauration (dates de scan jamais régressées, TV Time/Finance fusionnés…)
-- **Paramétrage des modules** : un interrupteur par module active/désactive son onglet en direct ; un bouton 🏠 à côté choisit s'il apparaît sur l'accueil
-- **Accueil personnalisable** : la page d'accueil (desktop) affiche tes modules sur une grille **3 colonnes** — **Musique en premier, puis par ordre alphabétique** — et tu choisis lesquels afficher via le bouton 🏠 du Paramétrage
+- **Paramétrage des modules** : un interrupteur par module active/désactive son onglet en direct ; un bouton 🏠 à côté choisit s'il apparaît sur l'accueil (**desktop ET mobile**). Ce choix est **sauvegardé dans tes exports/imports**
+- **Accueil personnalisable** : la page d'accueil affiche tes modules — **Musique en premier, puis par ordre alphabétique** (grille 3 colonnes sur desktop, 2 sur mobile) — et tu choisis lesquels afficher via le bouton 🏠 du Paramétrage ; « À propos » reste une barre en bas
 - **☁︎ Dropbox** (OAuth PKCE) et **△ Google Drive** (OAuth implicite) optionnels : sauvegarde complète écrasée à chaque envoi
 - Proposition de sauvegarde hebdomadaire, réinitialisation mois/année automatique (mois **local**)
 

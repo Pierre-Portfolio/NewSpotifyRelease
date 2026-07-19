@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.4.1';
+const APP_VERSION = '7.4.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2639,6 +2639,7 @@ function StoreProvider({ children }) {
     setHistory(loadHistoryFromDB());
     setLikedTracks(loadLikedTracksFromDB());
     setModuleToggles(loadModuleToggles()); // reflète un éventuel paramétrage restauré sans reload
+    setHomeModules(loadHomeModules());     // idem pour la visibilité accueil (bouton 🏠)
     return res;
   }, [dbReady]);
 
@@ -5160,13 +5161,20 @@ function HubHome({ isMobile, onGo, disabled }) {
   // Cartes normalisées : { emoji, label, color, goKey, mobileKey }
   let cards;
   if (isMobile) {
-    // Mobile : layout inchangé (2 colonnes) à partir de HUB_CARDS — la tuile « Stats » et
-    // « Musique » sont retirées de l'accueil (Stats via le menu ⋯ ; Musique déjà en barre du haut)
-    let mc = HUB_CARDS.filter(c => !(disabled && disabled.has(c.mobile)));
-    mc = mc.filter(c => c.mobile !== 'statspanel' && c.mobile !== 'musique');
-    const MOBILE_ORDER = ['actu','rappel','meteo','maps','finance','compare','food','mdp','todo','tvtime','stats'];
-    mc = [...mc].sort((a, b) => MOBILE_ORDER.indexOf(a.mobile) - MOBILE_ORDER.indexOf(b.mobile));
-    cards = mc.map(c => ({ emoji:c.emoji, label:c.label, color:c.color, goKey:c.mobile, mobileKey:c.mobile }));
+    // Mobile : mêmes règles que l'accueil desktop — TOUS les modules basculables souhaités
+    // sur l'accueil (bouton 🏠 du Paramétrage), donc par défaut TOUS présents. Musique en
+    // premier puis ordre ALPHABÉTIQUE. « À propos » (non basculable) est ajouté à part comme
+    // barre pleine largeur allongée en fin de grille.
+    const mc = TOGGLE_MODULES.filter(m =>
+      moduleEnabled(moduleToggles, m.id) && moduleOnHome(homeModules, m.id) && !(disabled && disabled.has(m.mobile)));
+    mc.sort((a, b) => {
+      if (a.id === 'musique') return -1;
+      if (b.id === 'musique') return 1;
+      return a.label.localeCompare(b.label, 'fr');
+    });
+    cards = mc.map(m => ({ emoji:m.icon, label:m.label, color:m.color, goKey:m.mobile, mobileKey:m.mobile }));
+    // « À propos » : barre allongée pleine largeur, toujours présente (non basculable)
+    cards.push({ emoji:'⚙️', label:'À propos', color:'#e05050', goKey:'stats', mobileKey:'stats' });
   } else {
     // Desktop : TOUS les modules basculables souhaités sur l'accueil (bouton 🏠 du Paramétrage),
     // Musique en premier puis ordre ALPHABÉTIQUE (demande utilisateur), grille 3 colonnes.
@@ -5944,6 +5952,8 @@ function buildBackup() {
     notes: lsJson(NOTE_LS_KEY) || [],
     // Paramétrage : modules activés/désactivés (section Paramétrage d'À propos)
     modules: lsJson(MODULES_LS_KEY) || {},
+    // Paramétrage : visibilité de chaque module sur l'accueil (bouton 🏠 du Paramétrage)
+    home_modules: lsJson(HOME_MODULES_LS_KEY) || {},
     // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
     listens: lsJson(LISTEN_LOG_KEY) || [],
   };
@@ -5966,7 +5976,7 @@ const EXPORT_SECTIONS = [
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Alertes',      icon:'🔔', hint:'rappels fixes + persos (dates & heures)', fields:['rappels', 'rappels_time', 'remembers'] },
   { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique", fields:['stats', 'listens'] },
-  { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés', fields:['modules'] },
+  { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil', fields:['modules','home_modules'] },
 ];
 // Télécharge la sauvegarde en JSON. `section` = entrée d'EXPORT_SECTIONS (défaut : Tous).
 // Retourne l'objet (réutilisé par la proposition hebdo).
@@ -6195,6 +6205,8 @@ function applyBackup(data) {
   // le bouton 🕒 écrit désormais directement dans la playlist YouTube du compte)
   // Paramétrage des modules (activés/désactivés) — REMPLACÉ si présent
   if (data.modules && typeof data.modules === 'object' && !Array.isArray(data.modules)) put(MODULES_LS_KEY, data.modules);
+  // Visibilité des modules sur l'accueil (bouton 🏠) — REMPLACÉ si présent
+  if (data.home_modules && typeof data.home_modules === 'object' && !Array.isArray(data.home_modules)) put(HOME_MODULES_LS_KEY, data.home_modules);
   // Finance : historique local des prix — FUSIONNÉ (pas remplacé) : union par série,
   // tri par date, densité bornée (≥ 30 min entre 2 points), cap FIN_HIST_MAX_PTS.
   // Un backup d'un autre appareil COMPLÈTE donc l'historique local sans l'écraser.
@@ -8149,7 +8161,7 @@ function VosEcoutesPanel() {
       {/* Ordre : Paramétrage → Exporter → Sauvegardes cloud → Restaurations (JSON puis cloud) → quota → purge */}
       <StatsCollapse title="⚙️ PARAMÉTRAGE" color="#8ab4ff">
         <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
-          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Le bouton 🏠 (à droite) affiche/masque le module sur l'accueil. Ce réglage est inclus dans l'export/import de tes données.
+          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Le bouton 🏠 (à droite) affiche/masque le module sur l'accueil (desktop &amp; mobile). Ce réglage est inclus dans l'export/import de tes données.
         </div>
         {TOGGLE_MODULES.map(m => {
           const on   = moduleEnabled(moduleToggles, m.id);
