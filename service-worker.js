@@ -51,7 +51,9 @@
 // via Google Gemini (clé perso locale).
 // v64 : bump de cache — Mot de Passe : édition d'une entrée, réordonnancement drag & drop,
 // système de tags (filtre + création), le tout dans le coffre chiffré (exporté/synchro).
-const CACHE  = 'spotifyplus-v64';
+// v65 : bump de cache — export/import & synchro Drive/Dropbox élargis : Frigo, Vêtement
+// (sans photos), Emploi, Sport, clés/pseudos API, records de jeux, préférences.
+const CACHE  = 'spotifyplus-v65';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

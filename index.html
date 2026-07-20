@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.1';
+const APP_VERSION = '7.6.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6918,6 +6918,7 @@ function buildBackup() {
     );
   } catch {}
   const lsJson = k => { try { return JSON.parse(localStorage.getItem(k)) || null; } catch { return null; } };
+  const lsRaw  = k => { try { return localStorage.getItem(k) || null; } catch { return null; } };
   return {
     app: 'spotifyplus',
     version: APP_VERSION,
@@ -6961,6 +6962,31 @@ function buildBackup() {
     home_modules: lsJson(HOME_MODULES_LS_KEY) || {},
     // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
     listens: lsJson(LISTEN_LOG_KEY) || [],
+    // Frigo : contenu par compartiment + dates de péremption (saisi à la main, non re-fetchable)
+    frigo: lsJson('spotifyplus_frigo') || null,
+    // Vêtement : inventaire + fiches, SANS les photos (data URLs trop lourdes, exclues comme TierList)
+    vetement: (() => {
+      const v = lsJson('spotifyplus_vetements'); if (!v) return null;
+      return { counts: v.counts || {}, items: Array.isArray(v.items) ? v.items.map(it => { const { photo, ...rest } = it || {}; return rest; }) : [] };
+    })(),
+    // Emploi : salaire + secteur choisi
+    emploi: lsJson('spotifyplus_emploi') || null,
+    // Sport : exercices cochés par partie du corps
+    sport: lsJson('spotifyplus_sport') || null,
+    // Clés / config d'API (chaînes brutes, comme tmdb_key/yt_key) — pour ne pas les re-saisir
+    gemini_key: lsRaw('spotifyplus_gemini_key'),
+    github_token: lsRaw('spotifyplus_github_token'),
+    chess_user: lsRaw('spotifyplus_chess_user'),
+    speedrun_user: lsRaw('spotifyplus_speedrun_user'),
+    lol: { key: lsRaw('spotifyplus_lol_key'), cfg: lsJson('spotifyplus_lol_cfg') },
+    // Jeux : records des mini-jeux + dernier jeu ouvert + niveaux de difficulté persistés
+    games: (() => {
+      const hi = {};
+      try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.indexOf('spotifyplus_game_hi_') === 0) hi[k.slice('spotifyplus_game_hi_'.length)] = +localStorage.getItem(k) || 0; } } catch {}
+      return { hi, last: lsRaw('spotifyplus_games_last'), gh_level: lsRaw('spotifyplus_game_gh_level'), osu_level: lsRaw('spotifyplus_game_osu_level') };
+    })(),
+    // Préférences d'affichage diverses
+    prefs: { tvtime_filter: lsRaw('spotifyplus_tvtime_filter'), tvtime_sort: lsRaw('spotifyplus_tvtime_sort'), loop: lsRaw('spotifyplus_loop') },
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -6977,11 +7003,16 @@ const EXPORT_SECTIONS = [
   { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…)', fields:['finance'] },
   { key:'bonplan',  label:'Bon Plan',     icon:'🛒', hint:'jeux suivis + prix cibles', fields:['bonplan'] },
   { key:'food',     label:'Santé',        icon:'🍎', hint:'profil + calories quotidiennes (pas la composition)', fields:['food'] },
+  { key:'frigo',    label:'Frigo',        icon:'🧊', hint:'contenu + dates de péremption', fields:['frigo'] },
+  { key:'vetement', label:'Vêtement',     icon:'👕', hint:'inventaire + fiches (sans photos)', fields:['vetement'] },
+  { key:'emploi',   label:'Emploi',       icon:'💼', hint:'salaire + secteur',           fields:['emploi'] },
+  { key:'sport',    label:'Sport',        icon:'🏋️', hint:'exercices cochés',           fields:['sport'] },
   { key:'note',     label:'Note',         icon:'🗒️', hint:'notes (chiffrées incluses, telles quelles)', fields:['notes'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Alertes',      icon:'🔔', hint:'rappels fixes + persos (dates & heures)', fields:['rappels', 'rappels_time', 'remembers'] },
-  { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique", fields:['stats', 'listens'] },
-  { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil', fields:['modules','home_modules'] },
+  { key:'comptes',  label:'Comptes & clés',icon:'🔐', hint:'clés/pseudos API (Gemini, GitHub, LoL, chess, speedrun)', fields:['gemini_key','github_token','chess_user','speedrun_user','lol'] },
+  { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique + records de jeux", fields:['stats', 'listens', 'games'] },
+  { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil + préférences', fields:['modules','home_modules','prefs'] },
 ];
 // Télécharge la sauvegarde en JSON. `section` = entrée d'EXPORT_SECTIONS (défaut : Tous).
 // Retourne l'objet (réutilisé par la proposition hebdo).
@@ -7237,6 +7268,51 @@ function applyBackup(data) {
     const existing = loadVaultBlob();
     if (existing) { try { localStorage.setItem('spotifyplus_mdp_vault_prev', JSON.stringify(existing)); } catch {} }
     saveVaultBlob(data.mdp_vault);
+  }
+  // putRaw : écrit une chaîne brute (clés/pseudos) sans JSON.stringify (lecture via getItem brut).
+  const putRaw = (k, v) => { if (typeof v === 'string' && v) { try { localStorage.setItem(k, v); } catch {} } };
+  // Frigo / Emploi / Sport — REMPLACÉS si présents (snapshots simples, comme Maps)
+  if (data.frigo && typeof data.frigo === 'object')  put('spotifyplus_frigo', data.frigo);
+  if (data.emploi && typeof data.emploi === 'object') put('spotifyplus_emploi', data.emploi);
+  if (data.sport && typeof data.sport === 'object')  put('spotifyplus_sport', data.sport);
+  // Vêtement — inventaire + fiches ; les photos (data URLs) ne sont jamais dans l'export,
+  // donc on PRÉSERVE la photo locale d'une fiche de même id lors d'un ré-import sur le même appareil.
+  if (data.vetement && typeof data.vetement === 'object') {
+    try {
+      let local = null; try { local = JSON.parse(localStorage.getItem('spotifyplus_vetements')); } catch {}
+      const localPhotos = {};
+      if (local && Array.isArray(local.items)) local.items.forEach(it => { if (it && it.id && it.photo) localPhotos[it.id] = it.photo; });
+      const items = Array.isArray(data.vetement.items) ? data.vetement.items.map(it => (it && localPhotos[it.id]) ? { ...it, photo: localPhotos[it.id] } : it) : [];
+      put('spotifyplus_vetements', { counts: data.vetement.counts || {}, items });
+    } catch {}
+  }
+  // Clés / pseudos d'API — REMPLACÉS si non vides (comme tmdb_key/yt_key)
+  putRaw('spotifyplus_gemini_key', data.gemini_key);
+  putRaw('spotifyplus_github_token', data.github_token);
+  putRaw('spotifyplus_chess_user', data.chess_user);
+  putRaw('spotifyplus_speedrun_user', data.speedrun_user);
+  if (data.lol && typeof data.lol === 'object') {
+    putRaw('spotifyplus_lol_key', data.lol.key);
+    if (data.lol.cfg && typeof data.lol.cfg === 'object') put('spotifyplus_lol_cfg', data.lol.cfg);
+  }
+  // Jeux — records FUSIONNÉS en gardant le MAX ; préférences remplacées
+  if (data.games && typeof data.games === 'object') {
+    if (data.games.hi && typeof data.games.hi === 'object') {
+      for (const k of Object.keys(data.games.hi)) {
+        const v = +data.games.hi[k] || 0;
+        let cur = 0; try { cur = +(localStorage.getItem('spotifyplus_game_hi_' + k) || 0) || 0; } catch {}
+        if (v > cur) { try { localStorage.setItem('spotifyplus_game_hi_' + k, String(v)); } catch {} }
+      }
+    }
+    putRaw('spotifyplus_games_last', data.games.last);
+    putRaw('spotifyplus_game_gh_level', data.games.gh_level);
+    putRaw('spotifyplus_game_osu_level', data.games.osu_level);
+  }
+  // Préférences d'affichage — remplacées si présentes
+  if (data.prefs && typeof data.prefs === 'object') {
+    putRaw('spotifyplus_tvtime_filter', data.prefs.tvtime_filter);
+    putRaw('spotifyplus_tvtime_sort', data.prefs.tvtime_sort);
+    putRaw('spotifyplus_loop', data.prefs.loop);
   }
   return { artistsRestored, statsRestored, musicRestored };
 }
