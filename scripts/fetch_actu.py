@@ -293,6 +293,14 @@ def fetch_insolite():
     return fetch_gnews([gn_search("insolite")])
 
 
+def fetch_linkedin():
+    """Actualité LinkedIn — news autour du réseau professionnel."""
+    return fetch_gnews([
+        gn_search("LinkedIn"),
+        gn_search('LinkedIn OR "réseau professionnel" OR "monde du travail"'),
+    ])
+
+
 def fetch_trends():
     xml = get_any("https://trends.google.com/trending/rss?geo=FR")
     out = []
@@ -384,6 +392,7 @@ def main():
         "hn":       fetch_hn,
         "leaks":    fetch_leaks,
         "monde":    fetch_monde,
+        "linkedin": fetch_linkedin,
         "bourse":   fetch_bourse,
         "cyber":    fetch_cyber,
         "jeux":     fetch_jeux,
@@ -416,12 +425,12 @@ def main():
     old_cache = existing.get("images") or {}
     new_cache = {}
     budget = [IMG_BUDGET]
-    for key in ("presse", "monde", "bourse", "cyber", "jeux", "insolite"):
+    for key in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite"):
         if isinstance(out.get(key), list):
             enrich_images(out[key], old_cache, new_cache, budget)
     out["images"] = new_cache
-    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "bourse", "cyber", "jeux", "insolite"))
-    withimg = sum(1 for k in ("presse", "monde", "bourse", "cyber", "jeux", "insolite")
+    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite"))
+    withimg = sum(1 for k in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite")
                   for a in (out.get(k) or []) if a.get("image"))
     print(f"images: {withimg}/{total} articles illustrés ({IMG_BUDGET - budget[0]} décodages ce run)")
 
