@@ -47,7 +47,9 @@
 // rang) ; Doodle Jump ralenti ~20 % + sauter sur un monstre l'écrase et fait rebondir.
 // v61 : bump de cache — module Sport : collapse par partie du corps + exos à griser.
 // v62 : bump de cache — nouveau module Emploi (salaire vs secteur + offres du moment).
-const CACHE  = 'spotifyplus-v62';
+// v63 : bump de cache — Frigo : assistant IA (photo→ingrédients, 10 recettes, recette d'un plat)
+// via Google Gemini (clé perso locale).
+const CACHE  = 'spotifyplus-v63';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

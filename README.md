@@ -58,8 +58,15 @@ Mode **🧮 Calculatrice** entre Full et Mes Actifs : calculatrice de poche 100 
 ### Vêtement
 👕 **Garde-robe 100 % locale** en deux temps : le collapse **Inventaire** compte combien tu as de chaque type de vêtement (T-shirt, Chaussettes, Pantalon…) avec des boutons + / −. Chaque **+1 crée automatiquement une fiche** dans le second collapse **Mes vêtements**, qui reste **vide au départ** et se remplit tout seul : un **sous-collapse par type** présent, contenant **une fiche par vêtement** (nom, **taille**, photo, état, lieu). Supprimer une fiche (« je le jette ») diminue aussi l'inventaire d'une unité. Activable/désactivable dans le Paramétrage comme les autres modules.
 
-### Frigo Massy
-🧊 Nouveau module — **vide pour le moment**, le contenu arrivera bientôt. Activable/désactivable dans le Paramétrage comme les autres modules.
+### Frigo
+🧊 **Gestion du frigo 100 % locale** : range tes aliments par compartiment (Compartiment principal, Congélateur, Placard) avec leur **date de péremption** — les aliments périmés ou bientôt périmés remontent automatiquement dans **Alertes**.
+
+🤖 **Assistant IA** (avec ta propre clé **Google Gemini** gratuite, stockée uniquement sur ton appareil — jamais publiée, donc le dépôt reste public) :
+- **📷 Photo → ingrédients** : prends une photo de ton frigo ou de tes courses, l'IA reconnaît les aliments et te propose de **pré-remplir** le frigo d'un clic (tu coches ceux à garder et choisis le compartiment).
+- **🍳 10 recettes avec mon frigo** : un bouton qui propose **10 recettes** réalisables avec ce que tu as (ou en achetant juste quelques ingrédients en plus, listés à part).
+- **📖 Recette d'un plat** : tape le nom d'un plat → l'IA te donne les **ingrédients et les étapes**.
+
+Activable/désactivable dans le Paramétrage comme les autres modules.
 
 ### Emploi
 💼 **Marché de l'emploi 100 % local**, en deux temps. **💰 Mon salaire vs secteur** : saisis ton salaire brut (par mois ou par an) et choisis ton secteur → l'appli le compare à la **moyenne du secteur** (ordres de grandeur indicatifs pour la France) et affiche l'écart en euros et en pourcentage avec une double barre « Moi / Secteur ». **📋 Offres du moment** : cherche un métier et un lieu pour voir des **offres publiées en ce moment** (récupérées de sources publiques gratuites, orientées tech / international / télétravail), chaque offre menant à l'annonce d'origine. Ton salaire et ton secteur sont mémorisés localement.
