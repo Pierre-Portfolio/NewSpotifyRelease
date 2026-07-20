@@ -95,6 +95,8 @@ Visuel type « Vos trajets » Google Maps : carte Leaflet (tuiles OSM) + timelin
 ### Mot de Passe
 Coffre d'identifiants **chiffré par un mot de passe maître** (AES-GCM 256 + PBKDF2 via Web Crypto native) — le localStorage ne contient que des données chiffrées, le mot de passe maître n'est jamais stocké. Recherche, masquage/copie, verrouillage auto (reload + inactivité 10 min), export/import chiffré. URLs assainies (pas de `javascript:`). ⚠ Mot de passe oublié = données irrécupérables.
 
+**Nouveautés** : un **bouton ✏️** pour **modifier** un identifiant existant (login, mot de passe, URL, commentaire, tags), le **réordonnancement par glisser-déposer** (poignée ⠿, à la souris ou au doigt, quand aucun filtre n'est actif), et un **système de tags** — un filtre en haut (« Tous » + un bouton par tag, avec un petit **+** pour en créer) et l'attribution de plusieurs tags à chaque mot de passe. **Tout ça (l'ordre, les modifications et les tags) vit dans le coffre chiffré**, donc c'est automatiquement **exporté/importé** avec la sauvegarde et **synchronisé dans Dropbox et Google Drive**.
+
 ### Alertes (Remember)
 Rappels datés (rubriques fixes Administratif/Logement/Véhicule/Médecin/Travail/Finance/Sport/Anniversaire/Autre + rappels persos), heure optionnelle, badges d'urgence, **notifications** (J-30/J-7/J-1/jour J + retards) et **ajout auto au To do** à ≤ 3 j. **🛰️ Veilles Techno** : 🤖 Dependabot (alertes de sécurité de tes dépôts GitHub, token perso) et 🏁 Speedrun (runs à valider sur les jeux que tu modères, pseudo public).
 

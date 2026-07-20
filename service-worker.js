@@ -49,7 +49,9 @@
 // v62 : bump de cache — nouveau module Emploi (salaire vs secteur + offres du moment).
 // v63 : bump de cache — Frigo : assistant IA (photo→ingrédients, 10 recettes, recette d'un plat)
 // via Google Gemini (clé perso locale).
-const CACHE  = 'spotifyplus-v63';
+// v64 : bump de cache — Mot de Passe : édition d'une entrée, réordonnancement drag & drop,
+// système de tags (filtre + création), le tout dans le coffre chiffré (exporté/synchro).
+const CACHE  = 'spotifyplus-v64';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

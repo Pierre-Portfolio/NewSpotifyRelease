@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.0';
+const APP_VERSION = '7.6.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -15217,6 +15217,14 @@ function TodoPanel() {
 // ⚠ Mot de passe maître oublié = données irrécupérables (pas de backend, pas de reset).
 // ════════════════════════════════════════════════
 const MDP_AMBER = '#38c98a';   // vert-cyan de l'arc-en-ciel (= couleur de l'onglet Mot de Passe dans le menu ⋯)
+// Palette cyclique pour les tags créés par l'utilisateur (couleur attribuée à la création).
+const MDP_TAG_COLORS = ['#38c98a', '#5aa9ff', '#e0a050', '#e05050', '#b06cf5', '#f5a623', '#46c46a', '#e368a8', '#6f7bf5', '#2fc1c1'];
+// Contenu du coffre déchiffré = { entries:[{id,identifiant,mdp,url,comment,tags:[tagId]}], tags:[{id,name,color}] }.
+// Rétro-compat : un ancien coffre chiffrait directement le TABLEAU d'entrées → normalisé ici.
+function mdpNormalizeVault(data) {
+  if (Array.isArray(data)) return { entries: data, tags: [] };
+  return { entries: Array.isArray(data && data.entries) ? data.entries : [], tags: Array.isArray(data && data.tags) ? data.tags : [] };
+}
 const MDP_VAULT_KEY = 'spotifyplus_mdp_vault';   // blob chiffré { v, salt, iv, ct }
 const MDP_LEGACY_KEY = 'spotifyplus_mdp';        // ancien stockage EN CLAIR (migré au 1er déverrouillage/création)
 const _mdpTextEnc = new TextEncoder();
@@ -15305,17 +15313,26 @@ function GestionMdpPanel() {
   const [phase, setPhase] = React.useState(
     () => _mdpSession.unlocked ? 'unlocked' : (loadVaultBlob() ? 'locked' : 'setup'));
   const [entries, setEntries] = React.useState(() => _mdpSession.entries || []);
+  const [tags, setTags]       = React.useState(() => _mdpSession.tags || []);      // [{id,name,color}]
   const [pw, setPw]           = React.useState('');     // saisie mot de passe maître (setup/unlock)
   const [pw2, setPw2]         = React.useState('');     // confirmation (setup)
   const [err, setErr]         = React.useState('');
   const [busy, setBusy]       = React.useState(false);
-  const [form, setForm]       = React.useState({ identifiant:'', mdp:'', url:'', comment:'' });
+  const [form, setForm]       = React.useState({ identifiant:'', mdp:'', url:'', comment:'', tags:[] });
   const [shown, setShown]     = React.useState({});
   const [msg, setMsg]         = React.useState('');
   const [showAdd, setShowAdd] = React.useState(false);  // formulaire d'ajout repliable
   const [query, setQuery]     = React.useState('');      // recherche
+  const [tagFilter, setTagFilter] = React.useState(null);  // id de tag filtré (ou null = tous)
+  const [showTagForm, setShowTagForm] = React.useState(false);
+  const [newTag, setNewTag]   = React.useState('');      // nom du tag en création
+  const [editId, setEditId]   = React.useState(null);    // id de l'entrée en cours d'édition
+  const [editForm, setEditForm] = React.useState({ identifiant:'', mdp:'', url:'', comment:'', tags:[] });
+  const [dragId, setDragId]   = React.useState(null);    // id de l'entrée glissée (réordonnancement)
   const masterRef = React.useRef(_mdpSession.pw);       // mot de passe maître courant (mémoire only)
   const fileRef   = React.useRef(null);
+  const entriesRef = React.useRef(entries);             // miroir des entrées (drop de drag & drop)
+  React.useEffect(() => { entriesRef.current = entries; }, [entries]);
 
   // Verrouillage auto après inactivité : on s'abonne au timer module-level (qui tourne même
   // panneau démonté) et on bascule l'UI en « verrouillé » quand il se déclenche. Si le coffre
@@ -15323,7 +15340,7 @@ function GestionMdpPanel() {
   React.useEffect(() => {
     const onAutoLock = () => {
       masterRef.current = null;
-      setEntries([]); setShown({}); setPw(''); setPhase('locked');
+      setEntries([]); setTags([]); setShown({}); setPw(''); setEditId(null); setPhase('locked');
       setMsg('🔒 Coffre verrouillé automatiquement (inactivité).');
     };
     _mdpLockSubs.add(onAutoLock);
@@ -15331,12 +15348,15 @@ function GestionMdpPanel() {
     return () => _mdpLockSubs.delete(onAutoLock);
   }, []);
 
-  // Persiste les entrées : (re)chiffre avec le mot de passe maître courant et écrit le blob.
-  const persist = async (next) => {
+  // Persiste le coffre : (re)chiffre { entries, tags } avec le mot de passe maître et écrit le blob.
+  // `nextEntries`/`nextTags` omis → on garde la valeur courante (permet de ne changer que l'un).
+  const persist = async (nextEntries, nextTags) => {
     mdpBumpActivity();
-    setEntries(next);
-    _mdpSession.entries = next;
-    try { saveVaultBlob(await mdpEncrypt(masterRef.current, next)); } catch (e) { setErr('Échec du chiffrement'); }
+    const e = nextEntries !== undefined ? nextEntries : entriesRef.current;
+    const t = nextTags !== undefined ? nextTags : tags;
+    setEntries(e); setTags(t);
+    _mdpSession.entries = e; _mdpSession.tags = t;
+    try { saveVaultBlob(await mdpEncrypt(masterRef.current, { entries: e, tags: t })); } catch (err) { setErr('Échec du chiffrement'); }
   };
 
   const createVault = async () => {
@@ -15347,10 +15367,10 @@ function GestionMdpPanel() {
     try {
       let initial = [];
       try { initial = JSON.parse(localStorage.getItem(MDP_LEGACY_KEY)) || []; } catch {}
-      saveVaultBlob(await mdpEncrypt(pw, initial));
+      saveVaultBlob(await mdpEncrypt(pw, { entries: initial, tags: [] }));
       try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}  // efface l'ancien clair migré
-      masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:initial };
-      setEntries(initial); setPhase('unlocked'); setPw(''); setPw2(''); mdpBumpActivity();
+      masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:initial, tags:[] };
+      setEntries(initial); setTags([]); setPhase('unlocked'); setPw(''); setPw2(''); mdpBumpActivity();
     } catch (e) { setErr('Erreur de création du coffre'); }
     setBusy(false);
   };
@@ -15360,19 +15380,20 @@ function GestionMdpPanel() {
     try {
       const blob = loadVaultBlob();
       const data = await mdpDecrypt(pw, blob);
-      // Upgrade transparent : un coffre v1 (300k itér.) est re-chiffré en v2 (600k)
-      if ((blob.v || 1) < MDP_VAULT_V) { try { saveVaultBlob(await mdpEncrypt(pw, data)); } catch {} }
-      masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:data };
-      setEntries(data); setPhase('unlocked'); setPw(''); mdpBumpActivity();
+      const vault = mdpNormalizeVault(data);   // { entries, tags } (migre un ancien tableau nu)
+      // Upgrade transparent : coffre v1 (300k itér.) → v2 (600k), ou ancien format tableau → objet
+      if ((blob.v || 1) < MDP_VAULT_V || Array.isArray(data)) { try { saveVaultBlob(await mdpEncrypt(pw, vault)); } catch {} }
+      masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:vault.entries, tags:vault.tags };
+      setEntries(vault.entries); setTags(vault.tags); setPhase('unlocked'); setPw(''); mdpBumpActivity();
     } catch (e) { setErr('Mot de passe maître incorrect'); }
     setBusy(false);
   };
 
   const lock = () => {
     _mdpClearIdle();
-    _mdpSession = { unlocked:false, pw:null, entries:null };
+    _mdpSession = { unlocked:false, pw:null, entries:null, tags:null };
     masterRef.current = null;
-    setEntries([]); setShown({}); setPw(''); setPhase('locked'); setMsg('');
+    setEntries([]); setTags([]); setShown({}); setPw(''); setEditId(null); setPhase('locked'); setMsg('');
   };
 
   // Réinitialise le coffre (mot de passe maître OUBLIÉ) : supprime le blob chiffré et
@@ -15384,19 +15405,76 @@ function GestionMdpPanel() {
     try { localStorage.removeItem(MDP_VAULT_KEY); } catch {}
     try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}   // efface aussi un éventuel ancien stockage clair
     _mdpClearIdle();
-    _mdpSession = { unlocked:false, pw:null, entries:null };
+    _mdpSession = { unlocked:false, pw:null, entries:null, tags:null };
     masterRef.current = null;
-    setEntries([]); setShown({}); setPw(''); setPw2(''); setErr(''); setMsg('');
+    setEntries([]); setTags([]); setShown({}); setPw(''); setPw2(''); setErr(''); setMsg(''); setEditId(null);
     setPhase('setup');
   };
 
   const add = () => {
-    const f = { identifiant: form.identifiant.trim(), mdp: form.mdp, url: form.url.trim(), comment: form.comment.trim() };
+    const f = { identifiant: form.identifiant.trim(), mdp: form.mdp, url: form.url.trim(), comment: form.comment.trim(), tags: form.tags || [] };
     if (!f.identifiant && !f.mdp && !f.url) return;
     persist([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), ...f }, ...entries]);
-    setForm({ identifiant:'', mdp:'', url:'', comment:'' });
+    setForm({ identifiant:'', mdp:'', url:'', comment:'', tags:[] });
   };
   const remove = id => persist(entries.filter(e => e.id !== id));
+
+  // ─ Édition d'une entrée ─
+  const startEdit = e => { setEditId(e.id); setEditForm({ identifiant:e.identifiant||'', mdp:e.mdp||'', url:e.url||'', comment:e.comment||'', tags:(e.tags||[]).slice() }); };
+  const cancelEdit = () => setEditId(null);
+  const saveEdit = () => {
+    persist(entries.map(e => e.id === editId
+      ? { ...e, identifiant:editForm.identifiant.trim(), mdp:editForm.mdp, url:editForm.url.trim(), comment:editForm.comment.trim(), tags:editForm.tags }
+      : e));
+    setEditId(null);
+  };
+
+  // ─ Tags ─
+  const createTag = () => {
+    const name = newTag.trim(); if (!name) return;
+    if (tags.some(t => t.name.toLowerCase() === name.toLowerCase())) { setNewTag(''); return; }
+    const color = MDP_TAG_COLORS[tags.length % MDP_TAG_COLORS.length];
+    persist(undefined, [...tags, { id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), name, color }]);
+    setNewTag('');
+  };
+  const deleteTag = tid => {
+    if (!confirm('Supprimer ce tag ? Il sera retiré de tous les mots de passe.')) return;
+    persist(entries.map(e => ({ ...e, tags: (e.tags || []).filter(x => x !== tid) })), tags.filter(t => t.id !== tid));
+    if (tagFilter === tid) setTagFilter(null);
+  };
+  const toggleTagOn = (setF, curTags, tid) => setF(f => ({ ...f, tags: (f.tags || []).includes(tid) ? f.tags.filter(x => x !== tid) : [...(f.tags || []), tid] }));
+  const tagById = id => tags.find(t => t.id === id);
+
+  // ─ Réordonnancement par drag & drop (pointer events → souris + tactile) ─
+  // Actif seulement sans filtre/recherche (réordonner un sous-ensemble filtré serait ambigu).
+  const reorderable = !query.trim() && !tagFilter && !editId;
+  const startDrag = (ev, id) => {
+    if (!reorderable) return;
+    ev.preventDefault();
+    setDragId(id);
+    let cur = entriesRef.current.slice();   // ordre de travail (source de vérité du drop)
+    const move = e => {
+      const p = e.touches ? e.touches[0] : e;
+      const el = document.elementFromPoint(p.clientX, p.clientY);
+      const row = el && el.closest && el.closest('[data-mdp-row]');
+      if (!row) return;
+      const overId = row.getAttribute('data-mdp-row');
+      if (!overId || overId === id) return;
+      const from = cur.findIndex(x => x.id === id);
+      const to = cur.findIndex(x => x.id === overId);
+      if (from < 0 || to < 0 || from === to) return;
+      const next = cur.slice(); const [m] = next.splice(from, 1); next.splice(to, 0, m);
+      cur = next; setEntries(next);
+    };
+    const up = () => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      setDragId(null);
+      persist(cur);   // commit l'ordre courant (chiffre le blob)
+    };
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+  };
 
   // Export = télécharge le blob chiffré (sauvegarde de secours, déchiffrable avec le mot de passe maître).
   const exportVault = () => {
@@ -15425,8 +15503,8 @@ function GestionMdpPanel() {
           try { localStorage.setItem('spotifyplus_mdp_vault_prev', JSON.stringify(existing)); } catch {}
         }
         saveVaultBlob(blob);
-        _mdpSession = { unlocked:false, pw:null, entries:null }; masterRef.current = null;
-        setEntries([]); setPw(''); setErr(''); setMsg('Sauvegarde importée — déverrouille avec son mot de passe maître.');
+        _mdpSession = { unlocked:false, pw:null, entries:null, tags:null }; masterRef.current = null;
+        setEntries([]); setTags([]); setPw(''); setErr(''); setMsg('Sauvegarde importée — déverrouille avec son mot de passe maître.');
         setPhase('locked');
       } catch (e) { setErr('Fichier illisible'); }
     };
@@ -15475,11 +15553,33 @@ function GestionMdpPanel() {
   }
 
   // ─ Coffre déverrouillé ─
+  const inputBase = { width:'100%', boxSizing:'border-box', background:'#111', borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' };
   const field = (k, ph) => (
     <input type="text" value={form[k]} placeholder={ph}
       onChange={e => setForm(f => ({ ...f, [k]: e.target.value }))}
       onKeyDown={e => { if (e.key === 'Enter') add(); }}
-      style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${form[k] ? MDP_AMBER : C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+      style={{ ...inputBase, border:`1px solid ${form[k] ? MDP_AMBER : C.border}` }} />
+  );
+  const editField = (k, ph) => (
+    <input type="text" value={editForm[k]} placeholder={ph}
+      onChange={e => setEditForm(f => ({ ...f, [k]: e.target.value }))}
+      onKeyDown={e => { if (e.key === 'Enter') saveEdit(); }}
+      style={{ ...inputBase, border:`1px solid ${editForm[k] ? MDP_AMBER : C.border}` }} />
+  );
+  // Sélecteur de tags pour un formulaire (ajout / édition) : chips cliquables.
+  const tagPicker = (selected, setF) => (tags.length ? (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
+      {tags.map(t => {
+        const on = (selected || []).includes(t.id);
+        return (
+          <button key={t.id} type="button" onClick={() => toggleTagOn(setF, selected, t.id)}
+            style={{ background: on ? t.color + '33' : 'none', border:`1px solid ${on ? t.color : C.border}`, color: on ? t.color : C.dim, borderRadius:12, padding:'2px 8px', fontSize:10, fontWeight:700, cursor:'pointer' }}>{on ? '✓ ' : ''}{t.name}</button>
+        );
+      })}
+    </div>
+  ) : <div style={{ fontSize:9.5, color:C.dim, fontStyle:'italic' }}>Aucun tag — crée-en un avec le + à côté du filtre.</div>);
+  const tagChip = t => (
+    <span key={t.id} style={{ background:t.color + '22', border:`1px solid ${t.color}66`, color:t.color, borderRadius:10, padding:'1px 7px', fontSize:9, fontWeight:700 }}>{t.name}</span>
   );
   return (
     // onClick/onKeyDown Capture : toute interaction dans le coffre réarme le verrouillage auto
@@ -15500,6 +15600,8 @@ function GestionMdpPanel() {
           {field('mdp', 'Mot de passe')}
           {field('url', 'URL (https://…)')}
           {field('comment', 'Commentaire')}
+          {tags.length > 0 && <div style={{ fontSize:9.5, color:C.dim }}>Tags :</div>}
+          {tags.length > 0 && tagPicker(form.tags, setForm)}
           <button onClick={add} style={bigBtn}>✓ Enregistrer</button>
         </div>
       )}
@@ -15509,13 +15611,40 @@ function GestionMdpPanel() {
           onChange={e => setQuery(e.target.value)}
           style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${query ? MDP_AMBER : C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
       )}
+      {/* Barre de filtre par tag + création (petit +) */}
+      {entries.length > 0 && (
+        <div style={{ display:'flex', alignItems:'center', gap:4, flexWrap:'wrap' }}>
+          <button onClick={() => setTagFilter(null)} style={{ background: tagFilter ? 'none' : `${MDP_AMBER}22`, border:`1px solid ${tagFilter ? C.border : MDP_AMBER}`, color: tagFilter ? C.dim : MDP_AMBER, borderRadius:12, padding:'2px 9px', fontSize:10, fontWeight:700, cursor:'pointer' }}>Tous</button>
+          {tags.map(t => {
+            const on = tagFilter === t.id;
+            return (
+              <span key={t.id} style={{ display:'inline-flex', alignItems:'center', background: on ? t.color + '33' : 'none', border:`1px solid ${on ? t.color : C.border}`, borderRadius:12, overflow:'hidden' }}>
+                <button onClick={() => setTagFilter(on ? null : t.id)} style={{ background:'none', border:'none', color: on ? t.color : C.dim, padding:'2px 4px 2px 9px', fontSize:10, fontWeight:700, cursor:'pointer' }}>{t.name}</button>
+                <button onClick={() => deleteTag(t.id)} title="Supprimer le tag" style={{ background:'none', border:'none', color: on ? t.color : C.dim, padding:'2px 7px 2px 2px', fontSize:10, cursor:'pointer', opacity:0.7 }}>×</button>
+              </span>
+            );
+          })}
+          <button onClick={() => setShowTagForm(v => !v)} title="Créer un tag" style={{ background:`${MDP_AMBER}18`, border:`1px solid ${MDP_AMBER}66`, color:MDP_AMBER, borderRadius:12, width:22, height:22, fontSize:13, lineHeight:1, cursor:'pointer', padding:0 }}>+</button>
+        </div>
+      )}
+      {showTagForm && (
+        <div style={{ display:'flex', gap:5 }}>
+          <input type="text" value={newTag} placeholder="Nom du tag" autoFocus
+            onChange={e => setNewTag(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') createTag(); }}
+            style={{ ...inputBase, flex:1, border:`1px solid ${newTag ? MDP_AMBER : C.border}` }} />
+          <button onClick={createTag} style={{ ...bigBtn, padding:'0 12px' }}>Créer</button>
+        </div>
+      )}
       {(() => {
         const q = query.trim().toLowerCase();
-        const list = q ? entries.filter(e => (
-          (e.identifiant || '').toLowerCase().includes(q) ||
-          (e.url || '').toLowerCase().includes(q) ||
-          (e.comment || '').toLowerCase().includes(q)
-        )) : entries;
+        const list = entries.filter(e => {
+          if (tagFilter && !(e.tags || []).includes(tagFilter)) return false;
+          if (!q) return true;
+          return (e.identifiant || '').toLowerCase().includes(q) ||
+            (e.url || '').toLowerCase().includes(q) ||
+            (e.comment || '').toLowerCase().includes(q);
+        });
         if (entries.length === 0) return (
           <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun identifiant enregistré</div>
         );
@@ -15524,10 +15653,35 @@ function GestionMdpPanel() {
         );
         return (
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {list.map(e => (
-            <div key={e.id} style={{ background:C.surfaceHigh, borderRadius:8, padding:'7px 9px', display:'flex', flexDirection:'column', gap:3 }}>
+          {reorderable && list.length > 1 && <div style={{ fontSize:8.5, color:C.dim, fontStyle:'italic' }}>Glisse la poignée ⠿ pour réordonner.</div>}
+          {list.map(e => {
+            const eTags = (e.tags || []).map(tagById).filter(Boolean);
+            if (editId === e.id) {
+              // ── Formulaire d'édition inline ──
+              return (
+                <div key={e.id} data-mdp-row={e.id} style={{ background:C.surfaceHigh, borderRadius:8, padding:'8px 9px', display:'flex', flexDirection:'column', gap:5, border:`1px solid ${MDP_AMBER}66` }}>
+                  <div style={{ fontSize:9.5, color:MDP_AMBER, fontWeight:700 }}>✏️ Modifier</div>
+                  {editField('identifiant', 'Identifiant / login')}
+                  {editField('mdp', 'Mot de passe')}
+                  {editField('url', 'URL (https://…)')}
+                  {editField('comment', 'Commentaire')}
+                  {tags.length > 0 && <div style={{ fontSize:9.5, color:C.dim }}>Tags :</div>}
+                  {tags.length > 0 && tagPicker(editForm.tags, setEditForm)}
+                  <div style={{ display:'flex', gap:5 }}>
+                    <button onClick={saveEdit} style={{ ...bigBtn, flex:1 }}>✓ Enregistrer</button>
+                    <button onClick={cancelEdit} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, padding:'7px 12px', cursor:'pointer' }}>Annuler</button>
+                  </div>
+                </div>
+              );
+            }
+            return (
+            <div key={e.id} data-mdp-row={e.id} style={{ background:C.surfaceHigh, borderRadius:8, padding:'7px 9px', display:'flex', flexDirection:'column', gap:3, opacity: dragId === e.id ? 0.5 : 1, border: dragId === e.id ? `1px dashed ${MDP_AMBER}` : '1px solid transparent' }}>
               <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                {reorderable && (
+                  <span onPointerDown={ev => startDrag(ev, e.id)} title="Glisser pour réordonner" style={{ cursor:'grab', color:C.dim, fontSize:13, flexShrink:0, touchAction:'none', lineHeight:1, userSelect:'none' }}>⠿</span>
+                )}
                 <div style={{ flex:1, minWidth:0, fontSize:12, fontWeight:700, color:C.text, wordBreak:'break-word' }}>{e.identifiant || '—'}</div>
+                <button onClick={() => startEdit(e)} title="Modifier" style={{ background:'none', border:'none', fontSize:12, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
                 <button onClick={() => remove(e.id)} title="Supprimer" style={{ background:'none', border:'none', color:'#e05050', fontSize:15, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
               </div>
               {e.mdp && (
@@ -15541,8 +15695,10 @@ function GestionMdpPanel() {
                 ? <a href={safeHref(e.url)} target="_blank" rel="noreferrer" style={{ fontSize:10, color:'#5aa9ff', wordBreak:'break-all', textDecoration:'none' }}>↗ {e.url}</a>
                 : <span title="Lien non affiché (schéma non autorisé)" style={{ fontSize:10, color:C.muted, wordBreak:'break-all' }}>↗ {e.url}</span>)}
               {e.comment && <div style={{ fontSize:10, color:C.muted, wordBreak:'break-word' }}>{e.comment}</div>}
+              {eTags.length > 0 && <div style={{ display:'flex', flexWrap:'wrap', gap:3, marginTop:1 }}>{eTags.map(tagChip)}</div>}
             </div>
-          ))}
+            );
+          })}
         </div>
         );
       })()}
