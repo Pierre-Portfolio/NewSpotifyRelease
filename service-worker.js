@@ -43,7 +43,9 @@
 // blob:, bloqué par la CSP img-src).
 // v57 : bump de cache — nouveau jeu Doodle Jump (solo canvas, plateformes/ressorts/
 // jetpack/monstres/trous noirs).
-const CACHE  = 'spotifyplus-v57';
+// v58 : bump de cache — TierList : échange de 2 images par drag&drop (réordonner dans un
+// rang) ; Doodle Jump ralenti ~20 % + sauter sur un monstre l'écrase et fait rebondir.
+const CACHE  = 'spotifyplus-v58';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
