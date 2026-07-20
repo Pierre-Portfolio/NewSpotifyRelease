@@ -39,7 +39,9 @@
 // clé partagée tierlist-v1, drag & drop tactile).
 // v47 : bump de cache — nouveau jeu UnderCoverDraw (dessin & déduction 3-8 joueurs,
 // portage du projet perso, 344 couples de mots inline).
-const CACHE  = 'spotifyplus-v55';
+// v56 : bump de cache — fix import d'images TierList (FileReader data: URL au lieu de
+// blob:, bloqué par la CSP img-src).
+const CACHE  = 'spotifyplus-v56';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
