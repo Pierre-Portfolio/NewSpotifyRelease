@@ -41,7 +41,9 @@
 // portage du projet perso, 344 couples de mots inline).
 // v56 : bump de cache — fix import d'images TierList (FileReader data: URL au lieu de
 // blob:, bloqué par la CSP img-src).
-const CACHE  = 'spotifyplus-v56';
+// v57 : bump de cache — nouveau jeu Doodle Jump (solo canvas, plateformes/ressorts/
+// jetpack/monstres/trous noirs).
+const CACHE  = 'spotifyplus-v57';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

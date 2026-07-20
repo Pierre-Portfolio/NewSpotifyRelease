@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.5.0';
+const APP_VERSION = '7.5.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2914,6 +2914,7 @@ const GAMES = [
   { id:'2048',       label:'2048',            min:1, max:1 },
   { id:'bataille',   label:'Bataille navale', min:2, max:2 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
+  { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
   { id:'flappy',     label:'Flappy Bird',     min:1, max:1 },
   { id:'go',         label:'Go',              min:2, max:2 },
   { id:'guitar',     label:'Guitar Hero',     min:1, max:1 },
@@ -3002,6 +3003,7 @@ function GameHost({ game, label }) {
     case '2048':       return <Game2048 />;
     case 'bataille':   return <GameBataille />;
     case 'demineur':   return <GameDemineur />;
+    case 'doodle':     return <GameDoodle />;
     case 'flappy':     return <GameFlappy />;
     case 'go':         return <GameGo />;
     case 'guitar':     return <GameGuitarHero />;
@@ -3289,6 +3291,299 @@ function GameFlappy() {
             <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
           </div>
         )}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Doodle Jump (solo) ════════
+// Portage maison du jeu culte : le doodler saute automatiquement de plateforme en plateforme,
+// on le dirige à gauche/droite (bords de l'écran traversants), la caméra monte avec lui et le
+// score = altitude. Mécaniques fidèles au jeu d'origine : plateformes vertes (fixes), bleues
+// (mobiles), marron (cassantes, on passe à travers), blanches (à usage unique) ; ressorts et
+// trampolines (super saut) ; chapeau à hélice & jetpack (vol) ; monstres (mortels au contact,
+// détruits en tirant) ; trous noirs. Tout est dessiné au canvas (aucun asset externe).
+const DOODLE_W = 340, DOODLE_H = 480, D_CAM = DOODLE_H * 0.42;
+const D_GRAV = 0.30, D_JUMP = -9.4, D_SPRING = -15.5, D_TRAMPO = -20.5, D_VMAX = 15;
+const D_PLAT_W = 62, D_PLAT_H = 14, D_FEET = 15, D_HALF = 15;
+function doodleRR(ctx, x, y, w, h, r, fill) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+}
+function doodleBg(ctx, W, H, climb) {
+  ctx.fillStyle = '#f4efdd'; ctx.fillRect(0, 0, W, H);               // papier crème (carnet)
+  ctx.strokeStyle = '#cfe0ef'; ctx.lineWidth = 1;
+  const sp = 28, off = ((climb % sp) + sp) % sp;
+  ctx.beginPath(); for (let y = off; y < H; y += sp) { ctx.moveTo(0, y); ctx.lineTo(W, y); } ctx.stroke();
+  ctx.strokeStyle = '#f2c0c0'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(26, 0); ctx.lineTo(26, H); ctx.stroke();
+}
+function doodleSpring(ctx, cx, py) {
+  ctx.strokeStyle = '#b9bec6'; ctx.lineWidth = 2;
+  ctx.beginPath(); for (let i = 0; i < 3; i++) { ctx.moveTo(cx - 5, py - 3 - i * 4); ctx.lineTo(cx + 5, py - 5 - i * 4); } ctx.stroke();
+  ctx.fillStyle = '#e0e4ea'; ctx.fillRect(cx - 6, py - 16, 12, 3);
+}
+function doodleTrampoline(ctx, cx, py) {
+  ctx.fillStyle = '#2f6fd0'; ctx.beginPath(); ctx.ellipse(cx, py - 3, 16, 5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#1b4c96'; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.moveTo(cx - 14, py - 1); ctx.lineTo(cx - 11, py + 8); ctx.moveTo(cx + 14, py - 1); ctx.lineTo(cx + 11, py + 8); ctx.stroke();
+}
+function doodlePlatform(ctx, p) {
+  const cols = { green: ['#7ec850', '#4e8f2c'], blue: ['#5cb8ef', '#2f7fbf'], break: ['#c68a4e', '#8a5a2c'], white: ['#eef2f5', '#c3ccd4'] };
+  const c = cols[p.type] || cols.green;
+  doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
+  ctx.fillStyle = c[1]; ctx.fillRect(p.x + 3, p.y + p.h - 4, p.w - 6, 3);
+  if (p.type === 'break') {
+    ctx.strokeStyle = '#5a3a18'; ctx.lineWidth = 1.4; ctx.beginPath();
+    ctx.moveTo(p.x + p.w * 0.42, p.y); ctx.lineTo(p.x + p.w * 0.5, p.y + p.h);
+    ctx.moveTo(p.x + p.w * 0.6, p.y); ctx.lineTo(p.x + p.w * 0.52, p.y + p.h); ctx.stroke();
+  }
+  if (p.spring) doodleSpring(ctx, p.x + p.w / 2, p.y);
+  if (p.trampoline) doodleTrampoline(ctx, p.x + p.w / 2, p.y);
+}
+function doodleMonster(ctx, m, t) {
+  const cx = m.x + m.w / 2, cy = m.y + m.h / 2;
+  if (m.type === 2) {   // OVNI
+    ctx.fillStyle = '#8a7bd8'; ctx.beginPath(); ctx.ellipse(cx, cy + 4, 22, 8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#b8e0ff'; ctx.beginPath(); ctx.arc(cx, cy, 10, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = '#5a4bb0'; [-12, 0, 12].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx, cy + 4, 2.5, 0, Math.PI * 2); ctx.fill(); });
+    return;
+  }
+  const col = m.type === 0 ? '#7b4bd0' : '#d04b7b';
+  ctx.fillStyle = col;
+  for (let i = 0; i < 7; i++) { const a = i / 7 * Math.PI * 2; ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * 15, cy + Math.sin(a) * 13); ctx.lineTo(cx + Math.cos(a) * 23, cy + Math.sin(a) * 20); ctx.lineTo(cx + Math.cos(a + 0.32) * 15, cy + Math.sin(a + 0.32) * 13); ctx.closePath(); ctx.fill(); }
+  ctx.strokeStyle = '#0003'; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(cx, cy, 17, 15, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#fff'; [-6, 6].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx, cy - 2, 4.2, 0, Math.PI * 2); ctx.fill(); });
+  ctx.fillStyle = '#111'; [-6, 6].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx, cy - 1, 2.1, 0, Math.PI * 2); ctx.fill(); });
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(cx, cy + 6, 4, 0, Math.PI); ctx.stroke();
+}
+function doodleItem(ctx, it, t) {
+  const cx = it.x + it.w / 2, cy = it.y + it.h / 2;
+  if (it.type === 'jet') {
+    ctx.fillStyle = '#9aa3ad'; ctx.fillRect(cx - 8, cy - 8, 16, 16);
+    ctx.fillStyle = '#6b727b'; ctx.fillRect(cx - 8, cy - 8, 16, 4);
+    ctx.fillStyle = '#f5a623'; ctx.beginPath(); ctx.moveTo(cx - 6, cy + 8); ctx.lineTo(cx + 6, cy + 8); ctx.lineTo(cx, cy + 15); ctx.closePath(); ctx.fill();
+  } else {
+    ctx.fillStyle = '#e24a4a'; ctx.beginPath(); ctx.arc(cx, cy + 3, 8, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = '#8a2a2a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy - 5); ctx.lineTo(cx, cy - 9); ctx.stroke();
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 2.5; const a = t * 0.5;
+    ctx.beginPath(); ctx.moveTo(cx - 9 * Math.cos(a), cy - 9 + 3 * Math.sin(a)); ctx.lineTo(cx + 9 * Math.cos(a), cy - 9 - 3 * Math.sin(a)); ctx.stroke();
+  }
+}
+function doodleHole(ctx, h, t) {
+  const g = ctx.createRadialGradient(h.x, h.y, 2, h.x, h.y, h.r);
+  g.addColorStop(0, '#000'); g.addColorStop(0.7, '#2a1a4a'); g.addColorStop(1, 'rgba(60,40,90,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#6a4bb0'; ctx.lineWidth = 1.6; ctx.beginPath();
+  for (let a = 0; a < Math.PI * 4; a += 0.3) { const rr = 2 + a * 2.2; ctx.lineTo(h.x + Math.cos(a + t * 0.05) * rr, h.y + Math.sin(a + t * 0.05) * rr); } ctx.stroke();
+}
+function doodleDoodler(ctx, x, y, face, fly, t) {
+  ctx.save(); ctx.translate(x, y);
+  const dir = face === -1 ? -1 : 1;   // face 0 = tir vers le haut
+  if (fly === 'jet') {
+    ctx.fillStyle = '#9aa3ad'; ctx.fillRect(-20, -4, 9, 20); ctx.fillStyle = '#6b727b'; ctx.fillRect(-20, -4, 9, 5);
+    ctx.fillStyle = '#f5a623'; const fl = 6 + Math.random() * 7; ctx.beginPath(); ctx.moveTo(-20, 16); ctx.lineTo(-11, 16); ctx.lineTo(-15.5, 16 + fl); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = '#3f7a24'; [-8, 8].forEach(fx => { ctx.beginPath(); ctx.ellipse(fx, 15, 5, 4, 0, 0, Math.PI * 2); ctx.fill(); });   // pattes
+  ctx.fillStyle = '#7ac043'; ctx.strokeStyle = '#3f7a24'; ctx.lineWidth = 2;                                                       // corps
+  ctx.beginPath(); ctx.ellipse(0, 2, 16, 15, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  if (face === 0) {   // museau vers le haut (tir)
+    ctx.fillStyle = '#7ac043'; ctx.beginPath(); ctx.moveTo(-6, -8); ctx.quadraticCurveTo(0, -26, 6, -8); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#2f5e18'; ctx.beginPath(); ctx.arc(-2, -20, 1.5, 0, Math.PI * 2); ctx.arc(2, -20, 1.5, 0, Math.PI * 2); ctx.fill();
+  } else {            // museau sur le côté (sens du déplacement)
+    ctx.fillStyle = '#7ac043'; ctx.beginPath(); ctx.moveTo(6 * dir, -4); ctx.quadraticCurveTo(25 * dir, -2, 22 * dir, 7); ctx.quadraticCurveTo(14 * dir, 8, 6 * dir, 6); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#2f5e18'; ctx.beginPath(); ctx.arc(19 * dir, 3, 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#3f7a24'; ctx.lineWidth = 1.4;                                                        // yeux
+  [-6, 6].forEach(ex => { ctx.beginPath(); ctx.arc(ex, -8, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); });
+  const pp = face === 0 ? 0 : dir * 1.6; ctx.fillStyle = '#222';
+  [-6, 6].forEach(ex => { ctx.beginPath(); ctx.arc(ex + pp, -8, 2.2, 0, Math.PI * 2); ctx.fill(); });
+  if (fly === 'prop') {
+    ctx.fillStyle = '#e24a4a'; ctx.beginPath(); ctx.arc(0, -16, 8, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = '#8a2a2a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, -24); ctx.lineTo(0, -28); ctx.stroke();
+    const a = t * 0.7; ctx.strokeStyle = '#333'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(-11 * Math.cos(a), -28 + 4 * Math.sin(a)); ctx.lineTo(11 * Math.cos(a), -28 - 4 * Math.sin(a)); ctx.stroke();
+  }
+  ctx.restore();
+}
+function doodleDraw(ctx, s, W, H) {
+  doodleBg(ctx, W, H, s.climb);
+  s.holes.forEach(h => doodleHole(ctx, h, s.t));
+  s.platforms.forEach(p => doodlePlatform(ctx, p));
+  s.items.forEach(it => doodleItem(ctx, it, s.t));
+  s.monsters.forEach(m => doodleMonster(ctx, m, s.t));
+  s.parts.forEach(pt => { ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c; ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz); });
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#3a7d1e';
+  s.bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill(); });
+  doodleDoodler(ctx, s.px, s.py, s.faceTimer > 0 ? 0 : s.face, s.fly > 0 ? s.flyType : null, s.t);
+}
+function doodleSpawnRow(s, ny) {
+  const diff = Math.min(1, s.score / 700);
+  const w = D_PLAT_W, x = 6 + Math.random() * (DOODLE_W - w - 12);
+  let type = 'green';
+  if (s.lastType !== 'break') {   // jamais deux cassantes d'affilée (garde la montée jouable)
+    const r = Math.random();
+    const pB = 0.06 + diff * 0.10, pM = 0.10 + diff * 0.12, pV = diff * 0.10;
+    if (r < pB) type = 'break';
+    else if (r < pB + pM) type = 'blue';
+    else if (r < pB + pM + pV) type = 'white';
+  }
+  const p = { x, y: ny, w, h: D_PLAT_H, type, dead: false };
+  if (type === 'blue') p.vx = (Math.random() < 0.5 ? -1 : 1) * (0.7 + diff * 1.4);
+  if (type === 'green' || type === 'blue') { const rr = Math.random(); if (rr < 0.02) p.trampoline = true; else if (rr < 0.11) p.spring = true; }
+  s.platforms.push(p); s.lastType = type;
+  if ((type === 'green' || type === 'blue') && !p.spring && !p.trampoline && Math.random() < 0.03) {
+    const jet = Math.random() < 0.35;
+    s.items.push({ x: x + w / 2 - 12, y: ny - 24, w: 24, h: 20, type: jet ? 'jet' : 'prop', taken: false });
+  } else if (s.score > 60 && Math.random() < 0.02 + diff * 0.10) {
+    const mt = Math.floor(Math.random() * 3);
+    s.monsters.push({ x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.9 : 0 });
+  } else if (s.score > 350 && Math.random() < 0.015 + diff * 0.02) {
+    s.holes.push({ x: 24 + Math.random() * (DOODLE_W - 48), y: ny - 22, r: 22 });
+  }
+}
+function GameDoodle() {
+  const W = DOODLE_W, H = DOODLE_H;
+  const canvasRef = React.useRef(null);
+  const g = React.useRef(null);
+  const phaseRef = React.useRef('ready');
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('doodle'));
+  const [phase, setPhase] = React.useState('ready');
+  React.useEffect(() => { phaseRef.current = phase; }, [phase]);
+  const reset = () => {
+    const plats = [{ x: W / 2 - D_PLAT_W / 2, y: H - 60, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false }];
+    let y = H - 60;
+    for (let i = 0; i < 9; i++) { y -= 52 + Math.random() * 22; plats.push({ x: 6 + Math.random() * (W - D_PLAT_W - 12), y, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false }); }
+    g.current = { px: W / 2, py: H - 92, vx: 0, vy: D_JUMP, face: 1, platforms: plats, monsters: [], bullets: [], items: [], holes: [], parts: [],
+      climb: 0, score: 0, fly: 0, flyType: null, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99 };
+    setScore(0);
+  };
+  const start = () => { reset(); setPhase('playing'); };
+  const shoot = () => {
+    if (phaseRef.current !== 'playing') return;
+    const s = g.current; if (!s || s.t - s.lastShot < 8) return;
+    s.lastShot = s.t; s.bullets.push({ x: s.px, y: s.py - 16, vy: -8.5 }); s.faceTimer = 12;
+  };
+  React.useEffect(() => { if (!g.current) reset(); const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && phase !== 'playing') doodleDraw(ctx, g.current, W, H); }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    const die = () => { if (!alive) return; alive = false; cancelAnimationFrame(raf); const sc = g.current.score; setBest(b => { const nb = Math.max(b, sc); setGameHi('doodle', nb); return nb; }); setPhase('dead'); };
+    const rectHit = (ax, ay, aw, ah, bx, by, bw, bh) => ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current, ctx = canvasRef.current.getContext('2d');
+      s.t++;
+      // — déplacement horizontal —
+      if (s.targetX != null) { const dx = s.targetX - s.px; s.px += Math.max(-9, Math.min(9, dx)); s.vx = Math.max(-9, Math.min(9, dx)); if (dx > 0.6) s.face = 1; else if (dx < -0.6) s.face = -1; }
+      else { s.vx += s.dir * 0.9; s.vx *= 0.90; s.vx = Math.max(-7, Math.min(7, s.vx)); s.px += s.vx; if (s.vx > 0.3) s.face = 1; else if (s.vx < -0.3) s.face = -1; }
+      if (s.px < -D_HALF) s.px = W + D_HALF; else if (s.px > W + D_HALF) s.px = -D_HALF;   // bords traversants
+      // — vertical (gravité ou vol) —
+      if (s.fly > 0) { s.fly--; s.vy = s.flyType === 'jet' ? -11 : -8; if (s.fly === 0) s.vy = -6; }
+      else { s.vy += D_GRAV; if (s.vy > D_VMAX) s.vy = D_VMAX; }
+      s.py += s.vy;
+      // — caméra : on monte, tout redescend —
+      if (s.py < D_CAM && s.vy < 0) {
+        const d = D_CAM - s.py; s.py = D_CAM; s.climb += d;
+        s.platforms.forEach(p => p.y += d); s.monsters.forEach(m => m.y += d);
+        s.bullets.forEach(b => b.y += d); s.holes.forEach(h => h.y += d); s.items.forEach(it => it.y += d); s.parts.forEach(pt => pt.y += d);
+      }
+      // — plateformes mobiles —
+      s.platforms.forEach(p => { if (p.type === 'blue' && p.vx) { p.x += p.vx; if (p.x < 4) { p.x = 4; p.vx *= -1; } else if (p.x + p.w > W - 4) { p.x = W - 4 - p.w; p.vx *= -1; } } });
+      // — monstres mobiles —
+      s.monsters.forEach(m => { if (m.vx) { m.x += m.vx; if (m.x < 6) { m.x = 6; m.vx *= -1; } else if (m.x + m.w > W - 6) { m.x = W - 6 - m.w; m.vx *= -1; } } });
+      // — balles —
+      s.bullets.forEach(b => { b.y += b.vy; });
+      s.bullets = s.bullets.filter(b => {
+        for (const m of s.monsters) { if (m.alive && rectHit(b.x - 4, b.y - 4, 8, 8, m.x, m.y, m.w, m.h)) { m.alive = false; for (let k = 0; k < 8; k++) s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 22, max: 22, sz: 4, c: m.type === 1 ? '#d04b7b' : '#7b4bd0' }); return false; } }
+        return b.y > -20;
+      });
+      // — atterrissage (uniquement en chute, hors vol) —
+      const feet = s.py + D_FEET;
+      if (s.vy > 0 && s.fly <= 0) {
+        for (const p of s.platforms) {
+          if (p.dead) continue;
+          if (s.px + 11 > p.x && s.px - 11 < p.x + p.w && s.prevFeet <= p.y && feet >= p.y) {
+            if (p.type === 'break') { p.dead = true; for (let k = 0; k < 6; k++) s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: (Math.random() - 0.5) * 4, vy: 1 + Math.random() * 2, life: 26, max: 26, sz: 4, c: '#8a5a2c' }); break; }
+            s.py = p.y - D_FEET;
+            s.vy = p.trampoline ? D_TRAMPO : p.spring ? D_SPRING : D_JUMP;
+            if (p.type === 'white') p.dead = true;
+            break;
+          }
+        }
+      }
+      // — collecte chapeau/jetpack —
+      for (const it of s.items) {
+        if (!it.taken && rectHit(s.px - 12, s.py - 12, 24, 26, it.x, it.y, it.w, it.h)) { it.taken = true; s.fly = it.type === 'jet' ? 150 : 95; s.flyType = it.type; s.vy = -8; }
+      }
+      // — monstres : mort au contact (hors vol) —
+      if (s.fly <= 0) { for (const m of s.monsters) { if (m.alive && rectHit(s.px - 11, s.py - 12, 22, 26, m.x + 4, m.y + 4, m.w - 8, m.h - 8)) { die(); return; } } }
+      // — trous noirs —
+      if (s.fly <= 0) { for (const h of s.holes) { if (Math.hypot(s.px - h.x, s.py - h.y) < h.r * 0.6) { die(); return; } } }
+      // — génération de nouvelles rangées au-dessus —
+      let topY = Infinity; for (const p of s.platforms) if (p.y < topY) topY = p.y;
+      while (topY > -12) { const gap = 42 + Math.random() * 22 + Math.min(46, s.score * 0.05); const ny = topY - gap; doodleSpawnRow(s, ny); topY = ny; }
+      // — particules + nettoyage —
+      s.parts.forEach(pt => { pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.25; pt.life--; });
+      s.parts = s.parts.filter(pt => pt.life > 0);
+      s.platforms = s.platforms.filter(p => !p.dead && p.y < H + 30);
+      s.monsters = s.monsters.filter(m => m.alive && m.y < H + 40);
+      s.items = s.items.filter(it => !it.taken && it.y < H + 40);
+      s.holes = s.holes.filter(h => h.y < H + 40);
+      if (s.faceTimer > 0) s.faceTimer--;
+      s.prevFeet = s.py + D_FEET;
+      // — chute mortelle —
+      if (s.py - D_HALF > H) { die(); return; }
+      const nsc = Math.floor(s.climb / 10);
+      if (nsc !== s.score) { s.score = nsc; setScore(nsc); }
+      doodleDraw(ctx, s, W, H); raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  // clavier (flèches/ZQSD + Espace pour tirer)
+  React.useEffect(() => {
+    const kd = e => {
+      const s = g.current; if (!s) return;
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A' || e.key === 'q' || e.key === 'Q') { s.dir = -1; s.targetX = null; }
+      else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { s.dir = 1; s.targetX = null; }
+      else if (e.code === 'Space' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W' || e.key === 'z' || e.key === 'Z') { e.preventDefault(); shoot(); }
+    };
+    const ku = e => {
+      const s = g.current; if (!s) return;
+      if ((e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A' || e.key === 'q' || e.key === 'Q') && s.dir === -1) s.dir = 0;
+      if ((e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') && s.dir === 1) s.dir = 0;
+    };
+    window.addEventListener('keydown', kd); window.addEventListener('keyup', ku);
+    return () => { window.removeEventListener('keydown', kd); window.removeEventListener('keyup', ku); };
+  }, []);
+  // pilotage tactile : on glisse le doigt sur le plateau, le doodler suit la position X
+  const dragRef = React.useRef(false);
+  const steer = e => { const s = g.current; if (!s || phaseRef.current !== 'playing') return; const r = canvasRef.current.getBoundingClientRect(); s.targetX = (e.clientX - r.left) / r.width * W; s.dir = 0; };
+  const onDown = e => { if (phaseRef.current !== 'playing') { start(); return; } dragRef.current = true; try { canvasRef.current.setPointerCapture(e.pointerId); } catch {} steer(e); };
+  const onMove = e => { if (dragRef.current) steer(e); };
+  const onUp = () => { dragRef.current = false; if (g.current) g.current.targetX = null; };
+  const hold = d => ({ onPointerDown: e => { e.preventDefault(); const s = g.current; if (s) { s.dir = d; s.targetX = null; } }, onPointerUp: () => { const s = g.current; if (s && s.dir === d) s.dir = 0; }, onPointerLeave: () => { const s = g.current; if (s && s.dir === d) s.dir = 0; } });
+  return (
+    <GameWrap hint="Le doodler saute tout seul : dirige-le à gauche/droite (bords traversants) et vise le plus haut possible. 🟢 fixe · 🔵 mobile · 🟤 cassante · ⚪ à usage unique · ressorts/trampoline = super saut · 🎩 hélice & 🚀 jetpack = vol · 👾 monstres (tire ou évite) · 🕳️ trous noirs. Glisse le doigt sur le plateau (ou flèches/ZQSD) ; 🔫 ou Espace pour tirer."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Altitude <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:W }}>
+        <canvas ref={canvasRef} width={W} height={H} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={onDown} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#333', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:17, fontWeight:800 }}>{phase === 'dead' ? `💥 Chute ! Altitude ${score}` : '🟢 Doodle Jump'}</div>
+            <div style={{ fontSize:12, background:'#ffffffcc', padding:'6px 12px', borderRadius:8, fontWeight:700 }}>Touche pour {phase === 'dead' ? 'rejouer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
+      <div style={{ display:'flex', gap:8, width:'100%', maxWidth:W, justifyContent:'center' }}>
+        <button {...hold(-1)} style={gameBtn({ flex:1, fontSize:18, padding:'10px 0', touchAction:'none' })}>◀</button>
+        <button onPointerDown={e => { e.preventDefault(); shoot(); }} style={gameBtn({ flex:1, padding:'10px 0', touchAction:'none' })}>🔫 Tir</button>
+        <button {...hold(1)} style={gameBtn({ flex:1, fontSize:18, padding:'10px 0', touchAction:'none' })}>▶</button>
       </div>
     </GameWrap>
   );
@@ -14946,6 +15241,7 @@ function statCardEl({ label, value, sub, icon, color }) {
 // hors-ligne, aucune requête. Ordre = ordre des jeux (GAMES). Un jeu jamais joué → « — ».
 const GAMES_HUB_STATS = [
   { id:'2048',   label:'2048',        icon:'🔢', metric:'meilleur score' },
+  { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
   { id:'guitar', label:'Guitar Hero', icon:'🎸', metric:'meilleur score' },
