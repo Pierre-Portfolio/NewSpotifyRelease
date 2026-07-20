@@ -45,7 +45,9 @@
 // jetpack/monstres/trous noirs).
 // v58 : bump de cache — TierList : échange de 2 images par drag&drop (réordonner dans un
 // rang) ; Doodle Jump ralenti ~20 % + sauter sur un monstre l'écrase et fait rebondir.
-const CACHE  = 'spotifyplus-v61';
+// v61 : bump de cache — module Sport : collapse par partie du corps + exos à griser.
+// v62 : bump de cache — nouveau module Emploi (salaire vs secteur + offres du moment).
+const CACHE  = 'spotifyplus-v62';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
