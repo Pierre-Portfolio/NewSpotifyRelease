@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.5.3';
+const APP_VERSION = '7.5.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3308,6 +3308,9 @@ const DOODLE_W = 340, DOODLE_H = 480, D_CAM = DOODLE_H * 0.42;
 // → même hauteur de saut (v²/2g conservé), tout se déroule plus lentement.
 const D_GRAV = 0.192, D_JUMP = -7.5, D_SPRING = -12.4, D_TRAMPO = -16.4, D_VMAX = 12;
 const D_PLAT_W = 62, D_PLAT_H = 14, D_FEET = 15, D_HALF = 15;
+// Portée d'un saut normal ≈ D_JUMP²/(2·D_GRAV) ≈ 146 px. Écart entre plateformes :
+// ≤ SAFE = confortable · entre SAFE et MAX = saut « limite » (dalle blanche + monstre latéral) · jamais > MAX (sinon saut infaisable).
+const D_GAP_SAFE = 92, D_GAP_MAX = 120;
 function doodleRR(ctx, x, y, w, h, r, fill) {
   ctx.beginPath();
   ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
@@ -3421,10 +3424,19 @@ function doodleDraw(ctx, s, W, H) {
   s.bullets.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill(); });
   doodleDoodler(ctx, s.px, s.py, s.faceTimer > 0 ? 0 : s.face, s.fly > 0 ? s.flyType : null, s.t);
 }
-function doodleSpawnRow(s, ny) {
+function doodleSpawnRow(s, ny, risky) {
   const diff = Math.min(1, s.score / 700);
   const w = D_PLAT_W, x = 6 + Math.random() * (DOODLE_W - w - 12);
   let type = 'green';
+  // — saut « limite » : dalle blanche (rebond garanti mais à usage unique) + monstre qui patrouille de droite à gauche —
+  // jamais deux dalles à usage unique/cassantes d'affilée → on garde toujours une plateforme solide entre deux
+  if (risky && s.lastType !== 'white' && s.lastType !== 'break') {
+    const p = { x, y: ny, w, h: D_PLAT_H, type: 'white', dead: false };
+    s.platforms.push(p); s.lastType = 'white';
+    const mx = (x + w / 2 < DOODLE_W / 2) ? DOODLE_W - 54 : 10;   // côté opposé à la dalle → évitable
+    s.monsters.push({ x: mx, y: ny - 46, w: 44, h: 38, type: 1, alive: true, vx: (Math.random() < 0.5 ? -1 : 1) * (0.7 + diff * 0.7) });
+    return;
+  }
   if (s.lastType !== 'break') {   // jamais deux cassantes d'affilée (garde la montée jouable)
     const r = Math.random();
     const pB = 0.06 + diff * 0.10, pM = 0.10 + diff * 0.12, pV = diff * 0.10;
@@ -3537,7 +3549,13 @@ function GameDoodle() {
       if (s.fly <= 0) { for (const h of s.holes) { if (Math.hypot(s.px - h.x, s.py - h.y) < h.r * 0.6) { die(); return; } } }
       // — génération de nouvelles rangées au-dessus —
       let topY = Infinity; for (const p of s.platforms) if (p.y < topY) topY = p.y;
-      while (topY > -12) { const gap = 42 + Math.random() * 22 + Math.min(46, s.score * 0.05); const ny = topY - gap; doodleSpawnRow(s, ny); topY = ny; }
+      while (topY > -12) {
+        let gap = 42 + Math.random() * 20 + Math.min(38, s.score * 0.04);
+        if (gap > D_GAP_MAX) gap = D_GAP_MAX;                     // jamais un saut infaisable
+        const ny = topY - gap;
+        doodleSpawnRow(s, ny, gap > D_GAP_SAFE);                  // saut « limite » → dalle blanche + monstre latéral
+        topY = ny;
+      }
       // — particules + nettoyage —
       s.parts.forEach(pt => { pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.25; pt.life--; });
       s.parts = s.parts.filter(pt => pt.life > 0);
