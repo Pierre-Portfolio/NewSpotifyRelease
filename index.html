@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.14';
+const APP_VERSION = '7.6.15';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1336,6 +1336,25 @@ async function importDiscoverWeekly(addLog) {
 // ignore les cooldowns, log un diagnostic détaillé (playlists trouvées, lisibles ou non),
 // relance l'import si un contenu est lisible, et retourne l'URL Spotify de la playlist à
 // ouvrir (ou de la recherche si introuvable) — null si rien à ouvrir.
+// URL de la VRAIE playlist éditoriale « Découvertes de la semaine » (owner Spotify) à OUVRIR
+// dans l'onglet Spotify. On ne veut PAS ouvrir une copie perso (souvent figée sur une semaine
+// passée) : l'import des titres se fait depuis la copie lisible, mais le bouton doit emmener
+// vers la playlist officielle qui se rafraîchit chaque lundi.
+async function dwEditorialUrl(candidates) {
+  // 1) l'éditoriale Spotify déjà présente dans la bibliothèque (nom exact + owner 'spotify')
+  const inLib = (candidates || []).find(p => p.owner?.id === 'spotify' && DW_NAME_RE.test(p.name || ''));
+  if (inLib?.external_urls?.spotify) return inLib.external_urls.spotify;
+  // 2) sinon via l'API de recherche (les métadonnées éditoriales restent renvoyées même si
+  //    leur contenu ne l'est plus depuis la migration 2026)
+  try {
+    const sr = await apiGet('https://api.spotify.com/v1/search?q=' + encodeURIComponent('Découvertes de la semaine') + '&type=playlist&limit=10');
+    const items = (sr?.playlists?.items || []).filter(Boolean); // l'API glisse parfois des null
+    const hit = items.find(p => p.owner?.id === 'spotify' && DW_NAME_RE.test(p.name || '')) || items.find(p => DW_NAME_RE.test(p.name || ''));
+    if (hit?.external_urls?.spotify) return hit.external_urls.spotify;
+  } catch {}
+  return null;
+}
+
 async function dwManualAccess(addLog) {
   addLog('── Accès direct « Découvertes de la semaine » ──', 'info');
   if (Date.now() < _rlUntil) {
@@ -1350,13 +1369,10 @@ async function dwManualAccess(addLog) {
     // DIRECTEMENT la bonne (on n'a besoin que de son URL — les métadonnées des playlists
     // éditoriales restent renvoyées même si leur CONTENU ne l'est plus). La page de
     // recherche Spotify ne sert plus que de dernier repli.
-    const sr = await apiGet('https://api.spotify.com/v1/search?q=' + encodeURIComponent('Découvertes de la semaine') + '&type=playlist&limit=10');
-    const items = (sr?.playlists?.items || []).filter(Boolean); // l'API glisse parfois des null
-    const isDW = p => /découvertes de la semaine|discover weekly/i.test(p.name || '');
-    const hit = items.find(p => p.owner?.id === 'spotify' && isDW(p)) || items.find(isDW);
-    if (hit?.external_urls?.spotify) {
-      addLog(`✓ Playlist trouvée via la recherche Spotify : « ${hit.name} » — ouverture directe. (Pour l'import auto des titres : ajoute-la à ta bibliothèque, ou mieux, crée une copie perso.)`, 'ok');
-      return hit.external_urls.spotify;
+    const eurl = await dwEditorialUrl([]);
+    if (eurl) {
+      addLog('✓ Playlist « Découvertes de la semaine » trouvée via la recherche Spotify — ouverture directe. (Pour l\'import auto des titres : ajoute-la à ta bibliothèque, ou mieux, crée une copie perso.)', 'ok');
+      return eurl;
     }
     addLog('✗ Aucune playlist « Découvertes de la semaine » dans ta bibliothèque ni via la recherche. Le like d\'un titre ne suffit pas : ouvre la playlist sur Spotify → « Ajouter à ta bibliothèque ». J\'ouvre la recherche Spotify…', 'warn');
     return 'https://open.spotify.com/search/D%C3%A9couvertes%20de%20la%20semaine';
@@ -1373,13 +1389,18 @@ async function dwManualAccess(addLog) {
   }
   if (readable) {
     // Contenu lisible → on la mémorise (ré-lecture directe chaque semaine), cooldowns levés,
-    // puis importDiscoverWeekly refait la lecture et insère en base.
+    // puis importDiscoverWeekly refait la lecture et insère en base. On IMPORTE depuis la copie
+    // lisible mais on OUVRE la VRAIE playlist éditoriale (qui se rafraîchit chaque lundi), pas
+    // la copie perso souvent figée sur une semaine passée.
     try { localStorage.setItem(DW_PID_KEY, readable.id); localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
     await importDiscoverWeekly(addLog);
-    return readable.external_urls?.spotify || null;
+    const eurl = await dwEditorialUrl(candidates);
+    return eurl || readable.external_urls?.spotify || null;
   }
   addLog('LE PLUS SIMPLE : lance la LECTURE de la playlist que j\'ouvre — les titres seront capturés automatiquement dans « En attente » pendant l\'écoute (file d\'attente du player). Alternative : menu ⋯ → « Ajouter à une autre playlist » → « Nouvelle playlist » (garde « découvertes » dans le nom) — cette COPIE PERSO sera lisible et importée automatiquement. J\'ouvre la playlist…', 'warn');
-  return candidates[0].external_urls?.spotify || null;
+  // On ouvre la VRAIE éditoriale (rafraîchie chaque lundi) plutôt qu'une copie perso figée.
+  const eurl = await dwEditorialUrl(candidates);
+  return eurl || candidates[0].external_urls?.spotify || null;
 }
 
 // ── CAPTURE DES DÉCOUVERTES PAR LA LECTURE (6.4.5) ──
