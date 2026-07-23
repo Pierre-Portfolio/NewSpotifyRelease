@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.6';
+const APP_VERSION = '7.6.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1613,6 +1613,12 @@ function StoreProvider({ children }) {
   const filteredFeedIndexRef = React.useRef(new Map());
   React.useEffect(() => { filteredFeedIndexRef.current = filteredFeedIndex; }, [filteredFeedIndex]);
 
+  // Dernière position CONNUE dans filteredFeed (mémorisée à chaque navigation / lecture d'un
+  // titre présent dans la liste). Sert de repli à navigateFeed quand le titre en cours a été
+  // FILTRÉ HORS de la liste (plusieurs filtres actifs) : sans ce repli, filteredFeedIndex.get
+  // renvoie -1 et « suivant » repartait au début de la liste (index 0) au lieu de continuer.
+  const currentFeedIdxRef = React.useRef(-1);
+
   // Tout filtre/tri actif (type, recherche artiste, tri date/artiste) re-query la DB
   // (loadFeedFromDB applique filtre+tri EN SQL) → on voit les titres même au-delà du cap des
   // 1000 chargés en mémoire. Retour à 'all'/'default'/'' → recharge le feed de base. Debounce
@@ -1847,6 +1853,13 @@ function StoreProvider({ children }) {
     // le reset permet de ré-avancer si l'utilisateur réécoute le même titre plus tard dans la session
     if (currentUri && advancedForRef.current && advancedForRef.current !== currentUri) {
       advancedForRef.current = null;
+    }
+
+    // Mémorise la position du titre en cours tant qu'il est dans la liste filtrée : sert de
+    // repli à navigateFeed quand un changement de filtre l'exclut ensuite (voir currentFeedIdxRef).
+    if (currentUri) {
+      const ci = filteredFeedIndexRef.current.get(currentUri);
+      if (ci != null) currentFeedIdxRef.current = ci;
     }
 
     if (!prevUri || prevUri === currentUri) return;
@@ -2163,14 +2176,22 @@ function StoreProvider({ children }) {
     const f = filteredFeedRef.current;
     if (f.length === 0) return;
     const nowUri = _effUri(prevNowRef.current?.uri);
-    const currentIdx = nowUri ? (filteredFeedIndexRef.current.get(nowUri) ?? -1) : -1;
+    // realIdx = position RÉELLE du titre joué dans la liste filtrée (-1 s'il en est exclu).
+    const realIdx = nowUri ? (filteredFeedIndexRef.current.get(nowUri) ?? -1) : -1;
+    if (realIdx !== -1) currentFeedIdxRef.current = realIdx;
+    // baseIdx = point de départ de la navigation : le titre courant s'il est dans la liste,
+    // sinon la dernière position connue (repli) → « suivant » continue au lieu de repartir à 0.
+    let baseIdx = realIdx !== -1 ? realIdx : currentFeedIdxRef.current;
+    if (baseIdx >= f.length) baseIdx = -1;   // liste raccourcie depuis : repli neutre
     let nextIdx;
-    if (dir === -1) nextIdx = currentIdx > 0 ? currentIdx - 1 : f.length - 1;
-    else nextIdx = currentIdx < f.length - 1 ? currentIdx + 1 : 0;
+    if (dir === -1) nextIdx = baseIdx > 0 ? baseIdx - 1 : f.length - 1;
+    else nextIdx = (baseIdx >= 0 && baseIdx < f.length - 1) ? baseIdx + 1 : 0;
     if (f[nextIdx]) await playTrack(f[nextIdx].spotifyUri);
+    currentFeedIdxRef.current = nextIdx;   // on est désormais sur nextIdx
     // Clic « suivant » : retirer immédiatement le titre quitté, sans attendre le poll 5s.
-    // Couvre le double-clic rapide où l'URI intermédiaire n'apparaît jamais dans now.uri.
-    if (dir > 0 && currentIdx !== -1) markListened(f[currentIdx].spotifyUri);
+    // ⚠ Seulement si on connaît le VRAI titre joué (realIdx) — jamais depuis le repli, sinon
+    // on marquerait « écouté » un titre qui n'est pas celui en cours de lecture.
+    if (dir > 0 && realIdx !== -1) markListened(f[realIdx].spotifyUri);
   }, [markListened]);
 
   // Sync des likes Spotify → DB dès que la DB est prête

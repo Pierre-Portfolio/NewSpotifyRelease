@@ -47,7 +47,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // Token pré-scope → 403 sur la file → log « déconnecte/reconnecte-toi » 1×/session (_dwCapDenied).
 ```
 
-### `APP_VERSION` (actuellement `'7.6.6'`)
+### `APP_VERSION` (actuellement `'7.6.7'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -136,7 +136,7 @@ Feed batché par artiste (`artistFeedItems` → 1 `setFeed`). Refresh Artistes t
 
 Marquage écouté quand `now?.uri` change (URI précédente dans le feed & `dbReady`) : `UPDATE tracks listened=1, listened_at` + `UPDATE stats` + `saveDB` + `recordListen()` + animation slide-right (600 ms). `listenedUrisRef` anti-doublon. Écritures DB **hors** updater `setFeed` (item lu via `feedRef.current`).
 
-**Clic « Suivant » (`markListened(uri)`)** : les 3 players + `navigateFeed(+1)` capturent l'URI quittée AVANT de jouer le suivant, puis `markListened(leaving)` — retrait immédiat, corrige le double-clic rapide où l'URI intermédiaire échappe au poll 5 s. Idempotent.
+**Clic « Suivant » (`markListened(uri)`)** : les 3 players + `navigateFeed(+1)` capturent l'URI quittée AVANT de jouer le suivant, puis `markListened(leaving)` — retrait immédiat, corrige le double-clic rapide où l'URI intermédiaire échappe au poll 5 s. Idempotent. **Repli de position (7.6.7)** : `navigateFeed` mémorise la dernière position connue dans `filteredFeed` (`currentFeedIdxRef`, mis à jour à chaque nav + dans l'effet `now?.uri` quand le titre est dans la liste). Quand plusieurs filtres EXCLUENT le titre en cours de la liste, `filteredFeedIndex.get` renvoyait -1 → « suivant » repartait à l'index 0 (début de liste). Désormais `baseIdx` = position réelle sinon repli → la nav continue là où on était. ⚠ `markListened` n'utilise QUE la position réelle (`realIdx`), jamais le repli (sinon on marquerait « écouté » le mauvais titre).
 
 **3 mécanismes d'auto-avance** (triple couverture, `advancedForRef` anti-doublon, `prevNowRef` = tick précédent) :
 1. Effet `now?.uri` : URI null/hors feed **ET** titre quitté proche de la fin (`nearEnd`, garde anti-vol de lecture)
