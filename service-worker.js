@@ -53,7 +53,9 @@
 // système de tags (filtre + création), le tout dans le coffre chiffré (exporté/synchro).
 // v65 : bump de cache — export/import & synchro Drive/Dropbox élargis : Frigo, Vêtement
 // (sans photos), Emploi, Sport, clés/pseudos API, records de jeux, préférences.
-const CACHE  = 'spotifyplus-v66';
+// v66 : bump de cache — Sport : sous-collapse Running vide en tête.
+// v67 : bump de cache — To do : boutons ‹ › × plus gros et plus espacés.
+const CACHE  = 'spotifyplus-v67';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
