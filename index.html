@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.12';
+const APP_VERSION = '7.6.13';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7298,6 +7298,7 @@ function mergeTvItem(a, b) {
   if (a.dropped || b.dropped) base.dropped = true;         // « ne plus suivre » conservé à la fusion
   if (a.unlimited || b.unlimited) base.unlimited = true;   // plafond 500 retiré : on garde le plus permissif
   if (a.keepShorts || b.keepShorts) base.keepShorts = true; // tag « garder les Shorts » : on garde le plus permissif
+  if (a.shortsOnly || b.shortsOnly) base.shortsOnly = true; // tag « garder uniquement les Shorts »
   if (base.status === 'done') base.doneAt = a.doneAt || b.doneAt || Date.now();
   else delete base.doneAt;
   return base;
@@ -13228,10 +13229,14 @@ async function ytBuildItem(raw, opts = {}) {
   if (!videosRaw.length) return { error: 'Aucune vidéo trouvée pour ce lien.' };
   const durs = await ytFetchDurations(videosRaw.map(v => v.id));
   for (const v of videosRaw) v.dur = durs.get(v.id) || 0;
-  // Ignore les vidéos < 3 min (Shorts / clips courts) — sauf si le tag « garder les Shorts »
-  // est activé pour cette chaîne/playlist (opts.keepShorts).
-  const videos = opts.keepShorts ? videosRaw : videosRaw.filter(v => (v.dur || 0) >= YT_MIN_MINUTES);
-  if (!videos.length) return { error: opts.keepShorts ? 'Aucune vidéo trouvée pour ce lien.' : 'Aucune vidéo de plus de 3 min trouvée pour ce lien.' };
+  // Filtrage Shorts (< 3 min) selon les tags de la chaîne/playlist :
+  //  • shortsOnly → UNIQUEMENT les Shorts (complément exact du filtre normal, dur inconnue=0 inclus)
+  //  • keepShorts → tout (Shorts + vidéos longues)
+  //  • défaut     → uniquement les vidéos ≥ 3 min (Shorts exclus)
+  const videos = opts.shortsOnly
+    ? videosRaw.filter(v => (v.dur || 0) < YT_MIN_MINUTES)
+    : opts.keepShorts ? videosRaw : videosRaw.filter(v => (v.dur || 0) >= YT_MIN_MINUTES);
+  if (!videos.length) return { error: opts.shortsOnly ? 'Aucun Short trouvé pour ce lien.' : opts.keepShorts ? 'Aucune vidéo trouvée pour ce lien.' : 'Aucune vidéo de plus de 3 min trouvée pour ce lien.' };
   videos.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));   // chrono croissant
   const byYear = {};
   for (const v of videos) { const y = (v.date || '').slice(0, 4) || '—'; (byYear[y] = byYear[y] || []).push(v); }
@@ -13247,7 +13252,8 @@ async function ytBuildItem(raw, opts = {}) {
     videos, watchedIds: [],
     refreshedAt: Date.now(),
     unlimited: !!opts.unlimited,   // plafond 500 retiré pour cette chaîne
-    keepShorts: !!opts.keepShorts, // tag « garder les Shorts (< 3 min) » pour cette chaîne/playlist
+    keepShorts: !!opts.keepShorts || !!opts.shortsOnly, // tag « garder les Shorts (< 3 min) »
+    shortsOnly: !!opts.shortsOnly, // tag « garder UNIQUEMENT les Shorts » (chaîne 100 % Shorts)
   };
 }
 
@@ -13267,7 +13273,9 @@ async function ytCheckNewVideos() {
   for (const it of yts) {
     if (it.dropped) continue;   // « ne plus suivre » → jamais de recherche de nouveautés
     if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
-    const built = await ytBuildItem(it.id, { unlimited: it.unlimited, keepShorts: it.keepShorts });   // préserve plafond retiré + tag Shorts
+    const built = await ytBuildItem(it.id, { unlimited: it.unlimited, keepShorts: it.keepShorts, shortsOnly: it.shortsOnly });   // préserve plafond retiré + tags Shorts
+    // shortsOnly : built.videos ne contient QUE des Shorts → la détection de nouveauté
+    // (et donc la notif « En cours ») ne se déclenche que pour un Short qui sort.
     if (!built || built.error) continue;
     const oldIds = new Set((it.videos || []).map(v => v.id));
     const hasNew = (built.videos || []).some(v => !oldIds.has(v.id));
@@ -13281,7 +13289,7 @@ async function ytCheckNewVideos() {
     if (x.type !== 'youtube' || !patches.has(x.id)) return x;
     const { built, hasNew } = patches.get(x.id);
     const merged = { ...built, watchedIds: x.watchedIds || [], status: x.status,
-      doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts };
+      doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly };
     // Nouvelle vidéo sur une série déjà « vue » → on la remet en cours
     if (hasNew && x.status === 'done') { merged.status = 'watching'; merged.doneAt = undefined; }
     changed = true;
@@ -13772,7 +13780,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onSe
 
 // ── Fiche YouTube (clic sur l'affiche d'une chaîne/playlist suivie) — vidéos groupées
 // en SAISONS = ANNÉES de publication, cochage INDIVIDUEL par vidéo (watchedIds).
-function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onIgnore }) {
+function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onShortsOnly, onIgnore }) {
   const [openYear, setOpenYear] = React.useState(null);
   const seen = new Set(item.watchedIds || []);
   const total = item.totalEps || (item.videos || []).length;
@@ -13869,10 +13877,18 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
 
         {/* Tag « garder les Shorts » — SPÉCIFIQUE YouTube : par défaut les vidéos < 3 min sont
             exclues ; coché, elles sont réintégrées (re-télécharge la liste de la chaîne). */}
-        <button onClick={() => onKeepShorts(!item.keepShorts)} disabled={refreshing}
+        <button onClick={() => onKeepShorts(!item.keepShorts)} disabled={refreshing || item.shortsOnly}
           title="Inclure les vidéos de moins de 3 min (Shorts / clips courts) — re-télécharge la liste de la chaîne"
-          style={{ width:'100%', background: item.keepShorts ? `${YT_COLOR}22` : 'none', border:`1px solid ${item.keepShorts ? YT_COLOR + 'aa' : C.border}`, borderRadius:6, color: refreshing ? C.dim : (item.keepShorts ? YT_COLOR : C.dim), fontSize:10, fontWeight:700, padding:'6px 0', cursor: refreshing ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', marginBottom:12 }}>
+          style={{ width:'100%', background: item.keepShorts ? `${YT_COLOR}22` : 'none', border:`1px solid ${item.keepShorts ? YT_COLOR + 'aa' : C.border}`, borderRadius:6, color: (refreshing || item.shortsOnly) ? C.dim : (item.keepShorts ? YT_COLOR : C.dim), fontSize:10, fontWeight:700, padding:'6px 0', cursor: (refreshing || item.shortsOnly) ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', marginBottom:8, opacity: item.shortsOnly ? 0.5 : 1 }}>
           🩳 {refreshing ? '…' : (item.keepShorts ? 'Shorts inclus ✓' : 'Garder les Shorts (< 3 min)')}
+        </button>
+
+        {/* Tag « garder UNIQUEMENT les Shorts » (7.6.13) — n'affiche que les Shorts dans les
+            saisons ci-dessous et ne notifie « En cours » que pour un Short qui sort. */}
+        <button onClick={() => onShortsOnly(!item.shortsOnly)} disabled={refreshing}
+          title="N'afficher QUE les Shorts (< 3 min) de cette chaîne, et n'être notifié·e que pour un Short qui sort — re-télécharge la liste"
+          style={{ width:'100%', background: item.shortsOnly ? `${YT_COLOR}22` : 'none', border:`1px solid ${item.shortsOnly ? YT_COLOR + 'aa' : C.border}`, borderRadius:6, color: refreshing ? C.dim : (item.shortsOnly ? YT_COLOR : C.dim), fontSize:10, fontWeight:700, padding:'6px 0', cursor: refreshing ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', marginBottom:12 }}>
+          🩳 {refreshing ? '…' : (item.shortsOnly ? 'Uniquement les Shorts ✓' : 'Garder uniquement les Shorts')}
         </button>
 
         {/* Retirer le plafond de 500 vidéos pour cette chaîne — visible tant que non illimitée
@@ -14073,20 +14089,38 @@ function TvTimePanel() {
     const raw = ytInput.trim();
     if (!raw) return;
     setYtBusy(true); setYtMsg('Récupération des vidéos… (peut prendre quelques secondes)');
-    const built = await ytBuildItem(raw);
-    setYtBusy(false);
+    let built = await ytBuildItem(raw);
+    // Chaîne qui ne fait QUE des Shorts : le build normal ne renvoie aucune vidéo ≥ 3 min.
+    // On retente en « uniquement les Shorts » et, si ça donne des Shorts, on demande à
+    // l'utilisateur si c'est volontaire → ajout avec le tag « garder uniquement les Shorts ».
+    if (built && built.error) {
+      const shortsBuilt = await ytBuildItem(raw, { shortsOnly: true });
+      if (shortsBuilt && !shortsBuilt.error) {
+        setYtBusy(false);
+        const alreadyShorts = items.some(x => x.type === 'youtube' && x.id === shortsBuilt.id && x.shortsOnly);
+        if (!alreadyShorts && !confirm(`« ${shortsBuilt.title} » ne publie que des Shorts (< 3 min).\n\nC'est volontaire ? OK = l'ajouter en « garder uniquement les Shorts » (tu ne seras notifié·e que pour un Short qui sort).`)) {
+          setYtMsg('Ajout annulé.'); return;
+        }
+        built = shortsBuilt;
+      } else {
+        setYtBusy(false);
+        setYtMsg('⚠ ' + (built.error || 'Échec de la récupération.')); return;
+      }
+    } else {
+      setYtBusy(false);
+    }
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
     const exist = items.find(x => x.type === 'youtube' && x.id === built.id);
     if (exist) {
       // Si l'existant avait le plafond retiré, on re-fetch sans limite pour ne pas régresser à 500
       let merged = built;
       if (exist.unlimited && !built.unlimited) {
-        const full = await ytBuildItem(raw, { unlimited: true });
+        const full = await ytBuildItem(raw, { unlimited: true, keepShorts: exist.keepShorts, shortsOnly: exist.shortsOnly });
         if (full && !full.error) merged = full;
       }
-      // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé / plafond
+      // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé / plafond / tags Shorts
       update(items.map(x => (x.type === 'youtube' && x.id === built.id)
-        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited } : x));
+        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x));
       setYtMsg(`Mis à jour : ${merged.title} (${merged.totalEps} vidéos)`);
     } else {
       update([built, ...items]);
@@ -14098,24 +14132,38 @@ function TvTimePanel() {
   const ytRefreshItem = async item => {
     if (ytRefreshingId) return;
     setYtRefreshingId(item.id);
-    const built = await ytBuildItem(item.id, { unlimited: item.unlimited, keepShorts: item.keepShorts });
+    const built = await ytBuildItem(item.id, { unlimited: item.unlimited, keepShorts: item.keepShorts, shortsOnly: item.shortsOnly });
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de l\'actualisation.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts } : x));
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x));
   };
   // Tag « garder les Shorts (< 3 min) » d'une chaîne/playlist YouTube. Re-fetch complet car les
   // Shorts filtrés ne sont pas stockés : ON = les réintègre, OFF = les retire. Préserve vues/statut.
+  // Activer « garder les Shorts » désactive « uniquement les Shorts » (exclusifs).
   const setKeepShorts = async (item, v) => {
     if (ytRefreshingId) return;
     setYtRefreshingId(item.id);
     setYtMsg(v ? 'Réintégration des Shorts…' : 'Retrait des Shorts…');
-    const built = await ytBuildItem(item.id, { unlimited: item.unlimited, keepShorts: v });
+    const built = await ytBuildItem(item.id, { unlimited: item.unlimited, keepShorts: v, shortsOnly: false });
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, keepShorts: v, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
+      ? { ...built, keepShorts: v, shortsOnly: false, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
     setYtMsg(`${v ? 'Shorts réintégrés' : 'Shorts retirés'} : ${built.title} (${built.totalEps} vidéos)`);
+  };
+  // Tag « garder UNIQUEMENT les Shorts » : n'affiche que les Shorts (< 3 min), et la notif
+  // « En cours » ne se déclenche que pour un Short qui sort. Exclusif de « garder les Shorts ».
+  const setShortsOnly = async (item, v) => {
+    if (ytRefreshingId) return;
+    setYtRefreshingId(item.id);
+    setYtMsg(v ? 'Filtrage : uniquement les Shorts…' : 'Retrait du filtre Shorts…');
+    const built = await ytBuildItem(item.id, { unlimited: item.unlimited, shortsOnly: v, keepShorts: v ? false : item.keepShorts });
+    setYtRefreshingId(null);
+    if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec.')); return; }
+    update(items.map(x => (x.type === 'youtube' && x.id === item.id)
+      ? { ...built, shortsOnly: v, keepShorts: v ? false : x.keepShorts, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
+    setYtMsg(`${v ? 'Uniquement les Shorts' : 'Filtre Shorts retiré'} : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Retire le plafond de 500 vidéos pour CETTE chaîne : re-fetch complet (peut être long / coûteux en quota)
   const ytLoadAll = async item => {
@@ -14123,11 +14171,11 @@ function TvTimePanel() {
     if (!confirm(`Récupérer TOUTES les vidéos de « ${item.title} » (plus de plafond à 500) ?\n\nCela peut être long et consommer beaucoup de quota API + stockage local.`)) return;
     setYtRefreshingId(item.id);
     setYtMsg('Récupération de toutes les vidéos… (peut prendre du temps)');
-    const built = await ytBuildItem(item.id, { unlimited: true, keepShorts: item.keepShorts });
+    const built = await ytBuildItem(item.id, { unlimited: true, keepShorts: item.keepShorts, shortsOnly: item.shortsOnly });
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, keepShorts: x.keepShorts } : x));
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x));
     setYtMsg(`Toutes les vidéos récupérées : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Reverrouille une chaîne dont le plafond avait été retiré : ne conserve que les vidéos
@@ -14766,6 +14814,7 @@ function TvTimePanel() {
         onUnlimited={() => ytLoadAll(detailItem)}
         onRelock={() => ytRelock(detailItem)}
         onKeepShorts={v => setKeepShorts(detailItem, v)}
+        onShortsOnly={v => setShortsOnly(detailItem, v)}
         onIgnore={() => ignoreUnwatched(detailItem)} />}
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}

@@ -63,7 +63,8 @@
 // v73 : bump de cache — Finance : la section CRYPTO affiche « PEPE = X % d'un BTC » (position PEPE cachée) au lieu du badge EUR/USD.
 // v74 : bump de cache — nouveau module « API » (liste de toutes les API + export JSON des cochées).
 // v75 : bump de cache — Note : espace « Note crypté » séparé (mot de passe global, clic sur le titre), plus de mdp par note.
-const CACHE  = 'spotifyplus-v75';
+// v76 : bump de cache — TV Time YouTube : tag « garder uniquement les Shorts » (affiche/notifie que les Shorts) + demande à l'ajout d'une chaine 100% Shorts.
+const CACHE  = 'spotifyplus-v76';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
