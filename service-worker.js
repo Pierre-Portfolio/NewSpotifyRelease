@@ -56,7 +56,8 @@
 // v66 : bump de cache — Sport : sous-collapse Running vide en tête.
 // v67 : bump de cache — To do : boutons ‹ › × plus gros et plus espacés.
 // v68 : bump de cache — Alertes : ligne « Carte de crédit » dans la rubrique Finance.
-const CACHE  = 'spotifyplus-v68';
+// v69 : bump de cache — retrait de la popup « compte Spotify Free ? » (403) au changement de titre.
+const CACHE  = 'spotifyplus-v69';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
