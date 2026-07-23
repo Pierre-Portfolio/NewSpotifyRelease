@@ -58,7 +58,8 @@
 // v68 : bump de cache — Alertes : ligne « Carte de crédit » dans la rubrique Finance.
 // v69 : bump de cache — retrait de la popup « compte Spotify Free ? » (403) au changement de titre.
 // v70 : bump de cache — fix nav « suivant/précédent » du feed quand le titre courant est filtré hors liste (repli sur la dernière position connue au lieu de repartir à 0).
-const CACHE  = 'spotifyplus-v70';
+// v71 : bump de cache — bouton Découvertes de la semaine : rappel jaune chaque lundi, couleur initiale une fois cliqué (jusqu'au lundi suivant).
+const CACHE  = 'spotifyplus-v71';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
