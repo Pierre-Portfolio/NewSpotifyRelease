@@ -61,7 +61,8 @@
 // v71 : bump de cache — bouton Découvertes de la semaine : rappel jaune chaque lundi, couleur initiale une fois cliqué (jusqu'au lundi suivant).
 // v72 : bump de cache — Vêtement : section « Mes marques » (marques aimées + types d'articles).
 // v73 : bump de cache — Finance : la section CRYPTO affiche « PEPE = X % d'un BTC » (position PEPE cachée) au lieu du badge EUR/USD.
-const CACHE  = 'spotifyplus-v73';
+// v74 : bump de cache — nouveau module « API » (liste de toutes les API + export JSON des cochées).
+const CACHE  = 'spotifyplus-v74';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

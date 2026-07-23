@@ -10,7 +10,7 @@
 ## Aperçu
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
-Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, Météo, Finance, Emploi, Jeux, Bon Plan, TV Time, Note, Santé, Sport, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
+Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, API, Météo, Finance, Emploi, Jeux, Bon Plan, TV Time, Note, Santé, Sport, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
 
 👉 **https://pierre-portfolio.github.io/NewSpotifyRelease/** — aucune installation, tout est statique sur GitHub Pages.
 
@@ -73,6 +73,9 @@ Activable/désactivable dans le Paramétrage comme les autres modules.
 
 ### Sport
 🏋️ **Suivi d'entraînement 100 % local** : un collapse par **partie du corps** (Running, Full body, Dos, Pecs, Biceps, Triceps, Jambe), chacun listant les **exercices possibles** sous forme de tuiles. **Touche un exercice pour le marquer fait** (il se grise), et le bouton **↺ Réinitialiser** remet la partie à zéro. Ton avancement est mémorisé.
+
+### API
+🔌 **Liste de toutes les API réseau de l'appli** (Spotify, TMDB, YouTube/Drive, CoinGecko, GitHub, Gemini, proxies CORS…), groupées par thème avec le rôle de chacune et un badge 🔑 pour celles qui utilisent une clé ou un compte perso. Chaque API a un **interrupteur** (comme le Paramétrage) : coche celles qui t'intéressent puis clique **⬇ Exporter** pour télécharger un fichier JSON contenant uniquement les API cochées (+ boutons « Tout cocher / décocher »). 100 % local.
 
 ### Bon Plan
 Chasseur de bons plans (refonte) : **⭐ Ma liste** en premier (suivi de prix : ☆ sur n'importe quel jeu, **prix cible** optionnel → ✓ vert quand l'offre passe dessous, rafraîchi automatiquement, inclus dans la sauvegarde), **🔥 Promos du moment** (meilleures offres jeux PC du jour via CheapShark, filtres −50 % / −75 % / AAA, vignettes — section repliée par défaut), **🎮 Recherche jeux** (~20 boutiques PC, prix ≈ EUR, + liens de recherche directe **Steam · G2A · Instant Gaming · Eneba · Kinguin · Gamivo · CDKeys** sous chaque jeu déplié ; **quand aucun résultat sur CheapShark**, le prix RÉEL en euros est désormais récupéré directement chez **Steam** — la recherche affichait souvent « — » faute de prix, c'est corrigé) et **🔎 Tous produits** (refonte : la recherche marche désormais via **4 API gratuites sans clé** — **Apple** (apps, musique, films, livres, avec prix + pochette, désormais via relais CORS car l'API Apple bloquait le navigateur), **Open Products Facts** (produits du quotidien), **Open Beauty Facts** (cosmétiques) et **Open Food Facts** (alimentaire) ; lien leDénicheur en repli pour l'électronique avec prix).
