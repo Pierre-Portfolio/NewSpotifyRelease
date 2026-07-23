@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.11';
+const APP_VERSION = '7.6.12';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6182,7 +6182,7 @@ function Home({ isMobile }) {
           <div onClick={e => e.stopPropagation()}
             style={{ width:'100%', maxWidth:460, maxHeight:'85vh', overflowY:'auto', background:C.bg, border:`1px solid ${toolColor}55`, borderRadius:14, padding:'14px 16px', boxShadow:'0 24px 60px rgba(0,0,0,0.6)' }}>
             <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
-              <span style={{ fontSize:12, fontWeight:800, letterSpacing:'0.07em', color:toolColor }}>{tool === 'calc' ? '🧮 CALCULATRICE' : tool === 'games' ? '🎮 JEUX' : '🗒️ NOTE'}</span>
+              <span style={{ fontSize:12, fontWeight:800, letterSpacing:'0.07em', color:toolColor }}>{tool === 'calc' ? '🧮 CALCULATRICE' : tool === 'games' ? '🎮 JEUX' : ''}</span>
               <button onClick={() => setTool(null)} style={{ background:'none', border:'none', color:C.muted, fontSize:18, lineHeight:1, cursor:'pointer', padding:'0 2px' }}>×</button>
             </div>
             {tool === 'calc' ? <FinanceCalcPanel /> : tool === 'games' ? <JeuxPanel /> : <NotePanel />}
@@ -7170,6 +7170,9 @@ function buildBackup() {
     // Note : notes locales — les notes chiffrées restent chiffrées dans l'export
     // (blob { v, salt, iv, ct } par note, comme le coffre MDP)
     notes: lsJson(NOTE_LS_KEY) || [],
+    // Vérificateur du mot de passe global des notes cryptées (blob chiffré, jamais le mdp) —
+    // permet de valider le mot de passe après restauration même sans note cryptée existante.
+    notes_enc_check: lsJson(NOTE_ENC_CHECK_KEY) || null,
     // Paramétrage : modules activés/désactivés (section Paramétrage d'À propos)
     modules: lsJson(MODULES_LS_KEY) || {},
     // Paramétrage : visibilité de chaque module sur l'accueil (bouton 🏠 du Paramétrage)
@@ -7221,7 +7224,7 @@ const EXPORT_SECTIONS = [
   { key:'vetement', label:'Vêtement',     icon:'👕', hint:'inventaire + fiches (sans photos)', fields:['vetement'] },
   { key:'emploi',   label:'Emploi',       icon:'💼', hint:'salaire + secteur',           fields:['emploi'] },
   { key:'sport',    label:'Sport',        icon:'🏋️', hint:'exercices cochés',           fields:['sport'] },
-  { key:'note',     label:'Note',         icon:'🗒️', hint:'notes (chiffrées incluses, telles quelles)', fields:['notes'] },
+  { key:'note',     label:'Note',         icon:'🗒️', hint:'notes (cryptées incluses, telles quelles)', fields:['notes', 'notes_enc_check'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Alertes',      icon:'🔔', hint:'rappels fixes + persos (dates & heures)', fields:['rappels', 'rappels_time', 'remembers'] },
   { key:'comptes',  label:'Comptes & clés',icon:'🔐', hint:'clés/pseudos API (Gemini, GitHub, LoL, chess, speedrun)', fields:['gemini_key','github_token','chess_user','speedrun_user','lol'] },
@@ -7451,6 +7454,8 @@ function applyBackup(data) {
       saveNotes(Object.values(byId));
     } catch {}
   }
+  // Vérificateur du mot de passe global des notes cryptées — REMPLACÉ si présent et non vide.
+  if (isVaultBlob(data.notes_enc_check)) put(NOTE_ENC_CHECK_KEY, data.notes_enc_check);
   // (l'ancienne clé yt_watchlater — liste locale « à regarder plus tard » — est ignorée :
   // le bouton 🕒 écrit désormais directement dans la playlist YouTube du compte)
   // Paramétrage des modules (activés/désactivés) — REMPLACÉ si présent
@@ -15177,128 +15182,212 @@ function NourriturePanel() {
 }
 
 // ════════════════════════════════════════════════
-// NOTE — prise de notes locale (localStorage), chiffrement OPTIONNEL PAR NOTE
-// (pas de mot de passe global au module) : AES-GCM 256 + PBKDF2 — on réutilise
-// mdpEncrypt/mdpDecrypt du coffre Mot de Passe (blob { v, salt, iv, ct }).
-// Note claire : { id, title, text, locked:false, updatedAt }
-// Note chiffrée : { id, title, locked:true, enc:{v,salt,iv,ct}, updatedAt } — le TEXTE
-// seul est chiffré (le titre reste lisible pour la liste), mot de passe jamais stocké.
-// Module basculable (Paramétrage), exporté/importé (clé backup `notes`, fusion par id
-// la plus récente gagne), PAS de carte sur l'accueil connecté (demande) mais accessible
-// depuis la PAGE DE CONNEXION (bouton 🗒️ — tout est local, aucune connexion requise).
-// ⚠ Mot de passe d'une note oublié = texte irrécupérable (aucun backend).
+// NOTE — prise de notes locale (localStorage). DEUX ESPACES SÉPARÉS (7.6.12) :
+//   • « Note » : notes en CLAIR uniquement. Les notes cryptées n'apparaissent PAS ici
+//     (même leur existence est masquée — demande utilisateur : « afficher qu'une note est
+//     protégée est déjà trop sensible »).
+//   • « Note crypté » : accessible en CLIQUANT sur le TITRE en haut à gauche → saisie d'un
+//     MOT DE PASSE GLOBAL (plus de mot de passe par note). Affiche TOUTES les notes cryptées
+//     (titre + texte chiffrés). Bouton « ← Revenir aux notes » en bas à gauche.
+// Chiffrement AES-GCM 256 + PBKDF2 réutilisé du coffre MDP (mdpEncrypt/mdpDecrypt, blob
+// { v, salt, iv, ct }). Le mot de passe global n'est jamais stocké ; un VÉRIFICATEUR
+// (`spotifyplus_notes_enc_check` = mdpEncrypt(gpw,{v:1})) permet de valider la saisie même
+// sans note cryptée existante, et voyage dans le backup (clé `notes_enc_check`).
+// Note claire   : { id, title, text, locked:false, updatedAt }
+// Note cryptée  : { id, locked:true, enc:{v,salt,iv,ct}, updatedAt } — enc = { title, text }
+//   chiffrés (AUCUN titre en clair). Anciennes notes { title clair, enc:{text} } chiffrées
+//   avec un mdp individuel : dé-verrouillables per-note dans l'espace crypté, re-chiffrées
+//   au mot de passe global à l'enregistrement (migration douce).
+// Module basculable (Paramétrage), exporté/importé (clé backup `notes` + `notes_enc_check`).
+// ⚠ Mot de passe global oublié = notes cryptées irrécupérables (aucun backend).
 // ════════════════════════════════════════════════
 const NOTE_COLOR = '#6fd345';   // vert de l'arc-en-ciel (entre Musique et Nourriture)
 const NOTE_LS_KEY = 'spotifyplus_notes';
+const NOTE_ENC_CHECK_KEY = 'spotifyplus_notes_enc_check';   // vérificateur du mot de passe global
 function loadNotes() { try { return JSON.parse(localStorage.getItem(NOTE_LS_KEY)) || []; } catch { return []; } }
 function saveNotes(n) { lsSet(NOTE_LS_KEY, JSON.stringify(n)); }
 function isNoteEnc(n) { return !!(n && n.locked && isVaultBlob(n.enc)); }
+function loadNoteEncCheck() { try { return JSON.parse(localStorage.getItem(NOTE_ENC_CHECK_KEY)) || null; } catch { return null; } }
+function saveNoteEncCheck(b) { lsSet(NOTE_ENC_CHECK_KEY, JSON.stringify(b)); }
 
 function NotePanel() {
   const [notes, setNotes]   = React.useState(loadNotes);
-  const [editId, setEditId] = React.useState(null);    // null | 'new' | id — éditeur ouvert
+  const [mode, setMode]     = React.useState('normal'); // 'normal' | 'enc'
+  const [gpw, setGpw]       = React.useState('');        // mot de passe global (session de l'espace crypté)
+  const [dec, setDec]       = React.useState({});        // id → { title, text } | null (échec = ancien mdp individuel)
+
+  // Éditeur (création / édition)
+  const [editId, setEditId] = React.useState(null);      // null | 'new' | id
   const [title, setTitle]   = React.useState('');
   const [text, setText]     = React.useState('');
-  const [encOn, setEncOn]   = React.useState(false);   // chiffrer cette note à l'enregistrement
-  const [editPw, setEditPw] = React.useState('');      // mot de passe de la note déverrouillée (session éditeur)
-  const [pw, setPw]         = React.useState('');      // nouveau mot de passe (activation du chiffrement)
-  const [pw2, setPw2]       = React.useState('');
-  const [askPwId, setAskPwId] = React.useState(null);  // note chiffrée en attente de mot de passe
-  const [askPw, setAskPw]   = React.useState('');
   const [busy, setBusy]     = React.useState(false);
   const [err, setErr]       = React.useState('');
 
+  // Porte d'accès à l'espace crypté
+  const [gate, setGate]     = React.useState(null);      // null | 'setup' | 'unlock'
+  const [gPw, setGPw]       = React.useState('');
+  const [gPw2, setGPw2]     = React.useState('');
+  const [gErr, setGErr]     = React.useState('');
+  const [gBusy, setGBusy]   = React.useState(false);
+
+  // Déverrouillage per-note LEGACY (anciennes notes chiffrées avec un mdp individuel)
+  const [askId, setAskId]   = React.useState(null);
+  const [askPw, setAskPw]   = React.useState('');
+
   const commit = list => { setNotes(list); saveNotes(list); };
-  const closeEditor = () => { setEditId(null); setTitle(''); setText(''); setEncOn(false); setEditPw(''); setPw(''); setPw2(''); setErr(''); };
-  const openNew = () => { closeEditor(); setEditId('new'); };
-  const openNote = async (n) => {
-    setErr(''); setAskPwId(null); setAskPw('');
-    if (!isNoteEnc(n)) { setEditId(n.id); setTitle(n.title || ''); setText(n.text || ''); setEncOn(false); setEditPw(''); return; }
-    setAskPwId(n.id);   // → petit formulaire de mot de passe inline sur la carte
+  const closeEditor = () => { setEditId(null); setTitle(''); setText(''); setErr(''); setBusy(false); };
+
+  // Déchiffre toutes les notes cryptées à l'entrée dans l'espace crypté (titre + texte).
+  React.useEffect(() => {
+    if (mode !== 'enc' || !gpw) { setDec({}); return; }
+    let cancelled = false;
+    (async () => {
+      const out = {};
+      for (const n of notes) {
+        if (!isNoteEnc(n)) continue;
+        try { const d = await mdpDecrypt(gpw, n.enc); out[n.id] = { title: (d && d.title) || n.title || 'Sans titre', text: (d && d.text) || '' }; }
+        catch { out[n.id] = null; }   // ancien mdp individuel → déverrouillage per-note requis
+      }
+      if (!cancelled) setDec(out);
+    })();
+    return () => { cancelled = true; };
+  }, [mode, gpw, notes]);
+
+  // ── Porte : entrer dans l'espace crypté ──
+  const openGate = () => { if (mode !== 'normal') return; setGErr(''); setGPw(''); setGPw2(''); setGate(loadNoteEncCheck() ? 'unlock' : 'setup'); };
+  const cancelGate = () => { setGate(null); setGPw(''); setGPw2(''); setGErr(''); };
+  const submitGate = async () => {
+    if (gBusy) return;
+    setGBusy(true); setGErr('');
+    try {
+      if (gate === 'setup') {
+        if (!gPw) { setGErr('Choisis un mot de passe.'); setGBusy(false); return; }
+        if (gPw !== gPw2) { setGErr('Les deux mots de passe ne correspondent pas.'); setGBusy(false); return; }
+        saveNoteEncCheck(await mdpEncrypt(gPw, { v: 1 }));
+        setGpw(gPw); setMode('enc'); cancelGate();
+      } else {
+        const chk = loadNoteEncCheck();
+        try { await mdpDecrypt(gPw, chk); }
+        catch { setGErr('Mot de passe incorrect.'); setGBusy(false); return; }
+        setGpw(gPw); setMode('enc'); cancelGate();
+      }
+    } catch { setGErr('Erreur de chiffrement.'); }
+    setGBusy(false);
   };
-  const unlockNote = async (n) => {
+  const leaveEnc = () => { setMode('normal'); setGpw(''); setDec({}); closeEditor(); setAskId(null); setAskPw(''); setErr(''); };
+
+  // ── Ouvrir / éditer ──
+  const openNew = () => { closeEditor(); setEditId('new'); };
+  const openNote = async n => {
+    setErr('');
+    if (mode === 'normal') { setEditId(n.id); setTitle(n.title || ''); setText(n.text || ''); return; }
+    const d = dec[n.id];
+    if (d) { setEditId(n.id); setTitle(d.title || ''); setText(d.text || ''); return; }
+    if (d === null) { setAskId(n.id); setAskPw(''); }   // legacy : mot de passe individuel
+  };
+  const unlockLegacy = async n => {
     if (!askPw || busy) return;
     setBusy(true); setErr('');
-    try {
-      const data = await mdpDecrypt(askPw, n.enc);
-      setEditId(n.id); setTitle(n.title || ''); setText((data && data.text) || '');
-      setEncOn(true); setEditPw(askPw); setAskPwId(null); setAskPw('');
-    } catch { setErr('Mot de passe incorrect.'); }
+    try { const d = await mdpDecrypt(askPw, n.enc); setEditId(n.id); setTitle(n.title || ''); setText((d && d.text) || ''); setAskId(null); setAskPw(''); }
+    catch { setErr('Mot de passe incorrect.'); }
     setBusy(false);
   };
+
   const saveNote = async () => {
     if (busy) return;
     const t = title.trim() || 'Sans titre';
-    let entry;
-    if (encOn) {
-      // mot de passe : celui de la note déverrouillée, ou le nouveau (saisi 2×)
-      let password = editPw;
-      if (!password) {
-        if (!pw) { setErr('Choisis un mot de passe pour chiffrer cette note.'); return; }
-        if (pw !== pw2) { setErr('Les deux mots de passe ne correspondent pas.'); return; }
-        password = pw;
-      }
+    const now = Date.now();
+    const newId = () => now + '_' + Math.random().toString(36).slice(2);
+    if (mode === 'enc') {
+      if (!gpw) { setErr('Session cryptée expirée.'); return; }
       setBusy(true); setErr('');
-      try { entry = { locked: true, enc: await mdpEncrypt(password, { text }) }; }
+      let enc;
+      try { enc = await mdpEncrypt(gpw, { title: t, text }); }
       catch { setErr('Échec du chiffrement.'); setBusy(false); return; }
       setBusy(false);
+      const entry = { locked: true, enc };   // note cryptée : AUCUN titre en clair
+      if (editId === 'new') commit([{ id: newId(), updatedAt: now, ...entry }, ...notes]);
+      else commit(notes.map(n => n.id === editId ? { id: n.id, updatedAt: now, ...entry } : n));
     } else {
-      entry = { locked: false, text };
-    }
-    const now = Date.now();
-    if (editId === 'new') {
-      commit([{ id: now + '_' + Math.random().toString(36).slice(2), title: t, updatedAt: now, ...entry }, ...notes]);
-    } else {
-      commit(notes.map(n => n.id === editId ? { id: n.id, title: t, updatedAt: now, ...entry } : n));
+      const entry = { locked: false, title: t, text };
+      if (editId === 'new') commit([{ id: newId(), updatedAt: now, ...entry }, ...notes]);
+      else commit(notes.map(n => n.id === editId ? { id: n.id, updatedAt: now, ...entry } : n));
     }
     closeEditor();
   };
-  const deleteNote = (n) => {
-    if (!window.confirm(`Supprimer la note « ${n.title || 'Sans titre'} » ?`)) return;
+  const deleteNote = n => {
+    const label = mode === 'enc' ? ((dec[n.id] && dec[n.id].title) || 'cette note cryptée') : (n.title || 'Sans titre');
+    if (!window.confirm(`Supprimer la note « ${label} » ?`)) return;
     if (editId === n.id) closeEditor();
-    if (askPwId === n.id) { setAskPwId(null); setAskPw(''); }
+    if (askId === n.id) { setAskId(null); setAskPw(''); }
     commit(notes.filter(x => x.id !== n.id));
   };
 
   const inputSt = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'6px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box', width:'100%' };
   const btnSt = on => ({ background: on ? `${NOTE_COLOR}22` : 'none', border:`1px solid ${on ? NOTE_COLOR + '66' : C.border}`, borderRadius:6, color: on ? NOTE_COLOR : C.muted, fontSize:11, padding:'6px 12px', cursor:'pointer', fontFamily:'inherit' });
-  const sorted = [...notes].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   const fmtDate = ts => ts ? new Date(ts).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' }) : '';
+  const isEnc = mode === 'enc';
+  const accent = isEnc ? '#e0a050' : NOTE_COLOR;
+  const list = notes.filter(n => isEnc ? isNoteEnc(n) : !isNoteEnc(n)).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-      {editId === null && (
-        <button onClick={openNew} style={{ ...btnSt(true), fontWeight:700, padding:'8px 0' }}>+ Nouvelle note</button>
+      {/* Titre auto-géré : cliquer « NOTE » (mode normal) ouvre l'accès aux notes cryptées */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8 }}>
+        <button onClick={openGate} disabled={isEnc}
+          title={isEnc ? '' : 'Cliquer pour accéder aux notes cryptées (mot de passe)'}
+          style={{ background:'none', border:'none', padding:0, margin:0, cursor: isEnc ? 'default' : 'pointer', color:accent, fontSize:12, fontWeight:800, letterSpacing:'0.07em', fontFamily:'inherit', display:'flex', alignItems:'center', gap:7 }}>
+          {isEnc ? '🔒 NOTE CRYPTÉ' : '🗒️ NOTE'}
+          {!isEnc && <span style={{ fontSize:11, color:C.dim }}>🔒</span>}
+        </button>
+      </div>
+
+      {/* Porte : saisie du mot de passe global */}
+      {gate && (
+        <div style={{ background:C.surface, border:`1px solid ${accent}66`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+          <div style={{ fontSize:11, fontWeight:800, letterSpacing:'0.05em', color:'#e0a050' }}>
+            {gate === 'setup' ? '🔒 CRÉER LE MOT DE PASSE DES NOTES CRYPTÉES' : '🔒 NOTES CRYPTÉES — MOT DE PASSE'}
+          </div>
+          <div style={{ fontSize:10, color:C.dim, lineHeight:1.4 }}>
+            {gate === 'setup'
+              ? 'Un seul mot de passe protège toutes tes notes cryptées. ⚠ Oublié = notes irrécupérables.'
+              : 'Saisis le mot de passe global pour voir tes notes cryptées.'}
+          </div>
+          <input type="password" value={gPw} placeholder="Mot de passe" autoFocus
+            onChange={e => { setGPw(e.target.value); setGErr(''); }}
+            onKeyDown={e => { if (e.key === 'Enter' && gate === 'unlock') submitGate(); }}
+            style={inputSt} />
+          {gate === 'setup' && (
+            <input type="password" value={gPw2} placeholder="Confirmer le mot de passe"
+              onChange={e => { setGPw2(e.target.value); setGErr(''); }}
+              onKeyDown={e => { if (e.key === 'Enter') submitGate(); }}
+              style={inputSt} />
+          )}
+          {gErr && <div style={{ fontSize:10, color:'#e05050' }}>{gErr}</div>}
+          <div style={{ display:'flex', gap:8 }}>
+            <button onClick={submitGate} disabled={gBusy} style={{ ...btnSt(true), flex:1, fontWeight:700, opacity: gBusy ? 0.6 : 1 }}>{gBusy ? '…' : (gate === 'setup' ? '✓ Créer' : '🔓 Ouvrir')}</button>
+            <button onClick={cancelGate} style={btnSt(false)}>Annuler</button>
+          </div>
+        </div>
       )}
 
-      {/* Éditeur (création ou édition) */}
+      {/* Bouton nouvelle note (libellé selon l'espace) */}
+      {editId === null && !gate && (
+        <button onClick={openNew} style={{ ...btnSt(true), fontWeight:700, padding:'8px 0' }}>
+          {isEnc ? '+ Nouvelle note cryptée' : '+ Nouvelle note'}
+        </button>
+      )}
+
+      {/* Éditeur (aucun choix de chiffrement : dépend de l'espace courant) */}
       {editId !== null && (
-        <div style={{ background:C.surface, border:`1px solid ${NOTE_COLOR}55`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
-          <div style={{ fontSize:11, fontWeight:800, letterSpacing:'0.05em', color:NOTE_COLOR }}>
-            {editId === 'new' ? '🗒️ NOUVELLE NOTE' : '✏️ ÉDITION'}
+        <div style={{ background:C.surface, border:`1px solid ${accent}55`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+          <div style={{ fontSize:11, fontWeight:800, letterSpacing:'0.05em', color:accent }}>
+            {editId === 'new' ? (isEnc ? '🔒 NOUVELLE NOTE CRYPTÉE' : '🗒️ NOUVELLE NOTE') : (isEnc ? '🔒 ÉDITION (CRYPTÉE)' : '✏️ ÉDITION')}
           </div>
-          <input type="text" value={title} placeholder="Titre (reste lisible même si la note est chiffrée)"
-            onChange={e => setTitle(e.target.value)} style={inputSt} />
+          <input type="text" value={title} placeholder="Titre" onChange={e => setTitle(e.target.value)} style={inputSt} />
           <textarea value={text} placeholder="Ta note…" onChange={e => setText(e.target.value)} rows={8}
             style={{ ...inputSt, resize:'vertical', minHeight:110, lineHeight:1.5 }} />
-          {/* Chiffrement par note (optionnel) */}
-          <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:11, color: encOn ? NOTE_COLOR : C.muted, cursor:'pointer', userSelect:'none' }}>
-            <input type="checkbox" checked={encOn} onChange={e => { setEncOn(e.target.checked); setErr(''); }} />
-            🔒 Chiffrer cette note par mot de passe
-          </label>
-          {encOn && !editPw && (
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6 }}>
-              <input type="password" value={pw} placeholder="Mot de passe" onChange={e => setPw(e.target.value)} style={inputSt} />
-              <input type="password" value={pw2} placeholder="Confirmer" onChange={e => setPw2(e.target.value)} style={inputSt} />
-            </div>
-          )}
-          {encOn && editPw && (
-            <div style={{ fontSize:9.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-              🔑 mot de passe actuel conservé — décoche puis recoche pour en changer
-              <button onClick={() => { setEditPw(''); setPw(''); setPw2(''); }} style={{ marginLeft:8, background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9, padding:'2px 7px', cursor:'pointer' }}>changer</button>
-            </div>
-          )}
-          {encOn && <div style={{ fontSize:9, color:'#e0a050', lineHeight:1.4 }}>⚠ Mot de passe oublié = note irrécupérable (chiffrement local, aucun backend).</div>}
+          {isEnc && <div style={{ fontSize:9, color:'#e0a050', lineHeight:1.4 }}>🔒 Note chiffrée avec le mot de passe global (titre inclus).</div>}
           {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
           <div style={{ display:'flex', gap:8 }}>
             <button onClick={saveNote} disabled={busy} style={{ ...btnSt(true), flex:1, fontWeight:700, opacity: busy ? 0.6 : 1 }}>{busy ? '…' : '✓ Enregistrer'}</button>
@@ -15307,43 +15396,60 @@ function NotePanel() {
         </div>
       )}
 
-      {/* Liste des notes (plus récente en premier) */}
-      {sorted.length === 0 && editId === null && (
-        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'8px 0', fontFamily:'DM Mono,monospace' }}>Aucune note pour l'instant</div>
-      )}
-      {sorted.map(n => (
-        <div key={n.id} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 12px', display:'flex', flexDirection:'column', gap:6 }}>
-          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-            <span style={{ fontSize:13, flexShrink:0 }}>{isNoteEnc(n) ? '🔒' : '🗒️'}</span>
-            <div onClick={() => openNote(n)} style={{ flex:1, minWidth:0, cursor:'pointer' }}>
-              <div style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{n.title || 'Sans titre'}</div>
-              <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-                {fmtDate(n.updatedAt)}{isNoteEnc(n) ? ' · chiffrée' : ''}
-              </div>
-            </div>
-            <button onClick={() => openNote(n)} title={isNoteEnc(n) ? 'Déverrouiller' : 'Éditer'}
-              style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, padding:'3px 8px', cursor:'pointer', flexShrink:0 }}>{isNoteEnc(n) ? '🔓' : '✏️'}</button>
-            <button onClick={() => deleteNote(n)} title="Supprimer"
-              style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
-          </div>
-          {/* Aperçu : 2 lignes du texte en clair — jamais pour une note chiffrée */}
-          {!isNoteEnc(n) && n.text && editId !== n.id && (
-            <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.45, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', whiteSpace:'pre-wrap' }}>{n.text}</div>
-          )}
-          {/* Déverrouillage inline d'une note chiffrée */}
-          {askPwId === n.id && (
-            <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-              <input type="password" value={askPw} placeholder="Mot de passe de la note" autoFocus
-                onChange={e => { setAskPw(e.target.value); setErr(''); }}
-                onKeyDown={e => { if (e.key === 'Enter') unlockNote(n); }}
-                style={{ ...inputSt, flex:1, width:'auto' }} />
-              <button onClick={() => unlockNote(n)} disabled={busy} style={btnSt(true)}>{busy ? '…' : '🔓'}</button>
-              <button onClick={() => { setAskPwId(null); setAskPw(''); setErr(''); }} style={btnSt(false)}>×</button>
-            </div>
-          )}
-          {askPwId === n.id && err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
+      {/* Liste */}
+      {list.length === 0 && editId === null && !gate && (
+        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'8px 0', fontFamily:'DM Mono,monospace' }}>
+          {isEnc ? 'Aucune note cryptée pour l\'instant' : 'Aucune note pour l\'instant'}
         </div>
-      ))}
+      )}
+      {list.map(n => {
+        const d = isEnc ? dec[n.id] : null;             // undefined = en cours ; null = legacy ; obj = ok
+        const loading = isEnc && d === undefined;
+        const legacy  = isEnc && d === null;
+        const shownTitle = isEnc
+          ? (loading ? '⏳ Déchiffrement…' : legacy ? (n.title || '🔒 Verrouillée') : ((d && d.title) || 'Sans titre'))
+          : (n.title || 'Sans titre');
+        const preview = isEnc ? (d && d.text) : n.text;
+        return (
+          <div key={n.id} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 12px', display:'flex', flexDirection:'column', gap:6 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ fontSize:13, flexShrink:0 }}>{isEnc ? '🔒' : '🗒️'}</span>
+              <div onClick={() => openNote(n)} style={{ flex:1, minWidth:0, cursor:'pointer' }}>
+                <div style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{shownTitle}</div>
+                <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                  {fmtDate(n.updatedAt)}{legacy ? ' · ancien mot de passe' : ''}
+                </div>
+              </div>
+              <button onClick={() => openNote(n)} title={legacy ? 'Déverrouiller (ancien mot de passe)' : 'Éditer'}
+                style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, padding:'3px 8px', cursor:'pointer', flexShrink:0 }}>{legacy ? '🔓' : '✏️'}</button>
+              <button onClick={() => deleteNote(n)} title="Supprimer"
+                style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+            </div>
+            {preview && editId !== n.id && (
+              <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.45, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', whiteSpace:'pre-wrap' }}>{preview}</div>
+            )}
+            {/* Déverrouillage per-note LEGACY */}
+            {askId === n.id && (
+              <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                <input type="password" value={askPw} placeholder="Ancien mot de passe de la note" autoFocus
+                  onChange={e => { setAskPw(e.target.value); setErr(''); }}
+                  onKeyDown={e => { if (e.key === 'Enter') unlockLegacy(n); }}
+                  style={{ ...inputSt, flex:1, width:'auto' }} />
+                <button onClick={() => unlockLegacy(n)} disabled={busy} style={btnSt(true)}>{busy ? '…' : '🔓'}</button>
+                <button onClick={() => { setAskId(null); setAskPw(''); setErr(''); }} style={btnSt(false)}>×</button>
+              </div>
+            )}
+            {askId === n.id && err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
+          </div>
+        );
+      })}
+
+      {/* Retour à l'espace « Note » (bas à gauche) */}
+      {isEnc && (
+        <div>
+          <button onClick={leaveEnc} style={{ ...btnSt(false), fontWeight:700 }}>← Revenir aux notes</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -17860,7 +17966,6 @@ function MobileApp() {
         )}
         {tab === 'note' && (
           <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
-            <div style={{ fontSize:10, fontWeight:700, color:NOTE_COLOR, letterSpacing:'0.07em' }}>NOTE</div>
             <NotePanel />
           </div>
         )}
@@ -17981,7 +18086,7 @@ function WebApp() {
     emploi:     { heading:'EMPLOI',       color:EMPLOI_COLOR,  node:<EmploiPanel /> },
     tvtime:     { heading:'TV TIME',      color:TVTIME_COLOR,  node:<TvTimePanel /> },
     vetement:   { heading:'VÊTEMENT',     color:'#f59a2e',     node:<VetementPanel /> },
-    note:       { heading:'NOTE',         color:NOTE_COLOR,   node:<NotePanel /> },
+    note:       { heading:'NOTE',         color:NOTE_COLOR,   node:<NotePanel />, selfHeading:true },
     food:       { heading:'SANTÉ',        color:FOOD_COLOR,   node:<NourriturePanel /> },
     sport:      { heading:'SPORT',        color:SPORT_COLOR,  node:<SportPanel /> },
     todo:       { heading:'TO DO',        color:TODO_GREEN,   node:<TodoPanel /> },

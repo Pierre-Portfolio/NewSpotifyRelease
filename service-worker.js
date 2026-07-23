@@ -62,7 +62,8 @@
 // v72 : bump de cache — Vêtement : section « Mes marques » (marques aimées + types d'articles).
 // v73 : bump de cache — Finance : la section CRYPTO affiche « PEPE = X % d'un BTC » (position PEPE cachée) au lieu du badge EUR/USD.
 // v74 : bump de cache — nouveau module « API » (liste de toutes les API + export JSON des cochées).
-const CACHE  = 'spotifyplus-v74';
+// v75 : bump de cache — Note : espace « Note crypté » séparé (mot de passe global, clic sur le titre), plus de mdp par note.
+const CACHE  = 'spotifyplus-v75';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
