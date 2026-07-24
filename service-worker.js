@@ -70,7 +70,9 @@
 // v87 : bump de cache — Cartographie : nouvelle carte « Qualité de l'eau » (dansmoneau.fr, eau du robinet par commune).
 // v88 : bump de cache — Cartographie : nouvelle carte interactive INSEE (insee.fr).
 // v89 : bump de cache — Cartographie : nouvelle carte « Santé » (odisse.santepubliquefrance.fr) + sous-collapses triés par ordre alphabétique.
-const CACHE  = 'spotifyplus-v90';
+// v90 : bump de cache — Cartographie : nouvelle carte « Aurores boréales » (spaceweatherlive.com).
+// v91 : bump de cache — TV Time YouTube : clic sur la miniature d'une vidéo → ouvre la vidéo (nouvel onglet) + marque vue automatiquement.
+const CACHE  = 'spotifyplus-v91';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
