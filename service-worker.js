@@ -64,7 +64,8 @@
 // v74 : bump de cache — nouveau module « API » (liste de toutes les API + export JSON des cochées).
 // v75 : bump de cache — Note : espace « Note crypté » séparé (mot de passe global, clic sur le titre), plus de mdp par note.
 // v76 : bump de cache — TV Time YouTube : tag « garder uniquement les Shorts » (affiche/notifie que les Shorts) + demande à l'ajout d'une chaine 100% Shorts.
-const CACHE  = 'spotifyplus-v83';
+// v84 : bump de cache — Actu : collapse « Cartographie » (au-dessus des fuites) regroupant Réseaux de Transport Paris + Feux de forêt + Guerre + Qualité de l'air.
+const CACHE  = 'spotifyplus-v84';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
