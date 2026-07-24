@@ -66,7 +66,8 @@
 // v76 : bump de cache — TV Time YouTube : tag « garder uniquement les Shorts » (affiche/notifie que les Shorts) + demande à l'ajout d'une chaine 100% Shorts.
 // v84 : bump de cache — Actu : collapse « Cartographie » (au-dessus des fuites) regroupant Réseaux de Transport Paris + Feux de forêt + Guerre + Qualité de l'air.
 // v85 : bump de cache — Cartographie : chaque carte a un bouton « ⛶ Plein écran » (overlay) + bouton « ← Retour » (Échap) pour revenir.
-const CACHE  = 'spotifyplus-v85';
+// v86 : bump de cache — Cartographie : « Feux de forêt » (EFFIS, ne s'affichait pas) remplacé par « Catastrophes naturelles » (GDACS, multi-aléas mondial).
+const CACHE  = 'spotifyplus-v86';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
