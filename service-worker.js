@@ -68,7 +68,8 @@
 // v85 : bump de cache — Cartographie : chaque carte a un bouton « ⛶ Plein écran » (overlay) + bouton « ← Retour » (Échap) pour revenir.
 // v86 : bump de cache — Cartographie : « Feux de forêt » (EFFIS, ne s'affichait pas) remplacé par « Catastrophes naturelles » (GDACS, multi-aléas mondial).
 // v87 : bump de cache — Cartographie : nouvelle carte « Qualité de l'eau » (dansmoneau.fr, eau du robinet par commune).
-const CACHE  = 'spotifyplus-v87';
+// v88 : bump de cache — Cartographie : nouvelle carte interactive INSEE (insee.fr).
+const CACHE  = 'spotifyplus-v88';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
