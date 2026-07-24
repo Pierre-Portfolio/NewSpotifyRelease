@@ -70,7 +70,7 @@
 // v87 : bump de cache — Cartographie : nouvelle carte « Qualité de l'eau » (dansmoneau.fr, eau du robinet par commune).
 // v88 : bump de cache — Cartographie : nouvelle carte interactive INSEE (insee.fr).
 // v89 : bump de cache — Cartographie : nouvelle carte « Santé » (odisse.santepubliquefrance.fr) + sous-collapses triés par ordre alphabétique.
-const CACHE  = 'spotifyplus-v89';
+const CACHE  = 'spotifyplus-v90';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
