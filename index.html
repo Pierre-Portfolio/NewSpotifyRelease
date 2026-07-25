@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.30';
+const APP_VERSION = '7.6.31';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -9621,6 +9621,9 @@ function StatsPanel() {
         <StatsCollapse title="♟️ CHESS.COM" color={CHESS_COLOR}>
           <ChessStatsSection />
         </StatsCollapse>
+        <StatsCollapse title="🕹️ STEAM" color={STEAM_COLOR}>
+          <SteamStatsSection />
+        </StatsCollapse>
         <StatsCollapse title="🕹️ JEUX HUB" color={GAMES_COLOR}>
           <GamesHubStatsSection />
         </StatsCollapse>
@@ -17543,6 +17546,133 @@ function ChessStatsSection() {
       <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
         {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
         <button onClick={() => { setShowCfg(true); setNameInput(chessUser()); }} title="Changer de pseudo" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>⚙</button>
+        <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Steam (collapse 🕹️ STEAM dans 🎮 JEUX de StatsPanel) ──────────────────────
+// Mes statistiques Steam : niveau, jeux possédés, temps de jeu total, jeu le plus
+// joué, activité des 2 dernières semaines + rappel de la wishlist (keyless).
+// ⚠ Contrairement à la wishlist, ces endpoints EXIGENT une clé Web API Steam
+// (steamcommunity.com/dev/apikey) — saisie dans Bon Plan → Bibliothèque Steam → ⚙
+// ou dans le module API. Cache `spotifyplus_steam_stats` 30 min, re-fetchable →
+// PAS dans buildBackup / EXPORT_SECTIONS / restoreBackup (comme la wishlist).
+// { fetchedAt, id, persona, avatar, url, created, level, gameCount, totalMinutes,
+//   played, top:[{appid,name,minutes}], recentCount, recentMinutes } | { error }
+async function steamFetchStats(force) {
+  const id = steamId(), key = steamKey();
+  if (!id || !key) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(STEAM_STATS_LS)); } catch {}
+  if (!force && cache && cache.id === id && Date.now() - cache.fetchedAt < STEAM_TTL) return cache;
+  const api = (path, extra) => `https://api.steampowered.com/${path}?key=${encodeURIComponent(key)}&${extra}`;
+  const [sum, owned, lvl, recent] = await Promise.all([
+    steamGetJson(api('ISteamUser/GetPlayerSummaries/v2/',        'steamids=' + encodeURIComponent(id))),
+    steamGetJson(api('IPlayerService/GetOwnedGames/v1/',         'steamid=' + encodeURIComponent(id) + '&include_appinfo=1&include_played_free_games=1')),
+    steamGetJson(api('IPlayerService/GetSteamLevel/v1/',         'steamid=' + encodeURIComponent(id))),
+    steamGetJson(api('IPlayerService/GetRecentlyPlayedGames/v1/','steamid=' + encodeURIComponent(id))),
+  ]);
+  if ((sum && sum.__denied) || (owned && owned.__denied)) return { error: 'KEY' };
+  if (!sum && !owned) return { error: 'NET' };
+  const player  = (sum && sum.response && Array.isArray(sum.response.players) && sum.response.players[0]) || null;
+  const games   = (owned && owned.response && owned.response.games) || [];
+  const sorted  = games.slice().sort((a, b) => (steamNum(b.playtime_forever) || 0) - (steamNum(a.playtime_forever) || 0));
+  const rec     = (recent && recent.response) || {};
+  const data = {
+    fetchedAt: Date.now(), id,
+    persona: (player && player.personaname) || 'Compte Steam',
+    avatar:  (player && (player.avatarfull || player.avatarmedium || player.avatar)) || '',
+    url:     (player && player.profileurl) || ('https://steamcommunity.com/profiles/' + id),
+    created: player ? steamNum(player.timecreated) : null,
+    level:   (lvl && lvl.response && steamNum(lvl.response.player_level)) || null,
+    gameCount:    steamNum(owned && owned.response && owned.response.game_count) || games.length,
+    totalMinutes: games.reduce((n, g) => n + (steamNum(g.playtime_forever) || 0), 0),
+    played:       games.filter(g => (steamNum(g.playtime_forever) || 0) > 0).length,
+    top: sorted.slice(0, 3).map(g => ({ appid: steamNum(g.appid), name: g.name || ('App ' + g.appid), minutes: steamNum(g.playtime_forever) || 0 })),
+    recentCount:   steamNum(rec.total_count) || (Array.isArray(rec.games) ? rec.games.length : 0),
+    recentMinutes: (rec.games || []).reduce((n, g) => n + (steamNum(g.playtime_2weeks) || 0), 0),
+  };
+  // Profil privé / clé sans droits : Steam répond 200 avec une enveloppe vide.
+  if (!player && !games.length) return { error: 'PRIVATE' };
+  try { localStorage.setItem(STEAM_STATS_LS, JSON.stringify(data)); } catch {}
+  return data;
+}
+
+// Sous-section « 🕹️ Steam » du collapse 🎮 JEUX (StatsPanel) — même gabarit que
+// chess.com / Speedrun / GitHub (statCardEl).
+function SteamStatsSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const [showCfg, setShowCfg] = React.useState(false);
+  const configured = !!(steamId() && steamKey());
+  const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
+
+  const ERR = {
+    KEY:     'Clé Web API Steam invalide ou expirée — corrige-la avec ⚙ (ou dans le module API).',
+    PRIVATE: 'Steam ne renvoie rien — vérifie que ton profil et tes détails de jeu sont publics.',
+    NET:     'API Steam injoignable — réessaie dans un instant.',
+  };
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await steamFetchStats(force);
+    if (d.error) { setErr(ERR[d.error] || ERR.NET); if (d.error !== 'CONFIG') setData(null); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px' };
+  if (!configured || showCfg) {
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+        {!configured && (
+          <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+            Ces statistiques demandent ton <b style={{ color:STEAM_COLOR }}>SteamID64</b> ET une <b style={{ color:STEAM_COLOR }}>clé Web API Steam</b>
+            {steamId() ? <> — ton SteamID est déjà enregistré, il ne manque que la clé.</> : '.'} La wishlist (Bon Plan) fonctionne, elle, sans clé.
+          </div>
+        )}
+        <SteamConfigForm onSaved={() => { setShowCfg(false); setData(null); setTimeout(() => refresh(true), 0); }} onCancel={() => setShowCfg(false)} />
+      </div>
+    );
+  }
+  // Wishlist : lue depuis le cache du module Bon Plan (aucune requête supplémentaire ici).
+  let wlCount = 0;
+  try { const c = JSON.parse(localStorage.getItem(STEAM_WL_LS)); if (c && Array.isArray(c.items)) wlCount = c.items.length; } catch {}
+  const bigPromos = steamPromoItems().length;
+  const cards = data ? [
+    ...(data.level != null ? [{ label:'NIVEAU STEAM', value: fmtN(data.level), sub:'niveau du profil', icon:'🎖️', color:STEAM_COLOR }] : []),
+    { label:'JEUX POSSÉDÉS',  value: fmtN(data.gameCount),                sub:`${fmtN(data.played)} lancé(s) au moins une fois`, icon:'🎮', color:STEAM_COLOR },
+    { label:'TEMPS DE JEU',   value: steamFmtPlaytime(data.totalMinutes), sub:`≈ ${fmtN(Math.round(data.totalMinutes / 1440))} jour(s) cumulé(s)`, icon:'⏱', color:'#f0883e' },
+    ...(data.top[0] ? [{ label:'JEU LE PLUS JOUÉ', value: data.top[0].name, sub: steamFmtPlaytime(data.top[0].minutes) + ' de jeu', icon:'🏆', color:'#e3b341' }] : []),
+    ...(data.top[1] ? [{ label:'2e PLUS JOUÉ',     value: data.top[1].name, sub: steamFmtPlaytime(data.top[1].minutes) + ' de jeu', icon:'🥈', color:'#c0c6cc' }] : []),
+    ...(data.top[2] ? [{ label:'3e PLUS JOUÉ',     value: data.top[2].name, sub: steamFmtPlaytime(data.top[2].minutes) + ' de jeu', icon:'🥉', color:'#cd7f32' }] : []),
+    { label:'JAMAIS LANCÉS',  value: fmtN(Math.max(0, data.gameCount - data.played)), sub:'jeux de la bibliothèque encore vierges', icon:'📦', color:'#8b949e' },
+    { label:'CES 2 SEMAINES', value: steamFmtPlaytime(data.recentMinutes), sub:`${fmtN(data.recentCount)} jeu(x) joué(s) récemment`, icon:'🔥', color:'#45c552' },
+    ...(wlCount ? [{ label:'LISTE DE SOUHAITS', value: fmtN(wlCount), sub: bigPromos ? `${fmtN(bigPromos)} à −${STEAM_PROMO_PCT} % ou plus 🔥` : 'jeux suivis dans Bon Plan', icon:'⭐', color:'#f5c518' }] : []),
+  ] : [];
+  const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {loading && !data && <div style={{ ...card, fontSize:11, color:C.muted }}>⏳ Lecture de ton profil Steam…</div>}
+      {err && <div style={{ ...card, fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {data && (
+        <div style={{ ...card, display:'flex', alignItems:'center', gap:10 }}>
+          {data.avatar && <img src={data.avatar} alt="" style={{ width:38, height:38, borderRadius:'50%', border:`1px solid ${STEAM_COLOR}60`, flexShrink:0 }} />}
+          <div style={{ minWidth:0 }}>
+            <a href={data.url} target="_blank" rel="noopener noreferrer" style={{ fontSize:13, fontWeight:800, color:C.text, textDecoration:'none' }}>{data.persona} ↗</a>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+              {data.created ? `depuis ${new Date(data.created * 1000).toLocaleDateString('fr-FR', { year:'numeric', month:'long' })}` : ''}
+            </div>
+          </div>
+        </div>
+      )}
+      {cards.map(statCardEl)}
+      <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+        {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
+        <button onClick={() => setShowCfg(true)} title="Configurer Steam" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>⚙</button>
         <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
       </div>
     </div>
