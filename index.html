@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.38';
+const APP_VERSION = '7.6.39';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18066,6 +18066,46 @@ function rappelBadge(days) {
   if (days <= 30)    return { txt:`${days} j`,       color:'#f5a623' };
   return { txt:`${days} j`, color:'#46c46a' };
 }
+// ── Rappels RÉCURRENTS ────────────────────────────────────────────────────────
+// Pour ces clés, la date saisie est la date d'ORIGINE (ex. le début de la relation) et
+// l'alerte se répète tous les N MOIS. Partout (badge, dates à venir, notifications J-30/
+// J-7/J-1/J0, ajout auto au To do, stats) on raisonne donc sur la PROCHAINE occurrence :
+// un rappel récurrent ne tombe jamais « en retard », il resonne à chaque échéance.
+// { "<section>.<item>": N mois } — la clé porte le même format que `spotifyplus_rappels`.
+const RAPPEL_RECUR = { 'anniversaire.couple_cecile': 6 };   // « Couple avec Cécile » : tous les 6 mois
+// Ajoute n mois à une date 'YYYY-MM-DD' en BORNANT le jour au dernier jour du mois cible
+// (31 août + 6 mois → 28/29 février, jamais un débordement sur mars comme le ferait
+// setMonth). Renvoie une chaîne 'YYYY-MM-DD'.
+function rappelAddMonths(dateStr, n) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const total = (m - 1) + n;
+  const ny    = y + Math.floor(total / 12);
+  const nm    = ((total % 12) + 12) % 12;                   // 0-11
+  const last  = new Date(ny, nm + 1, 0).getDate();          // dernier jour du mois cible
+  const p2    = v => String(v).padStart(2, '0');
+  return `${ny}-${p2(nm + 1)}-${p2(Math.min(d, last))}`;
+}
+// Date EFFECTIVE d'un rappel : la prochaine occurrence ≥ aujourd'hui si la clé est
+// récurrente, la date telle quelle sinon (rappels normaux, extra et persos inchangés).
+// Le nombre de périodes écoulées est calculé directement (pas de boucle sur des années) ;
+// la petite boucle finale ne sert qu'à rattraper le jour du mois (bornage ci-dessus).
+function rappelNextDate(key, dateStr) {
+  const step = RAPPEL_RECUR[key];
+  if (!step || !dateStr) return dateStr;
+  const base = new Date(dateStr + 'T00:00:00');
+  if (isNaN(base.getTime())) return dateStr;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (base >= today) return dateStr;                        // occurrence d'origine encore à venir
+  const months = (today.getFullYear() - base.getFullYear()) * 12 + (today.getMonth() - base.getMonth());
+  let k = Math.floor(months / step), next = rappelAddMonths(dateStr, k * step), guard = 0;
+  while (rappelDelta(next) < 0 && guard++ < 24) { k++; next = rappelAddMonths(dateStr, k * step); }
+  return next;
+}
+// Libellé court de la périodicité, affiché à côté d'un rappel récurrent ('' si non récurrent).
+function rappelRecurLabel(key) {
+  const n = RAPPEL_RECUR[key];
+  return n ? (n === 12 ? '↻ 1 an' : `↻ ${n} mois`) : '';
+}
 // Tous les rappels datés (fixes + persos) avec leur nb de jours restants
 // { key, label, days, date } — `key` = identifiant stable ("<section>.<item>" pour les
 // fixes, "custom.<id>" pour les persos), utilisé pour dédoublonner l'ajout auto au To do.
@@ -18074,9 +18114,10 @@ function rememberAllWithDelta() {
   const dates = loadRappels();
   const times = loadRappelTimes();
   RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
-    const k = sec.key + '.' + ik;
-    const d = rappelDelta(dates[k]);
-    if (d != null) out.push({ key: k, label, days: d, date: dates[k], time: times[k] || '' });
+    const k  = sec.key + '.' + ik;
+    const ds = rappelNextDate(k, dates[k]);   // prochaine occurrence si le rappel est récurrent
+    const d  = rappelDelta(ds);
+    if (d != null) out.push({ key: k, label, days: d, date: ds, time: times[k] || '' });
   }));
   RAPPEL_EXTRA.forEach(e => { const d = rappelDelta(dates[e.key]); if (d != null) out.push({ key: e.key, label: e.label, days: d, date: dates[e.key], time: times[e.key] || '' }); });
   loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ key: 'custom.' + r.id, label: r.label, days: d, date: r.date, time: r.time || '' }); });
@@ -19117,7 +19158,7 @@ function RappelPanel() {
 
   // Rappels échus (pour le bandeau) — fixes + persos
   const due = [];
-  RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => { const d = rappelDelta(dates[sec.key + '.' + ik]); if (d != null && d <= 0) due.push(label); }));
+  RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => { const k = sec.key + '.' + ik; const d = rappelDelta(rappelNextDate(k, dates[k])); if (d != null && d <= 0) due.push(label); }));
   RAPPEL_EXTRA.forEach(e => { const d = rappelDelta(dates[e.key]); if (d != null && d <= 0) due.push(e.label); });
   customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d <= 0) due.push(c.label); });
 
@@ -19144,8 +19185,8 @@ function RappelPanel() {
   const upcoming = React.useMemo(() => {
     const out = [];
     RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => {
-      const k = sec.key + '.' + ik; const ds = dates[k]; const d = rappelDelta(ds);
-      if (d != null && d >= 0) out.push({ label, date: ds, time: times[k] || '', days: d });
+      const k = sec.key + '.' + ik; const ds = rappelNextDate(k, dates[k]); const d = rappelDelta(ds);
+      if (d != null && d >= 0) out.push({ label, date: ds, time: times[k] || '', days: d, recur: rappelRecurLabel(k) });
     }));
     RAPPEL_EXTRA.forEach(e => { const ds = dates[e.key]; const d = rappelDelta(ds); if (d != null && d >= 0) out.push({ label: e.label, date: ds, time: times[e.key] || '', days: d }); });
     customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d >= 0) out.push({ label: c.label, date: c.date, time: c.time || '', days: d }); });
@@ -19196,7 +19237,10 @@ function RappelPanel() {
               const b = rappelBadge(r.days);
               return (
                 <div key={i} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8 }}>
-                  <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{r.label}</div>
+                  <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>
+                    {r.label}
+                    {r.recur && <span style={{ marginLeft:6, fontSize:8, fontFamily:'DM Mono,monospace', color:RAPPEL_PURPLE, border:`1px solid ${RAPPEL_PURPLE}55`, borderRadius:4, padding:'1px 4px', whiteSpace:'nowrap' }}>{r.recur}</span>}
+                  </div>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, whiteSpace:'nowrap', flexShrink:0 }}>{fmtRappelDate(r.date)}{r.time ? ' · ' + r.time : ''}</span>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                 </div>
@@ -19209,11 +19253,23 @@ function RappelPanel() {
           {sec.items.map(([ik, label]) => {
             const key = sec.key + '.' + ik;
             const val = dates[key] || '';
-            const b = rappelBadge(rappelDelta(val));
+            // Rappel récurrent : le champ date garde la date d'ORIGINE (modifiable), mais le
+            // badge et la pastille ↻ annoncent la PROCHAINE occurrence.
+            const recur = rappelRecurLabel(key);
+            const next  = rappelNextDate(key, val);
+            const b = rappelBadge(rappelDelta(next));
             return (
               <div key={ik} style={{ display:'flex', alignItems:'center', gap:8 }}>
                 <div onClick={() => val && toggleTime(key)} title={val ? 'Cliquer pour afficher/masquer l’heure' : undefined}
-                  style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: val ? 'pointer' : 'default' }}>{label}</div>
+                  style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: val ? 'pointer' : 'default' }}>
+                  {label}
+                  {recur && (
+                    <span title={val ? `Prochaine échéance : ${fmtRappelDate(next)}` : `Se répète tous les ${RAPPEL_RECUR[key]} mois`}
+                      style={{ marginLeft:6, fontSize:8, fontFamily:'DM Mono,monospace', color:RAPPEL_PURPLE, border:`1px solid ${RAPPEL_PURPLE}55`, borderRadius:4, padding:'1px 4px', whiteSpace:'nowrap' }}>
+                      {recur}{val ? ' · ' + fmtRappelDate(next) : ''}
+                    </span>
+                  )}
+                </div>
                 <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
                 {dateInput(val, e => setDate(key, e.target.value))}
                 {val && openTimes.has(key) && timeInput(times[key] || '', e => setTime(key, e.target.value))}

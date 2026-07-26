@@ -77,7 +77,10 @@
 // v99 : bump de cache — connexion Google Drive/YouTube réparée : Google a coupé le flux
 // OAuth implicite par redirection (« Erreur 400 : invalid_request ») → passage à Google
 // Identity Services (popup, script accounts.google.com/gsi/client chargé lazy).
-const CACHE  = 'spotifyplus-v100';
+// v100 : bump de cache — Alertes : nouvelle ligne « Couple avec Cécile » (rubrique Anniversaire).
+// v101 : bump de cache — Alertes : rappels récurrents (« Couple avec Cécile » resonne tous les
+// 6 mois — la date saisie est l'origine, l'appli vise toujours la prochaine échéance).
+const CACHE  = 'spotifyplus-v101';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
