@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.36';
+const APP_VERSION = '7.6.37';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7830,9 +7830,10 @@ function buildBackup() {
     // Mot de passe : blob CHIFFRÉ du coffre { v, salt, iv, ct } — jamais en clair,
     // déchiffrable uniquement avec le mot de passe maître
     mdp_vault: loadVaultBlob(),
-    // Nourriture : profil + totaux caloriques quotidiens. La COMPOSITION des repas
-    // (spotifyplus_food_meals) est volontairement EXCLUE de l'export (demande utilisateur).
-    food: { profile: lsJson(FOOD_PROFILE_KEY), days: lsJson(FOOD_DAYS_KEY) || {} },
+    // Santé : profil + totaux caloriques quotidiens + journal des pesées (section Poids).
+    // La COMPOSITION des repas (spotifyplus_food_meals) est volontairement EXCLUE de
+    // l'export (demande utilisateur) ; les pesées, elles, sont sauvegardées.
+    food: { profile: lsJson(FOOD_PROFILE_KEY), days: lsJson(FOOD_DAYS_KEY) || {}, weights: lsJson(WEIGHT_KEY) || [] },
     // Bon Plan : jeux suivis (⭐ Ma liste) + prix cibles — les caches promos/boutiques
     // (re-fetchables) restent exclus
     bonplan: lsJson(CMP_WATCH_LS) || [],
@@ -7892,7 +7893,7 @@ const EXPORT_SECTIONS = [
   { key:'maps',     label:'Maps',         icon:'🗺️', hint:'trajets Google Timeline',    fields:['maps'] },
   { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…)', fields:['finance'] },
   { key:'bonplan',  label:'Bon Plan',     icon:'🛒', hint:'jeux suivis + prix cibles', fields:['bonplan'] },
-  { key:'food',     label:'Santé',        icon:'🍎', hint:'profil + calories quotidiennes (pas la composition)', fields:['food'] },
+  { key:'food',     label:'Santé',        icon:'🍎', hint:'profil + calories quotidiennes + pesées (pas la composition)', fields:['food'] },
   { key:'frigo',    label:'Frigo',        icon:'🧊', hint:'contenu + dates de péremption', fields:['frigo'] },
   { key:'vetement', label:'Vêtement',     icon:'👕', hint:'inventaire + fiches + marques (photos sur Drive)', fields:['vetement'] },
   { key:'emploi',   label:'Emploi',       icon:'💼', hint:'salaire + secteur',           fields:['emploi'] },
@@ -8111,6 +8112,11 @@ function applyBackup(data) {
         const merged = { ...data.food.days, ...local };
         saveFoodDays(merged);
       } catch {}
+    }
+    // Pesées (section Poids) — FUSIONNÉES : le local gagne à id égal, les doublons
+    // évidents (même jour + même poids) sont ignorés, tout le reste est ajouté.
+    if (Array.isArray(data.food.weights)) {
+      try { saveWeights(weightMerge(loadWeights(), data.food.weights)); } catch {}
     }
   }
   // Note — FUSIONNÉ par id : la version la plus récemment modifiée (updatedAt) gagne,
@@ -10333,6 +10339,12 @@ function StatsPanel() {
       </StatsCollapse>
       <StatsCollapse title="🗺️ MAPS" color={MAPS_COLOR}>
         {mapsCards.map(renderCard)}
+      </StatsCollapse>
+      {/* Santé — sous-collapse Poids : synthèse + courbes d'évolution des pesées (100 % local) */}
+      <StatsCollapse title="🩺 SANTÉ" color={FOOD_COLOR}>
+        <StatsCollapse title="⚖️ POIDS" color={FOOD_COLOR}>
+          <WeightStatsSection />
+        </StatsCollapse>
       </StatsCollapse>
       <StatsCollapse title="🔔 ALERTES" color="#6f7bf5">
         {/* Mini-timeline des 4 prochaines échéances mise en avant, tout en haut */}
@@ -16335,6 +16347,14 @@ function NourriturePanel() {
     if (!p.weight || !p.height || !p.age) return;
     setProfile(p); saveFoodProfile(p); setEditProfile(false);
   };
+  // La pesée la plus récente (section Poids) met à jour le poids du profil — il alimente
+  // le métabolisme de base (Mifflin-St Jeor) et donc l'objectif calorique quotidien.
+  const syncProfileWeight = (kg) => {
+    if (!kg || !profile || profile.weight === kg) return;
+    const p = { ...profile, weight: kg };
+    setProfile(p); saveFoodProfile(p);
+    setForm(f => ({ ...f, weight: String(kg) }));
+  };
   // Recalcule et persiste le total du jour ÉDITÉ à partir de la composition (source de vérité UI)
   const commitMeals = (nextMeals) => {
     const pruned = saveFoodMeals(nextMeals);
@@ -16432,6 +16452,9 @@ function NourriturePanel() {
           </div>
         ) : null}
       </div>
+
+      {/* ── Poids : journal de pesées (poids, IMC, graisse, eau, métabolisme…) + export/import ── */}
+      <PoidsSection profile={profile} onProfileWeight={syncProfileWeight} />
 
       {/* ── Jour édité (aujourd'hui par défaut, 7 derniers jours éditables) : jauge + saisie des repas ── */}
       <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
@@ -16550,6 +16573,361 @@ function NourriturePanel() {
           );
         })}
       </StatsCollapse>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════
+// POIDS (section de Santé) — journal de pesées type balance connectée. 100 % LOCAL
+// (localStorage `spotifyplus_food_weights`), EXPORTABLE / IMPORTABLE de deux façons :
+//   • boutons ⬇ Exporter / ⬆ Importer de la section (fichier `spotifyplus-poids-<date>.json`,
+//     au format buildBackup partiel → relisible aussi par le ↥ Restaurer d'À propos) ;
+//   • les pesées voyagent dans la clé `food` du backup global (export « Santé »,
+//     sauvegarde Drive / Dropbox / pCloud / MEGA).
+// Une pesée = { id, date:'YYYY-MM-DD', poids, imc, graisse, eau, metabolisme, viscerale,
+// muscle, proteine, osseuse, ageCorp } — seuls `date` et `poids` sont obligatoires, les
+// autres champs sont ceux d'une balance à impédancemétrie et restent facultatifs.
+// L'IMC est calculé tout seul depuis la taille du profil quand il n'est pas saisi.
+// Les graphiques d'évolution vivent dans Stats → 🩺 SANTÉ → ⚖️ POIDS (WeightStatsSection).
+// ════════════════════════════════════════════════
+const WEIGHT_KEY = 'spotifyplus_food_weights';
+const WEIGHT_MAX = 2000;   // borne le localStorage (≈ 5 pesées/jour pendant 1 an)
+// Champs d'une pesée, dans l'ordre d'affichage (formulaire, fiche, graphiques).
+// `lower:true` = une baisse est une amélioration (couleur verte sur le delta).
+const WEIGHT_FIELDS = [
+  { key:'poids',       label:'Poids',               unit:'kg',   dec:1, icon:'⚖️', color:'#9bd93f', lower:true },
+  { key:'imc',         label:'IMC',                 unit:'',     dec:1, icon:'📐', color:'#7ecbff', lower:true },
+  { key:'graisse',     label:'Graisse corporelle',  unit:'%',    dec:1, icon:'🧈', color:'#f5a623', lower:true },
+  { key:'eau',         label:'Eau',                 unit:'%',    dec:1, icon:'💧', color:'#4ea3f5' },
+  { key:'metabolisme', label:'Métabolisme de base', unit:'kcal', dec:0, icon:'🔥', color:'#e07b54' },
+  { key:'viscerale',   label:'Graisse viscérale',   unit:'',     dec:0, icon:'🫀', color:'#e05180', lower:true },
+  { key:'muscle',      label:'Muscle',              unit:'kg',   dec:1, icon:'💪', color:'#b07fe8' },
+  { key:'proteine',    label:'Protéine',            unit:'%',    dec:1, icon:'🥚', color:'#c8956c' },
+  { key:'osseuse',     label:'Masse osseuse',       unit:'kg',   dec:2, icon:'🦴', color:'#a0a8b8' },
+  { key:'ageCorp',     label:'Âge corporel',        unit:'ans',  dec:0, icon:'🎂', color:'#f5c518', lower:true },
+];
+// Nombre tolérant : accepte la virgule décimale (clavier FR) et rejette tout le reste.
+function weightNum(v) {
+  if (v == null || v === '') return null;
+  const n = parseFloat(String(v).replace(',', '.'));
+  return isFinite(n) ? n : null;
+}
+function weightFmt(v, dec) {
+  if (v == null) return '—';
+  return Number(v).toLocaleString('fr-FR', { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 });
+}
+// Tri chronologique (ancien → récent) ; `id` départage deux pesées du même jour.
+function weightSort(list) {
+  return [...(list || [])].sort((a, b) =>
+    String(a.date || '').localeCompare(String(b.date || '')) || String(a.id || '').localeCompare(String(b.id || '')));
+}
+function loadWeights() { try { const a = JSON.parse(localStorage.getItem(WEIGHT_KEY)); return Array.isArray(a) ? weightSort(a) : []; } catch { return []; } }
+function saveWeights(list) { lsSet(WEIGHT_KEY, JSON.stringify(weightSort(list).slice(-WEIGHT_MAX))); }
+// Valide/assainit une pesée venue d'un fichier importé (rien n'est fait confiance).
+function weightNormalize(w) {
+  if (!w || typeof w !== 'object') return null;
+  const date = typeof w.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(w.date) ? w.date : null;
+  const poids = weightNum(w.poids);
+  if (!date || poids == null || poids <= 0) return null;
+  const out = { id: String(w.id || (date + '_' + Math.random().toString(36).slice(2))), date };
+  for (const f of WEIGHT_FIELDS) { const n = weightNum(w[f.key]); if (n != null) out[f.key] = n; }
+  return out;
+}
+// Fusion à l'import : le LOCAL gagne (même id), et on saute les doublons évidents
+// (même jour + même poids) pour qu'un ré-import ne duplique pas l'historique.
+function weightMerge(local, incoming) {
+  const byId = {}, sig = new Set();
+  for (const w of weightSort(local)) { byId[w.id] = w; sig.add(w.date + '|' + w.poids); }
+  for (const raw of (incoming || [])) {
+    const w = weightNormalize(raw);
+    if (!w || byId[w.id] || sig.has(w.date + '|' + w.poids)) continue;
+    byId[w.id] = w; sig.add(w.date + '|' + w.poids);
+  }
+  return weightSort(Object.values(byId));
+}
+// Série chronologique d'un champ : [{ date, value }] (pesées où le champ est renseigné)
+function weightSeries(list, key) {
+  return weightSort(list).filter(w => weightNum(w[key]) != null).map(w => ({ date: w.date, value: weightNum(w[key]) }));
+}
+// Valeur de référence il y a N jours : dernière mesure DATÉE avant la fenêtre (sinon la
+// plus ancienne) → sert aux deltas « sur 30 jours » sans inventer de valeur.
+function weightRefBefore(series, days) {
+  if (!series.length) return null;
+  const d = new Date(); d.setDate(d.getDate() - days);
+  const limit = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  let ref = null;
+  for (const p of series) { if (p.date <= limit) ref = p; }
+  return ref || series[0];
+}
+// Delta formaté + couleur (vert = va dans le bon sens selon `lower`)
+function weightDelta(cur, prev, f) {
+  if (cur == null || prev == null) return null;
+  const d = cur - prev;
+  const good = d === 0 ? null : (f.lower ? d < 0 : d > 0);
+  const sign = d > 0 ? '+' : d < 0 ? '−' : '';
+  return {
+    txt: `${sign}${weightFmt(Math.abs(d), f.dec)}${f.unit ? ' ' + f.unit : ''}`,
+    color: good === null ? C.muted : good ? '#5fd35f' : '#e05050',
+  };
+}
+const weightDateFr = s => { const d = new Date(s + 'T00:00:00'); return isNaN(d.getTime()) ? s : d.toLocaleDateString('fr-FR'); };
+
+// Courbe d'évolution — SVG maison (aucune lib → rien à ajouter à la CSP), même esprit
+// que BarChart. Échelle uniforme (viewBox non déformée) pour que les points restent ronds.
+function WeightLineChart({ series, color, unit, dec }) {
+  const pts = (series || []).slice(-60);   // 60 dernières pesées (lisibilité)
+  if (pts.length < 2) return null;
+  const W = 300, H = 96, PL = 40, PR = 8, PT = 10, PB = 18;
+  const vals = pts.map(p => p.value);
+  let min = Math.min(...vals), max = Math.max(...vals);
+  if (max - min < 1e-9) { max += 1; min -= 1; }
+  const x = i => PL + i * (W - PL - PR) / (pts.length - 1);
+  const y = v => PT + (max - v) * (H - PT - PB) / (max - min);
+  const line = pts.map((p, i) => `${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
+  const area = `${x(0).toFixed(1)},${(H - PB).toFixed(1)} ${line} ${x(pts.length - 1).toFixed(1)},${(H - PB).toFixed(1)}`;
+  const lbl = v => weightFmt(v, dec) + (unit ? ' ' + unit : '');
+  const short = s => { const d = new Date(s + 'T00:00:00'); return isNaN(d.getTime()) ? s : d.toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' }); };
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'auto', display:'block' }} role="img">
+      <line x1={PL} y1={PT} x2={W - PR} y2={PT} stroke={C.border} strokeWidth="1" strokeDasharray="3 3" />
+      <line x1={PL} y1={H - PB} x2={W - PR} y2={H - PB} stroke={C.border} strokeWidth="1" strokeDasharray="3 3" />
+      <polygon points={area} fill={color} opacity="0.13" />
+      <polyline points={line} fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+      {pts.map((p, i) => (
+        <circle key={i} cx={x(i)} cy={y(p.value)} r={pts.length > 30 ? 1.2 : 2} fill={color}>
+          <title>{`${weightDateFr(p.date)} : ${lbl(p.value)}`}</title>
+        </circle>
+      ))}
+      <text x="2" y={PT + 3} fontSize="7" fill={C.muted} fontFamily="DM Mono,monospace">{lbl(max)}</text>
+      <text x="2" y={H - PB + 3} fontSize="7" fill={C.muted} fontFamily="DM Mono,monospace">{lbl(min)}</text>
+      <text x={PL} y={H - 4} fontSize="7" fill={C.dim} fontFamily="DM Mono,monospace">{short(pts[0].date)}</text>
+      <text x={W - PR} y={H - 4} fontSize="7" fill={C.dim} fontFamily="DM Mono,monospace" textAnchor="end">{short(pts[pts.length - 1].date)}</text>
+    </svg>
+  );
+}
+
+// Formulaire vide (date du jour pré-remplie)
+function weightBlankForm() {
+  const f = { date: todoTodayStr() };
+  for (const w of WEIGHT_FIELDS) f[w.key] = '';
+  return f;
+}
+// Section « ⚖️ POIDS » du panneau Santé : saisie/édition/suppression des pesées,
+// historique, export & import JSON. `onProfileWeight` remonte le poids de la pesée la
+// plus récente pour tenir le profil (donc le métabolisme de base) à jour.
+function PoidsSection({ profile, onProfileWeight }) {
+  const [list, setList]     = React.useState(loadWeights);
+  const [form, setForm]     = React.useState(weightBlankForm);
+  const [editId, setEditId] = React.useState(null);
+  const [adding, setAdding] = React.useState(false);
+  const [msg, setMsg]       = React.useState('');
+  const fileRef = React.useRef(null);
+
+  const inSt  = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 7px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box', width:'100%' };
+  const btnSt = { background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:11, fontWeight:700, padding:'6px 10px', cursor:'pointer' };
+  const ghost = { background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'5px 9px', cursor:'pointer', fontFamily:'inherit' };
+
+  const openNew = () => { setForm(weightBlankForm()); setEditId(null); setAdding(true); setMsg(''); };
+  const openEdit = (w) => {
+    const f = { date: w.date };
+    for (const x of WEIGHT_FIELDS) f[x.key] = w[x.key] != null ? String(w[x.key]) : '';
+    setForm(f); setEditId(w.id); setAdding(true); setMsg('');
+  };
+  const cancel = () => { setAdding(false); setEditId(null); setForm(weightBlankForm()); };
+
+  const submit = () => {
+    const poids = weightNum(form.poids);
+    if (poids == null || poids <= 0) { setMsg('⚠ Le poids est obligatoire.'); return; }
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(form.date) ? form.date : todoTodayStr();
+    const entry = { id: editId || (Date.now() + '_' + Math.random().toString(36).slice(2)), date };
+    for (const f of WEIGHT_FIELDS) { const n = weightNum(form[f.key]); if (n != null) entry[f.key] = n; }
+    // IMC non saisi mais taille connue → on le calcule (poids / taille²)
+    if (entry.imc == null && profile && profile.height > 0) entry.imc = Math.round(poids / Math.pow(profile.height / 100, 2) * 10) / 10;
+    const next = weightSort([...list.filter(w => w.id !== entry.id), entry]);
+    setList(next); saveWeights(next);
+    // La pesée la plus récente tient le poids du profil à jour (métabolisme/objectif kcal)
+    if (next[next.length - 1].id === entry.id && onProfileWeight) onProfileWeight(poids);
+    setMsg(editId ? '✓ Pesée modifiée' : '✓ Pesée enregistrée');
+    cancel();
+  };
+  const remove = (w) => {
+    if (!confirm(`Supprimer la pesée du ${weightDateFr(w.date)} (${weightFmt(w.poids, 1)} kg) ?`)) return;
+    const next = list.filter(x => x.id !== w.id);
+    setList(next); saveWeights(next); setMsg('Pesée supprimée');
+    if (editId === w.id) cancel();
+  };
+
+  // Export : fichier buildBackup PARTIEL (scope food) → relisible par ↥ Restaurer d'À propos
+  const exportJson = () => {
+    if (!list.length) { setMsg('⚠ Aucune pesée à exporter.'); return; }
+    const data = { app:'spotifyplus', version: APP_VERSION, exported_at: new Date().toISOString(), scope:['food'], food:{ weights: list } };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type:'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = `spotifyplus-poids-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    setMsg(`✓ ${list.length} pesée(s) exportée(s)`);
+  };
+  // Import : accepte un tableau brut, { weights:[…] } ou une sauvegarde { food:{ weights } }
+  const importJson = (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const j = JSON.parse(r.result);
+        const arr = Array.isArray(j) ? j
+          : Array.isArray(j && j.weights) ? j.weights
+          : (j && j.food && Array.isArray(j.food.weights)) ? j.food.weights : null;
+        if (!arr) { setMsg('⚠ Fichier invalide : aucune pesée trouvée.'); return; }
+        const merged = weightMerge(list, arr);
+        const added = merged.length - list.length;
+        setList(merged); saveWeights(merged);
+        if (merged.length && onProfileWeight) onProfileWeight(merged[merged.length - 1].poids);
+        setMsg(added > 0 ? `✓ ${added} pesée(s) importée(s) · ${merged.length} au total` : 'Aucune nouvelle pesée (déjà toutes présentes)');
+      } catch { setMsg('⚠ Fichier illisible.'); }
+    };
+    r.readAsText(f);
+  };
+
+  const recent = [...list].reverse();     // plus récente en tête
+  const last = list.length ? list[list.length - 1] : null;
+  const prev = list.length > 1 ? list[list.length - 2] : null;
+  const poidsField = WEIGHT_FIELDS[0];
+  const dLast = last && prev ? weightDelta(last.poids, prev.poids, poidsField) : null;
+
+  return (
+    <StatsCollapse title="⚖️ POIDS" color={FOOD_COLOR}>
+      {/* Dernière pesée en un coup d'œil */}
+      {last && (
+        <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'8px 10px', display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+          <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>DERNIÈRE PESÉE · {weightDateFr(last.date)}</span>
+          <span style={{ fontSize:16, fontWeight:800, color:FOOD_COLOR, fontFamily:'DM Mono,monospace' }}>{weightFmt(last.poids, 1)} kg</span>
+          {dLast && <span style={{ fontSize:10, fontFamily:'DM Mono,monospace', color:dLast.color }}>{dLast.txt}</span>}
+          <span style={{ fontSize:9, color:C.muted, marginLeft:'auto', fontFamily:'DM Mono,monospace' }}>{list.length} pesée(s)</span>
+        </div>
+      )}
+      {/* Barre d'actions : nouvelle pesée + export / import */}
+      <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
+        {!adding && <button onClick={openNew} style={btnSt}>+ Nouvelle pesée</button>}
+        <button onClick={exportJson} style={ghost} title="Exporter les pesées en JSON">⬇ Exporter</button>
+        <button onClick={() => fileRef.current && fileRef.current.click()} style={ghost} title="Importer un fichier de pesées">⬆ Importer</button>
+        <input ref={fileRef} type="file" accept="application/json,.json" onChange={importJson} style={{ display:'none' }} />
+      </div>
+      {msg && <div style={{ fontSize:10, color: msg.indexOf('⚠') === 0 ? '#e05050' : FOOD_COLOR, fontFamily:'DM Mono,monospace' }}>{msg}</div>}
+
+      {/* Formulaire d'ajout / édition */}
+      {adding && (
+        <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+          <label style={{ fontSize:9, color:C.muted }}>Date de la pesée
+            <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date:e.target.value }))} style={inSt} /></label>
+          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(104px, 1fr))', gap:6 }}>
+            {WEIGHT_FIELDS.map(f => (
+              <label key={f.key} style={{ fontSize:9, color:C.muted }}>
+                {f.icon} {f.label}{f.unit ? ` (${f.unit})` : ''}
+                {/* ⚠ type="text" + inputMode="decimal" (PAS type="number") : un input number
+                    REJETTE la virgule décimale du clavier FR (value repasse à '' → saisie
+                    perdue en silence). weightNum accepte « 81,6 » comme « 81.6 ». */}
+                <input type="text" inputMode="decimal" value={form[f.key]}
+                  placeholder={f.key === 'imc' && profile && profile.height > 0 ? 'auto' : ''}
+                  onChange={e => setForm(v => ({ ...v, [f.key]: e.target.value }))}
+                  onKeyDown={e => { if (e.key === 'Enter') submit(); }} style={inSt} />
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize:9, color:C.dim, lineHeight:1.5 }}>
+            Seul le <b style={{ color:C.muted }}>poids</b> est obligatoire — laisse vide ce que ta balance ne mesure pas.
+            L'IMC est calculé tout seul si ta taille est renseignée dans le profil, et la pesée la plus récente met à jour le poids du profil.
+          </div>
+          <div style={{ display:'flex', gap:6 }}>
+            <button onClick={submit} style={{ ...btnSt, flex:1 }}>✓ {editId ? 'Enregistrer les modifications' : 'Enregistrer la pesée'}</button>
+            <button onClick={cancel} style={ghost}>Annuler</button>
+          </div>
+        </div>
+      )}
+
+      {/* Historique des pesées (plus récente en tête) */}
+      {recent.length === 0 ? (
+        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', fontFamily:'DM Mono,monospace' }}>
+          Aucune pesée enregistrée — clique sur « + Nouvelle pesée ».
+        </div>
+      ) : recent.map((w, i) => {
+        const before = recent[i + 1];   // pesée précédente dans le temps
+        return (
+          <div key={w.id} style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'8px 10px', display:'flex', flexDirection:'column', gap:5 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>{weightDateFr(w.date)}</span>
+              <span style={{ fontSize:13, fontWeight:800, color:FOOD_COLOR, fontFamily:'DM Mono,monospace' }}>{weightFmt(w.poids, 1)} kg</span>
+              {before && (() => { const d = weightDelta(w.poids, before.poids, poidsField); return d ? <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:d.color }}>{d.txt}</span> : null; })()}
+              <button onClick={() => openEdit(w)} title="Modifier"
+                style={{ background:'none', border:'none', color:C.dim, fontSize:12, lineHeight:1, padding:'0 2px', cursor:'pointer', marginLeft:'auto', flexShrink:0 }}>✏️</button>
+              <button onClick={() => remove(w)} title="Supprimer"
+                style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+            </div>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:'3px 10px' }}>
+              {WEIGHT_FIELDS.filter(f => f.key !== 'poids' && w[f.key] != null).map(f => (
+                <span key={f.key} style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+                  {f.icon} {f.label} <b style={{ color:f.color }}>{weightFmt(w[f.key], f.dec)}{f.unit ? ' ' + f.unit : ''}</b>
+                </span>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </StatsCollapse>
+  );
+}
+
+// Sous-section « ⚖️ POIDS » du collapse 🩺 SANTÉ de StatsPanel — cartes de synthèse +
+// une courbe d'évolution par mesure renseignée. 100 % local (lit `spotifyplus_food_weights`
+// au montage, donc à l'ouverture du collapse), aucune requête.
+function WeightStatsSection() {
+  const list = React.useMemo(() => loadWeights(), []);
+  if (!list.length) {
+    return (
+      <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+        Aucune pesée enregistrée. Ajoute-en dans <b style={{ color:FOOD_COLOR }}>Santé → ⚖️ Poids</b> :
+        poids, IMC, graisse corporelle, eau, métabolisme de base, graisse viscérale, muscle, protéine,
+        masse osseuse et âge corporel sont tracés ici.
+      </div>
+    );
+  }
+  const poidsF  = WEIGHT_FIELDS[0];
+  const serieP  = weightSeries(list, 'poids');
+  const last    = serieP[serieP.length - 1];
+  const first   = serieP[0];
+  const ref30   = weightRefBefore(serieP, 30);
+  const dTotal  = serieP.length > 1 ? weightDelta(last.value, first.value, poidsF) : null;
+  const d30     = ref30 && ref30 !== last ? weightDelta(last.value, ref30.value, poidsF) : null;
+  const cards = [
+    { label:'DERNIÈRE PESÉE', value:`${weightFmt(last.value, 1)} kg`, sub:weightDateFr(last.date), icon:'⚖️', color:FOOD_COLOR },
+    { label:'ÉVOLUTION TOTALE', value: dTotal ? dTotal.txt : '—', sub: dTotal ? `depuis le ${weightDateFr(first.date)}` : 'une seule pesée', icon:'📉', color: dTotal ? dTotal.color : C.muted },
+    { label:'SUR 30 JOURS', value: d30 ? d30.txt : '—', sub: d30 ? `depuis le ${weightDateFr(ref30.date)}` : 'pas assez de recul', icon:'🗓', color: d30 ? d30.color : C.muted },
+    { label:'PESÉES ENREGISTRÉES', value:String(list.length), sub:`depuis le ${weightDateFr(list[0].date)}`, icon:'📋', color:'#7ecbff' },
+  ];
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {cards.map(statCardEl)}
+      {/* Une courbe par mesure renseignée (≥ 2 points) ; sinon la valeur seule */}
+      {WEIGHT_FIELDS.map(f => {
+        const s = weightSeries(list, f.key);
+        if (!s.length) return null;
+        const cur = s[s.length - 1];
+        const d   = s.length > 1 ? weightDelta(cur.value, s[0].value, f) : null;
+        return (
+          <div key={f.key} style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:6 }}>
+            <div style={{ display:'flex', alignItems:'baseline', gap:8, flexWrap:'wrap' }}>
+              <span style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:f.color }}>{f.icon} {f.label.toUpperCase()}</span>
+              <span style={{ fontSize:12, fontWeight:800, color:C.text, fontFamily:'DM Mono,monospace' }}>{weightFmt(cur.value, f.dec)}{f.unit ? ' ' + f.unit : ''}</span>
+              {d && <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:d.color }}>{d.txt}</span>}
+              <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginLeft:'auto' }}>{s.length} mesure(s)</span>
+            </div>
+            {s.length > 1
+              ? <WeightLineChart series={s} color={f.color} unit={f.unit} dec={f.dec} />
+              : <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>Une seule mesure — la courbe apparaîtra à la 2ᵉ pesée.</div>}
+          </div>
+        );
+      })}
     </div>
   );
 }
