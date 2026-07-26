@@ -77,7 +77,7 @@
 // v99 : bump de cache — connexion Google Drive/YouTube réparée : Google a coupé le flux
 // OAuth implicite par redirection (« Erreur 400 : invalid_request ») → passage à Google
 // Identity Services (popup, script accounts.google.com/gsi/client chargé lazy).
-const CACHE  = 'spotifyplus-v99';
+const CACHE  = 'spotifyplus-v100';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
