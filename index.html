@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.47';
+const APP_VERSION = '7.6.48';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -548,9 +548,19 @@ async function megaDownload() {
 //   (chargé LAZY, pattern loadLeaflet, non versionné donc PAS de SRI possible) expose
 //   google.accounts.oauth2.initTokenClient(…).requestAccessToken() qui ouvre une POPUP et
 //   rend l'access token DANS la page — plus aucune redirection ni fragment #access_token.
-//   L'ancien flux redirigé est CONSERVÉ en repli (gdriveLoginRedirect) si le script GIS est
-//   injoignable (hors-ligne/réseau filtré) et gdriveHandleRedirect continue de traiter un
-//   retour #access_token= (onglet resté ouvert avant la mise à jour).
+//   gdriveHandleRedirect continue de traiter un retour #access_token= (onglet resté ouvert
+//   avant la mise à jour), mais on ne DÉCLENCHE plus jamais ce flux (voir 7.6.48).
+// ⚠ 7.6.48 — PLUS AUCUN REPLI PAR REDIRECTION : le flux implicite était encore utilisé en
+//   secours quand la popup GIS ne pouvait pas s'ouvrir → l'utilisateur était éjecté de l'app
+//   vers la page « Erreur 400 : invalid_request » de Google, APRÈS avoir choisi son compte.
+//   Ce repli ne réparait donc rien : il transformait un échec de popup en écran d'erreur.
+//   Il est remplacé par un message explicite (gdriveLoginFailed).
+// ⚠ CAS DE L'APP INSTALLÉE (PWA `display:standalone`) : c'est là que la popup échoue. Google
+//   renvoie le jeton vers un `storagerelay://…` que le contexte standalone (Custom Tab
+//   Android) ne sait pas résoudre → 400 juste après le choix du compte. Aucun contournement
+//   côté page n'existe (le code+PKCE exigerait un client_secret, donc un backend). Parade :
+//   se connecter UNE FOIS depuis un onglet Chrome normal — même origine, donc MÊME
+//   localStorage que la PWA → le jeton obtenu là est relu par l'app installée.
 // ⚠ POPUP = geste utilisateur obligatoire : requestAccessToken() doit partir d'un clic,
 //   sinon le navigateur bloque la fenêtre. → gdriveLogin est branché sur des BOUTONS, et la
 //   demande AUTOMATIQUE (gdriveAutoLogin) ne tente plus qu'un renouvellement SILENCIEUX
@@ -648,14 +658,14 @@ function gdriveLogin(opts) {
   // bloquée → 'popup_failed_to_open' → repli sur l'ancienne redirection. Script
   // définitivement injoignable → repli direct.
   if (gisReady()) return gdriveGisFlow(wanted);
-  return loadGis().then(() => gdriveGisFlow(wanted), () => { gdriveLoginRedirect(wanted); return false; });
+  return loadGis().then(() => gdriveGisFlow(wanted), () => { gdriveLoginFailed('gis_injoignable'); return false; });
 }
 function gdriveGisFlow(wanted) {
   return gdriveRequestToken(wanted, false)
     .catch(err => {
       const type = String((err && err.message) || '');
       if (type === 'popup_closed') throw err;                       // annulation volontaire → on ne relance rien
-      if (type === 'popup_failed_to_open') { gdriveLoginRedirect(wanted); throw err; }
+      if (type === 'popup_failed_to_open') throw err;               // popup bloquée → message (plus de redirection)
       // Consentement refusé AVEC le scope restreint drive.readonly → 2e essai sans lui
       if (wanted !== GDRIVE_SCOPE_BASE) return gdriveRequestToken(GDRIVE_SCOPE_BASE, false);
       throw err;
@@ -664,10 +674,34 @@ function gdriveGisFlow(wanted) {
     // state (comme au retour de l'ancienne redirection) — le marqueur oauth_return rouvre
     // l'onglet courant.
     .then(() => { window.location.reload(); return true; })
-    .catch(e => { console.warn('[gdrive] connexion annulée/échouée :', (e && e.message) || e); return false; });
+    .catch(e => {
+      const type = String((e && e.message) || '');
+      console.warn('[gdrive] connexion annulée/échouée :', type || e);
+      gdriveLoginFailed(type);
+      return false;
+    });
 }
-// ── REPLI : ancien flux implicite par redirection (voir l'avertissement en tête de bloc) ──
-function gdriveLoginRedirect(scopes) {
+// App lancée depuis l'icône de l'écran d'accueil (PWA installée) : c'est le cas où la popup
+// de consentement Google n'aboutit pas (voir l'avertissement en tête de bloc).
+function gdrivePwaMode() {
+  try {
+    if (window.navigator && window.navigator.standalone === true) return true;               // iOS
+    return !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);  // Android/desktop
+  } catch { return false; }
+}
+// Échec de connexion Google → on EXPLIQUE au lieu de rediriger vers le flux implicite mort.
+// 'popup_closed' = l'utilisateur a fermé la fenêtre lui-même : aucun message.
+function gdriveLoginFailed(type) {
+  if (type === 'popup_closed') return;
+  const base = 'Connexion à Google Drive impossible' + (type ? ' (' + type + ')' : '') + '.';
+  const msg  = gdrivePwaMode()
+    ? base + "\n\nDepuis l'app installée (icône de l'écran d'accueil), Google refuse de renvoyer le jeton — c'est une limitation de Chrome/Google, pas un réglage du Hub.\n\n➜ Ouvre " + REDIRECT_URI + " dans un onglet Chrome NORMAL, connecte Google Drive là-bas, puis reviens dans l'app : la connexion est partagée (même stockage)."
+    : base + "\n\nAutorise les fenêtres pop-up pour ce site (icône à droite de la barre d'adresse), puis réessaie.";
+  try { alert(msg); } catch {}
+}
+// ── LEGACY : construction de l'ancien flux implicite. PLUS APPELÉ (voir 7.6.48) — conservé
+// pour documenter la requête exacte que Google rejette désormais après le choix du compte.
+function _gdriveLoginRedirectLegacy(scopes) {
   if (!GDRIVE_CLIENT_ID) return;
   // Anti-CSRF / anti-fixation de token : le flux implicite renvoie l'access_token dans le
   // fragment (#access_token=…&state=…). On génère un nonce aléatoire, on le stocke, et on
