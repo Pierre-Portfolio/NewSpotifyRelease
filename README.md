@@ -10,7 +10,7 @@
 ## Aperçu
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
-Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, API, Météo, Finance, Emploi, Jeux, Bon Plan, TV Time, Note, Santé, Sport, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
+Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, API, Météo, Finance, Emploi, Jeux, Bon Plan, TV Time, Note, Revente, Santé, Sport, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
 
 👉 **https://pierre-portfolio.github.io/NewSpotifyRelease/** — aucune installation, tout est statique sur GitHub Pages.
 
@@ -94,6 +94,15 @@ Suivi calories façon **Lifesum** : profil (poids, taille, âge, sexe, activité
 
 ### Note
 Prise de **notes 100 % locale**, accessible depuis les onglets **et dès la page de connexion** (tuile 🗒️ Note de la grille de modules — aucune connexion Spotify requise). **Deux espaces séparés** : la page **« Note »** ne contient que tes notes en clair. Pour les notes sensibles, **clique sur le titre « Note » en haut à gauche** : un **mot de passe global** t'est demandé (à créer la première fois), puis le titre devient **« Note crypté »** et tu vois **uniquement** tes notes protégées (titre + contenu chiffrés AES-GCM 256 + PBKDF2) — un bouton **« ← Revenir aux notes »** en bas ramène à l'espace normal. **Bascule public ⇄ privé** : quand tu écris ou modifies une note, un bouton **entre « ✓ Enregistrer » et « Annuler »** la fait changer d'espace — **« 🔒 Passer privé »** la chiffre et l'envoie dans les notes cryptées (le mot de passe global t'est demandé s'il n'est pas déjà ouvert, ou créé si c'est la première fois), **« 🗒️ Passer public »** la remet en clair dans les notes normales (après confirmation). Un petit message confirme le déplacement. Les notes cryptées **n'apparaissent jamais** dans l'espace normal (même leur existence est masquée). Le mot de passe n'est **jamais stocké**. Notes exportables/importables (les cryptées restent cryptées), module désactivable dans le Paramétrage. ⚠ Mot de passe global oublié = notes cryptées irrécupérables.
+
+### Revente
+🏷️ **Une IA rédige tes annonces Vinted, Leboncoin et eBay d'un coup.** Tu crées un article (nom, catégorie, marque, taille, couleur, état, prix d'achat, prix de vente), tu ajoutes jusqu'à **5 photos**, et le bouton **✨ Générer les 3 annonces** produit pour chaque plateforme un **titre**, une **description** et un **prix**, adaptés à ses codes et à ses limites de caractères (Vinted 60 / Leboncoin 50 / eBay 80 pour le titre) : ton amical + hashtags sur Vinted, factuel sur Leboncoin, ultra riche en mots-clés sur eBay. **Le prix eBay est automatiquement majoré de +20 %** pour absorber les frais. L'IA propose aussi un **prix conseillé** et des **mots-clés**.
+
+Ensuite, chaque annonce a ses boutons **⧉ Titre / ⧉ Description / ⧉ Prix** (copie en un clic) et **↗ Déposer sur …** qui ouvre le formulaire de la plateforme dans un nouvel onglet — il ne reste qu'à coller et à déposer tes photos. Un sélecteur **Brouillon / En ligne / Vendu** par plateforme alimente les compteurs du module : **en ligne, vendus, chiffre d'affaires et marge** (prix de vente − prix d'achat).
+
+**Choix de l'IA** : **Claude (Anthropic)** ou **Gemini (Google)** — tu colles ta propre clé dans le module (ou dans l'onglet **API**), elle reste sur ton appareil. Les **photos sont rangées dans ton Google Drive**, dossier **`HUB_Pierre/Revente`** (créé tout seul) : elles survivent à une réinstallation et suivent sur un autre appareil.
+
+> ⚠️ **Le dépôt n'est pas automatique, et ça n'est pas une limite du code** : Vinted et Leboncoin n'ouvrent aucune API publique de dépôt d'annonce aux particuliers, et celle d'eBay exige un serveur avec un secret. Le module fait donc tout le travail de rédaction et de mise en forme, et te laisse le copier-coller final.
 
 ### To do
 Tâches classées par échéance en carrousel (Quotidien, Aujourd'hui, semaine, mois, année, un jour). ⭐ favorites (« compliquées »). Le Quotidien repart chaque jour à 00 h.
