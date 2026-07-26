@@ -74,7 +74,10 @@
 // v91 : bump de cache — TV Time YouTube : clic sur la miniature d'une vidéo → ouvre la vidéo (nouvel onglet) + marque vue automatiquement.
 // v92 : bump de cache — Cartographie : cartes réparées (refusaient l'iframe) → Aurores (image NOAA SWPC), Catastrophes naturelles (VolcanoDiscovery), Carte INSEE (mode iframe statistiques-locales), Qualité de l'eau (infoeau.fr).
 // v98 : bump de cache — 2 nouvelles destinations de sauvegarde : pCloud (OAuth) et MEGA (email+mdp, megajs vendorisé et précaché).
-const CACHE  = 'spotifyplus-v98';
+// v99 : bump de cache — connexion Google Drive/YouTube réparée : Google a coupé le flux
+// OAuth implicite par redirection (« Erreur 400 : invalid_request ») → passage à Google
+// Identity Services (popup, script accounts.google.com/gsi/client chargé lazy).
+const CACHE  = 'spotifyplus-v99';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
