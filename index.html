@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.33';
+const APP_VERSION = '7.6.34';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16574,6 +16574,18 @@ function TodoPanel() {
 const MDP_AMBER = '#38c98a';   // vert-cyan de l'arc-en-ciel (= couleur de l'onglet Mot de Passe dans le menu ⋯)
 // Palette cyclique pour les tags créés par l'utilisateur (couleur attribuée à la création).
 const MDP_TAG_COLORS = ['#38c98a', '#5aa9ff', '#e0a050', '#e05050', '#b06cf5', '#f5a623', '#46c46a', '#e368a8', '#6f7bf5', '#2fc1c1'];
+// Ordre d'affichage des collapses de tags : nombre saisi par l'utilisateur (champ « ordre »
+// à la création, modifiable ensuite). Un tag sans ordre défini passe APRÈS tous les autres,
+// dans son ordre de création (MDP_TAG_ORD_END + index). Appui long de 3 s = éditer le tag.
+const MDP_TAG_ORD_END  = 1e9;
+const MDP_TAG_HOLD_MS  = 3000;
+function mdpTagOrd(t, i) { const n = Number(t && t.order); return (t && t.order !== '' && t.order !== null && t.order !== undefined && Number.isFinite(n)) ? n : MDP_TAG_ORD_END + i; }
+// Tags triés pour l'affichage (ordre utilisateur, puis nom en cas d'égalité).
+function mdpSortTags(tags) {
+  return tags.map((t, i) => [t, mdpTagOrd(t, i)])
+    .sort((a, b) => (a[1] - b[1]) || String(a[0].name || '').localeCompare(String(b[0].name || '')))
+    .map(x => x[0]);
+}
 // Contenu du coffre déchiffré = { entries:[{id,identifiant,mdp,url,comment,tags:[tagId]}], tags:[{id,name,color}] }.
 // Rétro-compat : un ancien coffre chiffrait directement le TABLEAU d'entrées → normalisé ici.
 function mdpNormalizeVault(data) {
@@ -16681,9 +16693,13 @@ function GestionMdpPanel() {
   const [tagFilter, setTagFilter] = React.useState(null);  // id de tag filtré (ou null = tous)
   const [showTagForm, setShowTagForm] = React.useState(false);
   const [newTag, setNewTag]   = React.useState('');      // nom du tag en création
+  const [newTagOrder, setNewTagOrder] = React.useState('');   // ordre du tag en création (champ « order by »)
+  const [editTagId, setEditTagId]     = React.useState(null); // tag en cours d'édition (double-clic / appui 3 s)
+  const [tagEdit, setTagEdit] = React.useState({ name:'', order:'' });
   const [editId, setEditId]   = React.useState(null);    // id de l'entrée en cours d'édition
   const [editForm, setEditForm] = React.useState({ identifiant:'', mdp:'', url:'', comment:'', tags:[] });
   const [dragId, setDragId]   = React.useState(null);    // id de l'entrée glissée (réordonnancement)
+  const holdRef   = React.useRef({ timer:null, fired:false });   // appui long sur un chip de tag
   const masterRef = React.useRef(_mdpSession.pw);       // mot de passe maître courant (mémoire only)
   const fileRef   = React.useRef(null);
   const entriesRef = React.useRef(entries);             // miroir des entrées (drop de drag & drop)
@@ -16772,7 +16788,14 @@ function GestionMdpPanel() {
     persist([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), ...f }, ...entries]);
     setForm({ identifiant:'', mdp:'', url:'', comment:'', tags:[] });
   };
-  const remove = id => persist(entries.filter(e => e.id !== id));
+  // Suppression d'une entrée : CONFIRMATION obligatoire (un × mal cliqué faisait perdre
+  // un identifiant sans aucun filet — le coffre n'a pas d'historique ni de corbeille).
+  const remove = id => {
+    const e = entries.find(x => x.id === id);
+    const label = (e && (e.identifiant || e.url || e.comment)) || 'cet identifiant';
+    if (!confirm(`Supprimer « ${label} » ?\n\nCette suppression est définitive (aucune corbeille).`)) return;
+    persist(entries.filter(x => x.id !== id));
+  };
 
   // ─ Édition d'une entrée ─
   const startEdit = e => { setEditId(e.id); setEditForm({ identifiant:e.identifiant||'', mdp:e.mdp||'', url:e.url||'', comment:e.comment||'', tags:(e.tags||[]).slice() }); };
@@ -16785,17 +16808,51 @@ function GestionMdpPanel() {
   };
 
   // ─ Tags ─
+  // Chaque tag porte un `order` (saisi par l'utilisateur) qui pilote l'ordre des COLLAPSES
+  // de la liste. Tag sans `order` (créé avant 7.6.34) → rejeté en fin de liste, dans son
+  // ordre de création, sans jamais se mélanger aux tags ordonnés.
+  const nextTagOrder = () => {
+    const nums = tags.map((t, i) => mdpTagOrd(t, i)).filter(n => n < MDP_TAG_ORD_END);
+    return (nums.length ? Math.max(...nums) : 0) + 1;
+  };
   const createTag = () => {
     const name = newTag.trim(); if (!name) return;
-    if (tags.some(t => t.name.toLowerCase() === name.toLowerCase())) { setNewTag(''); return; }
+    if (tags.some(t => t.name.toLowerCase() === name.toLowerCase())) { setNewTag(''); setNewTagOrder(''); return; }
     const color = MDP_TAG_COLORS[tags.length % MDP_TAG_COLORS.length];
-    persist(undefined, [...tags, { id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), name, color }]);
-    setNewTag('');
+    const typed = Number(newTagOrder);
+    const order = newTagOrder.trim() !== '' && Number.isFinite(typed) ? typed : nextTagOrder();
+    persist(undefined, [...tags, { id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6), name, color, order }]);
+    setNewTag(''); setNewTagOrder('');
   };
   const deleteTag = tid => {
     if (!confirm('Supprimer ce tag ? Il sera retiré de tous les mots de passe.')) return;
     persist(entries.map(e => ({ ...e, tags: (e.tags || []).filter(x => x !== tid) })), tags.filter(t => t.id !== tid));
     if (tagFilter === tid) setTagFilter(null);
+    if (editTagId === tid) setEditTagId(null);
+  };
+
+  // ─ Édition d'un tag (nom + ordre) : double-clic OU appui long 3 s sur son chip ─
+  const openTagEdit = tid => {
+    const t = tags.find(x => x.id === tid); if (!t) return;
+    setShowTagForm(false);
+    setEditTagId(tid);
+    setTagEdit({ name: t.name, order: t.order === undefined || t.order === null ? '' : String(t.order) });
+  };
+  const saveTagEdit = () => {
+    const name = tagEdit.name.trim(); if (!name) { setEditTagId(null); return; }
+    const typed = Number(tagEdit.order);
+    persist(undefined, tags.map(t => t.id === editTagId
+      ? { ...t, name, order: tagEdit.order.trim() === '' ? t.order : (Number.isFinite(typed) ? typed : t.order) }
+      : t));
+    setEditTagId(null);
+  };
+  // Appui long : le timer est armé au pointerdown et annulé au relâchement / sortie du chip.
+  // `fired` neutralise le clic qui suit l'appui long (sinon il basculerait aussi le filtre).
+  const holdStart = tid => { holdClear(); holdRef.current.fired = false; holdRef.current.timer = setTimeout(() => { holdRef.current.timer = null; holdRef.current.fired = true; openTagEdit(tid); }, MDP_TAG_HOLD_MS); };
+  const holdClear = () => { if (holdRef.current.timer) { clearTimeout(holdRef.current.timer); holdRef.current.timer = null; } };
+  const clickTagFilter = tid => {
+    if (holdRef.current.fired) { holdRef.current.fired = false; return; }   // clic issu de l'appui long
+    setTagFilter(f => (f === tid ? null : tid));
   };
   const toggleTagOn = (setF, curTags, tid) => setF(f => ({ ...f, tags: (f.tags || []).includes(tid) ? f.tags.filter(x => x !== tid) : [...(f.tags || []), tid] }));
   const tagById = id => tags.find(t => t.id === id);
@@ -16922,9 +16979,10 @@ function GestionMdpPanel() {
       style={{ ...inputBase, border:`1px solid ${editForm[k] ? MDP_AMBER : C.border}` }} />
   );
   // Sélecteur de tags pour un formulaire (ajout / édition) : chips cliquables.
+  const sortedTags = mdpSortTags(tags);
   const tagPicker = (selected, setF) => (tags.length ? (
     <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
-      {tags.map(t => {
+      {sortedTags.map(t => {
         const on = (selected || []).includes(t.id);
         return (
           <button key={t.id} type="button" onClick={() => toggleTagOn(setF, selected, t.id)}
@@ -16970,25 +17028,48 @@ function GestionMdpPanel() {
       {entries.length > 0 && (
         <div style={{ display:'flex', alignItems:'center', gap:4, flexWrap:'wrap' }}>
           <button onClick={() => setTagFilter(null)} style={{ background: tagFilter ? 'none' : `${MDP_AMBER}22`, border:`1px solid ${tagFilter ? C.border : MDP_AMBER}`, color: tagFilter ? C.dim : MDP_AMBER, borderRadius:12, padding:'2px 9px', fontSize:10, fontWeight:700, cursor:'pointer' }}>Tous</button>
-          {tags.map(t => {
+          {sortedTags.map(t => {
             const on = tagFilter === t.id;
             return (
               <span key={t.id} style={{ display:'inline-flex', alignItems:'center', background: on ? t.color + '33' : 'none', border:`1px solid ${on ? t.color : C.border}`, borderRadius:12, overflow:'hidden' }}>
-                <button onClick={() => setTagFilter(on ? null : t.id)} style={{ background:'none', border:'none', color: on ? t.color : C.dim, padding:'2px 4px 2px 9px', fontSize:10, fontWeight:700, cursor:'pointer' }}>{t.name}</button>
+                <button onClick={() => clickTagFilter(t.id)} onDoubleClick={() => openTagEdit(t.id)}
+                  onPointerDown={() => holdStart(t.id)} onPointerUp={holdClear} onPointerLeave={holdClear} onPointerCancel={holdClear}
+                  title={`Filtrer · double-clic (ou appui 3 s) pour renommer / réordonner${mdpTagOrd(t, 0) < MDP_TAG_ORD_END ? ` · ordre ${t.order}` : ''}`}
+                  style={{ background:'none', border:'none', color: on ? t.color : C.dim, padding:'2px 4px 2px 9px', fontSize:10, fontWeight:700, cursor:'pointer', userSelect:'none', touchAction:'manipulation' }}>{t.name}</button>
                 <button onClick={() => deleteTag(t.id)} title="Supprimer le tag" style={{ background:'none', border:'none', color: on ? t.color : C.dim, padding:'2px 7px 2px 2px', fontSize:10, cursor:'pointer', opacity:0.7 }}>×</button>
               </span>
             );
           })}
-          <button onClick={() => setShowTagForm(v => !v)} title="Créer un tag" style={{ background:`${MDP_AMBER}18`, border:`1px solid ${MDP_AMBER}66`, color:MDP_AMBER, borderRadius:12, width:22, height:22, fontSize:13, lineHeight:1, cursor:'pointer', padding:0 }}>+</button>
+          <button onClick={() => { setEditTagId(null); setShowTagForm(v => !v); }} title="Créer un tag" style={{ background:`${MDP_AMBER}18`, border:`1px solid ${MDP_AMBER}66`, color:MDP_AMBER, borderRadius:12, width:22, height:22, fontSize:13, lineHeight:1, cursor:'pointer', padding:0 }}>+</button>
         </div>
       )}
       {showTagForm && (
-        <div style={{ display:'flex', gap:5 }}>
+        <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
           <input type="text" value={newTag} placeholder="Nom du tag" autoFocus
             onChange={e => setNewTag(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') createTag(); }}
-            style={{ ...inputBase, flex:1, border:`1px solid ${newTag ? MDP_AMBER : C.border}` }} />
+            style={{ ...inputBase, flex:'1 1 120px', width:'auto', border:`1px solid ${newTag ? MDP_AMBER : C.border}` }} />
+          <input type="number" value={newTagOrder} placeholder="Ordre" title="Ordre d'affichage du collapse (plus petit = plus haut)"
+            onChange={e => setNewTagOrder(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') createTag(); }}
+            style={{ ...inputBase, flex:'0 0 74px', width:74, border:`1px solid ${newTagOrder ? MDP_AMBER : C.border}` }} />
           <button onClick={createTag} style={{ ...bigBtn, padding:'0 12px' }}>Créer</button>
+        </div>
+      )}
+      {/* Édition d'un tag (double-clic ou appui long 3 s sur son chip) */}
+      {editTagId && (
+        <div style={{ display:'flex', gap:5, flexWrap:'wrap', alignItems:'center' }}>
+          <span style={{ fontSize:9.5, color:MDP_AMBER, fontWeight:700, flex:'0 0 auto' }}>✏️ Tag :</span>
+          <input type="text" value={tagEdit.name} placeholder="Nom du tag" autoFocus
+            onChange={e => setTagEdit(f => ({ ...f, name: e.target.value }))}
+            onKeyDown={e => { if (e.key === 'Enter') saveTagEdit(); if (e.key === 'Escape') setEditTagId(null); }}
+            style={{ ...inputBase, flex:'1 1 110px', width:'auto', border:`1px solid ${tagEdit.name ? MDP_AMBER : C.border}` }} />
+          <input type="number" value={tagEdit.order} placeholder="Ordre" title="Ordre d'affichage du collapse (plus petit = plus haut)"
+            onChange={e => setTagEdit(f => ({ ...f, order: e.target.value }))}
+            onKeyDown={e => { if (e.key === 'Enter') saveTagEdit(); if (e.key === 'Escape') setEditTagId(null); }}
+            style={{ ...inputBase, flex:'0 0 74px', width:74, border:`1px solid ${tagEdit.order !== '' ? MDP_AMBER : C.border}` }} />
+          <button onClick={saveTagEdit} style={{ ...bigBtn, padding:'0 12px' }}>✓</button>
+          <button onClick={() => setEditTagId(null)} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, padding:'5px 10px', cursor:'pointer' }}>Annuler</button>
         </div>
       )}
       {(() => {
@@ -17006,10 +17087,10 @@ function GestionMdpPanel() {
         if (list.length === 0) return (
           <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun résultat</div>
         );
-        return (
-        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {reorderable && list.length > 1 && <div style={{ fontSize:8.5, color:C.dim, fontStyle:'italic' }}>Glisse la poignée ⠿ pour réordonner.</div>}
-          {list.map(e => {
+        // ── Un collapse par TAG (ordre = champ « ordre » du tag) + « Reste » pour les
+        // entrées sans tag (ou dont les tags ont été supprimés). Une entrée portant
+        // plusieurs tags apparaît dans chacun de leurs collapses.
+        const renderEntry = e => {
             const eTags = (e.tags || []).map(tagById).filter(Boolean);
             if (editId === e.id) {
               // ── Formulaire d'édition inline ──
@@ -17053,7 +17134,21 @@ function GestionMdpPanel() {
               {eTags.length > 0 && <div style={{ display:'flex', flexWrap:'wrap', gap:3, marginTop:1 }}>{eTags.map(tagChip)}</div>}
             </div>
             );
-          })}
+        };
+        const known = new Set(tags.map(t => t.id));
+        const groups = sortedTags
+          .map(t => ({ key:t.id, title:t.name, color:t.color, items: list.filter(e => (e.tags || []).includes(t.id)) }))
+          .filter(g => g.items.length > 0);
+        const rest = list.filter(e => !(e.tags || []).some(id => known.has(id)));
+        if (rest.length) groups.push({ key:'__rest', title:'Reste', color:C.muted, items: rest });
+        return (
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {reorderable && list.length > 1 && <div style={{ fontSize:8.5, color:C.dim, fontStyle:'italic' }}>Glisse la poignée ⠿ pour réordonner · double-clic (ou appui 3 s) sur un tag pour le renommer / changer son ordre.</div>}
+          {groups.map(g => (
+            <StatsCollapse key={g.key} title={`${g.title} (${g.items.length})`} color={g.color} defaultOpen>
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>{g.items.map(renderEntry)}</div>
+            </StatsCollapse>
+          ))}
         </div>
         );
       })()}
