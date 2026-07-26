@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.42';
+const APP_VERSION = '7.6.43';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -10395,6 +10395,9 @@ function StatsPanel() {
         <StatsCollapse title="🔥 HEARTHSTONE" color={HS_COLOR}>
           <HearthstoneStatsSection />
         </StatsCollapse>
+        <StatsCollapse title="🔫 COUNTER-STRIKE" color={CS_COLOR}>
+          <CounterStrikeStatsSection />
+        </StatsCollapse>
         <StatsCollapse title="🕹️ JEUX HUB" color={GAMES_COLOR}>
           <GamesHubStatsSection />
         </StatsCollapse>
@@ -19519,6 +19522,146 @@ async function steamFetchStats(force) {
   if (!player && !games.length) return { error: 'PRIVATE' };
   try { localStorage.setItem(STEAM_STATS_LS, JSON.stringify(data)); } catch {}
   return data;
+}
+
+// ── Counter-Strike 2 (collapse 🔫 COUNTER-STRIKE dans 🎮 JEUX de StatsPanel) ───
+// AUCUNE nouvelle configuration : réutilise le SteamID64 + la clé Web API déjà saisis
+// pour la section Steam (`steamId()`/`steamKey()`), via `steamGetJson` (fetch direct
+// borné puis repli proxies CORS). Endpoint `ISteamUserStats/GetUserStatsForGame/v2`
+// sur l'appid 730 : Valve y publie le compteur de stats à vie du jeu (kills, morts,
+// tirs, MVP, temps de jeu, et un compteur par arme).
+// ⚠ Le profil Steam ET les détails de jeu doivent être PUBLICS, sinon Valve renvoie
+// une enveloppe vide en HTTP 200 (→ erreur `PRIVATE`, comme la section Steam).
+// ⚠ Steam est INJOIGNABLE depuis l'environnement d'agent (proxy 403) : parsing
+// défensif, forme réelle du payload non vérifiée en direct.
+const CS_COLOR    = '#de9b35';                  // orange Counter-Strike
+const CS_APPID    = 730;
+const CS_CACHE_LS = 'spotifyplus_cs';           // cache re-fetchable → PAS dans buildBackup
+const CS_TTL      = 30 * 60 * 1000;
+// Armes suivies par Valve (`total_kills_<clé>`) → libellé affiché pour l'arme favorite.
+const CS_WEAPONS = { ak47:'AK-47', m4a1:'M4A4 / M4A1-S', awp:'AWP', deagle:'Desert Eagle',
+  glock:'Glock-18', hkp2000:'P2000 / USP-S', p90:'P90', famas:'FAMAS', galilar:'Galil AR',
+  ump45:'UMP-45', mp7:'MP7', mac10:'MAC-10', sg556:'SG 553', aug:'AUG', ssg08:'SSG 08',
+  scar20:'SCAR-20', g3sg1:'G3SG1', xm1014:'XM1014', nova:'Nova', mag7:'MAG-7',
+  sawedoff:'Sawed-Off', negev:'Negev', m249:'M249', bizon:'PP-Bizon', tec9:'Tec-9',
+  fiveseven:'Five-SeveN', p250:'P250', elite:'Dual Berettas', knife:'Couteau', hegrenade:'Grenade HE',
+  molotov:'Molotov', taser:'Zeus x27' };
+
+// { fetchedAt, id, kills, deaths, kd, hsPct, accuracy, wins, matches, winRate, hours,
+//   mvps, rounds, bombsPlanted, bombsDefused, topWeapon } | { error }
+async function csFetchStats(force) {
+  const id = steamId(), key = steamKey();
+  if (!id || !key) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(CS_CACHE_LS)); } catch {}
+  if (!force && cache && cache.id === id && Date.now() - cache.fetchedAt < CS_TTL) return cache;
+  const j = await steamGetJson(`https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v2/`
+    + `?appid=${CS_APPID}&key=${encodeURIComponent(key)}&steamid=${encodeURIComponent(id)}`);
+  if (j && j.__denied) return { error: 'KEY' };
+  if (!j) return { error: 'NET' };
+  const raw = (j.playerstats && j.playerstats.stats) || [];
+  if (!Array.isArray(raw) || !raw.length) return { error: 'PRIVATE' };
+  const S = {};
+  raw.forEach(st => { if (st && st.name) S[st.name] = steamNum(st.value) || 0; });
+  const div = (a, b) => (b > 0 ? a / b : null);
+  // Arme favorite = plus gros compteur `total_kills_<arme>` (le couteau reste éligible :
+  // c'est bien l'arme avec laquelle le joueur a le plus tué).
+  let topWeapon = null;
+  Object.keys(CS_WEAPONS).forEach(w => {
+    const n = S['total_kills_' + w] || 0;
+    if (n > 0 && (!topWeapon || n > topWeapon.kills)) topWeapon = { label: CS_WEAPONS[w], kills: n };
+  });
+  const kills = S.total_kills || 0, deaths = S.total_deaths || 0;
+  const matches = S.total_matches_played || 0, wins = S.total_matches_won || 0;
+  const data = {
+    fetchedAt: Date.now(), id,
+    kills, deaths,
+    kd: div(kills, deaths),
+    hsPct: div(S.total_kills_headshot || 0, kills),
+    accuracy: div(S.total_shots_hit || 0, S.total_shots_fired || 0),
+    wins, matches, winRate: div(wins, matches),
+    hours: Math.round((S.total_time_played || 0) / 3600),
+    mvps: S.total_mvps || 0,
+    rounds: S.total_rounds_played || 0,
+    bombsPlanted: S.total_planted_bombs || 0,
+    bombsDefused: S.total_defused_bombs || 0,
+    topWeapon,
+  };
+  try { localStorage.setItem(CS_CACHE_LS, JSON.stringify(data)); } catch {}
+  return data;
+}
+
+// Sous-section « 🔫 Counter-Strike » du collapse 🎮 JEUX — aucune config propre : elle
+// réutilise celle de Steam (`SteamConfigForm`, partagé avec Bon Plan).
+function CounterStrikeStatsSection() {
+  const [data, setData]       = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr]         = React.useState('');
+  const [showCfg, setShowCfg] = React.useState(false);
+  const configured = !!(steamId() && steamKey());
+  const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
+  const pct  = v => v == null ? '—' : (v * 100).toFixed(1).replace('.', ',') + ' %';
+
+  const ERR = {
+    KEY:     'Clé Web API Steam refusée — vérifie-la (⚙).',
+    PRIVATE: 'Aucune statistique renvoyée : mets « Détails du jeu » sur PUBLIC dans la confidentialité de ton profil Steam (ou tu n\'as jamais lancé CS2).',
+    NET:     'API Steam injoignable — réessaie dans un instant.',
+  };
+  const refresh = async (force) => {
+    if (loading) return;
+    setLoading(true); setErr('');
+    const d = await csFetchStats(force);
+    // CONFIG = identifiants Steam absents (ex. juste après « Oublier ») : le rendu bascule
+    // tout seul sur le formulaire, afficher une erreur réseau serait trompeur.
+    if (d.error === 'CONFIG') { setData(null); setLoading(false); return; }
+    if (d.error) { setErr(ERR[d.error] || ERR.NET); setData(null); setLoading(false); return; }
+    setData(d); setLoading(false);
+  };
+  React.useEffect(() => { if (configured) refresh(false); }, []);
+
+  const card = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px' };
+  if (!configured || showCfg) {
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+        {!configured && (
+          <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+            Stats CS2 à vie via l'<b style={{ color:CS_COLOR }}>API Web Steam</b> — mêmes identifiants que
+            la section Steam (SteamID64 + clé Web API), rien de plus à créer.
+          </div>
+        )}
+        <SteamConfigForm showKey onSaved={() => { setShowCfg(false); try { localStorage.removeItem(CS_CACHE_LS); } catch {} setTimeout(() => refresh(true), 0); }}
+          onCancel={configured ? () => setShowCfg(false) : null} />
+      </div>
+    );
+  }
+
+  const cards = data ? [
+    { label:'ÉLIMINATIONS', value: fmtN(data.kills), icon:'🔫', color:CS_COLOR,
+      sub: `${fmtN(data.deaths)} morts${data.kd != null ? ' · ratio K/D ' + data.kd.toFixed(2).replace('.', ',') : ''}` },
+    { label:'TIRS DANS LA TÊTE', value: pct(data.hsPct), sub:'des éliminations', icon:'🎯', color:'#e05050' },
+    { label:'PRÉCISION', value: pct(data.accuracy), sub:'tirs touchés / tirs tirés', icon:'📌', color:'#6ea8fe' },
+    ...(data.matches ? [{ label:'PARTIES GAGNÉES', value: fmtN(data.wins),
+      sub: `sur ${fmtN(data.matches)} parties${data.winRate != null ? ' · ' + pct(data.winRate) : ''}`, icon:'🏆', color:'#46c46a' }] : []),
+    ...(data.hours ? [{ label:'TEMPS DE JEU', value: fmtN(data.hours) + ' h', sub: `${fmtN(data.rounds)} rounds joués`, icon:'⏱', color:CS_COLOR }] : []),
+    ...(data.mvps ? [{ label:'MVP', value: fmtN(data.mvps), sub:'étoiles de meilleur joueur de round', icon:'⭐', color:'#e3b341' }] : []),
+    ...(data.topWeapon ? [{ label:'ARME FAVORITE', value: data.topWeapon.label,
+      sub: `${fmtN(data.topWeapon.kills)} éliminations`, icon:'🥇', color:'#9b7bf5' }] : []),
+    ...(data.bombsPlanted || data.bombsDefused ? [{ label:'BOMBES', value: fmtN(data.bombsPlanted),
+      sub: `posées · ${fmtN(data.bombsDefused)} désamorcées`, icon:'💣', color:'#f0883e' }] : []),
+  ] : [];
+  const sync = data ? new Date(data.fetchedAt).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }) : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {loading && !data && <div style={{ ...card, fontSize:11, color:C.muted }}>⏳ Chargement des stats Counter-Strike…</div>}
+      {err && <div style={{ ...card, fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
+      {cards.map(statCardEl)}
+      <div style={{ display:'flex', alignItems:'center', gap:8, justifyContent:'flex-end' }}>
+        {sync && <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>sync {sync}</span>}
+        <button onClick={() => setShowCfg(true)} title="Configurer Steam" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor:'pointer', color:C.muted, fontSize:10, fontFamily:'inherit' }}>⚙</button>
+        <button onClick={() => refresh(true)} disabled={loading} title="Actualiser" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, padding:'5px 10px', cursor: loading ? 'default' : 'pointer', color:C.muted, fontSize:10, fontFamily:'inherit', opacity: loading ? 0.5 : 1 }}>↻ Actualiser</button>
+      </div>
+    </div>
+  );
 }
 
 // Sous-section « 🕹️ Steam » du collapse 🎮 JEUX (StatsPanel) — même gabarit que

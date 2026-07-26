@@ -86,7 +86,9 @@
 // via l'API officielle Supercell, relayée par le proxy RoyaleAPI).
 // v104 : bump de cache — Stats > Jeux : nouveau collapse « Hearthstone » (stats de la base
 // de cartes via HearthstoneJSON — Blizzard n'expose aucune stat de joueur pour ce jeu).
-const CACHE  = 'spotifyplus-v104';
+// v105 : bump de cache — Stats > Jeux : nouveau collapse « Counter-Strike » (stats CS2 à vie
+// via l'API Web Steam, sur les identifiants Steam déjà saisis).
+const CACHE  = 'spotifyplus-v105';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
