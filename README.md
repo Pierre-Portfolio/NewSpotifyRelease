@@ -102,7 +102,7 @@ Visuel type « Vos trajets » Google Maps : carte Leaflet (tuiles OSM) + timelin
 ### Mot de Passe
 Coffre d'identifiants **chiffré par un mot de passe maître** (AES-GCM 256 + PBKDF2 via Web Crypto native) — le localStorage ne contient que des données chiffrées, le mot de passe maître n'est jamais stocké. Recherche, masquage/copie, verrouillage auto (reload + inactivité 10 min), export/import chiffré. URLs assainies (pas de `javascript:`). ⚠ Mot de passe oublié = données irrécupérables.
 
-**Nouveautés** : un **bouton ✏️** pour **modifier** un identifiant existant (login, mot de passe, URL, commentaire, tags), le **réordonnancement par glisser-déposer** (poignée ⠿, à la souris ou au doigt, quand aucun filtre n'est actif), et un **système de tags** — un filtre en haut (« Tous » + un bouton par tag, avec un petit **+** pour en créer) et l'attribution de plusieurs tags à chaque mot de passe. **Tout ça (l'ordre, les modifications et les tags) vit dans le coffre chiffré**, donc c'est automatiquement **exporté/importé** avec la sauvegarde et **synchronisé dans Dropbox et Google Drive**.
+**Nouveautés** : un **bouton ✏️** pour **modifier** un identifiant existant (login, mot de passe, URL, commentaire, tags), le **réordonnancement par glisser-déposer** (poignée ⠿, à la souris ou au doigt, quand aucun filtre n'est actif), et un **système de tags** — un filtre en haut (« Tous » + un bouton par tag, avec un petit **+** pour en créer) et l'attribution de plusieurs tags à chaque mot de passe. **Tout ça (l'ordre, les modifications et les tags) vit dans le coffre chiffré**, donc c'est automatiquement **exporté/importé** avec la sauvegarde et **synchronisé dans Dropbox, Google Drive, pCloud et MEGA**.
 
 **Suppression protégée** : le × d'un identifiant demande maintenant une **confirmation** (« Supprimer « … » ? ») — plus de perte accidentelle, le coffre n'ayant pas de corbeille.
 
@@ -115,7 +115,10 @@ Rappels datés (rubriques fixes Administratif/Logement/Véhicule/Médecin/Travai
 - **Export / Import** JSON, complet **ou** partiel (exports séparés) — fusion prudente à la restauration (dates de scan jamais régressées, TV Time/Finance fusionnés…). **La sauvegarde couvre désormais quasiment tout** : en plus de la musique, des stats, du To do, des Alertes, de TV Time, de Maps, de la Finance, du Bon Plan, de la Santé, des Notes, du coffre Mot de Passe et du Paramétrage — aussi le **Frigo** (contenu + péremptions), le **Vêtement** (inventaire + fiches, **sans les photos** trop lourdes), l'**Emploi** (salaire + secteur), le **Sport** (exercices cochés), tes **clés & pseudos d'API** (Gemini, GitHub, LoL, chess.com, Speedrun), les **records de mini-jeux** et tes **préférences d'affichage**. Restent volontairement dehors : la composition détaillée des repas (Santé), les photos (Vêtement) et images (TierList), la **bibliothèque Steam** (wishlist & stats — cache re-téléchargeable, volontairement exclu), et tous les caches re-téléchargeables (Actu, cours de bourse, stats en ligne…).
 - **Paramétrage des modules** : un interrupteur par module active/désactive son onglet en direct ; un bouton 🏠 à côté choisit s'il apparaît sur l'accueil (**desktop ET mobile**). Ce choix est **sauvegardé dans tes exports/imports**
 - **Accueil personnalisable** : la page d'accueil affiche tes modules — **Musique en premier, puis par ordre alphabétique** (grille 3 colonnes sur desktop, 2 sur mobile) — et tu choisis lesquels afficher via le bouton 🏠 du Paramétrage ; « À propos » reste une barre en bas
-- **☁︎ Dropbox** (OAuth PKCE) et **△ Google Drive** (OAuth implicite) optionnels : sauvegarde complète écrasée à chaque envoi
+- **4 destinations cloud optionnelles**, toutes sur le même principe (sauvegarde complète écrasée à chaque envoi, restauration en un clic) :
+  - **☁︎ Dropbox** (OAuth PKCE) et **△ Google Drive** (OAuth implicite)
+  - **◲ pCloud** *(nouveau)* — OAuth aussi : crée une app sur `docs.pcloud.com/my_apps`, ajoute l'URL du Hub dans ses *Redirect URIs*, puis colle le *Client ID* directement dans la carte pCloud d'À propos (ou dans le module API) — pas besoin de toucher au code. Les comptes US et EU sont gérés automatiquement.
+  - **⬢ MEGA** *(nouveau)* — ⚠ **MEGA n'a pas d'OAuth** : la connexion demande l'**email et le mot de passe** de ton compte, et une session MEGA donne accès à **tout le compte** (alors que Dropbox/Drive ne donnent qu'un jeton révocable et limité). Par sécurité, la case « **mémoriser sur cet appareil** » est **décochée par défaut** : sans elle, rien n'est écrit dans le navigateur et la connexion dure jusqu'au rechargement de la page. Tout le chiffrement se fait chez toi (bibliothèque `megajs` auto-hébergée, téléchargée seulement au premier usage). Les comptes avec **double authentification ne sont pas gérés**.
 - Proposition de sauvegarde hebdomadaire, réinitialisation mois/année automatique (mois **local**)
 
 ## Technologies
@@ -123,7 +126,7 @@ Rappels datés (rubriques fixes Administratif/Logement/Véhicule/Médecin/Travai
 - **Content-Security-Policy** verrouillée : même en cas de XSS, le token Spotify ne peut être exfiltré
 - **sql.js 1.10.2** (SQLite WASM) et **Leaflet 1.9.4** **auto-hébergés** dans `vendor/`
 - **IndexedDB** (persistance du binaire SQLite) · Spotify Web API (refresh token avec rotation + mutex)
-- **Sync Dropbox / Google Drive** optionnelles (OAuth, aucune clé secrète dans le code)
+- **Sync Dropbox / Google Drive / pCloud** optionnelles (OAuth, aucune clé secrète dans le code) + **MEGA** via `megajs` auto-hébergée (chiffrement 100 % côté navigateur)
 - **GitHub Pages** (hébergement statique, aucun serveur)
 
 ## Structure du projet
@@ -132,7 +135,7 @@ NewSpotifyRelease/
   index.html          → App complète (React 18 CDN + sql.js), tout en un fichier
   manifest.json       → Config PWA
   service-worker.js   → Cache app shell + vendor (offline, network-first)
-  vendor/             → sql-wasm.js/.wasm, leaflet.js/.css (auto-hébergés)
+  vendor/             → sql-wasm.js/.wasm, leaflet.js/.css, megajs.js (auto-hébergés)
   icon-192.png, icon-512.png
   data/               → actu.json, indices.json (générés par GitHub Actions)
   scripts/            → fetch_actu.py, fetch_indices.py
