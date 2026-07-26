@@ -73,7 +73,7 @@
 // v90 : bump de cache — Cartographie : nouvelle carte « Aurores boréales » (spaceweatherlive.com).
 // v91 : bump de cache — TV Time YouTube : clic sur la miniature d'une vidéo → ouvre la vidéo (nouvel onglet) + marque vue automatiquement.
 // v92 : bump de cache — Cartographie : cartes réparées (refusaient l'iframe) → Aurores (image NOAA SWPC), Catastrophes naturelles (VolcanoDiscovery), Carte INSEE (mode iframe statistiques-locales), Qualité de l'eau (infoeau.fr).
-const CACHE  = 'spotifyplus-v95';
+const CACHE  = 'spotifyplus-v96';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

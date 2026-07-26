@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.32';
+const APP_VERSION = '7.6.33';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16121,6 +16121,12 @@ function NotePanel() {
   const [askId, setAskId]   = React.useState(null);
   const [askPw, setAskPw]   = React.useState('');
 
+  // Bascule public ⇄ privé depuis l'éditeur : quand on passe une note EN CLAIR en privé et
+  // qu'aucune session cryptée n'est ouverte, la porte s'ouvre pour récupérer le mdp global
+  // et la conversion s'exécute à la validation (sans entrer dans l'espace crypté).
+  const [toPrivate, setToPrivate] = React.useState(false);
+  const [msg, setMsg]             = React.useState('');
+
   const commit = list => { setNotes(list); saveNotes(list); };
   const closeEditor = () => { setEditId(null); setTitle(''); setText(''); setErr(''); setBusy(false); };
 
@@ -16140,9 +16146,33 @@ function NotePanel() {
     return () => { cancelled = true; };
   }, [mode, gpw, notes]);
 
+  // ── Écriture de la note de l'éditeur dans l'un ou l'autre espace ──
+  const newNoteId = now => now + '_' + Math.random().toString(36).slice(2);
+  const writeNote = (entry, now) => {
+    if (editId === 'new') commit([{ id: newNoteId(now), updatedAt: now, ...entry }, ...notes]);
+    else commit(notes.map(n => n.id === editId ? { id: n.id, updatedAt: now, ...entry } : n));
+  };
+  const saveAsClear = () => writeNote({ locked: false, title: title.trim() || 'Sans titre', text }, Date.now());
+  const saveAsEnc = async pw => {
+    const enc = await mdpEncrypt(pw, { title: title.trim() || 'Sans titre', text });
+    writeNote({ locked: true, enc }, Date.now());   // note cryptée : AUCUN titre en clair
+  };
+
   // ── Porte : entrer dans l'espace crypté ──
-  const openGate = () => { if (mode !== 'normal') return; setGErr(''); setGPw(''); setGPw2(''); setGate(loadNoteEncCheck() ? 'unlock' : 'setup'); };
-  const cancelGate = () => { setGate(null); setGPw(''); setGPw2(''); setGErr(''); };
+  const openGate = () => { if (mode !== 'normal') return; setMsg(''); setGErr(''); setGPw(''); setGPw2(''); setGate(loadNoteEncCheck() ? 'unlock' : 'setup'); };
+  const cancelGate = () => { setGate(null); setGPw(''); setGPw2(''); setGErr(''); setToPrivate(false); };
+  // Mot de passe global validé : soit on entre dans l'espace crypté, soit (bascule « Passer
+  // privé » depuis l'éditeur en clair) on chiffre la note courante et on reste dans l'espace normal.
+  const gateDone = async pw => {
+    if (toPrivate) {
+      try { await saveAsEnc(pw); }
+      catch { setGErr('Échec du chiffrement.'); setGBusy(false); return false; }
+      closeEditor(); cancelGate(); setMsg('🔒 Note déplacée dans les notes cryptées.');
+      return true;
+    }
+    setGpw(pw); setMode('enc'); cancelGate();
+    return true;
+  };
   const submitGate = async () => {
     if (gBusy) return;
     setGBusy(true); setGErr('');
@@ -16151,22 +16181,22 @@ function NotePanel() {
         if (!gPw) { setGErr('Choisis un mot de passe.'); setGBusy(false); return; }
         if (gPw !== gPw2) { setGErr('Les deux mots de passe ne correspondent pas.'); setGBusy(false); return; }
         saveNoteEncCheck(await mdpEncrypt(gPw, { v: 1 }));
-        setGpw(gPw); setMode('enc'); cancelGate();
+        if (!(await gateDone(gPw))) return;
       } else {
         const chk = loadNoteEncCheck();
         try { await mdpDecrypt(gPw, chk); }
         catch { setGErr('Mot de passe incorrect.'); setGBusy(false); return; }
-        setGpw(gPw); setMode('enc'); cancelGate();
+        if (!(await gateDone(gPw))) return;
       }
     } catch { setGErr('Erreur de chiffrement.'); }
     setGBusy(false);
   };
-  const leaveEnc = () => { setMode('normal'); setGpw(''); setDec({}); closeEditor(); setAskId(null); setAskPw(''); setErr(''); };
+  const leaveEnc = () => { setMode('normal'); setGpw(''); setDec({}); closeEditor(); setAskId(null); setAskPw(''); setErr(''); setMsg(''); };
 
   // ── Ouvrir / éditer ──
-  const openNew = () => { closeEditor(); setEditId('new'); };
+  const openNew = () => { closeEditor(); setMsg(''); setEditId('new'); };
   const openNote = async n => {
-    setErr('');
+    setErr(''); setMsg('');
     if (mode === 'normal') { setEditId(n.id); setTitle(n.title || ''); setText(n.text || ''); return; }
     const d = dec[n.id];
     if (d) { setEditId(n.id); setTitle(d.title || ''); setText(d.text || ''); return; }
@@ -16182,25 +16212,40 @@ function NotePanel() {
 
   const saveNote = async () => {
     if (busy) return;
-    const t = title.trim() || 'Sans titre';
-    const now = Date.now();
-    const newId = () => now + '_' + Math.random().toString(36).slice(2);
     if (mode === 'enc') {
       if (!gpw) { setErr('Session cryptée expirée.'); return; }
       setBusy(true); setErr('');
-      let enc;
-      try { enc = await mdpEncrypt(gpw, { title: t, text }); }
+      try { await saveAsEnc(gpw); }
       catch { setErr('Échec du chiffrement.'); setBusy(false); return; }
       setBusy(false);
-      const entry = { locked: true, enc };   // note cryptée : AUCUN titre en clair
-      if (editId === 'new') commit([{ id: newId(), updatedAt: now, ...entry }, ...notes]);
-      else commit(notes.map(n => n.id === editId ? { id: n.id, updatedAt: now, ...entry } : n));
     } else {
-      const entry = { locked: false, title: t, text };
-      if (editId === 'new') commit([{ id: newId(), updatedAt: now, ...entry }, ...notes]);
-      else commit(notes.map(n => n.id === editId ? { id: n.id, updatedAt: now, ...entry } : n));
+      saveAsClear();
     }
     closeEditor();
+  };
+
+  // Bascule public ⇄ privé DEPUIS l'éditeur : enregistre la note dans l'AUTRE espace
+  // (elle quitte donc l'espace courant). Public → privé demande le mot de passe global
+  // s'il n'est pas déjà en session ; privé → public confirme (la note ne sera plus chiffrée).
+  const toggleVisibility = async () => {
+    if (busy || gBusy) return;
+    setErr('');
+    if (isEnc) {
+      if (!window.confirm('Rendre cette note PUBLIQUE ? Elle ne sera plus chiffrée et rejoindra les notes normales.')) return;
+      saveAsClear();
+      closeEditor();
+      setMsg('🗒️ Note déplacée dans les notes normales.');
+      return;
+    }
+    if (gpw) {   // session cryptée déjà ouverte
+      setBusy(true);
+      try { await saveAsEnc(gpw); }
+      catch { setErr('Échec du chiffrement.'); setBusy(false); return; }
+      setBusy(false); closeEditor(); setMsg('🔒 Note déplacée dans les notes cryptées.');
+      return;
+    }
+    setToPrivate(true); setMsg(''); setGErr(''); setGPw(''); setGPw2('');
+    setGate(loadNoteEncCheck() ? 'unlock' : 'setup');
   };
   const deleteNote = n => {
     const label = mode === 'enc' ? ((dec[n.id] && dec[n.id].title) || 'cette note cryptée') : (n.title || 'Sans titre');
@@ -16228,6 +16273,11 @@ function NotePanel() {
         </button>
       </div>
 
+      {/* Confirmation d'une bascule public ⇄ privé (la note a changé d'espace) */}
+      {msg && (
+        <div style={{ fontSize:10, color:C.muted, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 10px' }}>{msg}</div>
+      )}
+
       {/* Porte : saisie du mot de passe global */}
       {gate && (
         <div style={{ background:C.surface, border:`1px solid ${accent}66`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
@@ -16235,9 +16285,13 @@ function NotePanel() {
             {gate === 'setup' ? '🔒 CRÉER LE MOT DE PASSE DES NOTES CRYPTÉES' : '🔒 NOTES CRYPTÉES — MOT DE PASSE'}
           </div>
           <div style={{ fontSize:10, color:C.dim, lineHeight:1.4 }}>
-            {gate === 'setup'
-              ? 'Un seul mot de passe protège toutes tes notes cryptées. ⚠ Oublié = notes irrécupérables.'
-              : 'Saisis le mot de passe global pour voir tes notes cryptées.'}
+            {toPrivate
+              ? (gate === 'setup'
+                  ? 'Cette note va devenir privée. Choisis le mot de passe global des notes cryptées. ⚠ Oublié = notes irrécupérables.'
+                  : 'Saisis le mot de passe global pour rendre cette note privée.')
+              : (gate === 'setup'
+                  ? 'Un seul mot de passe protège toutes tes notes cryptées. ⚠ Oublié = notes irrécupérables.'
+                  : 'Saisis le mot de passe global pour voir tes notes cryptées.')}
           </div>
           <input type="password" value={gPw} placeholder="Mot de passe" autoFocus
             onChange={e => { setGPw(e.target.value); setGErr(''); }}
@@ -16251,7 +16305,7 @@ function NotePanel() {
           )}
           {gErr && <div style={{ fontSize:10, color:'#e05050' }}>{gErr}</div>}
           <div style={{ display:'flex', gap:8 }}>
-            <button onClick={submitGate} disabled={gBusy} style={{ ...btnSt(true), flex:1, fontWeight:700, opacity: gBusy ? 0.6 : 1 }}>{gBusy ? '…' : (gate === 'setup' ? '✓ Créer' : '🔓 Ouvrir')}</button>
+            <button onClick={submitGate} disabled={gBusy} style={{ ...btnSt(true), flex:1, fontWeight:700, opacity: gBusy ? 0.6 : 1 }}>{gBusy ? '…' : (toPrivate ? '🔒 Passer privé' : (gate === 'setup' ? '✓ Créer' : '🔓 Ouvrir'))}</button>
             <button onClick={cancelGate} style={btnSt(false)}>Annuler</button>
           </div>
         </div>
@@ -16275,8 +16329,14 @@ function NotePanel() {
             style={{ ...inputSt, resize:'vertical', minHeight:110, lineHeight:1.5 }} />
           {isEnc && <div style={{ fontSize:9, color:'#e0a050', lineHeight:1.4 }}>🔒 Note chiffrée avec le mot de passe global (titre inclus).</div>}
           {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
-          <div style={{ display:'flex', gap:8 }}>
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             <button onClick={saveNote} disabled={busy} style={{ ...btnSt(true), flex:1, fontWeight:700, opacity: busy ? 0.6 : 1 }}>{busy ? '…' : '✓ Enregistrer'}</button>
+            {/* Bascule public ⇄ privé : enregistre la note dans l'AUTRE espace */}
+            <button onClick={toggleVisibility} disabled={busy}
+              title={isEnc ? 'Enregistrer cette note en clair dans les notes normales' : 'Chiffrer cette note et la déplacer dans les notes cryptées'}
+              style={{ ...btnSt(false), color: isEnc ? NOTE_COLOR : '#e0a050', borderColor: (isEnc ? NOTE_COLOR : '#e0a050') + '66', fontWeight:700, opacity: busy ? 0.6 : 1 }}>
+              {isEnc ? '🗒️ Passer public' : '🔒 Passer privé'}
+            </button>
             <button onClick={closeEditor} style={btnSt(false)}>Annuler</button>
           </div>
         </div>
