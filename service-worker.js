@@ -88,7 +88,9 @@
 // de cartes via HearthstoneJSON — Blizzard n'expose aucune stat de joueur pour ce jeu).
 // v105 : bump de cache — Stats > Jeux : nouveau collapse « Counter-Strike » (stats CS2 à vie
 // via l'API Web Steam, sur les identifiants Steam déjà saisis).
-const CACHE  = 'spotifyplus-v105';
+// v106 : bump de cache — fix des chips de raccourci de la carte « Espèces animales »
+// (le terme cliqué n'était pas pris en compte : recherche lancée avec l'ancien état).
+const CACHE  = 'spotifyplus-v106';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
