@@ -84,7 +84,9 @@
 // (mappemonde Leaflet + densité d'observations GBIF, recherche d'espèce, sans clé).
 // v103 : bump de cache — Stats > Jeux : nouveau collapse « Clash Royale » (stats de joueur
 // via l'API officielle Supercell, relayée par le proxy RoyaleAPI).
-const CACHE  = 'spotifyplus-v103';
+// v104 : bump de cache — Stats > Jeux : nouveau collapse « Hearthstone » (stats de la base
+// de cartes via HearthstoneJSON — Blizzard n'expose aucune stat de joueur pour ce jeu).
+const CACHE  = 'spotifyplus-v104';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
