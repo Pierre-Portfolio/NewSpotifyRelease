@@ -80,7 +80,9 @@
 // v100 : bump de cache — Alertes : nouvelle ligne « Couple avec Cécile » (rubrique Anniversaire).
 // v101 : bump de cache — Alertes : rappels récurrents (« Couple avec Cécile » resonne tous les
 // 6 mois — la date saisie est l'origine, l'appli vise toujours la prochaine échéance).
-const CACHE  = 'spotifyplus-v101';
+// v102 : bump de cache — Actu > Cartographie : nouvelle carte « Espèces animales »
+// (mappemonde Leaflet + densité d'observations GBIF, recherche d'espèce, sans clé).
+const CACHE  = 'spotifyplus-v102';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
