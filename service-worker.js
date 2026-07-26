@@ -82,7 +82,9 @@
 // 6 mois — la date saisie est l'origine, l'appli vise toujours la prochaine échéance).
 // v102 : bump de cache — Actu > Cartographie : nouvelle carte « Espèces animales »
 // (mappemonde Leaflet + densité d'observations GBIF, recherche d'espèce, sans clé).
-const CACHE  = 'spotifyplus-v102';
+// v103 : bump de cache — Stats > Jeux : nouveau collapse « Clash Royale » (stats de joueur
+// via l'API officielle Supercell, relayée par le proxy RoyaleAPI).
+const CACHE  = 'spotifyplus-v103';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
