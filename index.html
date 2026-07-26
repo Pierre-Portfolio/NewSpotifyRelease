@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.45';
+const APP_VERSION = '7.6.46';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2139,10 +2139,12 @@ function StoreProvider({ children }) {
           // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
           try { navigator.storage?.persist?.(); } catch {}
 
+          // Remember → To do : ajoute au carrousel « Aujourd'hui » les rappels à ≤ 3 j de l'échéance
+          // ⚠ AVANT notifyDueReminders : les rappels hebdomadaires ne notifient que si leur
+          // tâche est présente dans le To do — elle doit donc être créée d'abord.
+          try { syncRemembersToTodos(); } catch {}
           // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
           try { notifyDueReminders(); } catch {}
-          // Remember → To do : ajoute au carrousel « Aujourd'hui » les rappels à ≤ 3 j de l'échéance
-          try { syncRemembersToTodos(); } catch {}
 
           // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
           // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
@@ -18987,7 +18989,10 @@ const RAPPEL_SECTIONS = [
 // Rappels fixes rendus HORS rubrique (dans un collapse dédié — ex. « 🎮 Jeux »), mais
 // intégrés comme les autres (badge, dates à venir, notifications, To do, stats). La clé
 // porte un préfixe « section » qui n'existe pas dans RAPPEL_SECTIONS → aucune collision.
-const RAPPEL_EXTRA = [{ key:'jeux.leagueoflegends', label:'League of Legend' }];
+const RAPPEL_EXTRA = [
+  { key:'jeux.leagueoflegends', label:'League of Legend' },
+  { key:'jeux.epicgames',       label:'Epic Games' },   // hebdomadaire auto (cf. RAPPEL_WEEKLY)
+];
 const RAPPEL_TIME_KEY = 'spotifyplus_rappels_time';     // heure OPTIONNELLE des items fixes : { "<section>.<item>": "HH:MM" }
 function loadRappels() { try { return JSON.parse(localStorage.getItem(RAPPEL_LS_KEY)) || {}; } catch { return {}; } }
 function saveRappels(v) { lsSet(RAPPEL_LS_KEY, JSON.stringify(v)); }
@@ -19034,6 +19039,7 @@ function rappelAddMonths(dateStr, n) {
 // Le nombre de périodes écoulées est calculé directement (pas de boucle sur des années) ;
 // la petite boucle finale ne sert qu'à rattraper le jour du mois (bornage ci-dessus).
 function rappelNextDate(key, dateStr) {
+  if (RAPPEL_WEEKLY[key]) return rappelWeeklyDate(key);   // hebdomadaire : date calculée, la saisie est ignorée
   const step = RAPPEL_RECUR[key];
   if (!step || !dateStr) return dateStr;
   const base = new Date(dateStr + 'T00:00:00');
@@ -19045,8 +19051,39 @@ function rappelNextDate(key, dateStr) {
   while (rappelDelta(next) < 0 && guard++ < 24) { k++; next = rappelAddMonths(dateStr, k * step); }
   return next;
 }
+// ── Rappels HEBDOMADAIRES ─────────────────────────────────────────────────────
+// Échéance qui retombe TOUJOURS le même jour de la semaine à la même heure : la date
+// n'est donc PAS saisie par l'utilisateur, elle est CALCULÉE (aucune entrée dans
+// `spotifyplus_rappels` → rien à sauvegarder/restaurer, et le rappel ne peut jamais
+// « dériver » ni tomber en retard). { "<section>.<item>": { dow: 0=dim…6=sam, time:'HH:MM' } }
+const RAPPEL_DOW_FR = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+const RAPPEL_WEEKLY = { 'jeux.epicgames': { dow: 4, time: '16:00' } };   // Epic Games : jeux offerts renouvelés chaque JEUDI 16 h
+// Date 'YYYY-MM-DD' de la prochaine occurrence hebdomadaire (null si la clé n'est pas
+// hebdomadaire). Le jour J, l'échéance reste « aujourd'hui » JUSQU'À l'heure dite, puis
+// bascule sur la semaine suivante (à 16h01 le jeudi, la prochaine est jeudi prochain).
+function rappelWeeklyDate(key, ref) {
+  const w = RAPPEL_WEEKLY[key];
+  if (!w) return null;
+  const now   = ref || new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let diff = ((w.dow - today.getDay()) % 7 + 7) % 7;
+  if (diff === 0) {
+    const [hh, mm] = String(w.time || '00:00').split(':').map(Number);
+    if (now.getHours() * 60 + now.getMinutes() >= (hh || 0) * 60 + (mm || 0)) diff = 7;
+  }
+  const d  = new Date(today.getTime() + diff * 86400000);
+  const p2 = v => String(v).padStart(2, '0');
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+// Heure d'un rappel : celle saisie par l'utilisateur, sinon celle imposée par la
+// périodicité hebdomadaire ('' pour un rappel normal sans heure).
+function rappelTimeOf(key, times) {
+  return (times && times[key]) || (RAPPEL_WEEKLY[key] ? RAPPEL_WEEKLY[key].time : '') || '';
+}
 // Libellé court de la périodicité, affiché à côté d'un rappel récurrent ('' si non récurrent).
 function rappelRecurLabel(key) {
+  const w = RAPPEL_WEEKLY[key];
+  if (w) return `↻ ${RAPPEL_DOW_FR[w.dow]}${w.time ? ' ' + w.time : ''}`;
   const n = RAPPEL_RECUR[key];
   return n ? (n === 12 ? '↻ 1 an' : `↻ ${n} mois`) : '';
 }
@@ -19061,9 +19098,15 @@ function rememberAllWithDelta() {
     const k  = sec.key + '.' + ik;
     const ds = rappelNextDate(k, dates[k]);   // prochaine occurrence si le rappel est récurrent
     const d  = rappelDelta(ds);
-    if (d != null) out.push({ key: k, label, days: d, date: ds, time: times[k] || '' });
+    if (d != null) out.push({ key: k, label, days: d, date: ds, time: rappelTimeOf(k, times) });
   }));
-  RAPPEL_EXTRA.forEach(e => { const d = rappelDelta(dates[e.key]); if (d != null) out.push({ key: e.key, label: e.label, days: d, date: dates[e.key], time: times[e.key] || '' }); });
+  // Items « extra » : même traitement (un rappel hebdomadaire n'a pas de date saisie, elle
+  // est calculée par rappelNextDate) + drapeau `weekly` utilisé par les notifications.
+  RAPPEL_EXTRA.forEach(e => {
+    const ds = rappelNextDate(e.key, dates[e.key]);
+    const d  = rappelDelta(ds);
+    if (d != null) out.push({ key: e.key, label: e.label, days: d, date: ds, time: rappelTimeOf(e.key, times), weekly: !!RAPPEL_WEEKLY[e.key] });
+  });
   loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ key: 'custom.' + r.id, label: r.label, days: d, date: r.date, time: r.time || '' }); });
   return out;
 }
@@ -19088,7 +19131,14 @@ function rememberStats() {
 // Notification à l'ouverture de l'app aux JALONS J-30 (1 mois), J-7, J-1 et le jour J
 // (+ rappels en retard) — throttlée 1×/jour.
 function notifyDueReminders() {
-  const alerts = rememberAllWithDelta().filter(r => r.days === 30 || r.days === 7 || r.days === 1 || r.days <= 0);
+  const alerts = rememberAllWithDelta().filter(r => {
+    // Rappel HEBDOMADAIRE (Epic Games) : l'échéance est trop rapprochée pour les jalons
+    // J-30/J-7 → on prévient dès J-3 (le délai d'ajout au To do) et chaque jour jusqu'au
+    // jour J, MAIS uniquement tant que la tâche est encore dans le To do : si elle a été
+    // supprimée, c'est que c'est fait → plus de notification pour cette occurrence.
+    if (r.weekly) return r.days <= REMEMBER_TODO_LEAD_DAYS && todoHasRemember(r.key);
+    return r.days === 30 || r.days === 7 || r.days === 1 || r.days <= 0;
+  });
   if (!alerts.length) return;
   const today = new Date().toISOString().slice(0, 10);
   const KEY = 'spotifyplus_remember_notified';
@@ -19106,15 +19156,24 @@ function notifyDueReminders() {
 // connected) et après chaque modification de date dans RappelPanel.
 const REMEMBER_TODO_LEAD_DAYS = 3;
 const REMEMBER_TODO_ADDED_KEY = 'spotifyplus_remember_todo_added'; // { "<key>": "<date>" }
+// La tâche auto-créée pour ce rappel est-elle TOUJOURS dans le To do ? (elle porte
+// `rememberKey`). Sert aux rappels hebdomadaires : on ne notifie que tant que
+// l'utilisateur ne l'a pas supprimée.
+function todoHasRemember(key) {
+  try { return loadTodos().some(t => t && t.rememberKey === key); } catch { return false; }
+}
 function syncRemembersToTodos() {
   const soon = rememberAllWithDelta().filter(r => r.date && r.days != null && r.days <= REMEMBER_TODO_LEAD_DAYS);
   if (!soon.length) return false;
   let added;
   try { added = JSON.parse(localStorage.getItem(REMEMBER_TODO_ADDED_KEY)) || {}; } catch { added = {}; }
-  const todos = loadTodos();
+  let todos = loadTodos();
   let changed = false;
   soon.forEach(r => {
     if (added[r.key] === r.date) return;   // déjà ajouté pour cette échéance
+    // Rappel hebdomadaire : la tâche de la semaine PRÉCÉDENTE, si elle traîne encore
+    // (jamais supprimée), est retirée — sinon elles s'empileraient semaine après semaine.
+    if (r.weekly) { const kept = todos.filter(t => !t || t.rememberKey !== r.key); if (kept.length !== todos.length) todos = kept; }
     todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), text: '🔔 ' + r.label + (r.time ? ` (${r.time})` : ''), bucket: 'today', fav: false, rememberKey: r.key });
     added[r.key] = r.date;
     changed = true;
@@ -20560,7 +20619,7 @@ function RappelPanel() {
   // Rappels échus (pour le bandeau) — fixes + persos
   const due = [];
   RAPPEL_SECTIONS.forEach(sec => sec.items.forEach(([ik, label]) => { const k = sec.key + '.' + ik; const d = rappelDelta(rappelNextDate(k, dates[k])); if (d != null && d <= 0) due.push(label); }));
-  RAPPEL_EXTRA.forEach(e => { const d = rappelDelta(dates[e.key]); if (d != null && d <= 0) due.push(e.label); });
+  RAPPEL_EXTRA.forEach(e => { const d = rappelDelta(rappelNextDate(e.key, dates[e.key])); if (d != null && d <= 0) due.push(e.label); });
   customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d <= 0) due.push(c.label); });
 
   // Alertes des veilles API (Dependabot / Speedrun) — bandeaux visibles en tête du
@@ -20589,7 +20648,7 @@ function RappelPanel() {
       const k = sec.key + '.' + ik; const ds = rappelNextDate(k, dates[k]); const d = rappelDelta(ds);
       if (d != null && d >= 0) out.push({ label, date: ds, time: times[k] || '', days: d, recur: rappelRecurLabel(k) });
     }));
-    RAPPEL_EXTRA.forEach(e => { const ds = dates[e.key]; const d = rappelDelta(ds); if (d != null && d >= 0) out.push({ label: e.label, date: ds, time: times[e.key] || '', days: d }); });
+    RAPPEL_EXTRA.forEach(e => { const ds = rappelNextDate(e.key, dates[e.key]); const d = rappelDelta(ds); if (d != null && d >= 0) out.push({ label: e.label, date: ds, time: rappelTimeOf(e.key, times), days: d, recur: rappelRecurLabel(e.key) }); });
     customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d >= 0) out.push({ label: c.label, date: c.date, time: c.time || '', days: d }); });
     return out.sort((a, b) => a.days - b.days);
   }, [dates, customs, times]);
@@ -20690,15 +20749,28 @@ function RappelPanel() {
         {sec.key === 'sport' && (
           <StatsCollapse title="🎮 Jeux" color={RAPPEL_PURPLE}>
             {RAPPEL_EXTRA.map(e => {
-              const val = dates[e.key] || '';
-              const b = rappelBadge(rappelDelta(val));
+              // Rappel HEBDOMADAIRE (Epic Games) : aucune date à saisir, l'échéance est
+              // calculée (prochain jour de la semaine à l'heure fixée) → pas d'input date,
+              // on affiche la pastille de périodicité + la date de la prochaine occurrence.
+              const weekly = RAPPEL_WEEKLY[e.key];
+              const val    = weekly ? '' : (dates[e.key] || '');
+              const next   = rappelNextDate(e.key, dates[e.key]);
+              const b      = rappelBadge(rappelDelta(next));
               return (
                 <div key={e.key} style={{ display:'flex', alignItems:'center', gap:8, marginBottom:8 }}>
-                  <div onClick={() => val && toggleTime(e.key)} title={val ? 'Cliquer pour afficher/masquer l’heure' : undefined}
-                    style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: val ? 'pointer' : 'default' }}>{e.label}</div>
+                  <div onClick={() => !weekly && val && toggleTime(e.key)} title={!weekly && val ? 'Cliquer pour afficher/masquer l’heure' : undefined}
+                    style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: !weekly && val ? 'pointer' : 'default' }}>
+                    {e.label}
+                    {weekly && (
+                      <span title={`Chaque ${RAPPEL_DOW_FR[weekly.dow]} à ${weekly.time} · prochaine échéance : ${fmtRappelDate(next)} · ajouté au To do ${REMEMBER_TODO_LEAD_DAYS} j avant`}
+                        style={{ marginLeft:6, fontSize:8, fontFamily:'DM Mono,monospace', color:RAPPEL_PURPLE, border:`1px solid ${RAPPEL_PURPLE}55`, borderRadius:4, padding:'1px 4px', whiteSpace:'nowrap' }}>
+                        {rappelRecurLabel(e.key)} · {fmtRappelDate(next)}
+                      </span>
+                    )}
+                  </div>
                   <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
-                  {dateInput(val, ev => setDate(e.key, ev.target.value))}
-                  {val && openTimes.has(e.key) && timeInput(times[e.key] || '', ev => setTime(e.key, ev.target.value))}
+                  {!weekly && dateInput(val, ev => setDate(e.key, ev.target.value))}
+                  {!weekly && val && openTimes.has(e.key) && timeInput(times[e.key] || '', ev => setTime(e.key, ev.target.value))}
                 </div>
               );
             })}
