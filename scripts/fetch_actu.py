@@ -294,8 +294,15 @@ def fetch_insolite():
 
 
 def fetch_linkedin():
-    """Actualité LinkedIn — news autour du réseau professionnel."""
+    """Articles PUBLIÉS SUR LinkedIn (Pulse / LinkedIn News), repli : actu du réseau pro.
+
+    LinkedIn n'expose aucune API publique de lecture (partenaires uniquement, OAuth avec
+    client_secret, pas de CORS, pas de RSS) : on passe donc par Google News restreint au
+    domaine linkedin.com pour ramener du contenu VENANT de LinkedIn.
+    """
     return fetch_gnews([
+        gn_search("site:linkedin.com"),
+        gn_search("site:linkedin.com/pulse OR site:linkedin.com/posts"),
         gn_search("LinkedIn"),
         gn_search('LinkedIn OR "réseau professionnel" OR "monde du travail"'),
     ])
