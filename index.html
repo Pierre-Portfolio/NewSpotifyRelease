@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.65';
+const APP_VERSION = '7.6.66';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -11601,6 +11601,24 @@ function actuRecentFirst(items, maxDays) {
 }
 const ACTU_LI_MAX_DAYS = 30;   // LinkedIn : on ne garde qu'un mois de parutions
 
+// LinkedIn — un item vient-il VRAIMENT de linkedin.com ? (7.6.66)
+// La découverte passe par Google News (aucune API LinkedIn lisible, cf. actuFetchLinkedin),
+// mais on ne veut QUE des publications hébergées sur LinkedIn : les anciennes requêtes de
+// repli (`q=LinkedIn`) ramenaient des articles de presse PARLANT de LinkedIn. Trois indices,
+// du plus fiable au moins fiable : l'hôte de `sourceUrl` (attribut url de <source>, fourni
+// par Google News), l'hôte du lien lui-même (posé par l'Action quand elle a résolu la
+// redirection Google News), enfin le libellé de source « LinkedIn ».
+const ACTU_LI_HOST_RE = /(^|\.)linkedin\.com$/i;
+function actuLinkHost(u) {
+  try { return new URL(u).hostname; } catch { return ''; }
+}
+function actuIsLinkedin(a) {
+  if (!a) return false;
+  if (ACTU_LI_HOST_RE.test(actuLinkHost(a.sourceUrl || ''))) return true;
+  if (ACTU_LI_HOST_RE.test(actuLinkHost(a.link || ''))) return true;
+  return /^linkedin\b/i.test(String(a.source || '').trim());
+}
+
 // Parse un flux RSS/Atom → [{ title, link, date, source }]
 function actuParseRss(xml, max = 12) {
   if (!xml) return [];
@@ -11833,28 +11851,41 @@ function actuFetchCyber() {
 function actuFetchInsolite() {
   return actuFetchGNews([actuGNSearch('insolite')]);
 }
-// Actualité LinkedIn (7.6.56) — ⚠ IMPOSSIBLE de lire le fil « Actus » de SON compte :
-// LinkedIn n'a AUCUNE API publique de lecture du feed. Son API (« LinkedIn Marketing /
-// Share on LinkedIn ») est réservée aux partenaires validés, exige un OAuth avec
-// `client_secret` (donc un backend, impossible dans du code public) et n'envoie AUCUN
-// en-tête CORS ; il n'existe pas non plus de flux RSS officiel. Le mieux qu'une page
-// statique puisse faire est donc de récupérer des articles PUBLIÉS SUR LinkedIn plutôt
-// que des articles PARLANT de LinkedIn : on interroge Google News en le restreignant au
-// domaine (`site:linkedin.com` → LinkedIn Pulse & LinkedIn News), et on ne retombe sur
-// l'ancienne requête « actu du réseau professionnel » que si ça ne donne rien.
+// Actualité LinkedIn (7.6.56) — ⚠ IMPOSSIBLE de lire le fil « Actus » de SON compte, et
+// impossible d'interroger LinkedIn DIRECTEMENT : LinkedIn n'a AUCUNE API publique de
+// lecture. Son API (« LinkedIn Marketing / Share on LinkedIn ») est réservée aux
+// partenaires validés, exige un OAuth avec `client_secret` (donc un backend, impossible
+// dans du code public) et n'envoie AUCUN en-tête CORS ; le flux RSS de LinkedIn Pulse a été
+// supprimé et les pages publiques répondent 999 aux robots. Google News reste donc le seul
+// ANNUAIRE utilisable — mais on ne s'en sert QUE pour découvrir des publications hébergées
+// sur linkedin.com (`site:linkedin.com` → Pulse, posts, LinkedIn News).
+// ⚠ 7.6.66 — « je veux pas ceux de Google News mais bien ceux de LinkedIn » : les deux
+// requêtes de repli (`q=LinkedIn`) ramenaient des articles de PRESSE parlant de LinkedIn →
+// SUPPRIMÉES, et chaque lot est désormais filtré par `actuIsLinkedin` (un item dont l'hôte
+// n'est pas linkedin.com est jeté, quelle que soit la requête qui l'a ramené). Chaque
+// requête est essayée à son tour jusqu'à ce qu'il reste des items APRÈS filtrage — sinon la
+// section affiche « aucun article », jamais du hors-sujet. Les liens `news.google.com` sont
+// remplacés par l'URL linkedin.com réelle côté GitHub Action (`resolve_links` de
+// scripts/fetch_actu.py) ; ce fetcher client est un repli et ne peut pas les résoudre (le
+// décodage exige un POST vers un endpoint interne Google, sans CORS).
 // ⚠ 7.6.63 — FRAÎCHEUR : une recherche `site:` est classée par PERTINENCE par Google News,
 // d'où des articles vieux de ~300 jours dans la liste. Chaque requête est donc bornée par
 // l'opérateur `when:<N>d` de Google News, et le résultat repasse par `actuRecentFirst`
 // (filtre le hors-délai + tri parution décroissante) — ceinture et bretelles, car `when:`
 // est parfois ignoré sur les requêtes à opérateurs.
-function actuFetchLinkedin() {
+async function actuFetchLinkedin() {
   const w = ` when:${ACTU_LI_MAX_DAYS}d`;
-  return actuFetchGNews([
+  const queries = [
     actuGNSearch('site:linkedin.com' + w),
     actuGNSearch('site:linkedin.com/pulse OR site:linkedin.com/posts' + w),
-    actuGNSearch('LinkedIn' + w),
-    actuGNSearch('LinkedIn OR "réseau professionnel" OR "monde du travail"' + w),
-  ]).then(items => actuRecentFirst(items, ACTU_LI_MAX_DAYS));
+    actuGNSearch('site:fr.linkedin.com' + w),
+  ];
+  for (const q of queries) {
+    const raw = await actuFetchGNews([q]);
+    const items = actuRecentFirst(raw.filter(actuIsLinkedin), ACTU_LI_MAX_DAYS);
+    if (items.length) return items;
+  }
+  return [];
 }
 
 // Google Trends France — recherches tendance du jour (RSS via proxy CORS).
@@ -12820,17 +12851,22 @@ function ActuPanel() {
 
           {/* 1.1b LinkedIn — placé JUSTE SOUS Actu Mondial (demande utilisateur) */}
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
-            title={<span>💼 LINKEDIN <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
-            {/* ⚠ 7.6.63 — le tri/filtre est refait ICI et pas seulement dans le fetcher : la
-                source par défaut est `data/actu.json` (pré-fetché par la GitHub Action), donc
-                les items peuvent venir d'un run antérieur au correctif. */}
+            title={<span>💼 LINKEDIN <span style={{ color:C.dim, fontWeight:400 }}>· linkedin.com</span></span>}>
+            {/* ⚠ 7.6.63 / 7.6.66 — le filtre linkedin.com ET le tri par date sont refaits ICI,
+                pas seulement dans le fetcher : la source par défaut est `data/actu.json`
+                (pré-fetché par la GitHub Action), donc les items peuvent venir d'un run
+                antérieur aux correctifs et contenir de la presse « au sujet de » LinkedIn. */}
             {(() => {
-              const li = actuRecentFirst(d.linkedin, ACTU_LI_MAX_DAYS);
+              const src = Array.isArray(d.linkedin) ? d.linkedin : [];
+              const li = actuRecentFirst(src.filter(actuIsLinkedin), ACTU_LI_MAX_DAYS);
               if (li.length) return li.map((a, i) => row('li' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)));
-              return empty(d.linkedin && d.linkedin.length
-                ? `Aucun article publié dans les ${ACTU_LI_MAX_DAYS} derniers jours.`
+              return empty(src.length
+                ? `Aucune publication LinkedIn dans les ${ACTU_LI_MAX_DAYS} derniers jours.`
                 : 'Indisponible (proxy CORS injoignable).');
             })()}
+            <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
+              Uniquement des publications hébergées sur linkedin.com (Pulse, posts, LinkedIn News), trouvées via Google News restreint au domaine : LinkedIn n'ouvre aucune API ni flux RSS de lecture — lire le fil « Actus » de ton compte demanderait un serveur.
+            </div>
           </StatsCollapse>
 
           {/* 1.2 Bourse & crypto */}

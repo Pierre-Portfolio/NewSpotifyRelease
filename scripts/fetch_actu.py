@@ -197,7 +197,34 @@ def og_image(article_url):
     return None
 
 
-def enrich_images(items, old_cache, new_cache, budget):
+def gn_real_url(link, art_id, links_old, links_new, budget):
+    """URL réelle derrière un lien Google News, via le cache partagé `links` (7.6.66).
+
+    Le décodage coûte ~3 requêtes : il sert AUSSI BIEN à trouver l'og:image (enrich_images)
+    qu'à remplacer le lien de la section LinkedIn par l'URL linkedin.com (resolve_links) →
+    on le mutualise. Renvoie None si indécodable, hors budget, ou sur erreur réseau (rien
+    n'est alors mis en cache : nouvel essai au prochain run).
+    """
+    if art_id in links_new:
+        return links_new[art_id] or None
+    if art_id in links_old:
+        links_new[art_id] = links_old[art_id]
+        return links_old[art_id] or None
+    if budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    try:
+        real = gn_decode(link, art_id)
+    except Exception as e:  # noqa: BLE001 — transitoire : on retentera
+        print(f"   lien {art_id[:24]}…: {e}", file=sys.stderr)
+        return None
+    if real:
+        links_new[art_id] = real
+    time.sleep(0.5)                        # ménage le endpoint interne Google
+    return real
+
+
+def enrich_images(items, old_cache, new_cache, budget, links_old, links_new):
     """Complète a["image"] des items Google News qui n'en ont pas (voir bloc ci-dessus)."""
     for a in items:
         aid = gn_id(a.get("link", ""))
@@ -214,20 +241,42 @@ def enrich_images(items, old_cache, new_cache, budget):
             a["image"] = old_cache[aid]
             new_cache[aid] = old_cache[aid]
             continue
-        if budget[0] <= 0:
-            continue                       # le prochain run (cache aidant) finira le travail
-        budget[0] -= 1
+        real = gn_real_url(a["link"], aid, links_old, links_new, budget)
+        if not real:
+            continue                       # hors budget / indécodable : repli favicon client
         try:
-            real = gn_decode(a["link"], aid)
-            img = og_image(real) if real else None
+            img = og_image(real)
             a["image"] = img or ""
-            # Décodage OK mais pas d'og:image → "" caché (inutile de retenter) ;
-            # article indécodable/erreur réseau → PAS de cache, retenté au prochain run.
-            if real:
-                new_cache[aid] = img or ""
+            new_cache[aid] = img or ""     # "" = article sans og:image, inutile de retenter
         except Exception as e:  # noqa: BLE001 — transitoire : on retentera
             print(f"   image {aid[:24]}…: {e}", file=sys.stderr)
         time.sleep(0.5)                    # ménage le endpoint interne Google
+
+
+def resolve_links(items, links_old, links_new, budget):
+    """Remplace les liens `news.google.com` par l'URL RÉELLE de l'article (7.6.66).
+
+    Utilisé pour la section LinkedIn : l'utilisateur veut atterrir SUR linkedin.com, pas sur
+    la page de redirection Google News. Renvoie la liste des items GARDÉS — un item dont
+    l'URL a pu être résolue AILLEURS que sur linkedin.com est jeté (la recherche `site:` a
+    élargi, ce n'est pas une publication LinkedIn). Un item non résolu (hors budget, décodage
+    KO, réseau) est gardé tel quel avec son lien Google News : l'absence de preuve n'est pas
+    une preuve d'absence. À appeler APRÈS enrich_images, qui indexe ses images par id GN.
+    """
+    kept = []
+    for a in items:
+        aid = gn_id(a.get("link", ""))
+        if not aid:
+            kept.append(a)                 # déjà un lien direct
+            continue
+        real = gn_real_url(a["link"], aid, links_old, links_new, budget)
+        if real and not is_linkedin({"link": real}):
+            print(f"   linkedin: hors domaine, ignoré → {real[:80]}", file=sys.stderr)
+            continue
+        if real:
+            a["link"] = real
+        kept.append(a)
+    return kept
 
 
 def fetch_gnews(feeds):
@@ -321,12 +370,33 @@ def recent_first(items, max_days):
     return sorted(kept, key=lambda a: (item_time(a) is None, -(item_time(a) or 0)))
 
 
+LINKEDIN_HOST_RE = re.compile(r"(^|\.)linkedin\.com$", re.I)
+
+
+def is_linkedin(a):
+    """L'item vient-il VRAIMENT de linkedin.com ? (miroir d'actuIsLinkedin côté client)"""
+    for u in ((a or {}).get("sourceUrl"), (a or {}).get("link")):
+        try:
+            if u and LINKEDIN_HOST_RE.search(urllib.parse.urlparse(u).hostname or ""):
+                return True
+        except Exception:  # noqa: BLE001 — URL illisible : on tente l'indice suivant
+            pass
+    return bool(re.match(r"linkedin\b", str((a or {}).get("source") or "").strip(), re.I))
+
+
 def fetch_linkedin():
-    """Articles PUBLIÉS SUR LinkedIn (Pulse / LinkedIn News), repli : actu du réseau pro.
+    """Publications hébergées SUR linkedin.com (Pulse, posts, LinkedIn News).
 
     LinkedIn n'expose aucune API publique de lecture (partenaires uniquement, OAuth avec
-    client_secret, pas de CORS, pas de RSS) : on passe donc par Google News restreint au
-    domaine linkedin.com pour ramener du contenu VENANT de LinkedIn.
+    client_secret, pas de CORS, pas de RSS — le flux Pulse a été supprimé et les pages
+    publiques répondent 999 aux robots) : Google News reste le seul ANNUAIRE utilisable, mais
+    on le restreint au domaine et on FILTRE le résultat (7.6.66).
+
+    ⚠ Les anciennes requêtes de repli (`q=LinkedIn`) ramenaient des articles de PRESSE
+    parlant de LinkedIn : supprimées. Chaque requête est essayée à son tour jusqu'à ce qu'il
+    reste des items APRÈS filtrage `is_linkedin` — mieux vaut une section vide que du
+    hors-sujet. Les liens Google News sont ensuite remplacés par les vraies URL linkedin.com
+    (resolve_links, appelée dans main).
 
     ⚠ Fraîcheur : une recherche `site:` est classée par PERTINENCE, d'où des articles vieux
     de ~300 jours. Chaque requête est bornée par l'opérateur `when:<N>d` et le résultat
@@ -334,13 +404,15 @@ def fetch_linkedin():
     ignoré sur les requêtes à opérateurs.
     """
     w = " when:%dd" % LINKEDIN_MAX_DAYS
-    items = fetch_gnews([
+    for q in (
         gn_search("site:linkedin.com" + w),
         gn_search("site:linkedin.com/pulse OR site:linkedin.com/posts" + w),
-        gn_search("LinkedIn" + w),
-        gn_search('LinkedIn OR "réseau professionnel" OR "monde du travail"' + w),
-    ])
-    return recent_first(items, LINKEDIN_MAX_DAYS)
+        gn_search("site:fr.linkedin.com" + w),
+    ):
+        items = recent_first([a for a in fetch_gnews([q]) if is_linkedin(a)], LINKEDIN_MAX_DAYS)
+        if items:
+            return items
+    return []
 
 
 def fetch_trends():
@@ -466,11 +538,24 @@ def main():
     # les flux sont conservés → taille bornée (≤ 60 entrées).
     old_cache = existing.get("images") or {}
     new_cache = {}
+    # Cache des liens Google News DÉCODÉS (id GN → URL réelle), partagé par enrich_images et
+    # resolve_links : un même article n'est décodé qu'une fois, et pas du tout aux runs
+    # suivants. Reconstruit à chaque run comme "images" → taille bornée par les flux.
+    links_old = existing.get("links") or {}
+    links_new = {}
     budget = [IMG_BUDGET]
     for key in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite"):
         if isinstance(out.get(key), list):
-            enrich_images(out[key], old_cache, new_cache, budget)
+            enrich_images(out[key], old_cache, new_cache, budget, links_old, links_new)
+    # LinkedIn : on veut atterrir sur linkedin.com, pas sur la redirection Google News.
+    if isinstance(out.get("linkedin"), list):
+        before = len(out["linkedin"])
+        out["linkedin"] = resolve_links(out["linkedin"], links_old, links_new, budget)
+        direct = sum(1 for a in out["linkedin"] if is_linkedin({"link": a.get("link")}))
+        print(f"linkedin: {len(out['linkedin'])}/{before} items gardés, "
+              f"{direct} liens directs linkedin.com")
     out["images"] = new_cache
+    out["links"] = links_new
     total = sum(len(out.get(k) or []) for k in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite"))
     withimg = sum(1 for k in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite")
                   for a in (out.get(k) or []) if a.get("image"))
