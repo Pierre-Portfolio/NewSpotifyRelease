@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.63';
+const APP_VERSION = '7.6.64';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -10076,6 +10076,37 @@ const LOL_ROUTING = { euw1:'europe', eun1:'europe', tr1:'europe', ru:'europe', n
 const LOL_PLATFORM_LABELS = [['euw1','Europe Ouest (EUW)'], ['eun1','Europe Nord-Est (EUNE)'], ['na1','Amérique du Nord'], ['kr','Corée'], ['br1','Brésil'], ['la1','LAN'], ['la2','LAS'], ['jp1','Japon'], ['oc1','Océanie'], ['tr1','Turquie'], ['ru','Russie']];
 const LOL_TIER_FR = { IRON:'Fer', BRONZE:'Bronze', SILVER:'Argent', GOLD:'Or', PLATINUM:'Platine', EMERALD:'Émeraude', DIAMOND:'Diamant', MASTER:'Maître', GRANDMASTER:'Grand Maître', CHALLENGER:'Challenger' };
 const LOL_QUEUES  = { 420:'Classée Solo/Duo', 440:'Classée Flexible', 400:'Normale (draft)', 430:'Normale (aveugle)', 450:'ARAM', 490:'Partie rapide', 700:'Clash', 830:'Coop vs IA', 840:'Coop vs IA', 850:'Coop vs IA', 900:'URF', 1700:'Arena', 1900:'URF' };
+// Bleu/rouge d'équipe (7.6.64) — la carte « partie en cours » reprend la mise en page op.gg :
+// un bloc par équipe, teinté, avec la MOYENNE DE TIER de l'équipe dans son en-tête.
+const LOL_TEAM_BLUE = '#5383e8';
+const LOL_TEAM_RED  = '#e84057';
+// Échelle de tiers : chaque palier vaut 4 crans (une division = 1 cran, I = le meilleur).
+// Sert à MOYENNER les rangs d'une équipe puis à revenir à un libellé « Platine 3 ».
+const LOL_TIERS_ASC = ['IRON', 'BRONZE', 'SILVER', 'GOLD', 'PLATINUM', 'EMERALD', 'DIAMOND', 'MASTER', 'GRANDMASTER', 'CHALLENGER'];
+const LOL_DIV_NUM   = { I: 1, II: 2, III: 3, IV: 4 };
+const LOL_DIV_ROMAN = ['I', 'II', 'III', 'IV'];
+function lolTierValue(entry) {
+  if (!entry || !entry.tier) return null;
+  const idx = LOL_TIERS_ASC.indexOf(String(entry.tier).toUpperCase());
+  if (idx < 0) return null;
+  const div = LOL_DIV_NUM[String(entry.rank || '').toUpperCase()] || 1;   // Maître+ n'a pas de division
+  return idx * 4 + (5 - div);                                            // I → 4 crans, IV → 1 cran
+}
+function lolTierFromValue(v) {
+  if (v == null || isNaN(v)) return null;
+  const n   = Math.max(1, Math.round(v));
+  const idx = Math.min(LOL_TIERS_ASC.length - 1, Math.floor((n - 1) / 4));
+  const tier = LOL_TIERS_ASC[idx];
+  const fr   = LOL_TIER_FR[tier] || tier;
+  if (idx >= LOL_TIERS_ASC.indexOf('MASTER')) return fr;                 // pas de division au-delà de Diamant
+  return `${fr} ${LOL_DIV_ROMAN[3 - ((n - 1) % 4)]}`;
+}
+// Moyenne de tier d'une équipe : ignore les non classés, null si personne n'est classé.
+function lolAvgTier(entries) {
+  const vals = (entries || []).map(lolTierValue).filter(v => v != null);
+  if (!vals.length) return null;
+  return lolTierFromValue(vals.reduce((s, v) => s + v, 0) / vals.length);
+}
 
 function lolKey()     { try { return (localStorage.getItem(LOL_KEY_LS) || '').trim(); } catch { return ''; } }
 function loadLolCfg() { try { return JSON.parse(localStorage.getItem(LOL_CFG_LS)) || null; } catch { return null; } }
@@ -10246,18 +10277,46 @@ function opggSpectateNormalize(j) {
   const created = d.created_at || d.game_start_time || (d.game && d.game.created_at) || null;
   return {
     queueLabel: (qi.queue_translate || qi.game_type) || 'Partie',
+    mapLabel: qi.map_translate || qi.map || null,     // « Faille de l'invocateur » quand op.gg le donne
     startedAt: created ? Date.parse(created) : null,
+    bans: opggSpectateBans(d),
     participants: parts.map(p => {
       const sm = p.summoner || {};
+      const lvl = sm.level != null ? sm.level : (p.summoner_level != null ? p.summoner_level : null);
       return {
         puuid: sm.summoner_id || p.summoner_id || sm.id || p.puuid || null,
         riotId: sm.game_name != null ? `${sm.game_name || '?'}#${sm.tagline || ''}` : (p.riot_id || p.riotId || ''),
         championId: p.champion_id != null ? p.champion_id : (p.championId != null ? p.championId : null),
+        level: typeof lvl === 'number' ? lvl : (parseInt(lvl, 10) || null),
+        position: p.position || p.team_position || p.lane || null,
         teamId: p.team_key != null ? (String(p.team_key).toUpperCase() === 'RED' ? 200 : 100)
               : (p.team_id != null ? p.team_id : (p.teamId != null ? p.teamId : 100)),
       };
     }),
   };
+}
+// Champions BANNIS par équipe → { 100:[championId…], 200:[…] } (7.6.64). Le payload op.gg
+// n'est pas documenté : on accepte `banned_champions` à la racine (avec team_key/team_id sur
+// chaque ban) ET la forme `teams:[{ team_key, banned_champions:[…] }]`. Tout absent → {}.
+function opggSpectateBans(d) {
+  const out = {};
+  const push = (team, id) => {
+    if (id == null) return;
+    const k = String(team).toUpperCase() === 'RED' || team === 200 ? 200 : 100;
+    (out[k] = out[k] || []).push(typeof id === 'number' ? id : parseInt(id, 10));
+  };
+  const readBan = (b, team) => {
+    if (b == null) return;
+    if (typeof b === 'number' || typeof b === 'string') return push(team, b);
+    push(b.team_key != null ? b.team_key : (b.team_id != null ? b.team_id : team), b.champion_id != null ? b.champion_id : b.championId);
+  };
+  if (Array.isArray(d?.banned_champions)) d.banned_champions.forEach(b => readBan(b, 100));
+  if (Array.isArray(d?.teams)) d.teams.forEach(t => {
+    const team = t?.team_key != null ? t.team_key : (t?.team_id != null ? t.team_id : 100);
+    if (Array.isArray(t?.banned_champions)) t.banned_champions.forEach(b => readBan(b, team));
+  });
+  Object.keys(out).forEach(k => { out[k] = out[k].filter(v => !isNaN(v)); if (!out[k].length) delete out[k]; });
+  return out;
 }
 async function opggSpectate(platform, summonerId) {
   const region = LOL_OPGG_REGION[platform] || 'euw';
@@ -10421,7 +10480,7 @@ async function lolFetchLive(profile) {
   if (profile.source === 'opgg') {
     const g = await opggSpectate(profile.platform, profile.puuid);
     if (g && !g.error) {
-      return { source: 'opgg', queueLabel: g.queueLabel,
+      return { source: 'opgg', queueLabel: g.queueLabel, mapLabel: g.mapLabel || null, bans: g.bans || {},
         mins: g.startedAt ? Math.max(0, Math.floor((Date.now() - g.startedAt) / 60000)) : null,
         participants: g.participants };
     }
@@ -10443,7 +10502,12 @@ async function lolRiotLive(platform, puuid) {
     source: 'riot',
     queueLabel: LOL_QUEUES[g.gameQueueConfigId] || g.gameMode || 'Partie',
     mins: Math.max(0, Math.floor((g.gameLength || 0) / 60)),
-    participants: g.participants.map(p => ({ puuid: p.puuid, riotId: p.riotId || '', championId: p.championId, teamId: p.teamId })),
+    // Repli Riot : bans exposés par équipe dans `bannedChampions` (championId -1 = pas de ban)
+    bans: (g.bannedChampions || []).reduce((acc, b) => {
+      if (b && b.championId > 0) (acc[b.teamId === 200 ? 200 : 100] = acc[b.teamId === 200 ? 200 : 100] || []).push(b.championId);
+      return acc;
+    }, {}),
+    participants: g.participants.map(p => ({ puuid: p.puuid, riotId: p.riotId || '', championId: p.championId, teamId: p.teamId, level: p.summonerLevel || null })),
   };
 }
 
@@ -10704,74 +10768,137 @@ function LolStatsSection() {
     );
   };
 
-  // Carte « partie en cours » (Spectator) — champion joué, mode, durée, compos des équipes
+  // ── Carte « PARTIE EN COURS » — mise en page inspirée du tableau op.gg (7.6.64) ──
+  // Demande utilisateur : « que le design ressemble à ça » (tableau live d'op.gg). On reprend
+  // ce que la structure permet SANS nouvelle API : un bandeau d'en-tête (file, carte, chrono
+  // qui tourne), puis UN BLOC PAR ÉQUIPE — bleue / rouge, teinté, avec la MOYENNE DE TIER de
+  // l'équipe dans son en-tête — et une LIGNE-TABLEAU par joueur : champion, pseudo #tag +
+  // niveau, rang (tier + LP), barre de winrate + nb de parties. Les bans s'affichent quand le
+  // payload les expose. ⚠ Non repris faute de données : icônes de sorts d'invocateur et de
+  // runes, colonnes « information de champion » et KDA de la saison — op.gg les calcule côté
+  // serveur et aucun endpoint keyless ne les donne. Les colonnes absentes ne sont pas simulées.
   const liveCard = () => {
     if (!live) return null;
     const me = live.participants.find(p => p.puuid === data.puuid);
-    const allies  = live.participants.filter(p => me && p.teamId === me.teamId && p.puuid !== me.puuid);
-    const enemies = live.participants.filter(p => !me || p.teamId !== me.teamId);
+    // ⚠ Bleue = team 100 et rouge = team 200, comme en jeu (et comme op.gg) — surtout PAS
+    // « mon équipe = la bleue » : on peut très bien jouer côté rouge, et afficher l'inverse
+    // rendrait la carte trompeuse. C'est le libellé qui signale l'équipe du joueur.
+    const blue = live.participants.filter(p => p.teamId !== 200);
+    const red  = live.participants.filter(p => p.teamId === 200);
     const queue = live.queueLabel || 'Partie';
-    const mins = live.mins;   // null si l'heure de début est inconnue (source op.gg sans created_at)
-    // Ligne d'un rang (soloQ ou flex) : tier division LP · WR% coloré · nb de games
-    const rankLine = (e, tag) => {
-      if (!e) return null;
-      const total = e.wins + e.losses;
-      const wr = total ? Math.round((e.wins / total) * 100) : 0;
-      return (
-        <div key={tag || 's'} style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-          {tag && <span style={{ color:C.dim }}>{tag} </span>}
-          <span style={{ color:LOL_COLOR, fontWeight:700 }}>{(LOL_TIER_FR[e.tier] || e.tier)} {e.rank}</span> {e.leaguePoints} LP · <span style={{ color: wr >= 50 ? '#46c46a' : '#e05050' }}>{wr}%</span> · {fmtN(total)} games
-        </div>
-      );
-    };
-    // Ligne joueur : icône champion + pseudo + champion + élos soloQ/flex (winrate, games)
-    const playerRow = (p, i) => {
+
+    const entryOf = p => {
       const entries = ranks && ranks[p.puuid];
-      const solo = entries && entries.find(e => e.queueType === 'RANKED_SOLO_5x5');
-      const flex = entries && entries.find(e => e.queueType === 'RANKED_FLEX_SR');
+      if (!entries) return null;
+      return entries.find(e => e.queueType === 'RANKED_SOLO_5x5') || entries.find(e => e.queueType === 'RANKED_FLEX_SR') || null;
+    };
+    // Ligne joueur — grille : [champion] [pseudo + niveau] [rang + LP] [winrate + parties]
+    const playerRow = (p, i, accent) => {
+      const e = entryOf(p);
+      const total = e ? e.wins + e.losses : 0;
+      const wr = total ? Math.round((e.wins / total) * 100) : null;
       const name = ((p.riotId || '').split('#')[0] || '').trim();
+      const tag  = ((p.riotId || '').split('#')[1] || '').trim();
       const src = champIcon(p.championId);
       const isMe = data && p.puuid === data.puuid;
       return (
-        <div key={p.puuid || i} style={{ display:'flex', alignItems:'center', gap:8, padding:'3px 0' }}>
+        <div key={p.puuid || i} style={{ display:'grid', gridTemplateColumns:'34px minmax(0,1fr) auto', gap:8,
+          alignItems:'center', padding:'5px 6px', borderRadius:6,
+          background: isMe ? `${accent}22` : 'transparent',
+          borderLeft: `2px solid ${isMe ? accent : 'transparent'}` }}>
           {src
-            ? <img src={src} alt="" title={champName(p.championId)} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${isMe ? LOL_COLOR : C.border}`, flexShrink:0 }} />
-            : <span style={{ width:26, textAlign:'center', flexShrink:0 }}>⚔️</span>}
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:10.5, fontWeight:700, color: isMe ? LOL_COLOR : C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-              {name || champName(p.championId)}{name ? <span style={{ color:C.dim, fontWeight:400 }}> · {champName(p.championId)}</span> : null}
+            ? <img src={src} alt="" title={champName(p.championId)}
+                style={{ width:34, height:34, borderRadius:6, border:`1px solid ${isMe ? accent : C.border}`, display:'block' }} />
+            : <span style={{ width:34, textAlign:'center' }}>⚔️</span>}
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:11, fontWeight:700, color: isMe ? accent : C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {name || champName(p.championId)}
+              {tag && <span style={{ color:C.dim, fontWeight:400, fontSize:9.5 }}> #{tag}</span>}
             </div>
-            {!ranks
-              ? <div style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>chargement du rang…</div>
-              : (!solo && !flex)
-                ? <div style={{ fontSize:9, color:C.muted }}>Non classé</div>
-                : <React.Fragment>{rankLine(solo, '')}{rankLine(flex, 'Flex')}</React.Fragment>}
+            <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {champName(p.championId)}{p.level ? ` · niv. ${fmtN(p.level)}` : ''}
+            </div>
+          </div>
+          <div style={{ textAlign:'right', minWidth:112 }}>
+            <div style={{ fontSize:10, fontWeight:700, color: e ? LOL_COLOR : C.dim, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>
+              {!ranks ? '…' : e ? `${LOL_TIER_FR[e.tier] || e.tier} ${e.rank} (${e.leaguePoints} LP)` : 'Non classé'}
+            </div>
+            {e && total > 0 && (
+              <div style={{ display:'flex', alignItems:'center', gap:5, justifyContent:'flex-end', marginTop:2 }}>
+                <div style={{ width:52, height:4, borderRadius:2, background:`${C.border}`, overflow:'hidden' }}>
+                  <div style={{ width:`${wr}%`, height:'100%', background: wr >= 50 ? '#46c46a' : '#e05050' }} />
+                </div>
+                <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color: wr >= 50 ? '#46c46a' : '#e05050', fontWeight:700 }}>{wr}%</span>
+                <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:C.dim, whiteSpace:'nowrap' }}>({fmtN(total)})</span>
+              </div>
+            )}
           </div>
         </div>
       );
     };
-    const teamBlock = list => (
-      <div style={{ display:'flex', flexDirection:'column' }}>{list.map(playerRow)}</div>
-    );
+    // Bans de l'équipe (si le payload les expose) — petites vignettes grisées et barrées
+    const bansOf = teamId => {
+      const ids = (live.bans && live.bans[teamId]) || [];
+      if (!ids.length) return null;
+      return (
+        <div style={{ display:'flex', alignItems:'center', gap:3, flexWrap:'wrap' }} title={'Bannis : ' + ids.map(champName).join(', ')}>
+          <span style={{ fontSize:8.5, color:C.dim, letterSpacing:'0.06em' }}>BANNIS</span>
+          {ids.map((id, k) => {
+            const ic = champIcon(id);
+            return ic
+              ? <img key={k} src={ic} alt="" title={champName(id)}
+                  style={{ width:16, height:16, borderRadius:3, filter:'grayscale(1)', opacity:0.65 }} />
+              : <span key={k} style={{ fontSize:9, color:C.dim }}>·</span>;
+          })}
+        </div>
+      );
+    };
+    // Bloc d'une équipe : en-tête teinté (nom + moyenne de tier + bans) puis les 5 lignes
+    const teamBlock = (list, accent, label) => {
+      const avg = ranks ? lolAvgTier(list.map(entryOf)) : null;
+      return (
+        <div style={{ border:`1px solid ${accent}55`, borderRadius:8, overflow:'hidden' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', padding:'5px 8px', background:`${accent}1f`, borderBottom:`1px solid ${accent}33` }}>
+            <span style={{ fontSize:10, fontWeight:800, letterSpacing:'0.05em', color:accent }}>{label}</span>
+            <span style={{ fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+              Moyenne de tier : <b style={{ color: avg ? LOL_COLOR : C.dim }}>{avg || (ranks ? '—' : '…')}</b>
+            </span>
+            <div style={{ marginLeft:'auto' }}>{bansOf(list[0] ? list[0].teamId : 100)}</div>
+          </div>
+          <div style={{ padding:'3px 4px', background:`${accent}0a` }}>{list.map((p, i) => playerRow(p, i, accent))}</div>
+        </div>
+      );
+    };
+
     return (
-      <div style={{ ...card, border:`1px solid ${LOL_COLOR}60`, background:`${LOL_COLOR}0d`, display:'flex', flexDirection:'column', gap:8 }}>
+      <div style={{ ...card, border:`1px solid ${LOL_COLOR}60`, background:`${LOL_COLOR}0d`, display:'flex', flexDirection:'column', gap:8, padding:'10px 10px' }}>
         <style>{'@keyframes lolpulse{0%,100%{opacity:1}50%{opacity:.3}}'}</style>
-        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-          <span style={{ width:8, height:8, borderRadius:'50%', background:'#e05050', flexShrink:0, animation:'lolpulse 1.5s infinite' }} />
-          <span style={{ fontSize:11, fontWeight:800, letterSpacing:'0.05em', color:'#e05050' }}>EN PARTIE</span>
-          <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginLeft:'auto' }}>{queue}{mins != null ? ` · ${mins} min` : ''}</span>
+        {/* Bandeau d'en-tête : file de jeu · carte · chrono (gabarit op.gg) */}
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+          <span style={{ fontSize:11, fontWeight:800, color:C.text }}>{queue}</span>
+          <span style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:9, fontWeight:800, letterSpacing:'0.06em',
+            color:'#fff', background:'#e05050', borderRadius:4, padding:'2px 6px' }}>
+            <span style={{ width:6, height:6, borderRadius:'50%', background:'#fff', animation:'lolpulse 1.5s infinite' }} />LIVE
+          </span>
+          {live.mapLabel && <span style={{ fontSize:9.5, color:C.dim }}>{live.mapLabel}</span>}
+          <span style={{ marginLeft:'auto', fontSize:11, fontWeight:700, color:LOL_COLOR, fontFamily:'DM Mono,monospace' }}>
+            {live.mins != null ? `${live.mins} min` : '—'}
+          </span>
         </div>
         {me && (
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-            {champIcon(me.championId) && <img src={champIcon(me.championId)} alt="" style={{ width:40, height:40, borderRadius:8, border:`1px solid ${LOL_COLOR}60` }} />}
+            {champIcon(me.championId) && <img src={champIcon(me.championId)} alt="" style={{ width:36, height:36, borderRadius:8, border:`1px solid ${LOL_COLOR}60` }} />}
             <div>
               <div style={lab}>TU JOUES</div>
-              <div style={{ fontSize:15, fontWeight:800, color:LOL_COLOR }}>{champName(me.championId)}</div>
+              <div style={{ fontSize:14, fontWeight:800, color:LOL_COLOR }}>{champName(me.championId)}</div>
             </div>
           </div>
         )}
-        <div><div style={{ ...lab, marginBottom:4 }}>TON ÉQUIPE</div>{teamBlock(me ? [me, ...allies] : allies)}</div>
-        <div><div style={{ ...lab, marginBottom:4 }}>ADVERSAIRES</div>{teamBlock(enemies)}</div>
+        {!!blue.length && teamBlock(blue, LOL_TEAM_BLUE, me && me.teamId !== 200 ? 'ÉQUIPE BLEUE (LA TIENNE)' : 'ÉQUIPE BLEUE')}
+        {!!red.length  && teamBlock(red,  LOL_TEAM_RED,  me && me.teamId === 200 ? 'ÉQUIPE ROUGE (LA TIENNE)' : 'ÉQUIPE ROUGE')}
+        <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+          rang + winrate = classée solo/duo (flexible en repli) · sorts, runes et KDA de saison ne sont pas exposés par l'API sans clé
+        </div>
       </div>
     );
   };
