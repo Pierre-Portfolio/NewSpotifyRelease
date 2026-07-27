@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.64';
+const APP_VERSION = '7.6.65';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1719,22 +1719,25 @@ async function dwFindCandidates() {
   return { candidates };
 }
 
-async function importDiscoverWeekly(addLog) {
+// ⚠ 7.6.65 — IMPORT DÉCLENCHÉ UNIQUEMENT PAR L'UTILISATEUR. L'appel automatique au login a
+// été retiré (demande : « retire le forcing ») : le SEUL appelant est désormais
+// `dwManualAccess`, c'est-à-dire le bouton du Scrapping, et il passe `force:true` pour que
+// ni la cadence hebdo (`DW_LS_KEY`) ni le cooldown d'échec (`DW_FAIL_KEY`) ne puissent
+// ignorer un clic — un clic doit TOUJOURS interroger Spotify. Les garde-fous restent écrits
+// pour un éventuel appelant automatique futur ; seule la fenêtre rate-limit 429 s'applique
+// dans tous les cas (Spotify refuserait la requête de toute façon).
+async function importDiscoverWeekly(addLog, opts = {}) {
   const thisWeek = dwWeekKey();
   const lastOk   = localStorage.getItem(DW_LS_KEY);
-  // ⚠ 7.6.60 — ces 3 sorties étaient SILENCIEUSES : on se connectait et RIEN n'apparaissait
-  // dans les Logs, sans pouvoir distinguer « déjà fait cette semaine » d'un import qui n'a
-  // jamais tourné. Elles annoncent désormais pourquoi elles passent leur tour, et rappellent
-  // que le bouton violet, lui, ignore tous ces garde-fous.
-  if (lastOk === thisWeek) {
-    addLog(`Découvertes de la semaine : déjà importées cette semaine (${thisWeek}) — prochain import automatique lundi. Pour forcer maintenant : bouton violet ci-dessous.`, 'info');
+  if (!opts.force && lastOk === thisWeek) {
+    addLog(`Découvertes de la semaine : déjà importées cette semaine (${thisWeek}).`, 'info');
     return;
   }
   const lastFail = localStorage.getItem(DW_FAIL_KEY);
-  if (lastFail && Date.now() - parseInt(lastFail) < DW_FAIL_AGE_MS) {
+  if (!opts.force && lastFail && Date.now() - parseInt(lastFail) < DW_FAIL_AGE_MS) {
     const leftMs = DW_FAIL_AGE_MS - (Date.now() - parseInt(lastFail));
     const left   = leftMs >= 3600000 ? `${Math.round(leftMs / 3600000)} h` : `${Math.max(1, Math.round(leftMs / 60000))} min`;
-    addLog(`Découvertes de la semaine : dernier essai en échec, nouvelle tentative dans ${left}. Pour forcer maintenant : bouton violet ci-dessous.`, 'info');
+    addLog(`Découvertes de la semaine : dernier essai en échec, nouvelle tentative dans ${left}.`, 'info');
     return;
   }
   if (Date.now() < _rlUntil) {
@@ -1894,7 +1897,7 @@ async function dwManualAccess(addLog) {
     if (d.items.length) {
       addLog(`✓ Contenu LISIBLE (${d.items.length} titres) — import lancé.`, 'ok');
       try { localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
-      await importDiscoverWeekly(addLog);
+      await importDiscoverWeekly(addLog, { force: true });
       return await dwEditorialUrl([]);
     }
     addLog('✗ Contenu non renvoyé par Spotify (playlist ÉDITORIALE, non lisible par les apps tierces depuis la migration 2026) — je regarde tes autres playlists…', 'warn');
@@ -1932,7 +1935,7 @@ async function dwManualAccess(addLog) {
     // lisible mais on OUVRE en priorité MA vraie DW (id capté en lecture, sinon l'exemplaire
     // personnalisé de ma bibliothèque) — jamais une playlist commune trouvée par recherche.
     try { localStorage.setItem(DW_PID_KEY, readable.id); localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
-    await importDiscoverWeekly(addLog);
+    await importDiscoverWeekly(addLog, { force: true });
     const eurl = await dwEditorialUrl(candidates);
     return eurl || readable.external_urls?.spotify || null;
   }
@@ -2298,13 +2301,15 @@ function StoreProvider({ children }) {
             dbRun("UPDATE stats SET listened_this_year = 0, last_reset_year = ? WHERE id = 1", [curYear]);
           }
 
-          // Import Découvertes de la semaine si besoin (1x par semaine)
-          const initMsgs = [];
-          const addInitLog = (msg, type='info') => {
-            const t = new Date().toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-            initMsgs.push({ time: t, msg, type });
-          };
-          await importDiscoverWeekly(addInitLog).catch(() => {});
+          // ⚠ 7.6.65 — PLUS D'IMPORT AUTOMATIQUE des Découvertes de la semaine au login
+          // (demande utilisateur : « retire le forcing, on se contentera de moi qui clique »).
+          // L'appel `importDiscoverWeekly` qui tournait ici à chaque connexion — gate 1×/semaine
+          // ISO + re-tentative après le cooldown d'échec — est SUPPRIMÉ : plus aucune requête
+          // playlist n'est émise sans geste de l'utilisateur. Seul le bouton violet/jaune
+          // (`DiscoverWeeklyButton` → `dwManualAccess`, qui ignore tous les cooldowns) déclenche
+          // désormais la lecture de la playlist et l'import. La capture pendant l'ÉCOUTE
+          // (`dwCaptureFromContext`) reste active : elle ne coûte aucune requête dédiée, elle
+          // lit la file du player déjà interrogée par le poll.
 
           // Load known URIs for dedup (inclut les DW tracks fraîchement importées)
           const uriRows = dbAll("SELECT spotify_uri FROM tracks");
@@ -2345,7 +2350,6 @@ function StoreProvider({ children }) {
             else localStorage.removeItem(RL_LS_KEY);
           } catch {}
 
-          if (initMsgs.length > 0) setLogs(initMsgs);
           setDbReady(true);
 
           // Proposition de sauvegarde 1×/semaine — différée pour laisser l'UI s'afficher
@@ -8191,9 +8195,13 @@ function LogsPanel({ compact=false }) {
   );
 }
 
-// Bouton violet « Accéder à la playlist "Découverte de la semaine" » (Scrapping, sous
-// les Logs, desktop + mobile) : diagnostic + import manuel via dwManualAccess (résultats
-// détaillés dans les Logs juste au-dessus), puis ouverture de la playlist sur Spotify.
+// Bouton « Accéder à la playlist "Découverte de la semaine" » (Scrapping, AU-DESSUS des
+// Logs depuis 7.6.65, desktop + mobile) : diagnostic + import manuel via dwManualAccess
+// (résultats détaillés dans les Logs juste EN DESSOUS), puis ouverture de la playlist.
+// ⚠ 7.6.65 — c'est le SEUL déclencheur de l'import : l'appel automatique au login a été
+// retiré, plus aucune requête playlist ne part sans ce clic. Le rappel hebdo (jaune le
+// lundi, violet une fois cliqué) prend donc tout son sens : c'est le seul rappel qu'il
+// reste. La capture pendant l'ÉCOUTE reste active (elle ne coûte aucune requête dédiée).
 const DW_PURPLE = '#b06cf5';
 const DW_YELLOW = '#f5c518';                          // rappel hebdo (nouvelle semaine = nouvelles Découvertes)
 const DW_BTN_ACK_KEY = 'spotifyplus_dw_btn_ack';      // clé ISO semaine où le bouton a été cliqué
@@ -8224,7 +8232,7 @@ function DiscoverWeeklyButton() {
   };
   return (
     <button onClick={run} disabled={busy || !dbReady}
-      title="Cherche la playlist, importe les titres lisibles puis l'ouvre sur Spotify. Lance ensuite la LECTURE : les titres sont capturés automatiquement dans « En attente » pendant l'écoute (détails dans les Logs)"
+      title="Seul déclencheur de l'import (plus rien d'automatique) : cherche la playlist, importe les titres lisibles puis l'ouvre sur Spotify. Lance ensuite la LECTURE : les titres sont capturés dans « En attente » pendant l'écoute (détails dans les Logs juste en dessous)"
       style={{ width:'100%', background:`${accent}22`, border:`1px solid ${accent}${highlight ? '' : '66'}`, color: busy || !dbReady ? C.dim : accent,
         borderRadius:8, padding:'8px 10px', fontSize:11, fontWeight:highlight ? 800 : 700, cursor: busy || !dbReady ? 'default' : 'pointer' }}>
       {busy ? '↻ Accès en cours…' : `${highlight ? '🟡 ' : ''}Accéder à la playlist "Découverte de la semaine"`}
@@ -22101,8 +22109,11 @@ function MobileApp() {
             <DateRangePanel compact />
             <ScrapingStatusPanel compact />
             <NextCallPanel compact />
-            <LogsPanel compact />
+            {/* 7.6.65 — bouton AU-DESSUS des Logs (demande utilisateur) : c'est LUI qui
+                déclenche tout depuis que l'import automatique a été retiré, il doit donc être
+                vu en premier ; les Logs qui suivent affichent le résultat du clic. */}
             <DiscoverWeeklyButton />
+            <LogsPanel compact />
           </div>
         )}
         {tab === 'ecouter' && (
@@ -22353,8 +22364,9 @@ function WebApp() {
         <div style={{ width:280, borderRight:`1px solid ${C.border}`, background:C.surface, padding:'16px 14px', display:'flex', flexDirection:'column', gap:14, overflowY:'auto', flexShrink:0 }}>
           <DateRangePanel />
           <NextCallPanel />
-          <LogsPanel />
+          {/* 7.6.65 — bouton AU-DESSUS des Logs (cf. MobileApp) */}
           <DiscoverWeeklyButton />
+          <LogsPanel />
         </div>
 
         <div style={{ flex:1, overflowY:'auto', padding:'22px 24px', minWidth:0 }}>
