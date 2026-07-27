@@ -90,7 +90,10 @@
 // via l'API Web Steam, sur les identifiants Steam déjà saisis).
 // v106 : bump de cache — fix des chips de raccourci de la carte « Espèces animales »
 // (le terme cliqué n'était pas pris en compte : recherche lancée avec l'ancien état).
-const CACHE  = 'spotifyplus-v129';
+// v130 : bump de cache — connexion Spotify : la raison de l'échec est enfin AFFICHÉE sur
+// l'écran de connexion (code refusé, state invalide, /me en 403 « compte non déclaré dans le
+// Dashboard »…) au lieu d'un retour muet à la page de connexion.
+const CACHE  = 'spotifyplus-v130';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',

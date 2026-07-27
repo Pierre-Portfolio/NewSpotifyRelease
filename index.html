@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.67';
+const APP_VERSION = '7.6.68';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -142,36 +142,81 @@ async function generateCodeChallenge(verifier) {
 // ════════════════════════════════════════════════
 // AUTH
 // ════════════════════════════════════════════════
+// ⚠ Diagnostic de connexion : TOUTES les causes d'échec du retour OAuth (consentement refusé,
+// code déjà consommé, state anti-CSRF invalide, /me refusé par Spotify…) finissaient
+// silencieusement sur `setAuthState('login')` — l'utilisateur revoyait la page de connexion
+// sans la moindre explication et rien n'était réparable à l'aveugle. On mémorise donc la
+// raison réelle et on l'affiche sur l'écran de connexion (cf. AuthErrorBanner).
+// sessionStorage (pas un simple module-level) car refreshToken() RECHARGE la page dans ses
+// cas de sortie : le message doit survivre à ce reload, mais pas à la fermeture de l'onglet.
+const AUTH_ERR_KEY = 'spotifyplus_auth_error';
+function authErrSet(msg) { try { sessionStorage.setItem(AUTH_ERR_KEY, String(msg || '')); } catch {} }
+function authErrTake() {
+  try { const v = sessionStorage.getItem(AUTH_ERR_KEY) || ''; sessionStorage.removeItem(AUTH_ERR_KEY); return v; }
+  catch { return ''; }
+}
 async function loginWithSpotify() {
   const verifier   = generateRandomString(64);
   const challenge  = await generateCodeChallenge(verifier);
   const state      = generateRandomString(16);
-  localStorage.setItem('pkce_verifier', verifier);
-  localStorage.setItem('pkce_state', state);
+  // Stockage local saturé → setItem THROW : sans ce garde on partait quand même vers Spotify
+  // avec un verifier jamais écrit, et le retour échouait forcément (code_verifier absent).
+  try {
+    localStorage.setItem('pkce_verifier', verifier);
+    localStorage.setItem('pkce_state', state);
+  } catch {
+    authErrSet("Stockage local saturé : impossible d'enregistrer le jeton de connexion. Libère de l'espace (purge des écoutes, sauvegarde puis réinitialisation) puis réessaie.");
+    window.location.reload();
+    return;
+  }
   const params = new URLSearchParams({
     client_id: CLIENT_ID, response_type: 'code', redirect_uri: REDIRECT_URI,
     scope: SCOPES, code_challenge_method: 'S256', code_challenge: challenge, state,
   });
   window.location = `https://accounts.spotify.com/authorize?${params}`;
 }
+// Renvoie true si le jeton est enregistré. En cas d'échec, la RAISON exacte est posée via
+// authErrSet (affichée sur l'écran de connexion) au lieu d'un `false` muet.
 async function exchangeCode(code) {
   const verifier = localStorage.getItem('pkce_verifier');
+  if (!verifier) {
+    // Le verifier PKCE a disparu entre le départ et le retour : autre navigateur/profil,
+    // données de site effacées, ou navigation privée. Sans lui l'échange est impossible.
+    authErrSet("Le code de sécurité PKCE a disparu entre le départ et le retour. Reconnecte-toi depuis le MÊME navigateur, sans effacer les données du site ni passer en navigation privée.");
+    return false;
+  }
   const body = new URLSearchParams({
     client_id: CLIENT_ID, grant_type: 'authorization_code',
     code, redirect_uri: REDIRECT_URI, code_verifier: verifier,
   });
-  const res  = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
-  });
-  const data = await res.json();
+  let data;
+  try {
+    const res = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+    data = await res.json().catch(() => ({}));
+    if (!data.access_token && !data.error) data.error = 'http_' + res.status;
+  } catch (e) {
+    // Échec réseau : ne PAS jeter le verifier, un simple retour en arrière peut réussir
+    authErrSet('Réseau indisponible pendant la connexion à Spotify (' + ((e && e.message) || 'échec du fetch') + ').');
+    return false;
+  }
   localStorage.removeItem('pkce_verifier');
   localStorage.removeItem('pkce_state');
   if (data.access_token) {
-    localStorage.setItem('spotify_token', data.access_token);
-    localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
-    if (data.refresh_token) localStorage.setItem('spotify_refresh', data.refresh_token);
+    try {
+      localStorage.setItem('spotify_token', data.access_token);
+      localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
+      if (data.refresh_token) localStorage.setItem('spotify_refresh', data.refresh_token);
+    } catch {
+      // Quota localStorage : le jeton n'est PAS enregistré → sans ce message, connexion en
+      // boucle sans explication (chaque retour repartait sur l'écran de login).
+      authErrSet("Stockage local saturé : le jeton Spotify n'a pas pu être enregistré. Libère de l'espace (purge des écoutes, sauvegarde puis réinitialisation) puis réessaie.");
+      return false;
+    }
     return true;
   }
+  authErrSet('Spotify a refusé l\'échange du code : ' + (data.error_description || data.error || 'réponse inattendue, aucun jeton reçu') + '.');
   return false;
 }
 // Mutex : les refresh tokens Spotify PKCE sont à usage unique (rotation).
@@ -186,7 +231,11 @@ function refreshToken() {
       // avant la rotation PKCE). Le token va expirer sans pouvoir être renouvelé → sans ça,
       // le poll player enverrait des 401 toutes les 5 s indéfiniment. On nettoie et on
       // recharge vers l'écran de login (logoutClear efface spotify_token → pas de boucle).
-      if (localStorage.getItem('spotify_token')) { logoutClear(); window.location.reload(); }
+      if (localStorage.getItem('spotify_token')) {
+        authErrSet("Session expirée sans jeton de renouvellement (connexion antérieure à la rotation PKCE). Reconnecte-toi, c'est normal une seule fois.");
+        logoutClear();
+        window.location.reload();
+      }
       return false;
     }
     const body = new URLSearchParams({ client_id: CLIENT_ID, grant_type: 'refresh_token', refresh_token: refresh });
@@ -202,6 +251,7 @@ function refreshToken() {
     }
     if (data.error === 'invalid_grant') {
       // Refresh token définitivement mort : sans ça, le poll player enverrait des 401 toutes les 5s pour toujours
+      authErrSet('Session Spotify expirée (' + (data.error_description || 'jeton de renouvellement refusé') + '). Reconnecte-toi.');
       logoutClear();
       window.location.reload();
     }
@@ -2121,6 +2171,8 @@ const useStore = () => React.useContext(StoreCtx);
 function StoreProvider({ children }) {
   const [authState, setAuthState] = React.useState('loading');
   const [user,     setUser]       = React.useState(null);
+  // Raison du dernier échec de connexion Spotify — affichée sur l'écran de connexion
+  const [authError, setAuthError] = React.useState('');
 
   const [dbReady,  setDbReady]          = React.useState(false);
   const [resumableSession, setResumableSession] = React.useState(null);
@@ -2308,9 +2360,22 @@ function StoreProvider({ children }) {
       gdriveHandleRedirect();
       // Retour pCloud (jeton dans le fragment OU la query, state préfixé 'pcloud.')
       pcloudHandleRedirect();
+      // Message d'échec posé par un tour précédent (refreshToken recharge la page) — repris
+      // ici pour être affiché sur l'écran de connexion.
+      const carried = authErrTake();
+      if (carried) setAuthError(carried);
       const params = new URLSearchParams(window.location.search);
       const code   = params.get('code');
       const returnedState = params.get('state');
+      const oauthErr = params.get('error');
+      // Spotify renvoie ?error=… (consentement refusé, appli non autorisée…) SANS `code` :
+      // ce cas tombait dans le `if (!token)` plus bas et affichait le login sans un mot.
+      if (oauthErr && !code) {
+        window.history.replaceState({}, '', window.location.pathname);
+        setAuthError('Spotify a refusé la connexion : ' + (params.get('error_description') || oauthErr) + '.');
+        setAuthState('login');
+        return;
+      }
       if (code && returnedState === 'dropbox') {
         // Retour du consentement Dropbox (state='dropbox') : échange le code, puis reprend
         // l'init Spotify normale (le token Spotify est déjà en localStorage)
@@ -2319,9 +2384,12 @@ function StoreProvider({ children }) {
       } else if (code) {
         // Anti-CSRF : le state retourné doit correspondre à celui généré au départ
         const stateOk = returnedState && returnedState === localStorage.getItem('pkce_state');
+        if (!stateOk) {
+          authErrSet("Contrôle anti-CSRF échoué : le « state » renvoyé par Spotify ne correspond pas à celui du départ. Cela arrive si la connexion a été lancée depuis un autre onglet/navigateur, ou si les données du site ont été effacées entre-temps.");
+        }
         const ok = stateOk && await exchangeCode(code);
         window.history.replaceState({}, '', window.location.pathname);
-        if (!ok) { setAuthState('login'); return; }
+        if (!ok) { setAuthError(authErrTake()); setAuthState('login'); return; }
       }
       const token = localStorage.getItem('spotify_token');
       if (!token) { setAuthState('login'); return; }
@@ -2424,9 +2492,25 @@ function StoreProvider({ children }) {
           // avant le confirm bloquant (DB déjà prête, buildBackup fonctionne)
           setTimeout(() => { try { maybeWeeklyBackupPrompt(); } catch {} }, 2500);
         } else {
+          // Jeton valide MAIS Spotify refuse /me : c'est la panne la plus déroutante
+          // (l'utilisateur voit le consentement réussir puis revient sur le login). Le corps
+          // d'erreur Spotify porte le vrai motif — typiquement 403 « User not registered in
+          // the Developer Dashboard » quand l'appli est en Development Mode et que le compte
+          // n'est pas dans sa liste d'utilisateurs. On l'affiche mot pour mot.
+          const err = me && me.error;
+          const st  = err && err.status;
+          let msg = err
+            ? `Spotify a refusé l'accès au profil (HTTP ${st || '?'}) : ${err.message || 'sans message'}.`
+            : "Spotify n'a renvoyé aucun profil (réponse vide ou inattendue).";
+          if (st === 403) msg += " → ouvre developer.spotify.com/dashboard, ton appli, « User Management », et ajoute-toi (nom + e-mail du compte Spotify) ; en Development Mode chaque compte doit y figurer.";
+          if (st === 401) msg += " → le jeton a été refusé : déconnecte-toi puis reconnecte-toi.";
+          setAuthError(msg);
           setAuthState('login');
         }
-      } catch { setAuthState('login'); }
+      } catch (e) {
+        setAuthError('Échec de la connexion à Spotify : ' + ((e && e.message) || 'erreur inconnue') + '.');
+        setAuthState('login');
+      }
     })();
   }, []);
 
@@ -3327,7 +3411,7 @@ function StoreProvider({ children }) {
   };
 
   const api = {
-    authState, user, otherTab,
+    authState, user, otherTab, authError,
     syncState, scraping, paused, rlWaiting, blockedUntil, togglePause, startSync, logout,
     stats, progress, currentArtist, statusMsg, statusMode,
     nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs, now,
@@ -7581,6 +7665,9 @@ function Home({ isMobile }) {
   const [connecting, setConnecting] = React.useState(false);
   // Outils accessibles SANS connexion (tout est local) : 🗒️ Notes + 🧮 Calculatrice + 🎮 Jeux — panneau superposé
   const [tool, setTool] = React.useState(null);   // null | 'notes' | 'calc' | 'games'
+  // Raison du dernier échec de connexion : sans ça, un retour OAuth raté renvoyait ici
+  // sans le moindre indice (« ça ne se connecte pas et ça revient au login »).
+  const { authError } = useStore();
   const onConnect = () => { setConnecting(true); loginWithSpotify(); };
   // Taille calibrée pour tenir « Hub de Pierre » sur UNE seule ligne (nowrap) sans déborder
   const titleSize = isMobile ? 'clamp(26px,10.5vw,52px)' : 'clamp(48px,8vw,104px)';
@@ -7647,6 +7734,12 @@ function Home({ isMobile }) {
           {/* Carte de connexion */}
           <div style={{ maxWidth: isMobile?'100%':440, background:'rgba(255,255,255,0.035)', border:'1px solid rgba(255,255,255,0.10)', borderRadius:18, padding: isMobile?'16px 16px':'20px 22px', backdropFilter:'blur(8px)', boxShadow:'0 24px 60px rgba(0,0,0,0.5)' }}>
             <div style={{ fontFamily:'DM Mono,monospace', fontSize: isMobile?9:10, letterSpacing:'0.14em', color:'#8a8a9a', marginBottom:13 }}>// ON COMMENCE PAR LA MUSIQUE</div>
+            {authError && (
+              <div style={{ background:'rgba(224,80,80,0.12)', border:'1px solid rgba(224,80,80,0.45)', borderRadius:12, padding:'10px 12px', marginBottom:13 }}>
+                <div style={{ fontSize: isMobile?11:12, fontWeight:800, color:'#ff8f8f', marginBottom:5 }}>⚠ Connexion Spotify échouée</div>
+                <div style={{ fontSize: isMobile?11:12, color:'#e8c4c4', lineHeight:1.5, wordBreak:'break-word' }}>{authError}</div>
+              </div>
+            )}
             <button onClick={onConnect} disabled={connecting} className={connecting ? undefined : 'hub-cta'}
               style={{ width:'100%', background:'linear-gradient(90deg,#1ed760,#1fc95a)', border:'none', borderRadius:12, padding: isMobile?'14px 0':'16px 0', cursor: connecting?'default':'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:12, transition:'opacity 0.3s, transform 0.2s', opacity: connecting?0.75:1, boxShadow:'0 10px 30px rgba(30,215,96,0.35)' }}>
               <SpotifyIcon size={isMobile?19:21} />
