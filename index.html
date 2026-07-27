@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.68';
+const APP_VERSION = '7.6.69';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -19183,6 +19183,9 @@ function TodoPanel() {
   const [, forceTick]           = React.useReducer(x => x + 1, 0);
   const bucket = TODO_BUCKETS[bucketIdx];
   const isDaily = bucket[0] === 'daily';
+  // « Activité avec Cécile » : une activité faite n'est PAS supprimée — elle reste dans la
+  // liste, grisée + barrée, reléguée en bas (demande utilisateur). Réversible d'un clic sur ✓.
+  const isCecile = bucket[0] === 'cecile';
   const today = todoTodayStr();
   // Re-render au changement de jour → les tâches Quotidien validées repartent actives à 00h
   React.useEffect(() => {
@@ -19211,17 +19214,35 @@ function TodoPanel() {
     recordTodoDone(t.fav);
     return { ...t, doneDate: today };
   }));
+  // Cécile : bascule fait / à faire. La tâche reste en base (jamais supprimée) ; elle n'est
+  // comptée dans les stats qu'à la PREMIÈRE validation (flag `counted`), pour qu'un aller-retour
+  // ✓ / ↺ ne gonfle pas le journal des tâches terminées.
+  const toggleDone = id => update(todos.map(t => {
+    if (t.id !== id) return t;
+    if (t.done) return { ...t, done: false, doneAt: undefined };
+    if (!t.counted) recordTodoDone(t.fav);
+    return { ...t, done: true, doneAt: Date.now(), counted: true };
+  }));
   // Déplace une tâche d'un cran dans le carrousel (échéance plus proche/lointaine)
   const move = (id, dir) => update(todos.map(t => {
     if (t.id !== id) return t;
     const i = TODO_BUCKETS.findIndex(b => b[0] === t.bucket);
     const ni = Math.min(TODO_BUCKETS.length - 1, Math.max(0, i + dir));
-    // En sortant de Quotidien on efface la validation du jour (redevient une tâche normale)
-    return { ...t, bucket: TODO_BUCKETS[ni][0], doneDate: TODO_BUCKETS[ni][0] === 'daily' ? t.doneDate : undefined };
+    // En sortant de Quotidien on efface la validation du jour (redevient une tâche normale),
+    // et en sortant de Cécile l'état « fait » (ailleurs, × supprime la tâche).
+    return {
+      ...t,
+      bucket: TODO_BUCKETS[ni][0],
+      doneDate: TODO_BUCKETS[ni][0] === 'daily'  ? t.doneDate : undefined,
+      done:     TODO_BUCKETS[ni][0] === 'cecile' ? t.done     : undefined,
+    };
   }));
   const goBucket = dir => setBucketIdx(i => (i + dir + TODO_BUCKETS.length) % TODO_BUCKETS.length);
 
-  const items = todos.filter(t => t.bucket === bucket[0]);
+  let items = todos.filter(t => t.bucket === bucket[0]);
+  // Cécile : les activités faites descendent en bas de liste (ordre de saisie préservé sinon)
+  if (isCecile) items = [...items.filter(t => !t.done), ...items.filter(t => t.done)];
+  const doneCount = isCecile ? items.filter(t => t.done).length : 0;
   const arrowBtn = { background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:TODO_GREEN, fontSize:16, lineHeight:1, padding:'4px 10px', cursor:'pointer', flexShrink:0 };
 
   return (
@@ -19231,7 +19252,9 @@ function TodoPanel() {
         <button onClick={() => goBucket(-1)} style={arrowBtn} title="Échéance précédente">‹</button>
         <div style={{ flex:1, textAlign:'center', minWidth:0 }}>
           <div style={{ fontSize:13, fontWeight:800, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{bucket[2]} {bucket[1]}</div>
-          <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>{items.length} tâche{items.length > 1 ? 's' : ''}</div>
+          <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+            {items.length} tâche{items.length > 1 ? 's' : ''}{doneCount > 0 ? ` · ${doneCount} faite${doneCount > 1 ? 's' : ''}` : ''}
+          </div>
         </div>
         <button onClick={() => goBucket(1)} style={arrowBtn} title="Échéance suivante">›</button>
       </div>
@@ -19258,18 +19281,22 @@ function TodoPanel() {
           {items.map(t => {
             const bi = TODO_BUCKETS.findIndex(b => b[0] === t.bucket);
             const doneToday = isDaily && t.doneDate === today;
+            const doneCecile = isCecile && !!t.done;
+            const faded = doneToday || doneCecile;   // grisée + barrée (validée du jour / activité faite)
             return (
-              <div key={t.id} style={{ display:'flex', alignItems:'center', gap:10, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px', opacity: doneToday ? 0.5 : 1 }}>
+              <div key={t.id} style={{ display:'flex', alignItems:'center', gap:10, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px', opacity: faded ? 0.5 : 1 }}>
                 <button onClick={() => toggleFav(t.id)} title={t.fav ? 'Retirer des favorites' : 'Marquer comme favorite'}
                   style={{ background:'none', border:'none', color: t.fav ? '#f5c518' : C.dim, fontSize:15, lineHeight:1, padding:'2px 4px', cursor:'pointer', flexShrink:0 }}>{t.fav ? '★' : '☆'}</button>
-                <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', textDecoration: doneToday ? 'line-through' : 'none' }}>{t.text}</div>
+                <div style={{ flex:1, minWidth:0, fontSize:11, color: faded ? C.muted : C.text, wordBreak:'break-word', textDecoration: faded ? 'line-through' : 'none' }}>{t.text}</div>
                 <button onClick={() => move(t.id, -1)} disabled={bi === 0} title="Échéance plus proche"
                   style={{ background:'none', border:`1px solid ${bi === 0 ? C.border : TODO_GREEN + '55'}`, borderRadius:7, color: bi === 0 ? C.dim : TODO_GREEN, fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 10px', cursor: bi === 0 ? 'default' : 'pointer', flexShrink:0 }}>‹</button>
                 <button onClick={() => move(t.id, 1)} disabled={bi === TODO_BUCKETS.length - 1} title="Échéance plus lointaine"
                   style={{ background:'none', border:`1px solid ${bi === TODO_BUCKETS.length - 1 ? C.border : TODO_GREEN + '55'}`, borderRadius:7, color: bi === TODO_BUCKETS.length - 1 ? C.dim : TODO_GREEN, fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 10px', cursor: bi === TODO_BUCKETS.length - 1 ? 'default' : 'pointer', flexShrink:0 }}>›</button>
-                <button onClick={() => isDaily ? validateDaily(t.id) : remove(t.id)} disabled={doneToday}
-                  title={isDaily ? (doneToday ? 'Validée pour aujourd’hui' : 'Valider pour aujourd’hui (repart demain)') : 'Supprimer'}
-                  style={{ background:'none', border:`1px solid ${doneToday ? '#4caf5055' : '#e0505055'}`, borderRadius:7, color: doneToday ? '#4caf50' : '#e05050', fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 11px', cursor: doneToday ? 'default' : 'pointer', flexShrink:0 }}>{doneToday ? '✓' : '×'}</button>
+                <button onClick={() => isDaily ? validateDaily(t.id) : isCecile ? toggleDone(t.id) : remove(t.id)} disabled={doneToday}
+                  title={isDaily ? (doneToday ? 'Validée pour aujourd’hui' : 'Valider pour aujourd’hui (repart demain)')
+                       : isCecile ? (doneCecile ? 'Activité faite — cliquer pour la rouvrir' : 'Marquer comme faite (elle passe en bas, barrée)')
+                       : 'Supprimer'}
+                  style={{ background:'none', border:`1px solid ${faded ? '#4caf5055' : '#e0505055'}`, borderRadius:7, color: faded ? '#4caf50' : '#e05050', fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 11px', cursor: doneToday ? 'default' : 'pointer', flexShrink:0 }}>{faded ? '✓' : '×'}</button>
               </div>
             );
           })}
@@ -19278,6 +19305,11 @@ function TodoPanel() {
       {isDaily && (
         <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
           × = valider pour aujourd’hui · repart à 00h
+        </div>
+      )}
+      {isCecile && (
+        <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+          × = faite · barrée et rangée en bas (jamais supprimée) · ✓ pour rouvrir
         </div>
       )}
     </div>

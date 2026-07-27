@@ -108,7 +108,7 @@ Ensuite, chaque annonce a ses boutons **⧉ Titre / ⧉ Description / ⧉ Prix**
 > ⚠️ **Le dépôt n'est pas automatique, et ça n'est pas une limite du code** : Vinted et Leboncoin n'ouvrent aucune API publique de dépôt d'annonce aux particuliers, et celle d'eBay exige un serveur avec un secret. Le module fait donc tout le travail de rédaction et de mise en forme, et te laisse le copier-coller final.
 
 ### To do
-Tâches classées par échéance en carrousel (Quotidien, Aujourd'hui, semaine, mois, année, un jour, **💞 Activité avec Cécile** — nouvelle rubrique, en dernier). ⭐ favorites (« compliquées »). Le Quotidien repart chaque jour à 00 h.
+Tâches classées par échéance en carrousel (Quotidien, Aujourd'hui, semaine, mois, année, un jour, **💞 Activité avec Cécile** — nouvelle rubrique, en dernier). ⭐ favorites (« compliquées »). Le Quotidien repart chaque jour à 00 h. Dans **💞 Activité avec Cécile**, le × ne supprime **pas** l'activité : elle est grisée, barrée et rangée **en bas** de la liste (le titre indique « N faites ») — un clic sur le ✓ la rouvre.
 
 ### Maps
 Visuel type « Vos trajets » Google Maps : carte Leaflet (tuiles OSM) + timeline horodatée par jour, tracés colorés par mode, lieux visités. **⚠ L'app ne trace jamais ta position** : tu importes l'export officiel de ta Timeline Google (2 formats acceptés). Import incrémental.
