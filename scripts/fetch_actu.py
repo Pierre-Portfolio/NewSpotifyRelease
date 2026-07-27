@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "data", "actu.json")
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -293,19 +294,53 @@ def fetch_insolite():
     return fetch_gnews([gn_search("insolite")])
 
 
+LINKEDIN_MAX_DAYS = 30  # ne garder qu'un mois de parutions (miroir d'ACTU_LI_MAX_DAYS client)
+
+
+def item_time(a):
+    """Date de parution d'un item en timestamp, None si absente/illisible."""
+    d = (a or {}).get("date")
+    if not d:
+        return None
+    try:
+        return parsedate_to_datetime(d).timestamp()
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(d.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def recent_first(items, max_days):
+    """Jette les parutions plus vieilles que max_days, trie de la plus récente à la plus
+    ancienne. Un item sans date lisible est gardé mais renvoyé en fin de liste (on ne peut
+    pas juger de sa fraîcheur). Miroir exact d'actuRecentFirst côté client."""
+    floor = time.time() - max_days * 86400 if max_days else None
+    kept = [a for a in (items or []) if item_time(a) is None or not floor or item_time(a) >= floor]
+    return sorted(kept, key=lambda a: (item_time(a) is None, -(item_time(a) or 0)))
+
+
 def fetch_linkedin():
     """Articles PUBLIÉS SUR LinkedIn (Pulse / LinkedIn News), repli : actu du réseau pro.
 
     LinkedIn n'expose aucune API publique de lecture (partenaires uniquement, OAuth avec
     client_secret, pas de CORS, pas de RSS) : on passe donc par Google News restreint au
     domaine linkedin.com pour ramener du contenu VENANT de LinkedIn.
+
+    ⚠ Fraîcheur : une recherche `site:` est classée par PERTINENCE, d'où des articles vieux
+    de ~300 jours. Chaque requête est bornée par l'opérateur `when:<N>d` et le résultat
+    repasse par recent_first (filtre + tri parution décroissante), car `when:` est parfois
+    ignoré sur les requêtes à opérateurs.
     """
-    return fetch_gnews([
-        gn_search("site:linkedin.com"),
-        gn_search("site:linkedin.com/pulse OR site:linkedin.com/posts"),
-        gn_search("LinkedIn"),
-        gn_search('LinkedIn OR "réseau professionnel" OR "monde du travail"'),
+    w = " when:%dd" % LINKEDIN_MAX_DAYS
+    items = fetch_gnews([
+        gn_search("site:linkedin.com" + w),
+        gn_search("site:linkedin.com/pulse OR site:linkedin.com/posts" + w),
+        gn_search("LinkedIn" + w),
+        gn_search('LinkedIn OR "réseau professionnel" OR "monde du travail"' + w),
     ])
+    return recent_first(items, LINKEDIN_MAX_DAYS)
 
 
 def fetch_trends():

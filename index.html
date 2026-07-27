@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.62';
+const APP_VERSION = '7.6.63';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -11442,6 +11442,30 @@ function actuAgo(dateStr) {
   return `il y a ${Math.round(s / 86400)} j`;
 }
 
+// Fraîcheur d'un item d'actu (7.6.63) — Google News classe les recherches `site:` par
+// PERTINENCE, pas par date : la section LinkedIn remontait des articles vieux de ~300 jours
+// au milieu des récents. `actuItemTime` lit la date (RSS « Mon, 21 Jul 2025 … » ou ISO),
+// `actuRecentFirst` jette ce qui dépasse `maxDays` puis trie du PLUS RÉCENT au plus ancien.
+// Un item SANS date lisible n'est jamais jeté (on ne peut pas juger) mais passe en fin de liste.
+function actuItemTime(a) {
+  const t = Date.parse(a?.date || '');
+  return isNaN(t) ? null : t;
+}
+function actuRecentFirst(items, maxDays) {
+  const list = Array.isArray(items) ? items : [];
+  const floor = maxDays ? Date.now() - maxDays * 86400000 : null;
+  return list
+    .filter(a => { const t = actuItemTime(a); return t === null || !floor || t >= floor; })
+    .sort((a, b) => {
+      const ta = actuItemTime(a), tb = actuItemTime(b);
+      if (ta === null && tb === null) return 0;
+      if (ta === null) return 1;          // sans date → en dernier
+      if (tb === null) return -1;
+      return tb - ta;                     // parution la plus récente en tête
+    });
+}
+const ACTU_LI_MAX_DAYS = 30;   // LinkedIn : on ne garde qu'un mois de parutions
+
 // Parse un flux RSS/Atom → [{ title, link, date, source }]
 function actuParseRss(xml, max = 12) {
   if (!xml) return [];
@@ -11683,13 +11707,19 @@ function actuFetchInsolite() {
 // que des articles PARLANT de LinkedIn : on interroge Google News en le restreignant au
 // domaine (`site:linkedin.com` → LinkedIn Pulse & LinkedIn News), et on ne retombe sur
 // l'ancienne requête « actu du réseau professionnel » que si ça ne donne rien.
+// ⚠ 7.6.63 — FRAÎCHEUR : une recherche `site:` est classée par PERTINENCE par Google News,
+// d'où des articles vieux de ~300 jours dans la liste. Chaque requête est donc bornée par
+// l'opérateur `when:<N>d` de Google News, et le résultat repasse par `actuRecentFirst`
+// (filtre le hors-délai + tri parution décroissante) — ceinture et bretelles, car `when:`
+// est parfois ignoré sur les requêtes à opérateurs.
 function actuFetchLinkedin() {
+  const w = ` when:${ACTU_LI_MAX_DAYS}d`;
   return actuFetchGNews([
-    actuGNSearch('site:linkedin.com'),
-    actuGNSearch('site:linkedin.com/pulse OR site:linkedin.com/posts'),
-    actuGNSearch('LinkedIn'),
-    actuGNSearch('LinkedIn OR "réseau professionnel" OR "monde du travail"'),
-  ]);
+    actuGNSearch('site:linkedin.com' + w),
+    actuGNSearch('site:linkedin.com/pulse OR site:linkedin.com/posts' + w),
+    actuGNSearch('LinkedIn' + w),
+    actuGNSearch('LinkedIn OR "réseau professionnel" OR "monde du travail"' + w),
+  ]).then(items => actuRecentFirst(items, ACTU_LI_MAX_DAYS));
 }
 
 // Google Trends France — recherches tendance du jour (RSS via proxy CORS).
@@ -12656,9 +12686,16 @@ function ActuPanel() {
           {/* 1.1b LinkedIn — placé JUSTE SOUS Actu Mondial (demande utilisateur) */}
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>💼 LINKEDIN <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
-            {(d.linkedin && d.linkedin.length)
-              ? d.linkedin.map((a, i) => row('li' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
-              : empty('Indisponible (proxy CORS injoignable).')}
+            {/* ⚠ 7.6.63 — le tri/filtre est refait ICI et pas seulement dans le fetcher : la
+                source par défaut est `data/actu.json` (pré-fetché par la GitHub Action), donc
+                les items peuvent venir d'un run antérieur au correctif. */}
+            {(() => {
+              const li = actuRecentFirst(d.linkedin, ACTU_LI_MAX_DAYS);
+              if (li.length) return li.map((a, i) => row('li' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)));
+              return empty(d.linkedin && d.linkedin.length
+                ? `Aucun article publié dans les ${ACTU_LI_MAX_DAYS} derniers jours.`
+                : 'Indisponible (proxy CORS injoignable).');
+            })()}
           </StatsCollapse>
 
           {/* 1.2 Bourse & crypto */}
