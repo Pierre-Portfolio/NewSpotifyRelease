@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.72';
+const APP_VERSION = '7.6.73';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18335,6 +18335,8 @@ async function foodSearchNutrition(query) {
   const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' +
     encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=24' +
     '&fields=product_name,product_name_fr,generic_name_fr,brands,nutriments';
+  // `nutriments` porte déjà glucides/protéines/lipides (champs *_100g) : rien à demander
+  // de plus à l'API, on les lit simplement (7.6.73).
   // ⚠ search.pl (Open Food Facts) est LENT et échoue souvent au 1er appel (timeout/5xx)
   // → avant, chaque échec remontait « Recherche indisponible » et il fallait recliquer
   // 2-3 fois la loupe. On réessaie donc TOUT SEUL : 2 tentatives directes (timeout 12 s,
@@ -18369,35 +18371,151 @@ async function foodSearchNutrition(query) {
     const dedupe = (name + '|' + brand + '|' + kcal).toLowerCase();
     if (seen.has(dedupe)) continue;
     seen.add(dedupe);
-    out.push({ name, brand, kcal100: kcal });
+    // Macros pour 100 g — absentes de beaucoup de fiches → null (jamais 0 par défaut)
+    const macro = k => {
+      let v = n[k + '_100g'];
+      if (v == null) v = n[k];
+      v = parseFloat(v);
+      return isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : null;
+    };
+    out.push({ name, brand, kcal100: kcal, c100: macro('carbohydrates'), p100: macro('proteins'), f100: macro('fat') });
     if (out.length >= 12) break;
   }
   FOOD_SEARCH_CACHE[key] = out;
   return out;
 }
 
-// Une ligne de résultat : portion en grammes ajustable → calcule les kcal en direct,
-// bouton + ajoute le repas dans la catégorie sélectionnée.
+// ── MACROS : glucides / protéines / graisses (7.6.73) ────────────────────────
+// Les valeurs viennent d'Open Food Facts (champs `*_100g`) ou d'une suggestion IA, sont
+// mises à l'échelle de la portion à l'ajout et stockées DANS le repas
+// (`{ c, p, f }` en grammes) → totaux du jour et détail par journée sans re-requête.
+// ⚠ Facultatives partout : un repas saisi à la main (kcal seules) ou importé d'un backup
+// n'en a pas → l'UI affiche « macros inconnues » plutôt que d'inventer des chiffres.
+const FOOD_HOLD_MS = 450;   // appui long sur une ligne d'historique → macros de la journée
+// ⚠ `short` explicite : « Glucides » et « Graisses » commencent tous deux par G, une
+// initiale ne suffit donc pas à distinguer les chips d'un repas.
+const FOOD_MACROS = [
+  { key:'c', label:'Glucides', short:'Gluc.', color:'#f5c518', kcalPerG:4 },
+  { key:'p', label:'Protéines', short:'Prot.', color:'#5aa9ff', kcalPerG:4 },
+  { key:'f', label:'Graisses', short:'Gras', color:'#e07b54', kcalPerG:9 },
+];
+// Totaux d'une liste de repas : { c, p, f, known (repas avec macros), unknown, kcalKnown }
+function foodMacroTotals(list) {
+  const out = { c:0, p:0, f:0, known:0, unknown:0, kcalKnown:0 };
+  (list || []).forEach(m => {
+    const has = FOOD_MACROS.some(x => m[x.key] != null);
+    if (!has) { out.unknown++; return; }
+    out.known++;
+    out.kcalKnown += m.kcal || 0;
+    FOOD_MACROS.forEach(x => { out[x.key] += Number(m[x.key]) || 0; });
+  });
+  return out;
+}
+const foodMacroFmt = v => (v == null ? '—' : (v >= 10 ? Math.round(v) : Math.round(v * 10) / 10));
+// Barre empilée : part de CHAQUE macro dans les calories (4/4/9 kcal par gramme) — c'est
+// la répartition qui parle, pas la masse (1 g de graisse « pèse » 2× plus qu'1 g de sucre).
+function FoodMacroBar({ macros, height, labels }) {
+  const kc = FOOD_MACROS.map(m => (Number(macros[m.key]) || 0) * m.kcalPerG);
+  const tot = kc.reduce((a, b) => a + b, 0);
+  if (!tot) return null;
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+      <div style={{ display:'flex', height: height || 8, borderRadius:4, overflow:'hidden', background:'#111' }}>
+        {FOOD_MACROS.map((m, i) => (
+          <div key={m.key} title={`${m.label} · ${foodMacroFmt(macros[m.key])} g (${Math.round(kc[i] / tot * 100)} % des kcal)`}
+            style={{ width:`${kc[i] / tot * 100}%`, background:m.color, transition:'width 0.25s' }} />
+        ))}
+      </div>
+      {labels !== false && (
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+          {FOOD_MACROS.map((m, i) => (
+            <span key={m.key} style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:m.color, whiteSpace:'nowrap' }}>
+              ● {m.label} {foodMacroFmt(macros[m.key])} g<span style={{ color:C.dim }}> · {Math.round(kc[i] / tot * 100)} %</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── SUGGESTIONS IA (7.6.73) : les 2 PREMIERS résultats de recherche ───────────
+// Claude et Gemini répondent en parallèle d'Open Food Facts, avec les clés déjà en place
+// (Revente `spotifyplus_claude_key` / Frigo `spotifyplus_gemini_key`). Chacun renvoie la
+// valeur nutritionnelle MOYENNE pour 100 g de l'aliment demandé → même forme qu'un
+// résultat OFF, donc mêmes lignes, même portion ajustable, même ajout.
+// ⚠ Une estimation IA n'est PAS une mesure : les lignes sont badgées ✨ et l'ordre
+// (IA d'abord) est une demande explicite de l'utilisateur.
+const FOOD_AI_SCHEMA = {
+  type:'object', additionalProperties:false,
+  required:['nom', 'kcal', 'glucides', 'proteines', 'graisses'],
+  properties: {
+    nom:       { type:'string' },
+    kcal:      { type:'number' },
+    glucides:  { type:'number' },
+    proteines: { type:'number' },
+    graisses:  { type:'number' },
+    note:      { type:'string' },
+  },
+};
+function foodAiPrompt(q) {
+  return `Tu es un nutritionniste. Donne la valeur nutritionnelle MOYENNE pour 100 g (ou 100 ml si c'est une boisson) de : "${q}".
+Réponds UNIQUEMENT en JSON, sans texte autour :
+{"nom":"nom court en français","kcal":nombre,"glucides":grammes,"proteines":grammes,"graisses":grammes,"note":"précision courte (variété, cuisson, marque type) en moins de 60 caractères"}
+Valeurs pour 100 g, nombres seuls (pas d'unité), arrondies à l'entier ou au dixième. Si l'aliment est inconnu ou n'est pas un aliment, renvoie {"nom":""}.`;
+}
+async function foodAiSuggest(provider, q) {
+  const raw = provider === 'gemini'
+    ? await geminiGenerate([{ text: foodAiPrompt(q) }])
+    : await claudeGenerate({ text: foodAiPrompt(q), schema: FOOD_AI_SCHEMA, maxTokens: 1500 });
+  const j = geminiExtract(raw, '{', '}');
+  if (!j || !j.nom) return null;
+  const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : null; };
+  const kcal = num(j.kcal);
+  if (!kcal) return null;
+  return {
+    name: String(j.nom).slice(0, 80), brand: '', kcal100: Math.round(kcal),
+    c100: num(j.glucides), p100: num(j.proteines), f100: num(j.graisses),
+    ai: provider, note: j.note ? String(j.note).slice(0, 80) : '',
+  };
+}
+
+// Une ligne de résultat : portion en grammes ajustable → calcule les kcal ET les macros en
+// direct, bouton + ajoute le repas dans la catégorie sélectionnée.
 function FoodResultRow({ r, onAdd }) {
   const [grams, setGrams] = React.useState('100');
   const g = parseInt(grams, 10) || 0;
   const kcal = Math.round(r.kcal100 * g / 100);
+  const scale = k => (r[k] == null ? null : Math.round(r[k] * g / 100 * 10) / 10);
+  const macros = { c: scale('c100'), p: scale('p100'), f: scale('f100') };
+  const hasMacros = FOOD_MACROS.some(m => macros[m.key] != null);
   const inSt = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'4px 6px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', width:52, textAlign:'right' };
+  const aiTint = r.ai === 'gemini' ? '#8b7bf5' : r.ai === 'claude' ? '#d97757' : null;
   return (
-    <div style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px' }}>
-      <div style={{ flex:1, minWidth:0 }}>
-        <div style={{ fontSize:11, color:C.text, wordBreak:'break-word', lineHeight:1.2 }}>{r.name}</div>
-        <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-          {r.brand ? r.brand + ' · ' : ''}{r.kcal100} kcal/100 g
+    <div style={{ display:'flex', flexDirection:'column', gap:5, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px',
+      border: aiTint ? `1px solid ${aiTint}55` : '1px solid transparent' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:11, color:C.text, wordBreak:'break-word', lineHeight:1.2 }}>
+            {aiTint && <span style={{ color:aiTint, fontWeight:700 }}>✨ {r.ai === 'gemini' ? 'Gemini' : 'Claude'} · </span>}
+            {r.name}
+          </div>
+          <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+            {r.brand ? r.brand + ' · ' : ''}{r.kcal100} kcal/100 g{r.note ? ' · ' + r.note : ''}
+          </div>
         </div>
+        <input type="number" value={grams} onChange={e => setGrams(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && kcal > 0) onAdd(r, g, kcal); }}
+          style={inSt} title="Quantité en grammes" />
+        <span style={{ fontSize:9, color:C.dim }}>g</span>
+        <span style={{ fontSize:10, color:FOOD_COLOR, fontFamily:'DM Mono,monospace', width:56, textAlign:'right', flexShrink:0 }}>{kcal} kcal</span>
+        <button onClick={() => { if (kcal > 0) onAdd(r, g, kcal, macros); }} title="Ajouter"
+          style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'2px 8px', cursor:'pointer', flexShrink:0 }}>+</button>
       </div>
-      <input type="number" value={grams} onChange={e => setGrams(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter' && kcal > 0) onAdd(r, g, kcal); }}
-        style={inSt} title="Quantité en grammes" />
-      <span style={{ fontSize:9, color:C.dim }}>g</span>
-      <span style={{ fontSize:10, color:FOOD_COLOR, fontFamily:'DM Mono,monospace', width:56, textAlign:'right', flexShrink:0 }}>{kcal} kcal</span>
-      <button onClick={() => { if (kcal > 0) onAdd(r, g, kcal); }} title="Ajouter"
-        style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'2px 8px', cursor:'pointer', flexShrink:0 }}>+</button>
+      {/* Macros de la PORTION choisie — recalculées en direct quand on change les grammes */}
+      {hasMacros
+        ? <FoodMacroBar macros={macros} height={6} />
+        : <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>macros non renseignées pour ce produit</div>}
     </div>
   );
 }
@@ -18414,6 +18532,14 @@ function NourriturePanel() {
   const [results, setResults] = React.useState(null);   // null = pas de recherche, [] = aucun résultat
   const [searching, setSearching] = React.useState(false);
   const [searchErr, setSearchErr] = React.useState('');
+  // Suggestions IA affichées EN TÊTE des résultats (une par fournisseur configuré) :
+  // [{ provider, state:'loading'|'ok'|'err'|'none', data, err }] — arrivent indépendamment
+  // d'Open Food Facts, chacune s'affiche dès qu'elle répond.
+  const [aiRows, setAiRows] = React.useState([]);
+  // Journée dont le détail des macros est déplié dans l'historique (APPUI LONG sur la ligne)
+  const [macroDay, setMacroDay] = React.useState(null);
+  const histHold = React.useRef({ timer:null, fired:false });
+  React.useEffect(() => () => clearTimeout(histHold.current.timer), []);
   const [todayOpen, setTodayOpen] = React.useState(true);   // section Aujourd'hui repliable (ouverte par défaut)
   const today = todoTodayStr();
   // Jour ÉDITÉ (défaut : aujourd'hui). Les 7 derniers jours restent éditables (chips
@@ -18458,28 +18584,42 @@ function NourriturePanel() {
     setName(''); setKcal(''); setResults(null); setSearchErr('');
   };
   const removeMeal = id => commitMeals({ ...meals, [selDay]: dayMeals.filter(m => m.id !== id) });
-  // 🔎 Cherche les calories de l'aliment saisi via Open Food Facts.
+  // 🔎 Cherche les calories de l'aliment saisi : Claude + Gemini EN TÊTE (suggestions,
+  // clés déjà configurées ailleurs dans le Hub), Open Food Facts en dessous (mesures).
+  // Les trois partent EN PARALLÈLE : une IA lente ne retarde pas la base, et inversement.
   const searchFood = async () => {
     const q = name.trim();
     if (q.length < 2 || searching) return;
     setSearching(true); setSearchErr(''); setResults(null);
+    const providers = [];
+    if (claudeKey()) providers.push('claude');
+    if (geminiKey()) providers.push('gemini');
+    setAiRows(providers.map(p => ({ provider:p, state:'loading' })));
+    providers.forEach(p => {
+      foodAiSuggest(p, q)
+        .then(d => setAiRows(rows => rows.map(r => r.provider === p ? { ...r, state: d ? 'ok' : 'none', data: d } : r)))
+        .catch(e => setAiRows(rows => rows.map(r => r.provider === p ? { ...r, state:'err', err: String((e && e.message) || e).slice(0, 90) } : r)));
+    });
     try {
       const list = await foodSearchNutrition(q);
       setResults(list);
-      if (!list.length) setSearchErr('Aucun aliment trouvé — saisis les kcal à la main.');
+      if (!list.length) setSearchErr('Aucun aliment trouvé dans Open Food Facts.');
     } catch (err) {
-      setSearchErr('Recherche indisponible — saisis les kcal à la main.');
+      setSearchErr('Open Food Facts indisponible — suggestion IA ou saisie manuelle.');
       setResults(null);
     } finally {
       setSearching(false);
     }
   };
-  // Ajoute directement un résultat (portion en grammes → kcal calculées).
-  const addFromResult = (r, grams, kcalVal) => {
+  const clearSearch = () => { setName(''); setResults(null); setSearchErr(''); setAiRows([]); };
+  // Ajoute directement un résultat (portion en grammes → kcal ET macros calculées).
+  const addFromResult = (r, grams, kcalVal, macros) => {
     const label = grams && grams !== 100 ? `${r.name} (${grams} g)` : r.name;
     const entry = { id: Date.now() + '_' + Math.random().toString(36).slice(2), name: label, kcal: kcalVal, cat };
+    FOOD_MACROS.forEach(m => { const v = macros && macros[m.key]; if (v != null) entry[m.key] = v; });
+    if (r.ai) entry.ai = r.ai;   // trace : valeurs estimées par une IA, pas mesurées
     commitMeals({ ...meals, [selDay]: [...dayMeals, entry] });
-    setName(''); setKcal(''); setResults(null); setSearchErr('');
+    setKcal(''); clearSearch();
   };
 
   const imc = profile && profile.weight && profile.height ? profile.weight / Math.pow(profile.height / 100, 2) : 0;
@@ -18489,6 +18629,18 @@ function NourriturePanel() {
   // Historique élargi à 30 jours (demande utilisateur — les totaux quotidiens sont conservés)
   const histDays = _lastNDays(30).map(d => ({ ...d, kcal: days[d.key] || 0 })).filter(d => d.kcal > 0 || d.key === today).reverse();
   const editableSet = new Set(editableDays.map(d => d.key));
+  const dayMacros = foodMacroTotals(dayMeals);                       // macros du jour édité
+  // Appui long sur une ligne d'historique → macros de CETTE journée (recalculées depuis la
+  // composition locale ; un jour restauré d'un backup n'a pas de composition → message).
+  const holdHist = key => {
+    histHold.current.fired = false;
+    clearTimeout(histHold.current.timer);
+    histHold.current.timer = setTimeout(() => {
+      histHold.current.fired = true;
+      setMacroDay(d => (d === key ? null : key));
+    }, FOOD_HOLD_MS);
+  };
+  const holdHistEnd = () => clearTimeout(histHold.current.timer);
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
@@ -18573,6 +18725,18 @@ function NourriturePanel() {
         )}
         {target > 0 && !over && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{target - dayTotal} kcal restantes</div>}
         {over && <div style={{ fontSize:9, color:'#e05050', fontFamily:'DM Mono,monospace' }}>⚠ objectif dépassé de {dayTotal - target} kcal</div>}
+        {/* Répartition glucides / protéines / graisses du jour — visible dès qu'un aliment
+            validé porte ses macros (Open Food Facts ou suggestion IA). */}
+        {dayMacros.known > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+            <FoodMacroBar macros={dayMacros} height={8} />
+            {dayMacros.unknown > 0 && (
+              <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                {dayMacros.unknown} repas sans macros (saisi à la main) — non comptés ci-dessus
+              </div>
+            )}
+          </div>
+        )}
         {/* Saisie d'un repas */}
         <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
           {FOOD_CATS.map(([k, emo, lbl]) => (
@@ -18588,16 +18752,34 @@ function NourriturePanel() {
             style={{ ...inputSt, flex:2, width:'auto', minWidth:0 }} />
           <button onClick={searchFood} disabled={searching || name.trim().length < 2} title="Trouver les calories"
             style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'0 10px', cursor: searching || name.trim().length < 2 ? 'default' : 'pointer', opacity: searching || name.trim().length < 2 ? 0.5 : 1, flexShrink:0 }}>{searching ? '…' : '🔎'}</button>
-          {(name || results !== null || searchErr) && (
-            <button onClick={() => { setName(''); setResults(null); setSearchErr(''); }} title="Effacer la recherche"
+          {(name || results !== null || searchErr || aiRows.length > 0) && (
+            <button onClick={clearSearch} title="Effacer la recherche"
               style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:13, lineHeight:1, padding:'0 8px', cursor:'pointer', flexShrink:0 }}>×</button>
           )}
         </div>
-        {/* Résultats Open Food Facts : calories auto par aliment, portion ajustable */}
+        {/* 1) Suggestions IA (Claude + Gemini) — EN TÊTE des résultats */}
+        {aiRows.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+            {aiRows.map(row => {
+              const tint = row.provider === 'gemini' ? '#8b7bf5' : '#d97757';
+              const nom = row.provider === 'gemini' ? 'Gemini' : 'Claude';
+              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} />;
+              return (
+                <div key={row.provider} style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: row.state === 'err' ? C.dim : tint,
+                  background:C.surfaceHigh, border:`1px solid ${row.state === 'err' ? C.border : tint + '44'}`, borderRadius:8, padding:'5px 8px' }}>
+                  {row.state === 'loading' ? `⏳ ${nom} cherche la valeur nutritionnelle…`
+                    : row.state === 'none' ? `✨ ${nom} : aliment non reconnu.`
+                    : `✨ ${nom} indisponible — ${row.err || 'erreur'}`}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {/* 2) Résultats Open Food Facts : calories + macros mesurées, portion ajustable */}
         {searching && <div style={{ fontSize:10, color:FOOD_COLOR, fontFamily:'DM Mono,monospace' }}>⏳ Recherche des calories en cours…</div>}
         {searchErr && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{searchErr}</div>}
         {results && results.length > 0 && (
-          <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:220, overflowY:'auto' }}>
+          <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:260, overflowY:'auto' }}>
             {results.map((r, i) => <FoodResultRow key={i} r={r} onAdd={addFromResult} />)}
           </div>
         )}
@@ -18622,14 +18804,28 @@ function NourriturePanel() {
               <div style={{ fontSize:9, fontWeight:700, color:C.muted, letterSpacing:'0.05em' }}>
                 {emo} {lbl.toUpperCase()} · <span style={{ color:FOOD_COLOR }}>{list.reduce((s, m) => s + m.kcal, 0)} kcal</span>
               </div>
-              {list.map(m => (
+              {list.map(m => {
+                const hasM = FOOD_MACROS.some(x => m[x.key] != null);
+                return (
                 <div key={m.id} style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'5px 8px' }}>
-                  <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{m.name}</div>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:11, color:C.text, wordBreak:'break-word' }}>{m.name}{m.ai && <span style={{ color:C.dim }}> ✨</span>}</div>
+                    {hasM && (
+                      <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:2 }}>
+                        {FOOD_MACROS.map(x => m[x.key] == null ? null : (
+                          <span key={x.key} style={{ fontSize:8.5, fontFamily:'DM Mono,monospace', color:x.color }}>
+                            {x.short} {foodMacroFmt(m[x.key])} g
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{m.kcal} kcal</span>
                   <button onClick={() => removeMeal(m.id)} title="Supprimer"
                     style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           );
         })}
@@ -18640,24 +18836,53 @@ function NourriturePanel() {
       <StatsCollapse title="🗓 HISTORIQUE (30 J)" color={FOOD_COLOR}>
         {histDays.length === 0 ? (
           <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', fontFamily:'DM Mono,monospace' }}>Aucune journée enregistrée</div>
-        ) : histDays.map(d => {
+        ) : (<>
+          <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+            appui long sur une journée = glucides / protéines / graisses
+          </div>
+          {histDays.map(d => {
           const p = target ? Math.min(100, Math.round(d.kcal / target * 100)) : 0;
           const o = target && d.kcal > target;
+          const openMac = macroDay === d.key;
+          const mac = openMac ? foodMacroTotals(meals[d.key] || []) : null;
           return (
-            <div key={d.key} style={{ display:'flex', alignItems:'center', gap:8 }}>
-              <span style={{ fontSize:9, color: d.key === today ? FOOD_COLOR : C.muted, fontFamily:'DM Mono,monospace', width:64, flexShrink:0 }}>{d.full}</span>
-              <div style={{ flex:1, height:6, background:'#111', borderRadius:3, overflow:'hidden' }}>
-                <div style={{ width:`${p}%`, height:'100%', background: o ? '#e05050' : FOOD_COLOR }} />
+            <div key={d.key} style={{ display:'flex', flexDirection:'column', gap:4 }}>
+              <div onPointerDown={() => holdHist(d.key)} onPointerUp={holdHistEnd} onPointerLeave={holdHistEnd} onPointerCancel={holdHistEnd}
+                onContextMenu={e => e.preventDefault()}
+                title="Appui long : détail glucides / protéines / graisses"
+                style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', WebkitTouchCallout:'none', WebkitUserSelect:'none', userSelect:'none' }}>
+                <span style={{ fontSize:9, color: d.key === today ? FOOD_COLOR : C.muted, fontFamily:'DM Mono,monospace', width:64, flexShrink:0 }}>{d.full}</span>
+                <div style={{ flex:1, height:6, background:'#111', borderRadius:3, overflow:'hidden' }}>
+                  <div style={{ width:`${p}%`, height:'100%', background: o ? '#e05050' : FOOD_COLOR }} />
+                </div>
+                <span style={{ fontSize:9, color: o ? '#e05050' : C.muted, fontFamily:'DM Mono,monospace', width:58, textAlign:'right', flexShrink:0 }}>{d.kcal} kcal</span>
+                {editableSet.has(d.key) && (
+                  <button onClick={() => { if (histHold.current.fired) { histHold.current.fired = false; return; } setSelDay(d.key); setTodayOpen(true); setResults(null); setSearchErr(''); }}
+                    title={`Éditer les repas du ${d.full}`}
+                    style={{ background:'none', border:'none', color: selDay === d.key ? FOOD_COLOR : C.dim, fontSize:11, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
+                )}
               </div>
-              <span style={{ fontSize:9, color: o ? '#e05050' : C.muted, fontFamily:'DM Mono,monospace', width:58, textAlign:'right', flexShrink:0 }}>{d.kcal} kcal</span>
-              {editableSet.has(d.key) && (
-                <button onClick={() => { setSelDay(d.key); setTodayOpen(true); setResults(null); setSearchErr(''); }}
-                  title={`Éditer les repas du ${d.full}`}
-                  style={{ background:'none', border:'none', color: selDay === d.key ? FOOD_COLOR : C.dim, fontSize:11, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
+              {openMac && (
+                <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, padding:'7px 9px', display:'flex', flexDirection:'column', gap:5 }}>
+                  {mac.known > 0 ? (<>
+                    <FoodMacroBar macros={mac} height={7} />
+                    <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                      {mac.known} aliment{mac.known > 1 ? 's' : ''} avec macros · {mac.kcalKnown} kcal sur {d.kcal}
+                      {mac.unknown > 0 ? ` · ${mac.unknown} sans détail` : ''}
+                    </div>
+                  </>) : (
+                    <div style={{ fontSize:9.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>
+                      Aucune macro pour cette journée — les repas ont été saisis à la main (kcal seules)
+                      ou viennent d'une sauvegarde (seuls les totaux y sont conservés).
+                    </div>
+                  )}
+                  <button onClick={() => setMacroDay(null)}
+                    style={{ alignSelf:'flex-start', background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9, padding:'2px 8px', cursor:'pointer', fontFamily:'inherit' }}>replier</button>
+                </div>
               )}
             </div>
           );
-        })}
+        })}</>)}
       </StatsCollapse>
     </div>
   );
