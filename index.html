@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.66';
+const APP_VERSION = '7.6.67';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -568,18 +568,32 @@ async function megaDownload() {
 // Token ~1 h en localStorage, PAS de refresh token (idem flux implicite) : à l'expiration
 //   le bouton repasse en « Connecter » (1 clic, consentement déjà accordé → quasi instantané).
 // Scope drive.file : l'app ne voit QUE les fichiers qu'elle a elle-même créés (sauvegarde,
-//   photos Vêtement). + youtube : section Actu → Vidéos (abonnements + écriture playlist
-//   « À regarder plus tard (Hub) »). Ces deux-là suffisent à TOUT sauf « Mes Actifs ».
+//   photos Vêtement/Revente). Il suffit à TOUT sauf « Mes Actifs » et YouTube.
 // + drive.readonly = scope RESTREINT (lecture de tout le Drive) requis seulement par Finance
-//   → « Mes Actifs » (tableur « Finance » exporté en CSV). Il est demandé avec les autres,
+//   → « Mes Actifs » (tableur « Finance » exporté en CSV). Il est demandé avec drive.file,
 //   mais s'il fait échouer le consentement (scope restreint refusé aux apps non vérifiées),
 //   gdriveLogin RÉESSAIE automatiquement sans lui : le reste continue de marcher et seul
 //   « Mes Actifs » affiche un bouton « Autoriser la lecture du Drive ».
+// ⚠ 7.6.67 — LE SCOPE YOUTUBE NE PEUT PLUS ÊTRE DEMANDÉ AVEC LES SCOPES DRIVE. Google
+//   refuse désormais la requête groupée : « Accès bloqué : erreur d'autorisation — This
+//   request contains scopes that cannot be requested together: [.../auth/youtube,
+//   .../auth/drive.file] » (Erreur 400 : invalid_request), APRÈS le choix du compte. Ça
+//   marchait avant : c'est une restriction NOUVELLE côté Google (les scopes YouTube Data
+//   sont isolés des autres API Google), rien n'a changé côté client OAuth.
+//   → DEUX consentements et DEUX JETONS SÉPARÉS, chacun dans ses propres clés localStorage :
+//     • Drive  : gdrive_access / gdrive_expiry / gdrive_scopes  (drive.file [+ drive.readonly])
+//     • YouTube: ytg_access    / ytg_expiry    / ytg_scopes     (youtube seul)
+//   Un seul jeton ne peut PAS couvrir les deux (même en consentement incrémental : le
+//   include_granted_scopes referait une requête mixte → même erreur). Conséquence visible :
+//   la 1re fois, il faut cliquer « Connecter Google (YouTube) » dans Actu EN PLUS de la
+//   connexion Drive d'À propos. Les jetons Drive émis AVANT cette version portaient encore
+//   le scope youtube → ytgToken() les accepte en repli jusqu'à leur expiration (~1 h).
 // ════════════════════════════════════════════════
 const GDRIVE_CLIENT_ID   = '968594008637-12ssdcr5i1uutq9vru5f8444bfchephd.apps.googleusercontent.com';
 const GDRIVE_BACKUP_NAME = 'spotifyplus-sauvegarde.json';
 const GDRIVE_SCOPE_READ  = 'https://www.googleapis.com/auth/drive.readonly';  // restreint (Mes Actifs)
-const GDRIVE_SCOPE_BASE  = 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/youtube';
+const GDRIVE_SCOPE_YT    = 'https://www.googleapis.com/auth/youtube';         // ⚠ JAMAIS mélangé aux scopes Drive
+const GDRIVE_SCOPE_BASE  = 'https://www.googleapis.com/auth/drive.file';
 const GDRIVE_SCOPES      = GDRIVE_SCOPE_BASE + ' ' + GDRIVE_SCOPE_READ;
 function gdriveConfigured() { return !!GDRIVE_CLIENT_ID; }
 // Connecté = token présent ET non expiré (pas de refresh token possible côté navigateur)
@@ -626,17 +640,20 @@ function loadGis() {
 // Demande un access token à GIS. silent=true (prompt:'') → aucune UI, n'aboutit que si le
 // consentement est déjà accordé. Rejette avec le type d'erreur GIS ('popup_closed',
 // 'popup_failed_to_open', 'access_denied'…) pour que l'appelant décide de la suite.
-function gdriveRequestToken(scopes, silent) {
+// `store` = où persister le jeton obtenu (gdriveStoreToken par défaut, ytgStoreToken pour
+// le jeton YouTube — les deux vivent dans des clés SÉPARÉES, cf. 7.6.67).
+function gdriveRequestToken(scopes, silent, store) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const done = fn => (...a) => { if (settled) return; settled = true; fn(...a); };
     const ok   = done(resolve), ko = done(reject);
+    const keep = store || gdriveStoreToken;
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: GDRIVE_CLIENT_ID,
       scope: scopes,
       prompt: silent ? '' : undefined,
       callback: r => {
-        if (r && r.access_token) { gdriveStoreToken(r.access_token, r.expires_in, r.scope || scopes); ok(r); }
+        if (r && r.access_token) { keep(r.access_token, r.expires_in, r.scope || scopes); ok(r); }
         else ko(new Error((r && r.error) || 'GIS_NO_TOKEN'));
       },
       error_callback: e => ko(new Error((e && e.type) || 'GIS_ERR')),
@@ -657,17 +674,21 @@ function gdriveLogin(opts) {
   // utilisateur. Sinon on l'attend : ce n'est plus le même tick, la popup peut être
   // bloquée → 'popup_failed_to_open' → repli sur l'ancienne redirection. Script
   // définitivement injoignable → repli direct.
-  if (gisReady()) return gdriveGisFlow(wanted);
-  return loadGis().then(() => gdriveGisFlow(wanted), () => { gdriveLoginFailed('gis_injoignable'); return false; });
+  if (gisReady()) return gdriveGisFlow(wanted, gdriveStoreToken, GDRIVE_SCOPE_BASE);
+  return loadGis().then(() => gdriveGisFlow(wanted, gdriveStoreToken, GDRIVE_SCOPE_BASE),
+                        () => { gdriveLoginFailed('gis_injoignable'); return false; });
 }
-function gdriveGisFlow(wanted) {
-  return gdriveRequestToken(wanted, false)
+// `store` = destination du jeton (Drive ou YouTube). `fallback` = jeu de scopes de repli
+// tenté si le consentement échoue (Drive : sans le scope restreint drive.readonly ;
+// YouTube : aucun repli, le scope y est unique).
+function gdriveGisFlow(wanted, store, fallback) {
+  return gdriveRequestToken(wanted, false, store)
     .catch(err => {
       const type = String((err && err.message) || '');
       if (type === 'popup_closed') throw err;                       // annulation volontaire → on ne relance rien
       if (type === 'popup_failed_to_open') throw err;               // popup bloquée → message (plus de redirection)
       // Consentement refusé AVEC le scope restreint drive.readonly → 2e essai sans lui
-      if (wanted !== GDRIVE_SCOPE_BASE) return gdriveRequestToken(GDRIVE_SCOPE_BASE, false);
+      if (fallback && wanted !== fallback) return gdriveRequestToken(fallback, false, store);
       throw err;
     })
     // Rechargement : tous les panneaux lisent gdriveConnected() à l'initialisation de leur
@@ -753,8 +774,9 @@ function gdriveHandleRedirect() {
   if (!expected || nonce !== expected) return; // état invalide → on n'enregistre RIEN
   gdriveStoreToken(h.get('access_token'), h.get('expires_in'), h.get('scope'));
 }
-// Reconnexion Google AUTOMATIQUE à l'ouverture d'Actu (vidéos YouTube), d'À propos (Drive)
-// et de Vêtement (photos). ⚠ 7.6.36 : ce n'est plus une redirection vers le consentement
+// Reconnexion Google DRIVE AUTOMATIQUE à l'ouverture d'À propos (sauvegarde), de Vêtement
+// et de Revente (photos) — Actu passe par ytgAutoLogin, le jeton YouTube étant séparé
+// depuis 7.6.67. ⚠ 7.6.36 : ce n'est plus une redirection vers le consentement
 // (elle partait SANS geste utilisateur et, depuis la coupure du flux implicite, tombait sur
 // « Erreur 400 : invalid_request »), mais un renouvellement SILENCIEUX du token via GIS
 // (prompt:'') : aucune UI, il n'aboutit que si le consentement a déjà été accordé sur cet
@@ -771,6 +793,52 @@ function gdriveAutoLogin() {
     .then(() => gdriveRequestToken(GDRIVE_SCOPES, true))
     .then(() => { window.location.reload(); })   // token silencieux obtenu → les panneaux le relisent
     .catch(() => {});                            // pas de consentement préalable → silence
+}
+// ════════ JETON YOUTUBE — SÉPARÉ DU JETON DRIVE (7.6.67) ════════
+// Google refuse une requête de consentement mélangeant youtube et drive.file (voir le bloc
+// d'en-tête). Le scope youtube a donc son PROPRE consentement et son propre jeton, stocké
+// dans les clés ytg_* — même mécanique que Drive (popup GIS, ~1 h, pas de refresh token).
+const YTG_LS_KEYS = ['ytg_access', 'ytg_expiry', 'ytg_scopes'];
+function ytgStoreToken(token, expiresIn, scopes) {
+  try {
+    localStorage.setItem('ytg_access', token);
+    localStorage.setItem('ytg_expiry', String(Date.now() + (parseInt(expiresIn || '3600') || 3600) * 1000));
+    if (scopes) localStorage.setItem('ytg_scopes', scopes);
+    localStorage.removeItem('ytg_declined');
+  } catch {}
+}
+function ytgLogout() { YTG_LS_KEYS.concat(['ytg_state']).forEach(k => { try { localStorage.removeItem(k); } catch {} }); }
+// Jeton YouTube valide, ou REPLI sur un jeton Drive émis AVANT la séparation (il portait
+// encore le scope youtube) tant qu'il n'a pas expiré → pas de coupure à la mise à jour.
+function ytgToken() {
+  const exp = parseInt(localStorage.getItem('ytg_expiry') || '0') || 0;
+  const tok = localStorage.getItem('ytg_access');
+  if (tok && Date.now() < exp - 60000) return tok;
+  if (gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_YT)) return localStorage.getItem('gdrive_access');
+  return null;
+}
+function ytgConnected() { return !!ytgToken(); }
+// À APPELER DEPUIS UN CLIC (popup). Branchable directement en onClick : l'argument reçu
+// (événement React) est ignoré, le scope est toujours GDRIVE_SCOPE_YT.
+function ytgLogin() {
+  if (!GDRIVE_CLIENT_ID) return Promise.resolve(false);
+  try { localStorage.setItem('spotifyplus_oauth_return', '1'); } catch {}
+  if (gisReady()) return gdriveGisFlow(GDRIVE_SCOPE_YT, ytgStoreToken, null);
+  return loadGis().then(() => gdriveGisFlow(GDRIVE_SCOPE_YT, ytgStoreToken, null),
+                        () => { gdriveLoginFailed('gis_injoignable'); return false; });
+}
+// Renouvellement SILENCIEUX du jeton YouTube (aucune UI, n'aboutit que si le consentement
+// YouTube a déjà été accordé sur cet appareil). Mêmes garde-fous que gdriveAutoLogin.
+let _ytgAutoAsked = false;
+function ytgAutoLogin() {
+  if (_ytgAutoAsked || !gdriveConfigured() || ytgConnected()) return;
+  const declined = parseInt(localStorage.getItem('ytg_declined') || '0') || 0;
+  if (Date.now() - declined < 24 * 3600 * 1000) return;
+  _ytgAutoAsked = true;
+  loadGis()
+    .then(() => gdriveRequestToken(GDRIVE_SCOPE_YT, true, ytgStoreToken))
+    .then(() => { window.location.reload(); })
+    .catch(() => {});
 }
 // Préchargement du script GIS (non bloquant) : il doit être PRÊT quand l'utilisateur clique
 // « Connecter Google Drive », sinon la popup s'ouvrirait hors geste utilisateur (bloquée).
@@ -11415,8 +11483,8 @@ function VosEcoutesPanel() {
   const { listenStats: ls, purgeListened, resetQuota, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, logout } = useStore();
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
-  // Ouverture d'À propos sans Google connecté → même demande d'accès directe qu'Actu
-  // (un seul consentement pour Drive ET YouTube). Garde-fous dans gdriveAutoLogin.
+  // Ouverture d'À propos sans Google connecté → renouvellement silencieux du jeton DRIVE
+  // (celui de YouTube est distinct depuis 7.6.67). Garde-fous dans gdriveAutoLogin.
   React.useEffect(() => { gdriveAutoLogin(); }, []);
   // Restauration d'une sauvegarde exportée (fichier JSON de buildBackup)
   const onRestoreFile = (ev) => {
@@ -12051,16 +12119,18 @@ function loadYtWlAdded() {
 }
 function saveYtWlAdded(ids) { try { localStorage.setItem(YTSUB_WL_ADDED_LS, JSON.stringify(ids.slice(-500))); } catch {} }
 
-// GET /youtube/v3/{path} authentifié par le token OAuth Google (Bearer).
+// GET /youtube/v3/{path} authentifié par le token OAuth YouTube (Bearer).
+// ⚠ 7.6.67 : jeton PROPRE à YouTube (ytgToken), le scope youtube ne pouvant plus être
+// demandé avec les scopes Drive.
 // Retourne le JSON, ou { __error: 'AUTH' | 'SCOPE' | 'QUOTA' | 'NET' }.
 async function ytSubApi(path, params = {}) {
-  const token = gdriveToken();
+  const token = ytgToken();
   if (!token) return { __error: 'AUTH' };
   try {
     const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (res.status === 401) { gdriveLogout(); return { __error: 'AUTH' }; }
+    if (res.status === 401) { ytgLogout(); return { __error: 'AUTH' }; }
     if (res.status === 403) {
       // 403 = scope manquant (token pré-scope youtube), API non activée ou quota épuisé
       let reason = '';
@@ -12075,7 +12145,7 @@ async function ytSubApi(path, params = {}) {
 // POST /youtube/v3/{path} authentifié (écriture playlist). Mêmes erreurs typées que
 // ytSubApi + 'NOTFOUND' (playlist supprimée à la main → on la recrée).
 async function ytSubPost(path, params = {}, body = null) {
-  const token = gdriveToken();
+  const token = ytgToken();
   if (!token) return { __error: 'AUTH' };
   try {
     const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
@@ -12083,7 +12153,7 @@ async function ytSubPost(path, params = {}, body = null) {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : null,
     });
-    if (res.status === 401) { gdriveLogout(); return { __error: 'AUTH' }; }
+    if (res.status === 401) { ytgLogout(); return { __error: 'AUTH' }; }
     if (res.status === 403) {
       let reason = '';
       try { const j = await res.json(); reason = j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason || ''; } catch {}
@@ -12236,12 +12306,12 @@ function ActuYoutubeSection() {
   const [err, setErr]         = React.useState('');
   const [visible, setVisible] = React.useState(YTSUB_PAGE);
   const [ytTab, setYtTab]     = React.useState('video');   // 'video' (≥ 3 min) | 'short' (< 3 min)
-  const [connected]           = React.useState(() => gdriveConnected());
+  const [connected]           = React.useState(() => ytgConnected());   // jeton YouTube dédié (7.6.67)
   const [playingId, setPlayingId] = React.useState(null);  // vidéo lue en place (embed iframe)
   const sentinelRef           = React.useRef(null);
 
   const refresh = React.useCallback(async (force) => {
-    if (!gdriveConnected()) return;
+    if (!ytgConnected()) return;
     setLoading(true); setErr('');
     const d = await ytSubsFetchVideos(force);
     if (d.__error === 'AUTH')       setErr('AUTH');
@@ -12381,8 +12451,13 @@ function ActuYoutubeSection() {
         <div style={{ fontSize:11.5, color:C.dim, lineHeight:1.5, padding:'4px 0' }}>
           Les abonnements YouTube sont privés — connecte ton compte Google pour lister les
           dernières vidéos de tes chaînes (lecture seule, rien n'est ajouté dans TV Time).
+          <div style={{ marginTop:6, fontSize:10.5, opacity:.85 }}>
+            ⚠ Depuis juillet 2026, Google refuse de demander YouTube et Google Drive dans le
+            même consentement : cette autorisation est <b>séparée</b> de celle de la
+            sauvegarde Drive (À propos). Il faut donc les accorder toutes les deux une fois.
+          </div>
           <div style={{ marginTop:8 }}>
-            <button onClick={gdriveLogin} style={{ background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR,
+            <button onClick={ytgLogin} style={{ background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR,
               borderRadius:8, padding:'7px 14px', fontSize:12, cursor:'pointer', fontWeight:600 }}>▶ Connecter Google (YouTube)</button>
           </div>
         </div>
@@ -12392,7 +12467,7 @@ function ActuYoutubeSection() {
             ? 'Ton token Google ne couvre pas encore YouTube (ou l\'API « YouTube Data v3 » n\'est pas activée sur le projet Google Cloud du client OAuth).'
             : 'Session Google expirée.'} Reconnecte-toi pour accorder l'accès en lecture seule.
           <div style={{ marginTop:8 }}>
-            <button onClick={gdriveLogin} style={{ background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR,
+            <button onClick={ytgLogin} style={{ background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR,
               borderRadius:8, padding:'7px 14px', fontSize:12, cursor:'pointer', fontWeight:600 }}>↻ Reconnecter Google</button>
           </div>
         </div>
@@ -12758,10 +12833,10 @@ function ActuPanel() {
   const [data, setData]   = React.useState(() => loadActu());
   const [loading, setLoad] = React.useState(false);
   const [err, setErr]     = React.useState('');
-  // Ouverture d'Actu sans Google connecté → demande d'accès DIRECTE (consentement
-  // Drive+YouTube groupé) pour voir les vidéos YouTube sans clic supplémentaire.
-  // gdriveAutoLogin gère les garde-fous (déjà connecté / refus récent / 1×/chargement).
-  React.useEffect(() => { gdriveAutoLogin(); }, []);
+  // Ouverture d'Actu → renouvellement SILENCIEUX du jeton YOUTUBE (le seul dont Actu a
+  // besoin ; il est séparé du jeton Drive depuis 7.6.67). ytgAutoLogin gère les garde-fous
+  // (déjà connecté / refus récent / 1×/chargement) et n'ouvre jamais de popup.
+  React.useEffect(() => { ytgAutoLogin(); }, []);
 
   const refresh = React.useCallback(async () => {
     setLoad(true); setErr('');
