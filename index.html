@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.54';
+const APP_VERSION = '7.6.55';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8378,6 +8378,7 @@ function apiExported(map, id) { return !map || map[id] !== false; }
 // gratuites en dur : Twelve Data/Alpha Vantage — pas cohérent à éditer ici). Pour `googleapis`,
 // seule la clé YouTube Data v3 est concernée (Drive passe par OAuth). Une valeur peut être un
 // TABLEAU quand l'API demande 2 champs (Steam : SteamID64 public + clé Web API des stats).
+const API_RED = '#e05050';   // ligne « clé non renseignée » (7.6.55)
 const API_KEY_LS = {
   tmdb:       { ls: 'spotifyplus_tmdb_key',     ph: 'Clé API TMDB v3' },
   googleapis: { ls: 'spotifyplus_yt_key',       ph: 'Clé API YouTube Data v3' },
@@ -8390,15 +8391,44 @@ const API_KEY_LS = {
                 { ls: 'spotifyplus_steam_key',  ph: 'Clé Web API Steam (stats)' } ],
   pcloud:     { ls: PCLOUD_CLIENT_LS,           ph: 'Client ID pCloud (docs.pcloud.com/my_apps)' },
 };
+// ── 7.6.55 — LIGNES EN ROUGE quand la clé / le compte n'est PAS renseigné ──────────
+// Deux cas :
+//  1. l'API a un éditeur inline (`API_KEY_LS`) → on lit directement le localStorage ;
+//  2. l'identifiant vit ailleurs (jeton OAuth, identifiants MEGA, pseudo public…) →
+//     `API_CRED_CHECK` fournit un test dédié. Une API `key:true` SANS test connu n'est
+//     jamais signalée (on ne peut pas savoir → pas de faux rouge). Les clés gratuites
+//     en dur dans le code (Twelve Data, Alpha Vantage) comptent comme renseignées.
+const API_CRED_CHECK = {
+  spotify_api:     () => !!lsGet('spotify_token') || !!lsGet('spotify_refresh'),
+  spotify_acc:     () => !!lsGet('spotify_token') || !!lsGet('spotify_refresh'),
+  twelvedata:      () => !!TWELVE_DATA_KEY,
+  alphavantage:    () => !!ALPHA_VANTAGE_KEY,
+  dropbox_api:     () => dropboxConnected(),
+  dropbox_content: () => dropboxConnected(),
+  pcloud:          () => !!pcloudClientId(),
+  mega:            () => !!megaCred(),
+};
+function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } }
+// Champs de clé vides pour cette API (libellés) — [] si tout est renseigné.
+function apiMissingFields(a) {
+  const cfg = API_KEY_LS[a.id];
+  if (cfg) return [].concat(cfg).filter(k => !lsGet(k.ls).trim()).map(k => k.ph);
+  if (!a.key) return [];
+  const chk = API_CRED_CHECK[a.id];
+  if (!chk) return [];
+  try { return chk() ? [] : ['non connecté']; } catch { return []; }
+}
+
 // Éditeur inline d'une clé stockée en localStorage : affiche la valeur courante, la rend
 // modifiable (enregistrée au blur / Entrée / bouton 💾, vidée = clé retirée).
-function ApiKeyEditor({ lsKey, placeholder }) {
+function ApiKeyEditor({ lsKey, placeholder, onChanged }) {
   const [val, setVal] = React.useState(() => { try { return localStorage.getItem(lsKey) || ''; } catch { return ''; } });
   const [saved, setSaved] = React.useState(false);
   const save = () => {
     const v = val.trim();
     try { if (v) lsSet(lsKey, v); else localStorage.removeItem(lsKey); } catch {}
     setSaved(true); setTimeout(() => setSaved(false), 1500);
+    if (onChanged) onChanged();   // met à jour le rouge « clé non renseignée » de la ligne
   };
   return (
     <div style={{ display:'flex', alignItems:'center', gap:6, padding:'2px 0 2px 2px' }}>
@@ -8415,11 +8445,14 @@ function ApiKeyEditor({ lsKey, placeholder }) {
 
 function APIPanel() {
   const [map, setMap] = React.useState(loadApiExport);
+  // Re-render quand une clé est enregistrée/retirée (le rouge doit suivre immédiatement)
+  const [, bumpKeys] = React.useReducer(x => x + 1, 0);
   const setAndSave = next => { setMap(next); saveApiExport(next); };
   const toggle = id => setAndSave({ ...map, [id]: !apiExported(map, id) });
   const setAll = on => { const next = {}; API_LIST.forEach(a => { next[a.id] = on; }); setAndSave(next); };
   const chosen = API_LIST.filter(a => apiExported(map, a.id));
   const allOn = API_LIST.every(a => apiExported(map, a.id));
+  const nbMissing = API_LIST.reduce((n, a) => n + (apiMissingFields(a).length ? 1 : 0), 0);
   const exportSelected = () => {
     const apis = chosen.map(({ id, name, host, role, cat, key }) => ({ id, name, host, role, category: cat, key: !!key }));
     const payload = { app: 'Spotify+ Hub', exported_at: new Date().toISOString(), count: apis.length, apis };
@@ -8432,7 +8465,7 @@ function APIPanel() {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
       <div style={{ fontSize:12, color:C.muted, lineHeight:1.5 }}>
-        Toutes les API réseau utilisées par l'appli. Coche celles à inclure dans l'export puis clique « ⬇ Exporter » — un fichier JSON des API cochées est téléchargé. 🔑 = clé ou compte personnel. Les clés que tu saisis toi-même (TMDB, YouTube, GitHub, Gemini, Steam) sont affichées et modifiables juste sous leur ligne.
+        Toutes les API réseau utilisées par l'appli. Coche celles à inclure dans l'export puis clique « ⬇ Exporter » — un fichier JSON des API cochées est téléchargé. 🔑 = clé ou compte personnel. Les clés que tu saisis toi-même (TMDB, YouTube, GitHub, Gemini, Claude, Steam, Clash Royale, pCloud) sont affichées et modifiables juste sous leur ligne. <b style={{ color:API_RED }}>Une ligne en rouge = clé ou compte non renseigné</b>.
       </div>
       <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
         <button onClick={exportSelected} disabled={!chosen.length}
@@ -8441,7 +8474,9 @@ function APIPanel() {
         </button>
         {/* Un seul bouton : coche tout si au moins une case est décochée, sinon décoche tout */}
         <button onClick={() => setAll(!allOn)} style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:'8px 12px', fontSize:11, cursor:'pointer' }}>{allOn ? 'Tout décocher' : 'Tout cocher'}</button>
-        <span style={{ marginLeft:'auto', fontSize:10.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>{API_LIST.length} API</span>
+        <span style={{ marginLeft:'auto', fontSize:10.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+          {API_LIST.length} API{nbMissing > 0 && <span style={{ color:API_RED, fontWeight:700 }}> · {nbMissing} sans clé</span>}
+        </span>
       </div>
       {API_CATS.map(cat => {
         const rows = API_LIST.filter(a => a.cat === cat);
@@ -8453,21 +8488,27 @@ function APIPanel() {
               const on = apiExported(map, a.id);
               // Clé(s) éditable(s) sous la ligne (TMDB/YouTube/GitHub/Gemini/Steam ×2)
               const keyCfg = API_KEY_LS[a.id] ? [].concat(API_KEY_LS[a.id]) : null;
+              // 7.6.55 : clé/compte non renseigné → ligne EN ROUGE (fond, bordure, libellé)
+              const missing = apiMissingFields(a);
+              const ko = missing.length > 0;
               return (
-                <div key={a.id} style={{ padding:'7px 0', borderBottom:`1px solid ${C.border}44` }}>
+                <div key={a.id} style={{ padding:'7px 8px', margin:'0 -4px', borderBottom:`1px solid ${C.border}44`,
+                                         background: ko ? `${API_RED}14` : 'none',
+                                         borderLeft: ko ? `3px solid ${API_RED}` : '3px solid transparent', borderRadius:6 }}>
                   <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:10 }}>
                     <div style={{ minWidth:0, flex:1 }}>
-                      <div style={{ fontSize:12.5, fontWeight:600, color: on ? C.text : C.dim, display:'flex', alignItems:'center', gap:6 }}>
+                      <div style={{ fontSize:12.5, fontWeight:600, color: ko ? API_RED : (on ? C.text : C.dim), display:'flex', alignItems:'center', gap:6 }}>
                         {a.name}{a.key ? <span title="Clé / compte personnel" style={{ fontSize:11 }}>🔑</span> : null}
                       </div>
-                      <div style={{ fontSize:10, color:C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{a.role} · <span style={{ fontFamily:'DM Mono,monospace' }}>{a.host}</span></div>
+                      <div style={{ fontSize:10, color: ko ? `${API_RED}cc` : C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{a.role} · <span style={{ fontFamily:'DM Mono,monospace' }}>{a.host}</span></div>
+                      {ko && <div style={{ fontSize:9.5, color:API_RED, fontWeight:700, fontFamily:'DM Mono,monospace', marginTop:2 }}>⚠ à renseigner : {missing.join(' · ')}</div>}
                     </div>
                     <button onClick={() => toggle(a.id)} role="switch" aria-checked={on} title={on ? 'Exclure de l’export' : 'Inclure dans l’export'}
                       style={{ position:'relative', width:38, height:22, borderRadius:11, border:'none', cursor:'pointer', flexShrink:0, padding:0, background: on ? API_COLOR : C.border, transition:'background 0.15s' }}>
                       <span style={{ position:'absolute', top:2, left: on ? 18 : 2, width:18, height:18, borderRadius:'50%', background:'#fff', transition:'left 0.15s', boxShadow:'0 1px 2px rgba(0,0,0,0.4)' }} />
                     </button>
                   </div>
-                  {keyCfg && keyCfg.map(k => <ApiKeyEditor key={k.ls} lsKey={k.ls} placeholder={k.ph} />)}
+                  {keyCfg && keyCfg.map(k => <ApiKeyEditor key={k.ls} lsKey={k.ls} placeholder={k.ph} onChanged={bumpKeys} />)}
                 </div>
               );
             })}
