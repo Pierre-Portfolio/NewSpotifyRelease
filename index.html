@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.58';
+const APP_VERSION = '7.6.59';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1652,6 +1652,22 @@ const DW_FAIL_KEY    = 'spotifyplus_dw_last_fail';
 const DW_FAIL_AGE_MS = 6 * 60 * 60 * 1000;      // 6 h (cooldown après un échec — auto-réparant)
 const DW_PID_KEY     = 'spotifyplus_dw_playlist_id'; // ID de la dernière playlist DW dont le contenu était LISIBLE
 
+// URL EXACTE de MA « Découvertes de la semaine » (fournie par l'utilisateur, 7.6.58).
+// Sert à DEUX choses : (1) le bouton violet l'ouvre toujours telle quelle (dwEditorialUrl) ;
+// (2) l'import hebdo la lit EN PREMIER (dwFixedPlaylistId ci-dessous) → dès la 1re connexion
+// de la semaine, ses titres partent dans « En attente » sans avoir à balayer /me/playlists.
+// Changer de playlist = changer cette seule constante ; la vider rend les replis (id capté
+// en lecture, bibliothèque, copie perso) à nouveau seuls maîtres.
+const DW_FIXED_URL = 'https://open.spotify.com/playlist/37i9dQZEVXcVrEUmwjvgjE';
+// Extrait l'id Spotify de DW_FIXED_URL (accepte aussi un URI « spotify:playlist:<id> » ou un
+// id brut). Renvoie null si la constante est vide/illisible → l'import reprend ses replis.
+function dwFixedPlaylistId() {
+  const raw = (DW_FIXED_URL || '').trim();
+  if (!raw) return null;
+  const m = raw.match(/playlist[/:]([A-Za-z0-9]+)/) || raw.match(/^([A-Za-z0-9]{16,})$/);
+  return m ? m[1] : null;
+}
+
 // Clé ISO semaine « YYYY-Www » — les Découvertes de la semaine se rafraîchissent chaque
 // LUNDI, donc on ré-importe une fois par nouvelle semaine (au lieu d'un cooldown glissant
 // de 7 j qui dérivait du lundi de rafraîchissement).
@@ -1716,11 +1732,25 @@ async function importDiscoverWeekly(addLog) {
   const today = new Date().toISOString().slice(0, 10);
   let tracksData = null, sourcePid = null;
 
+  // 0) LA PLAYLIST FIXE (DW_FIXED_URL) — dès la 1re connexion de la semaine, on interroge
+  //    directement MA « Découvertes de la semaine » par son id, sans rien chercher : c'est la
+  //    source la plus fraîche (elle se rafraîchit chaque lundi) et la seule certaine d'être la
+  //    mienne. ⚠ Spotify peut refuser le CONTENU d'une playlist éditoriale (403 → items vide,
+  //    cf. migration 2026) : dans ce cas on enchaîne simplement sur les replis ci-dessous, et
+  //    la capture par la lecture reste le filet de sécurité.
+  const fixedPid = dwFixedPlaylistId();
+  if (fixedPid) {
+    const d = await fetchPlaylistItems(fixedPid);
+    if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
+    if (d.items.length) { tracksData = d; sourcePid = fixedPid; addLog(`✓ Playlist configurée lue directement (${d.items.length} titres).`, 'ok'); }
+    else addLog('Playlist configurée : contenu non renvoyé par Spotify (playlist éditoriale) — essai des autres sources…', 'info');
+  }
+
   // 1) Ré-lecture DIRECTE de la dernière playlist dont le contenu était lisible (copie perso) :
   //    son ID est stable et son contenu se rafraîchit chaque semaine → import fiable et rapide,
   //    sans re-balayer toutes les playlists.
   const rememberedPid = localStorage.getItem(DW_PID_KEY);
-  if (rememberedPid) {
+  if (!tracksData && rememberedPid && rememberedPid !== fixedPid) {
     const d = await fetchPlaylistItems(rememberedPid);
     if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
     if (d.items.length) { tracksData = d; sourcePid = rememberedPid; }
@@ -1732,7 +1762,9 @@ async function importDiscoverWeekly(addLog) {
     if (found.rate_limited) return; // fenêtre 429 — retentera au prochain login
     const candidates = found.candidates;
     if (!candidates.length) {
-      addLog('⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
+      addLog(fixedPid
+        ? '⚠ Spotify ne renvoie pas le contenu de la playlist configurée (playlist éditoriale) et aucune autre « Découvertes de la semaine » n\'est dans ta bibliothèque. LE PLUS SIMPLE : clique le bouton violet et lance la LECTURE — les titres seront capturés automatiquement dans « En attente ». Nouvel essai dans 6 h.'
+        : '⚠ Playlist "Découvertes de la semaine" introuvable dans tes playlists — ouvre-la sur Spotify et clique "Ajouter à ta bibliothèque", puis reconnecte-toi.', 'warn');
       localStorage.setItem(DW_FAIL_KEY, Date.now().toString()); // re-tentera dans 6 h
       return;
     }
@@ -1741,6 +1773,7 @@ async function importDiscoverWeekly(addLog) {
     // possédées/collaboratives. On essaie chaque candidate via fetchPlaylistItems jusqu'à trouver
     // un contenu lisible.
     for (const pl of candidates) {
+      if (pl.id === fixedPid) continue;   // déjà tentée à l'étape 0
       const d = await fetchPlaylistItems(pl.id);
       if (d.rate_limited) return; // fenêtre 429 — retentera au prochain login
       if (d.items.length) { tracksData = d; sourcePid = pl.id; break; }
@@ -1805,9 +1838,9 @@ async function importDiscoverWeekly(addLog) {
 // Sinon `null` → l'appelant ouvre la page de recherche Spotify et explique la marche à suivre.
 //
 // ⚠ 7.6.58 — L'utilisateur a fourni l'URL EXACTE de SA « Découvertes de la semaine » :
-// elle est désormais CODÉE EN DUR (`DW_FIXED_URL`) et l'emporte sur toute la détection
-// ci-dessus. Les 3 pistes restent en place comme repli si la constante est vidée un jour.
-const DW_FIXED_URL = 'https://open.spotify.com/playlist/37i9dQZEVXcVrEUmwjvgjE';
+// elle est désormais CODÉE EN DUR (`DW_FIXED_URL`, déclarée en tête du bloc Découvertes)
+// et l'emporte sur toute la détection ci-dessus. Les 3 pistes restent en place comme repli
+// si la constante est vidée un jour.
 const DW_OPEN_KEY = 'spotifyplus_dw_open_id';  // id de MA « Découvertes de la semaine » (vue en lecture)
 function dwRememberOpenId(pid) { try { if (pid) localStorage.setItem(DW_OPEN_KEY, pid); } catch {} }
 async function dwEditorialUrl(candidates) {
@@ -1836,6 +1869,21 @@ async function dwManualAccess(addLog) {
     addLog('⚠ Fenêtre rate-limit 429 active — réessaie après le compte à rebours.', 'warn');
     return null;
   }
+  // La playlist CONFIGURÉE d'abord (c'est celle qu'on ouvrira de toute façon) : si Spotify en
+  // renvoie le contenu, l'import est lancé tout de suite et on s'épargne le balayage complet.
+  const fixedPid = dwFixedPlaylistId();
+  if (fixedPid) {
+    addLog(`Playlist configurée (${fixedPid}) — lecture du contenu…`, 'info');
+    const d = await fetchPlaylistItems(fixedPid);
+    if (d.rate_limited) { addLog('⚠ Rate-limit Spotify pendant la lecture — réessaie plus tard.', 'warn'); return null; }
+    if (d.items.length) {
+      addLog(`✓ Contenu LISIBLE (${d.items.length} titres) — import lancé.`, 'ok');
+      try { localStorage.removeItem(DW_LS_KEY); localStorage.removeItem(DW_FAIL_KEY); } catch {}
+      await importDiscoverWeekly(addLog);
+      return await dwEditorialUrl([]);
+    }
+    addLog('✗ Contenu non renvoyé par Spotify (playlist ÉDITORIALE, non lisible par les apps tierces depuis la migration 2026) — je regarde tes autres playlists…', 'warn');
+  }
   const found = await dwFindCandidates();
   if (found.rate_limited) { addLog('⚠ Rate-limit Spotify pendant la recherche des playlists — réessaie plus tard.', 'warn'); return null; }
   const candidates = found.candidates;
@@ -1856,6 +1904,7 @@ async function dwManualAccess(addLog) {
   candidates.sort((a, b) => (a.owner?.id === 'spotify' ? 1 : 0) - (b.owner?.id === 'spotify' ? 1 : 0));
   let readable = null;
   for (const p of candidates) {
+    if (p.id === fixedPid) continue;   // déjà testée ci-dessus
     addLog(`Playlist trouvée : « ${p.name} » (owner : ${p.owner?.id || '?'}) — lecture du contenu…`, 'info');
     const d = await fetchPlaylistItems(p.id);
     if (d.rate_limited) { addLog('⚠ Rate-limit Spotify pendant la lecture — réessaie plus tard.', 'warn'); return p.external_urls?.spotify || null; }
