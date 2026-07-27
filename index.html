@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.73';
+const APP_VERSION = '7.6.74';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -13149,6 +13149,124 @@ function EspeceMapSection() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════
+// WIKIPÉDIA — dernières nouveautés (7.6.74)
+// Flux « featured » de l'API REST de Wikimedia : https://fr.wikipedia.org/api/rest_v1/
+// feed/featured/AAAA/MM/JJ — **sans clé, CORS ouvert**, origine DÉJÀ en connect-src
+// (elle sert aussi aux logos de fuites de données). Deux blocs en sortent :
+//   • `news`     = l'encadré « Actualités » de l'accueil (texte HTML + articles liés) ;
+//   • `mostread` = les articles les plus consultés de la journée (avec vignettes).
+// ⚠ Ces deux champs ne sont PAS servis pour la même date : `news` n'apparaît que certains
+// jours et `mostread` n'existe jamais pour le jour COURANT (Wikimedia le publie a
+// posteriori). On interroge donc jusqu'à 3 dates (J, J-1, J-2) et on garde le premier
+// bloc non vide de chacun — sinon la section serait vide un jour sur deux.
+const WIKI_LS  = 'spotifyplus_actu_wiki';
+const WIKI_TTL = 30 * 60 * 1000;   // même fraîcheur que le reste d'Actu
+const WIKI_MOSTREAD_MAX = 12;
+function wikiLoad() { try { return JSON.parse(localStorage.getItem(WIKI_LS)) || null; } catch { return null; } }
+function wikiSave(d) { try { localStorage.setItem(WIKI_LS, JSON.stringify(d)); } catch {} }
+// Le champ `story` est du HTML Wikimedia (liens internes) : on n'injecte JAMAIS ce HTML
+// (pas de dangerouslySetInnerHTML) — on en extrait le TEXTE via DOMParser, qui n'exécute
+// ni script ni chargement de ressource.
+function wikiStripHtml(html) {
+  try {
+    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
+  } catch { return String(html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); }
+}
+const wikiPageUrl = p => (p && p.content_urls && p.content_urls.desktop && p.content_urls.desktop.page) || null;
+const wikiThumb   = p => (p && p.thumbnail && p.thumbnail.source) || null;
+async function wikiFetchFeed(date) {
+  const y = date.getFullYear(), m = String(date.getMonth() + 1).padStart(2, '0'), d = String(date.getDate()).padStart(2, '0');
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+  try {
+    const r = await fetch(`https://fr.wikipedia.org/api/rest_v1/feed/featured/${y}/${m}/${d}`,
+      { headers: { 'Accept': 'application/json' }, ...(ctrl ? { signal: ctrl.signal } : {}) });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+  finally { if (timer) clearTimeout(timer); }
+}
+async function wikiFetchLatest(force) {
+  const cached = wikiLoad();
+  if (!force && cached && Date.now() - (cached.fetched_at || 0) < WIKI_TTL) return cached;
+  let news = [], mostread = [], newsDate = '', readDate = '', reached = false;
+  for (let back = 0; back < 3 && (!news.length || !mostread.length); back++) {
+    const dt = new Date(); dt.setDate(dt.getDate() - back);
+    const j = await wikiFetchFeed(dt);
+    if (!j) continue;
+    reached = true;
+    const dLabel = dt.toLocaleDateString('fr-FR', { day:'numeric', month:'long' });
+    if (!news.length && Array.isArray(j.news) && j.news.length) {
+      newsDate = dLabel;
+      news = j.news.slice(0, 8).map(n => {
+        const links = Array.isArray(n.links) ? n.links : [];
+        const main = links.find(l => wikiThumb(l)) || links[0] || null;
+        return {
+          text: wikiStripHtml(n.story),
+          title: main && main.titles ? (main.titles.normalized || main.titles.display || '') : '',
+          link: wikiPageUrl(main), thumb: wikiThumb(main),
+        };
+      }).filter(n => n.text);
+    }
+    const arts = (j.mostread && Array.isArray(j.mostread.articles)) ? j.mostread.articles : [];
+    if (!mostread.length && arts.length) {
+      readDate = dLabel;
+      mostread = arts.slice(0, WIKI_MOSTREAD_MAX).map(a => ({
+        title: a.normalizedtitle || a.titles && a.titles.normalized || '',
+        views: a.views || 0, link: wikiPageUrl(a), thumb: wikiThumb(a),
+        extract: (a.extract || '').slice(0, 120),
+      })).filter(a => a.title);
+    }
+  }
+  if (!reached) throw new Error('wikipedia injoignable');
+  const out = { news, mostread, newsDate, readDate, fetched_at: Date.now() };
+  wikiSave(out);
+  return out;
+}
+// Section « 📚 WIKIPÉDIA » d'Actu → Actualité. Le fetch part au MONTAGE, donc à la
+// première ouverture du collapse (StatsCollapse ne monte ses enfants qu'à l'ouverture).
+function ActuWikiSection({ row }) {
+  const fmt = n => Number(n || 0).toLocaleString('fr-FR');
+  const [d, setD] = React.useState(() => wikiLoad());
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const load = React.useCallback(async (force) => {
+    setLoading(true); setErr('');
+    try { setD(await wikiFetchLatest(force)); }
+    catch { setErr('Wikipédia injoignable pour le moment.'); }
+    setLoading(false);
+  }, []);
+  React.useEffect(() => { if (!d || Date.now() - (d.fetched_at || 0) > WIKI_TTL) load(false); }, []);
+  const sub = { fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:C.muted, margin:'8px 0 2px' };
+  const nothing = !d || (!d.news.length && !d.mostread.length);
+  return (
+    <div>
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:2 }}>
+        <button onClick={() => load(true)} disabled={loading}
+          style={{ fontSize:9, color: loading ? C.dim : C.muted, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'2px 8px', cursor: loading ? 'default' : 'pointer' }}>
+          {loading ? '↻ …' : '↻ Actualiser'}
+        </button>
+      </div>
+      {err && <div style={{ fontSize:11, color:'#e05050', padding:'4px 0' }}>{err}</div>}
+      {loading && nothing && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Chargement…</div>}
+      {d && d.news.length > 0 && (<>
+        <div style={sub}>🗞 ACTUALITÉS{d.newsDate ? ` · ${d.newsDate}` : ''}</div>
+        {d.news.map((n, i) => row('wn' + i, n.link, n.text, n.title || null, null, null, n.thumb))}
+      </>)}
+      {d && d.mostread.length > 0 && (<>
+        <div style={sub}>🔥 LES PLUS CONSULTÉS{d.readDate ? ` · ${d.readDate}` : ''}</div>
+        {d.mostread.map((a, i) => row('wr' + i, a.link, a.title, a.extract || null, fmt(a.views) + ' vues', null, a.thumb))}
+      </>)}
+      {!loading && !err && nothing && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune nouveauté publiée sur ces 3 derniers jours.</div>}
+      <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
+        Encadré « Actualités » et articles les plus consultés de Wikipédia FR (API Wikimedia, sans compte). Le texte est repris tel quel, sans le HTML de la page.
+      </div>
+    </div>
+  );
+}
+
 function ActuPanel() {
   const [data, setData]   = React.useState(() => loadActu());
   const [loading, setLoad] = React.useState(false);
@@ -13308,6 +13426,14 @@ function ActuPanel() {
             {(d.jeux && d.jeux.length)
               ? d.jeux.map((a, i) => row('je' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
+          </StatsCollapse>
+
+          {/* 1.7 Wikipédia — dernières nouveautés (7.6.74). Dernier de la liste :
+              c'est aussi sa place alphabétique. Source et cache PROPRES à la section
+              (API Wikimedia directe, sans proxy) → indépendante de data/actu.json. */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>📚 WIKIPÉDIA <span style={{ color:C.dim, fontWeight:400 }}>· fr.wikipedia.org</span></span>}>
+            <ActuWikiSection row={row} />
           </StatsCollapse>
         </StatsCollapse>
 
