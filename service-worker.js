@@ -90,7 +90,7 @@
 // via l'API Web Steam, sur les identifiants Steam déjà saisis).
 // v106 : bump de cache — fix des chips de raccourci de la carte « Espèces animales »
 // (le terme cliqué n'était pas pris en compte : recherche lancée avec l'ancien état).
-const CACHE  = 'spotifyplus-v121';
+const CACHE  = 'spotifyplus-v122';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
