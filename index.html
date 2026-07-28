@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.77';
+const APP_VERSION = '7.6.78';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17166,7 +17166,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onSe
 
 // ── Fiche YouTube (clic sur l'affiche d'une chaîne/playlist suivie) — vidéos groupées
 // en SAISONS = ANNÉES de publication, cochage INDIVIDUEL par vidéo (watchedIds).
-function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onShortsOnly, onIgnore }) {
+function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onShortsOnly, onIgnore, onPlay }) {
   const [openYear, setOpenYear] = React.useState(null);
   const seen = new Set(item.watchedIds || []);
   const total = item.totalEps || (item.videos || []).length;
@@ -17191,8 +17191,12 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
         color: done ? '#fff' : C.dim, fontSize:12, lineHeight:1, padding:0, fontWeight:800 }}>✓</button>
   );
   const toggleVideo = v => onSetWatched(seen.has(v.id) ? [...seen].filter(x => x !== v.id) : [...seen, v.id]);
-  // Clic sur la vignette → ouvre la vidéo (nouvel onglet) ET marque vue automatiquement.
-  const markSeen = v => { if (!seen.has(v.id)) onSetWatched([...seen, v.id]); };
+  // Clic sur la vignette → lecture PLEIN ÉCRAN dans l'app (7.6.78), file = toutes les
+  // vidéos de la fiche dans l'ordre affiché (années décroissantes) à partir de celle
+  // cliquée → le bouton ⏭ du lecteur enchaîne. La vidéo est marquée vue à son lancement.
+  // Le TITRE reste un lien « nouvel onglet » (repli si l'embed est refusé).
+  const flatVideos = years.reduce((a, y) => a.concat(byYear[y]), []);
+  const playFrom = v => onPlay(flatVideos, Math.max(0, flatVideos.findIndex(x => x.id === v.id)));
   const toggleYear = (y, vids) => {
     const ids = vids.map(v => v.id);
     const allY = ids.every(id => seen.has(id));
@@ -17321,14 +17325,13 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
                       const vseen = seen.has(v.id);
                       return (
                         <div key={v.id} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52 }}>
-                          <a href={`https://www.youtube.com/watch?v=${v.id}`} target="_blank" rel="noopener noreferrer"
-                            onClick={() => markSeen(v)} title="Regarder la vidéo (marquée vue automatiquement)"
-                            style={{ position:'relative', width:82, height:46, borderRadius:6, flexShrink:0, display:'block', overflow:'hidden', background:'#1a1a1a', cursor:'pointer' }}>
+                          <button onClick={() => playFrom(v)} title="Lire en plein écran ici (marquée vue automatiquement)"
+                            style={{ position:'relative', width:82, height:46, borderRadius:6, flexShrink:0, display:'block', overflow:'hidden', background:'#1a1a1a', cursor:'pointer', padding:0, border:'none' }}>
                             {v.still
                               ? <img src={v.still} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', display:'block', background:'#1a1a1a' }} />
                               : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16 }}>▶️</div>}
                             <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(0,0,0,0.28)', color:'#fff', fontSize:16, textShadow:'0 1px 3px rgba(0,0,0,0.8)' }}>▶</div>
-                          </a>
+                          </button>
                           <div style={{ flex:1, minWidth:0 }}>
                             <a href={`https://www.youtube.com/watch?v=${v.id}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
                               style={{ fontSize:11, fontWeight:600, color:C.text, textDecoration:'none', display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</a>
@@ -17347,6 +17350,79 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
         </div>
         <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
           ℹ Les vidéos sont regroupées par année de publication (une « saison » = une année). Chaque vidéo se coche indépendamment. Les vidéos vues et leur durée alimentent les statistiques TV Time. Le bouton ↻ récupère les nouvelles vidéos via l'API YouTube.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Lecteur YouTube PLEIN ÉCRAN (7.6.78) — lit une FILE de vidéos (`queue`) dans un
+// embed youtube-nocookie qui couvre tout le viewport, avec une barre en OVERLAY
+// « ← Retour · ⏮ · ⏭ Suivant » posée sur la vidéo en cours.
+// ⚠ Pas d'auto-avance en fin de vidéo : la connaître exigerait l'IFrame API de YouTube,
+// donc un script tiers (www.youtube.com) que la CSP interdit (`script-src` = 'self' +
+// unpkg + accounts.google.com). Le passage à la suivante est donc MANUEL (⏭ / flèche →).
+// La vidéo affichée est marquée VUE dès son lancement — même règle que le clic sur une
+// miniature dans la fiche YtDetailModal.
+function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying }) {
+  const boxRef = React.useRef(null);
+  const v = queue[index] || null;
+  const vid = v ? v.id : null;
+  // Marque vue à chaque vidéo lancée (changement d'index compris)
+  React.useEffect(() => { if (v) onPlaying(v); }, [vid]);
+  // Plein écran NATIF, best effort : refusé hors geste utilisateur et absent sur iOS →
+  // l'échec est sans conséquence, l'overlay couvre déjà tout le viewport.
+  React.useEffect(() => {
+    const el = boxRef.current;
+    if (el && el.requestFullscreen) { try { const p = el.requestFullscreen(); if (p && p.catch) p.catch(() => {}); } catch {} }
+    const prevOv = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOv;
+      if (document.fullscreenElement && document.exitFullscreen) { try { const p = document.exitFullscreen(); if (p && p.catch) p.catch(() => {}); } catch {} }
+    };
+  }, []);
+  const go = d => { const n = index + d; if (n >= 0 && n < queue.length) onIndex(n); };
+  // Effet SANS tableau de deps (ré-attaché à chaque render) → jamais de closure périmée
+  // sur `index`. ⚠ Échap en plein écran natif = sortie du plein écran (géré par le
+  // navigateur) : on ne ferme le lecteur que si on n'y est plus.
+  React.useEffect(() => {
+    const onKey = e => {
+      if (e.key === 'Escape') { if (!document.fullscreenElement) onClose(); }
+      else if (e.key === 'ArrowRight') go(+1);
+      else if (e.key === 'ArrowLeft') go(-1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+  if (!v) return null;
+  const obtn = (color, disabled) => ({
+    pointerEvents:'auto', background:'rgba(0,0,0,0.66)', border:`1px solid ${disabled ? '#ffffff33' : color + 'aa'}`,
+    borderRadius:20, color: disabled ? '#ffffff55' : '#fff', fontSize:12, fontWeight:700, padding:'7px 13px',
+    cursor: disabled ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', flexShrink:0, backdropFilter:'blur(2px)' });
+  return (
+    <div ref={boxRef} style={{ position:'fixed', inset:0, zIndex:400, background:'#000' }}>
+      <iframe key={v.id} src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1`}
+        title={v.title || 'Vidéo YouTube'} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowFullScreen
+        style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
+      {/* Barre d'actions EN OVERLAY sur la vidéo : retour + navigation dans la file */}
+      <div style={{ position:'absolute', top:0, left:0, right:0, padding:'10px 12px', display:'flex', alignItems:'center', gap:8,
+        background:'linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0))', pointerEvents:'none', flexWrap:'wrap' }}>
+        <button onClick={onClose} title="Fermer le lecteur (Échap)" style={obtn('#e05050')}>← Retour</button>
+        <button onClick={() => go(-1)} disabled={index <= 0} title="Vidéo précédente (←)" style={obtn(YT_COLOR, index <= 0)}>⏮</button>
+        <button onClick={() => go(+1)} disabled={index >= queue.length - 1} title="Vidéo suivante (→)" style={obtn(YT_COLOR, index >= queue.length - 1)}>⏭ Suivant</button>
+        {queue.length > 1 && (
+          <div style={{ fontSize:11, fontWeight:700, color:'#fff', fontFamily:'DM Mono,monospace', background:'rgba(0,0,0,0.6)', borderRadius:20, padding:'6px 10px', flexShrink:0 }}>
+            {index + 1}/{queue.length}
+          </div>
+        )}
+      </div>
+      {/* Titre + chaîne en bas (n'entrave pas les contrôles YouTube, qui sont plus haut) */}
+      <div style={{ position:'absolute', left:0, right:0, bottom:0, padding:'26px 14px 8px', pointerEvents:'none',
+        background:'linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0.72))' }}>
+        <div style={{ fontSize:12, fontWeight:700, color:'#fff', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</div>
+        <div style={{ fontSize:10, color:'#ffffffaa', fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+          {v.channel ? v.channel + ' · ' : ''}{v.date || ''}{v.dur ? ` · ${v.dur} min` : ''}
         </div>
       </div>
     </div>
@@ -17415,6 +17491,11 @@ function TvTimePanel() {
   // l'état PRÉCÉDENT → le bouton « retour en arrière » restaure le dernier état (cap 30).
   const [undoStack, setUndoStack] = React.useState([]);
   const update = next => { setUndoStack(s => [...s.slice(-29), items]); setItems(next); saveTvItems(next); };
+  // Miroir de `items` toujours à jour — le lecteur plein écran marque une vidéo vue à
+  // chaque avance, potentiellement plusieurs fois avant un re-render : lire la closure
+  // `items` perdrait les marquages précédents.
+  const itemsRef = React.useRef(items);
+  itemsRef.current = items;
   const undoLast = () => {
     setUndoStack(s => {
       if (!s.length) return s;
@@ -17706,6 +17787,49 @@ function TvTimePanel() {
 
   // Vidéos NON vues d'une chaîne/playlist YouTube (candidates à l'ajout en playlist).
   const ytUnwatchedIds = it => { const seen = new Set(it.watchedIds || []); return (it.videos || []).filter(v => !seen.has(v.id)).map(v => v.id); };
+
+  // ── Lecteur plein écran (7.6.78) ────────────────────────────────────────────────
+  // File de lecture = tableau de { id, title, date, dur, itemId, channel } ; `itemId`
+  // porte la chaîne d'origine pour marquer la bonne vidéo vue (une file peut mélanger
+  // plusieurs chaînes).
+  const [player, setPlayer] = React.useState(null);   // { queue, i } | null
+  const openPlayer = (queue, i = 0) => {
+    if (!queue || !queue.length) return;
+    setPlayer({ queue, i: Math.max(0, Math.min(i, queue.length - 1)) });
+  };
+  const ytQueueEntry = (it, v) => ({ id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: it.id, channel: it.title });
+  // Toutes les vidéos de MOINS de 3 min (YT_MIN_MINUTES) encore à voir, sur les chaînes
+  // pas encore terminées — dans l'ordre chronologique de chaque chaîne. ⚠ Une durée
+  // inconnue vaut 0 : elle est traitée comme un Short (même convention que le tag
+  // `shortsOnly` d'ytBuildItem).
+  const ytShortsQueue = () => {
+    const out = [];
+    for (const it of items) {
+      if (it.type !== 'youtube' || it.status === 'done') continue;
+      const seen = new Set(it.watchedIds || []);
+      for (const v of (it.videos || [])) {
+        if (seen.has(v.id) || (v.dur || 0) >= YT_MIN_MINUTES) continue;
+        out.push(ytQueueEntry(it, v));
+      }
+    }
+    return out;
+  };
+  // Marque une vidéo vue depuis le lecteur (hors pile d'annulation : une file de Shorts
+  // la saturerait). Même bascule automatique en « Vu » que ytSetWatched quand tout est vu.
+  const ytMarkVideoSeen = (itemId, videoId) => {
+    const prev = itemsRef.current;
+    const cur = prev.find(x => x.type === 'youtube' && x.id === itemId);
+    if (!cur || (cur.watchedIds || []).includes(videoId)) return;
+    const next = prev.map(it => {
+      if (it.type !== 'youtube' || it.id !== itemId) return it;
+      const clean = [...new Set([...(it.watchedIds || []), videoId])];
+      const nx = { ...it, watchedIds: clean };
+      const tot = it.totalEps || (it.videos || []).length;
+      if (tot > 0 && clean.length >= tot && it.status !== 'done') { nx.status = 'done'; nx.doneAt = Date.now(); }
+      return nx;
+    });
+    itemsRef.current = next; setItems(next); saveTvItems(next);
+  };
   // Ajoute toutes les vidéos restantes (non vues ET pas déjà dans la playlist) à la playlist
   // YouTube « À regarder plus tard (Hub) ». Réutilise le set local wlAdded → skip les doublons.
   const queueRemaining = async it => {
@@ -17979,6 +18103,20 @@ function TvTimePanel() {
           qui apparaît alors comme un onglet « 📚 Livres » à DROITE de « ▶️ YT ». */}
       <div style={{ display:'flex', alignItems:'center', gap:8 }}>
         <div style={{ flex:1, fontSize:10, fontWeight:700, color:TVTIME_COLOR, letterSpacing:'0.07em' }}>TV TIME</div>
+        {/* 🩳 Shorts restants (7.6.78) — à GAUCHE de l'icône 📚 : lance en plein écran la
+            file de TOUTES les vidéos < 3 min encore à voir (toutes chaînes non terminées). */}
+        {(() => {
+          const q = ytShortsQueue();
+          return (
+            <button onClick={() => openPlayer(q, 0)} disabled={!q.length}
+              title={q.length ? `Lancer en plein écran les ${q.length} vidéo(s) de moins de ${YT_MIN_MINUTES} min qu'il te reste à regarder` : `Aucune vidéo de moins de ${YT_MIN_MINUTES} min à regarder`}
+              style={{ background: q.length ? `${YT_COLOR}22` : 'none', border:`1px solid ${q.length ? YT_COLOR : C.border}`,
+                       borderRadius:6, color: q.length ? YT_COLOR : C.dim, fontSize:13, lineHeight:1, padding:'3px 8px',
+                       cursor: q.length ? 'pointer' : 'default', opacity: q.length ? 1 : 0.5 }}>
+              🩳{q.length > 0 && <span style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace' }}> {q.length}</span>}
+            </button>
+          );
+        })()}
         <button onClick={toggleBooks}
           title={booksOn ? 'Masquer la section Livres' : 'Suivre aussi mes LIVRES (recherche Google Books / Open Library)'}
           style={{ background: booksOn ? `${BOOK_COLOR}22` : 'none', border:`1px solid ${booksOn ? BOOK_COLOR : C.border}`,
@@ -18367,7 +18505,8 @@ function TvTimePanel() {
         onRelock={() => ytRelock(detailItem)}
         onKeepShorts={v => setKeepShorts(detailItem, v)}
         onShortsOnly={v => setShortsOnly(detailItem, v)}
-        onIgnore={() => ignoreUnwatched(detailItem)} />}
+        onIgnore={() => ignoreUnwatched(detailItem)}
+        onPlay={(vids, i) => openPlayer(vids.map(v => ytQueueEntry(detailItem, v)), i)} />}
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
@@ -18391,6 +18530,11 @@ function TvTimePanel() {
           onCartoon={v => commitPreview({ cartoon: !!v })}
           onStatus={st => commitPreview({ status: st, ...(st === 'done' ? (preview.type === 'tv' ? { watchedSet: tvAllKeys(preview), watchedEps: tvAllKeys(preview).length, doneAt: Date.now() } : { doneAt: Date.now() }) : {}) })} />;
       })()}
+      {/* Lecteur plein écran (bouton 🩳 ou clic sur une vignette de fiche YouTube) */}
+      {player && <YtFullscreenPlayer queue={player.queue} index={player.i}
+        onIndex={i => setPlayer(p => (p ? { ...p, i } : p))}
+        onClose={() => setPlayer(null)}
+        onPlaying={v => ytMarkVideoSeen(v.itemId, v.id)} />}
     </div>
   );
 }
