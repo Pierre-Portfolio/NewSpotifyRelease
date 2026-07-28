@@ -49,11 +49,11 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // Token pré-scope → 403 sur la file → log « déconnecte/reconnecte-toi » 1×/session (_dwCapDenied).
 ```
 
-### `APP_VERSION` (actuellement `'7.6.78'`)
+### `APP_VERSION` (actuellement `'7.6.79'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
-`delayChoice` (10/20/30 s) + jitter : `delayChoice*1000 + Math.random()*2000 + 1000`.
+`delayChoice` (10/20/30 s, **défaut 10 s depuis 7.6.79** — demande utilisateur, était 30 s ; state + `delayChoiceRef` initialisés à 10, non persisté donc chaque chargement repart sur 10 s) + jitter : `delayChoice*1000 + Math.random()*2000 + 1000`.
 
 ---
 
