@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.83';
+const APP_VERSION = '7.6.84';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12637,6 +12637,55 @@ async function ytWatchLaterRemove(videoId) {
   return { __error: 'NET' };
 }
 
+// Contenu de la playlist « Hub Pierre » (7.6.84) = les vidéos EN ATTENTE, dans l'ordre de
+// la playlist. La playlist n'est JAMAIS créée ici (`create = false`) : pas de playlist =
+// rien en attente. Les vidéos devenues privées/supprimées (titre neutralisé par YouTube,
+// donc INJOUABLES) sont écartées. Coût quota : 1 unité par page de 50.
+// Retourne { ok, playlistId, videos:[{ id, title, channel, date, thumb }] } ou { __error }.
+const YTSUB_WL_LIST_MAX = 200;
+const YTSUB_WL_DEAD_TITLES = ['private video', 'deleted video', 'vidéo privée', 'vidéo supprimée'];
+async function ytWlListVideos() {
+  const pid = await ytWlPlaylistId(false, false);
+  if (pid && pid.__error) return pid;
+  if (!pid || typeof pid !== 'string') return { ok: true, playlistId: null, videos: [] };
+  const out = [];
+  let pageToken = '';
+  for (let i = 0; i < 5 && out.length < YTSUB_WL_LIST_MAX; i++) {
+    const d = await ytSubApi('playlistItems', { part: 'snippet,contentDetails', playlistId: pid, maxResults: '50', ...(pageToken ? { pageToken } : {}) });
+    if (d.__error) {
+      // id caché périmé (playlist supprimée / recréée à la main) → il sera re-cherché au prochain appel
+      if (d.__error === 'NOTFOUND') { try { localStorage.removeItem(YTSUB_WL_ID_LS); } catch {} }
+      return d;
+    }
+    for (const it of (d.items || [])) {
+      const s = it.snippet || {}, cd = it.contentDetails || {};
+      const id = cd.videoId || (s.resourceId && s.resourceId.videoId) || '';
+      const title = s.title || '';
+      if (!id || !title || YTSUB_WL_DEAD_TITLES.includes(title.toLowerCase())) continue;
+      const th = s.thumbnails || {};
+      out.push({
+        id, title,
+        channel: s.videoOwnerChannelTitle || '',
+        date: (cd.videoPublishedAt || s.publishedAt || '').slice(0, 10),
+        thumb: ((th.medium || th.default || th.high || {}).url) || '',
+      });
+    }
+    pageToken = d.nextPageToken || '';
+    if (!pageToken) break;
+  }
+  const vids = out.slice(0, YTSUB_WL_LIST_MAX);
+  // Durées (1 unité de quota par lot de 50) : playlistItems ne les donne pas, et elles
+  // servent à l'affichage ET aux stats quand la vidéo atterrit dans « Chaîne non
+  // enregistrée ». Un échec ici n'est pas bloquant (durée simplement inconnue).
+  for (let i = 0; i < vids.length; i += 50) {
+    const d = await ytSubApi('videos', { part: 'contentDetails', id: vids.slice(i, i + 50).map(v => v.id).join(',') });
+    if (!d || d.__error || !d.items) continue;
+    const map = new Map(d.items.map(v => [v.id, ytParseDurationSec(v.contentDetails && v.contentDetails.duration)]));
+    for (const v of vids) { const sec = map.get(v.id); if (sec !== undefined) { v.durSec = sec; v.dur = Math.round(sec / 60); } }
+  }
+  return { ok: true, playlistId: pid, videos: vids };
+}
+
 // Toutes les chaînes suivies → [{ id, title }] (paginé, cap YTSUB_MAX_CHANNELS)
 async function ytSubsListChannels() {
   const subs = [];
@@ -17488,6 +17537,95 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
   );
 }
 
+// ── Playlist « Hub Pierre » — vidéos EN ATTENTE (7.6.84) ─────────────────────────────
+// Pop-up ouverte par le bouton 📺 de l'en-tête de TV Time : liste le contenu RÉEL de la
+// playlist YouTube (une requête, pas le set local `wlAdded` qui n'est qu'un mémo d'ajouts),
+// et un clic sur une vignette lance la file dans le MÊME lecteur plein écran que le 🩳.
+// La pop-up reste montée sous le lecteur (z 200 vs 400) → « ← Retour » revient à la liste ;
+// les vidéos déjà lancées y sont grisées (elles ont été retirées de la playlist côté
+// YouTube, ↻ le confirme).
+function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, onRefresh, onClose }) {
+  const played = playedIds || new Set();
+  const pending = (videos || []).filter(v => !played.has(v.id));
+  const errMsg = {
+    AUTH:  'Connecte-toi à YouTube (section Actu → ▶ Vidéos) pour lire ta playlist.',
+    SCOPE: 'Autorisation YouTube manquante — reconnecte-toi depuis la section Actu.',
+    QUOTA: 'Quota YouTube épuisé pour aujourd\'hui — réessaie demain.',
+    NOTFOUND: 'Playlist introuvable — elle a peut-être été supprimée sur YouTube.',
+  }[err] || (err ? 'Lecture impossible (réseau) — réessaie.' : '');
+  return (
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:200, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:'16px 18px', width:'100%', maxWidth:440, maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.6)' }}>
+        <div style={{ position:'sticky', top:0, zIndex:6, height:0, display:'flex', justifyContent:'flex-end', pointerEvents:'none' }}>
+          <button onClick={onClose} title="Fermer" style={{ pointerEvents:'auto', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:'50%', width:30, height:30, color:C.text, fontSize:18, lineHeight:1, cursor:'pointer', boxShadow:'0 2px 10px rgba(0,0,0,0.55)' }}>×</button>
+        </div>
+        <div style={{ display:'flex', alignItems:'flex-start', gap:12, marginBottom:12, paddingRight:28 }}>
+          <div style={{ width:44, height:44, borderRadius:10, background:'#111', display:'flex', alignItems:'center', justifyContent:'center', fontSize:20, flexShrink:0 }}>📺</div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:15, fontWeight:800, color:C.text, lineHeight:1.25}}>« {YTSUB_WL_NAME} »</div>
+            <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:3 }}>
+              {state === 'loading' ? 'Lecture de la playlist…' : state === 'err' ? 'Erreur' : `${pending.length} vidéo(s) en attente`}
+            </div>
+          </div>
+          <button onClick={onRefresh} disabled={state === 'loading'} title="Recharger la playlist depuis YouTube"
+            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color: state === 'loading' ? C.dim : YT_COLOR, fontSize:12, padding:'4px 9px', cursor: state === 'loading' ? 'default' : 'pointer', flexShrink:0 }}>{state === 'loading' ? '…' : '↻'}</button>
+        </div>
+
+        {state === 'err' && (
+          <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.55, background:'#e0505014', border:'1px solid #e0505044', borderRadius:8, padding:'8px 10px' }}>⚠ {errMsg}</div>
+        )}
+        {state === 'loading' && (
+          <div style={{ fontSize:10.5, color:C.muted, fontStyle:'italic', padding:'8px 2px' }}>⏳ Lecture de la playlist YouTube…</div>
+        )}
+        {state === 'ok' && !videos.length && (
+          <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.55, background:'#111', borderRadius:8, padding:'8px 10px' }}>
+            Aucune vidéo en attente. Ajoute-en avec le bouton 🕒 (fiche d'une chaîne, ou section Actu → ▶ Vidéos).
+          </div>
+        )}
+
+        {state === 'ok' && !!pending.length && (
+          <button onClick={() => onPlay(pending, 0)} title={`Lancer les ${pending.length} vidéo(s) en attente en plein écran`}
+            style={{ width:'100%', background:`${YT_COLOR}22`, border:`1px solid ${YT_COLOR}aa`, borderRadius:8, color:YT_COLOR, fontSize:11, fontWeight:800, padding:'8px 0', cursor:'pointer', fontFamily:'DM Mono,monospace', marginBottom:10 }}>
+            ▶ Tout lancer ({pending.length})
+          </button>
+        )}
+
+        {state === 'ok' && !!videos.length && (
+          <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+            {videos.map(v => {
+              const seen = played.has(v.id);
+              const idx = pending.findIndex(x => x.id === v.id);
+              return (
+                <div key={v.id} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52, opacity: seen ? 0.45 : 1 }}>
+                  <button onClick={() => onPlay(seen ? [v] : pending, seen ? 0 : Math.max(0, idx))}
+                    title={seen ? 'Revoir cette vidéo en plein écran' : 'Lire en plein écran ici (à partir de cette vidéo)'}
+                    style={{ position:'relative', width:82, height:46, borderRadius:6, flexShrink:0, display:'block', overflow:'hidden', background:'#1a1a1a', cursor:'pointer', padding:0, border:'none' }}>
+                    {v.thumb
+                      ? <img src={v.thumb} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', display:'block', background:'#1a1a1a' }} />
+                      : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16 }}>▶️</div>}
+                    <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(0,0,0,0.28)', color:'#fff', fontSize:16, textShadow:'0 1px 3px rgba(0,0,0,0.8)' }}>▶</div>
+                  </button>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <a href={`https://www.youtube.com/watch?v=${v.id}`} target="_blank" rel="noopener noreferrer"
+                      style={{ fontSize:11, fontWeight:600, color: seen ? C.muted : C.text, textDecoration:'none', display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</a>
+                    <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                      {seen ? '✓ lancée · ' : ''}{v.channel ? v.channel + ' · ' : ''}{v.date || '—'}{v.dur ? ` · ${v.dur} min` : ''}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
+          ℹ Contenu réel de ta playlist YouTube{playlistId ? <> <a href={`https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a></> : ` « ${YTSUB_WL_NAME} »`}. Une vidéo lancée ici est retirée de la playlist (comme quand elle est cochée « vue » dans TV Time) — ↻ pour recharger.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Lecteur YouTube PLEIN ÉCRAN (7.6.78) — lit une FILE de vidéos (`queue`) dans un
 // embed youtube-nocookie qui couvre tout le viewport, avec une barre en OVERLAY
 // « ← Retour · ⏮ · ⏭ Suivant » posée sur la vidéo en cours.
@@ -17940,6 +18078,28 @@ function TvTimePanel() {
     setPlayer({ queue, i: Math.max(0, Math.min(i, queue.length - 1)) });
   };
   const ytQueueEntry = (it, v) => ({ id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: it.id, channel: it.title });
+
+  // ── 📺 Playlist « Hub Pierre » — vidéos en attente (7.6.84) ─────────────────────────
+  // `wlPop` = { state:'loading'|'ok'|'err', videos, err, playlistId } | null (fermée).
+  // `wlPlayed` = ids lancés depuis la pop-up (grisés dans la liste : ils ont été retirés
+  // de la playlist côté YouTube dès leur lancement).
+  const [wlPop, setWlPop]       = React.useState(null);
+  const [wlPlayed, setWlPlayed] = React.useState(() => new Set());
+  const loadWlPop = async () => {
+    setWlPop(p => ({ state: 'loading', videos: (p && p.videos) || [], err: '', playlistId: p && p.playlistId }));
+    const r = await ytWlListVideos();
+    if (r && r.__error) { setWlPop({ state: 'err', videos: [], err: r.__error, playlistId: null }); return; }
+    setWlPop({ state: 'ok', videos: (r && r.videos) || [], err: '', playlistId: (r && r.playlistId) || null });
+  };
+  const openWlPop = () => { setWlPop({ state: 'loading', videos: [], err: '', playlistId: null }); loadWlPop(); };
+  // Entrée de file pour une vidéo de la playlist : `itemId` seulement si la vidéo est
+  // suivie quelque part dans TV Time (→ elle sera marquée vue dans SA chaîne) ; sinon
+  // null → elle atterrira dans « Chaîne non enregistrée ».
+  const wlQueueEntry = v => {
+    const owner = itemsRef.current.find(it => it.type === 'youtube' && (it.videos || []).some(x => x.id === v.id));
+    return { id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: owner ? owner.id : null, channel: v.channel || (owner ? owner.title : ''), fromWl: true };
+  };
+  const playWl = (list, i) => { openPlayer(list.map(wlQueueEntry), i); };
   // Toutes les vidéos de MOINS de 3 min (YT_MIN_MINUTES) encore à voir, sur les chaînes
   // pas encore terminées — dans l'ordre chronologique de chaque chaîne. ⚠ Une durée
   // inconnue vaut 0 : elle est traitée comme un Short (même convention que le tag
@@ -18278,6 +18438,17 @@ function TvTimePanel() {
           qui apparaît alors comme un onglet « 📚 Livres » à DROITE de « ▶️ YT ». */}
       <div style={{ display:'flex', alignItems:'center', gap:8 }}>
         <div style={{ flex:1, fontSize:10, fontWeight:700, color:TVTIME_COLOR, letterSpacing:'0.07em' }}>TV TIME</div>
+        {/* 📺 Vidéos en attente dans la playlist « Hub Pierre » (7.6.84) — à GAUCHE du 🩳 :
+            ouvre une pop-up listant le contenu RÉEL de la playlist YouTube ; un clic sur
+            une vignette lance la file dans le même lecteur plein écran que le 🩳.
+            ⚠ Le badge affiche `wlAdded` (mémo LOCAL des ajouts faits par le Hub, gratuit) —
+            le compte exact vient de l'API et n'est connu qu'une fois la pop-up ouverte. */}
+        <button onClick={openWlPop}
+          title={`Voir les vidéos en attente dans la playlist YouTube « ${YTSUB_WL_NAME} » et les lancer en plein écran`}
+          style={{ background: wlAdded.size ? `${YT_COLOR}22` : 'none', border:`1px solid ${wlAdded.size ? YT_COLOR : C.border}`,
+                   borderRadius:6, color: wlAdded.size ? YT_COLOR : C.dim, fontSize:13, lineHeight:1, padding:'3px 8px', cursor:'pointer' }}>
+          📺{wlAdded.size > 0 && <span style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace' }}> {wlAdded.size}</span>}
+        </button>
         {/* 🩳 Shorts restants (7.6.78) — à GAUCHE de l'icône 📚 : lance en plein écran la
             file de TOUTES les vidéos < 3 min encore à voir (toutes chaînes non terminées). */}
         {(() => {
@@ -18706,11 +18877,20 @@ function TvTimePanel() {
           onCartoon={v => commitPreview({ cartoon: !!v })}
           onStatus={st => commitPreview({ status: st, ...(st === 'done' ? (preview.type === 'tv' ? { watchedSet: tvAllKeys(preview), watchedEps: tvAllKeys(preview).length, doneAt: Date.now() } : { doneAt: Date.now() }) : {}) })} />;
       })()}
-      {/* Lecteur plein écran (bouton 🩳 ou clic sur une vignette de fiche YouTube) */}
+      {/* 📺 Vidéos en attente dans la playlist « Hub Pierre » (7.6.84) — reste montée sous
+          le lecteur (z 200 vs 400) pour que « ← Retour » revienne à la liste. */}
+      {wlPop && <YtWatchlistModal state={wlPop.state} videos={wlPop.videos} err={wlPop.err}
+        playlistId={wlPop.playlistId} playedIds={wlPlayed}
+        onPlay={(list, i) => playWl(list, i)} onRefresh={loadWlPop} onClose={() => setWlPop(null)} />}
+      {/* Lecteur plein écran (bouton 🩳 / 📺 ou clic sur une vignette de fiche YouTube) */}
       {player && <YtFullscreenPlayer queue={player.queue} index={player.i}
         onIndex={i => setPlayer(p => (p ? { ...p, i } : p))}
         onClose={() => setPlayer(null)}
-        onPlaying={v => ytMarkVideoSeen(v.itemId, v.id)} />}
+        onPlaying={v => {
+          if (v.fromWl) setWlPlayed(s => { const n = new Set(s); n.add(v.id); return n; });
+          if (v.itemId) ytMarkVideoSeen(v.itemId, v.id);
+          else wlForget([v.id]);   // vidéo hors TV Time : au moins la retirer de la playlist
+        }} />}
     </div>
   );
 }
