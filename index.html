@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.91';
+const APP_VERSION = '7.6.92';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3470,6 +3470,40 @@ function StoreProvider({ children }) {
 // ════════════════════════════════════════════════
 // HOOK
 // ════════════════════════════════════════════════
+
+// ── Verrou « IMMERSION » (7.6.92) ────────────────────────────────────────────────
+// ⚠ Le comportement responsive est VOULU et reste la règle : passer le téléphone en
+// paysage fait chuter `innerHeight` sous le seuil de `useShortViewport` → `Shell`
+// remplace `MobileApp` par `CompactPlayer` (les contrôles Spotify seuls). Mais quand
+// un OVERLAY PLEIN ÉCRAN est ouvert (lecteur YouTube de TV Time, carte du collapse
+// « Cartographie » d'Actu), ce basculement DÉMONTE l'overlay : la vidéo est quittée
+// et remplacée par Spotify au moment précis où l'on tourne l'écran pour la regarder.
+// → pendant une immersion, les hooks responsive GÈLENT leur valeur (les événements
+// `resize` sont ignorés) et se remettent à jour à la SORTIE de l'immersion.
+// Compteur (pas un booléen) : deux overlays peuvent se superposer.
+const _immersive = { n: 0, subs: new Set() };
+function _immersiveNotify() { _immersive.subs.forEach(fn => { try { fn(); } catch {} }); }
+function immersiveActive() { return _immersive.n > 0; }
+// Monte/démonte le verrou avec le composant qui affiche l'overlay.
+function useImmersiveLock(active) {
+  React.useEffect(() => {
+    if (!active) return;
+    _immersive.n++;
+    return () => { _immersive.n = Math.max(0, _immersive.n - 1); if (_immersive.n === 0) _immersiveNotify(); };
+  }, [active]);
+}
+// Abonnement d'un hook responsive : `resize` + réveil à la sortie d'immersion.
+function _useResponsive(read, deps) {
+  const [v, setV] = React.useState(read);
+  React.useEffect(() => {
+    const h = () => { if (!immersiveActive()) setV(read()); };
+    window.addEventListener('resize', h);
+    _immersive.subs.add(h);
+    return () => { window.removeEventListener('resize', h); _immersive.subs.delete(h); };
+  }, deps);
+  return v;
+}
+
 function useIsMobile(bp = 820) {
   // ⚠ Chrome Android peut cocher « Version pour ordinateur » au retour du consentement
   // Google (comportement navigateur, non désactivable côté page) : le viewport passe
@@ -3492,26 +3526,14 @@ function useIsMobile(bp = 820) {
     } catch { return false; }
   };
   const get = () => typeof window !== 'undefined' && (window.innerWidth < bp || touchSmall() || recentMobileHint());
-  const [m, setM] = React.useState(get);
-  React.useEffect(() => {
-    const h = () => setM(get());
-    window.addEventListener('resize', h);
-    return () => window.removeEventListener('resize', h);
-  }, [bp]);
-  return m;
+  return _useResponsive(get, [bp]);
 }
 
 // Détecte un viewport très court (ex. fenêtre du bas en multi-fenêtres / split-screen sur tel)
 // → on n'affiche alors que la barre de contrôles (CompactPlayer)
 function useShortViewport(maxH = 500) {
   const get = () => typeof window !== 'undefined' && window.innerHeight < maxH;
-  const [s, setS] = React.useState(get);
-  React.useEffect(() => {
-    const h = () => setS(get());
-    window.addEventListener('resize', h);
-    return () => window.removeEventListener('resize', h);
-  }, [maxH]);
-  return s;
+  return _useResponsive(get, [maxH]);
 }
 
 // Horloge partagée 1s : UN SEUL setInterval global pour tous les countdowns (quota 24h,
@@ -13011,6 +13033,9 @@ function ActuYoutubeSection() {
 // pour l'ouverture externe. Absent = le bouton pointe sur `src`, comme avant.
 function MapFrame({ src, title, credit, color, image, note, href }) {
   const [full, setFull] = React.useState(false);
+  // Carte en plein écran → on gèle le layout responsive : tourner le téléphone en
+  // paysage ne doit pas remplacer la page par CompactPlayer (ce qui fermerait la carte).
+  useImmersiveLock(full);
   // Bloque le scroll de la page derrière l'overlay plein écran.
   React.useEffect(() => {
     if (!full) return;
@@ -13147,6 +13172,9 @@ function EspeceMapSection() {
   const divRef   = React.useRef(null);
   const mapRef   = React.useRef(null);
   const layerRef = React.useRef(null);               // surcouche GBIF courante
+  // Plein écran → layout responsive gelé (cf. useImmersiveLock) : le passage en paysage
+  // ne doit pas basculer l'app sur CompactPlayer et démonter la carte.
+  useImmersiveLock(full);
 
   React.useEffect(() => {
     let dead = false;
@@ -17782,6 +17810,11 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   const boxRef = React.useRef(null);
   const v = queue[index] || null;
   const vid = v ? v.id : null;
+  // ⚠ 7.6.92 — Le lecteur est monté ⇒ layout responsive GELÉ (cf. useImmersiveLock).
+  // C'est TOUT l'intérêt du plein écran : on tourne le téléphone en paysage pour
+  // regarder la vidéo, et sans ce verrou la chute d'`innerHeight` remplaçait la page
+  // par CompactPlayer (contrôles Spotify) → lecteur démonté, vidéo quittée.
+  useImmersiveLock(true);
   // Marque vue à chaque vidéo lancée (changement d'index compris)
   React.useEffect(() => { if (v) onPlaying(v); }, [vid]);
   // Plein écran NATIF, best effort : refusé hors geste utilisateur et absent sur iOS →

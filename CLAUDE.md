@@ -49,7 +49,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // Token pré-scope → 403 sur la file → log « déconnecte/reconnecte-toi » 1×/session (_dwCapDenied).
 ```
 
-### `APP_VERSION` (actuellement `'7.6.83'`)
+### `APP_VERSION` (actuellement `'7.6.92'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -197,6 +197,12 @@ Export : `EXPORT_SECTIONS` (boutons dans « ↧ EXPORTER » d'À propos) → `do
 ---
 
 ## Modules (composants principaux)
+
+**⚠ 7.6.92 — VERROU « IMMERSION » : le responsive ne doit plus fermer un overlay plein écran** (demande utilisateur) — symptôme : tourner le téléphone en **paysage** pendant la lecture d'une vidéo de la playlist « Hub Pierre » **quittait la vidéo** et affichait les contrôles Spotify à la place. Cause : `innerHeight` chute sous 500 en paysage → `useShortViewport` passe à `true` → `Shell` rend `CompactPlayer` **à la place de `MobileApp`** → tout l'arbre (donc `TvTimePanel`, donc `YtFullscreenPlayer`) est **DÉMONTÉ**. ⚠ **Ce basculement reste voulu et INCHANGÉ partout ailleurs** (c'est explicitement ce que demande l'utilisateur) : la seule exception est « un overlay plein écran est ouvert ».
+- **Compteur module-level `_immersive` = `{n, subs}`** (juste avant `useIsMobile`) + `immersiveActive()` + hook **`useImmersiveLock(active)`** (incrémente au montage, décrémente au démontage, notifie les abonnés quand `n` retombe à **0**). Un compteur et non un booléen : deux overlays peuvent se superposer (une carte plein écran sous un lecteur).
+- **`_useResponsive(read, deps)`** factorise l'abonnement des DEUX hooks responsive (`useIsMobile`, `useShortViewport`, dont les corps se réduisent désormais à leur fonction de lecture) : `resize` **ignoré tant que `immersiveActive()`** (valeur GELÉE, donc aucun démontage), et ré-évaluation à la **sortie** d'immersion via `_immersive.subs` → à la fermeture de l'overlay, le layout rattrape immédiatement l'orientation réelle.
+- **3 points de branchement** : `YtFullscreenPlayer` (`useImmersiveLock(true)` — le composant n'existe que pendant la lecture ; couvre la file playlist 📺, la file 🩳 et les vignettes de fiche), `MapFrame` (`useImmersiveLock(full)`) et `EspeceMapSection` (`useImmersiveLock(full)`, la seule carte d'Actu qui n'est pas un `MapFrame`). ⚠ Les hooks sont appelés **avant** les `return` anticipés (`if (!v) return null` de `YtFullscreenPlayer`, `if (full) return portal` de `MapFrame`).
+- ⚠ Vérifié : compilation Babel du fichier + test jsdom des hooks EXTRAITS d'`index.html` (portrait → mobile, rotation SANS overlay → CompactPlayer, rotation AVEC overlay → gelé, fermeture en paysage → CompactPlayer immédiat, superposition de 2 overlays → relâché au dernier seulement).
 
 **Layout** : `WebApp` (desktop, sidebar gauche scraping + onglets en haut, une seule vue centrale) · `MobileApp` (barre haut : profil + 3 onglets principaux Scrapping/En attente/❤Likés + menu ⋯) · `CompactPlayer` (viewport court `innerHeight<500`) · `HubHome` (accueil connecté ; **desktop (7.2.9)** : grille **3 colonnes** construite depuis `TOGGLE_MODULES`, **Musique en 1er puis ordre alphabétique**, filtrée par `moduleEnabled` ET `moduleOnHome` (bouton 🏠 du Paramétrage), conteneur scrollable `overflow:auto` + `justify-content:safe center` ; **mobile** : inchangé, 2 colonnes depuis `HUB_CARDS`) · `Home` (login « Hub de Pierre »). Retour accueil = clic sur le profil. Défaut view/tab = `'home'`.
 
