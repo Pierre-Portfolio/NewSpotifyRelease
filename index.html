@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.76';
+const APP_VERSION = '7.6.77';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18529,6 +18529,25 @@ const FOOD_MACROS = [
   { key:'p', label:'Protéines', short:'Prot.', color:'#5aa9ff', kcalPerG:4 },
   { key:'f', label:'Graisses', short:'Gras', color:'#e07b54', kcalPerG:9 },
 ];
+// Repères quotidiens de macros dérivés de la CORPULENCE (7.6.77, demande utilisateur) :
+// protéines proportionnelles au POIDS (1,6 g/kg = repère classique pour un adulte actif),
+// graisses = 25 % des calories du jour (fourchette santé courante 20-35 %), glucides = le
+// RESTE des calories. La somme retombe donc toujours sur le besoin calculé par foodTarget.
+// ⚠ Ordres de grandeur grand public, PAS une prescription : rien n'est personnalisé au-delà
+// du poids et de l'objectif calorique déjà saisis dans le profil. Sans poids → null.
+const FOOD_PROT_PER_KG  = 1.6;
+const FOOD_FAT_KCAL_PCT = 0.25;
+function foodMacroTargets(p) {
+  const kcal = foodTarget(p);
+  const w = p && Number(p.weight);
+  if (!kcal || !w || w <= 0) return null;
+  // ⚠ Plafond : 1,6 g/kg appliqué au poids TOTAL devient absurde en cas de forte surcharge
+  // pondérale (140 kg → 224 g, soit 42 % des calories, qui écraseraient les glucides).
+  // On borne donc les protéines à 35 % des calories du jour → glucides toujours ≥ 40 %.
+  const prot = Math.min(Math.round(w * FOOD_PROT_PER_KG), Math.round(kcal * 0.35 / 4));
+  const fat  = Math.round(kcal * FOOD_FAT_KCAL_PCT / 9);
+  return { c: Math.max(0, Math.round((kcal - prot * 4 - fat * 9) / 4)), p: prot, f: fat, kcal };
+}
 // Totaux d'une liste de repas : { c, p, f, known (repas avec macros), unknown, kcalKnown }
 function foodMacroTotals(list) {
   const out = { c:0, p:0, f:0, known:0, unknown:0, kcalKnown:0 };
@@ -18565,6 +18584,43 @@ function FoodMacroBar({ macros, height, labels }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// TROIS barres SÉPARÉES, une par macro (7.6.77, demande utilisateur : « plutôt qu'une »).
+// ⚠ Ce n'est pas la même information que FoodMacroBar : la barre empilée montre la
+// RÉPARTITION du jour (part de chaque macro dans les calories avalées), ces barres-ci
+// montrent l'AVANCEMENT vers le repère quotidien (foodMacroTargets). Sans profil — donc
+// sans repère — on remplit la barre avec la part de calories pour qu'elle garde un sens.
+function FoodMacroBars({ macros, targets }) {
+  const kc = FOOD_MACROS.map(m => (Number(macros[m.key]) || 0) * m.kcalPerG);
+  const tot = kc.reduce((a, b) => a + b, 0);
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+      {FOOD_MACROS.map((m, i) => {
+        const g    = Number(macros[m.key]) || 0;
+        const tgt  = targets ? targets[m.key] : 0;
+        const over = tgt > 0 && g > tgt;
+        const pct  = tgt ? Math.min(100, g / tgt * 100) : (tot ? kc[i] / tot * 100 : 0);
+        return (
+          <div key={m.key} style={{ display:'flex', flexDirection:'column', gap:2 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', gap:8, fontSize:9, fontFamily:'DM Mono,monospace' }}>
+              <span style={{ color:m.color }}>● {m.label}</span>
+              <span style={{ color: over ? '#e05050' : C.muted }}>
+                {foodMacroFmt(g)}{tgt ? ` / ${tgt}` : ''} g
+                <span style={{ color:C.dim }}>
+                  {tgt ? ` · ${Math.round(g / tgt * 100)} %` : (tot ? ` · ${Math.round(kc[i] / tot * 100)} % des kcal` : '')}
+                </span>
+              </span>
+            </div>
+            <div style={{ height:6, background:'#111', borderRadius:3, overflow:'hidden' }}
+              title={`${m.label} · ${foodMacroFmt(g)} g${tgt ? ' sur ' + tgt + ' g conseillés aujourd’hui' : ''}`}>
+              <div style={{ width:`${pct}%`, height:'100%', background: over ? '#e05050' : m.color, transition:'width 0.25s' }} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -18677,6 +18733,7 @@ function NourriturePanel() {
   const [selDay, setSelDay] = React.useState(today);
   const editableDays = _lastNDays(7);                       // fenêtre d'édition (7 j, aujourd'hui inclus)
   const target = foodTarget(profile);
+  const macroTargets = foodMacroTargets(profile);   // repères g/jour déduits de la corpulence
   const dayMeals = meals[selDay] || [];
   const dayTotal = days[selDay] || 0;
 
@@ -18816,7 +18873,17 @@ function NourriturePanel() {
             <span>📏 {profile.height} cm</span>
             <span>🎂 {profile.age} ans</span>
             {imc > 0 && <span>IMC {imc.toFixed(1)}</span>}
-            <span style={{ color:FOOD_COLOR, fontWeight:700 }}>🎯 {target} kcal/jour</span>
+            {/* Besoin quotidien ET repères de macros SUR LA MÊME LIGNE (7.6.77, demande
+                utilisateur) : ce que la corpulence conseille par jour, aligné avec les kcal. */}
+            <span style={{ display:'flex', alignItems:'baseline', gap:10, flexWrap:'wrap' }}>
+              <span style={{ color:FOOD_COLOR, fontWeight:700 }}>🎯 {target} kcal/jour</span>
+              {macroTargets && FOOD_MACROS.map(m => (
+                <span key={m.key} style={{ color:m.color }}
+                  title={`${m.label} conseillées par jour pour ${profile.weight} kg (protéines ${FOOD_PROT_PER_KG} g/kg, lipides ${Math.round(FOOD_FAT_KCAL_PCT * 100)} % des calories, glucides = le reste)`}>
+                  {m.short} {macroTargets[m.key]} g
+                </span>
+              ))}
+            </span>
           </div>
         ) : null}
       </div>
@@ -18855,11 +18922,12 @@ function NourriturePanel() {
         )}
         {target > 0 && !over && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{target - dayTotal} kcal restantes</div>}
         {over && <div style={{ fontSize:9, color:'#e05050', fontFamily:'DM Mono,monospace' }}>⚠ objectif dépassé de {dayTotal - target} kcal</div>}
-        {/* Répartition glucides / protéines / graisses du jour — visible dès qu'un aliment
-            validé porte ses macros (Open Food Facts ou suggestion IA). */}
+        {/* Glucides / protéines / graisses du jour — UNE BARRE PAR MACRO (7.6.77), sous la
+            jauge de calories, remplies vers le repère quotidien déduit de la corpulence.
+            Visible dès qu'un aliment validé porte ses macros (Open Food Facts ou IA). */}
         {dayMacros.known > 0 && (
           <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
-            <FoodMacroBar macros={dayMacros} height={8} />
+            <FoodMacroBars macros={dayMacros} targets={macroTargets} />
             {dayMacros.unknown > 0 && (
               <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
                 {dayMacros.unknown} repas sans macros (saisi à la main) — non comptés ci-dessus
