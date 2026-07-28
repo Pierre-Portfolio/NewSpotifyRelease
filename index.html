@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.84';
+const APP_VERSION = '7.6.85';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16800,6 +16800,47 @@ async function ytBuildItem(raw, opts = {}) {
 // vues (watchedIds), le statut (sauf le repassage en cours) et les labels manga/cartoon.
 // Écrit directement dans localStorage (loadTvItems/saveTvItems) — ne dépend pas du montage du
 // panneau TV Time. Retourne true si au moins un item a changé.
+// ── « Chaîne non enregistrée » (7.6.85) ────────────────────────────────────────────────
+// Pseudo-chaîne 100 % LOCALE (drapeau `local`, id qui n'existe pas côté YouTube, JAMAIS
+// interrogée par l'API) qui recueille les vidéos regardées depuis la playlist « Hub
+// Pierre » (bouton 📺) et qui ne sont suivies dans AUCUNE chaîne/playlist de TV Time —
+// sans elle ces visionnages n'étaient comptés nulle part. Elle vit dans la section VUS
+// du bloc YouTube, épinglée en PREMIÈRE position.
+// ⚠ Le champ `date` d'une de ses vidéos est la DATE DE VISIONNAGE, pas de publication :
+// la fiche groupe les vidéos par année de `date` → une « saison » = l'année où je l'ai
+// regardée (demande utilisateur). La date de publication réelle est gardée à part
+// (`pubDate`) pour ne rien perdre.
+const YT_UNSAVED_ID    = '__hub_unsaved';
+const YT_UNSAVED_TITLE = 'Chaîne non enregistrée';
+const ytIsUnsaved = it => !!it && it.type === 'youtube' && it.id === YT_UNSAVED_ID;
+function ytUnsavedBlank() {
+  return { id: YT_UNSAVED_ID, type: 'youtube', local: true, ytKind: 'channel',
+    title: YT_UNSAVED_TITLE, poster: null, status: 'done', videos: [], watchedIds: [],
+    totalEps: 0, addedAt: Date.now() };
+}
+// Ajoute une vidéo VUE à la pseudo-chaîne. Idempotent, et sans effet si la vidéo est déjà
+// suivie dans une VRAIE chaîne (elle y sera marquée vue à la place). Renvoie le tableau
+// d'items inchangé quand il n'y a rien à faire → l'appelant peut comparer par identité.
+function ytUnsavedAdd(items, v, when = Date.now()) {
+  if (!v || !v.id) return items;
+  if (items.some(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id))) return items;
+  const cur = items.find(ytIsUnsaved) || ytUnsavedBlank();
+  if ((cur.videos || []).some(x => x.id === v.id)) return items;
+  // Date LOCALE (jamais toISOString : le fuseau ferait basculer d'un jour, donc d'année le 31/12)
+  const d = new Date(when);
+  const seenDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const entry = { id: v.id, title: v.title || 'Vidéo', date: seenDate, watchedAt: when,
+    pubDate: v.pubDate || v.date || '', dur: v.dur || 0, channel: v.channel || '',
+    still: v.thumb || v.still || `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg` };
+  // Trié par DATE DE VISIONNAGE décroissante — la fiche conserve l'ordre du tableau à
+  // l'intérieur d'une année, et les années sont déjà affichées de la plus récente à la plus ancienne.
+  const videos = [entry, ...(cur.videos || [])].sort((a, b) => (b.watchedAt || 0) - (a.watchedAt || 0));
+  const next = { ...cur, videos, watchedIds: videos.map(x => x.id), totalEps: videos.length, status: 'done', doneAt: when };
+  return items.some(ytIsUnsaved)
+    ? items.map(it => (ytIsUnsaved(it) ? next : it))
+    : [next, ...items];
+}
+
 async function ytCheckNewVideos() {
   if (!ytKey()) return false;
   const cur = loadTvItems();
@@ -16808,6 +16849,7 @@ async function ytCheckNewVideos() {
   const now = Date.now();
   const patches = new Map();   // id → { built, hasNew }
   for (const it of yts) {
+    if (it.local) continue;     // pseudo-chaîne locale (« Chaîne non enregistrée ») : aucun id YouTube à interroger
     if (it.dropped) continue;   // « ne plus suivre » → jamais de recherche de nouveautés
     if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
     const built = await ytBuildItem(it.id, { unlimited: it.unlimited, keepShorts: it.keepShorts, shortsOnly: it.shortsOnly });   // préserve plafond retiré + tags Shorts
@@ -17396,7 +17438,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:15, fontWeight:800, color:C.text, lineHeight:1.25 }}>{item.title}</div>
             <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:3 }}>
-              {item.ytKind === 'playlist' ? '▶️ Playlist' : '▶️ Chaîne'} · {years.length} année(s) · {total} vidéo(s)
+              {item.local ? '📺 Vidéos vues hors chaîne suivie' : item.ytKind === 'playlist' ? '▶️ Playlist' : '▶️ Chaîne'} · {years.length} année(s) · {total} vidéo(s)
             </div>
             <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:8 }}>
               <div style={{ flex:1 }}><Bar v={watched} max={total} /></div>
@@ -17409,7 +17451,10 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
             (À voir) et le rouge (En cours) : passe la chaîne en Vu SANS cocher les vidéos
             non vues et SANS `dropped` → elle repassera « En cours » à la prochaine
             nouvelle vidéo (ytCheckNewVideos). */}
-        <div style={{ display:'flex', gap:5, marginBottom:8 }}>
+        {/* ⚠ Pseudo-chaîne locale « Chaîne non enregistrée » (7.6.85) : ni statut, ni ↻,
+            ni tags Shorts, ni plafond — elle n'a pas d'id YouTube à interroger et ne
+            contient QUE des vidéos déjà vues. */}
+        {!item.local && <div style={{ display:'flex', gap:5, marginBottom:8 }}>
           {STATUSES.map(([k, label, color]) => {
             const active = item.status === k && !(k === 'done' && !allSeen);
             const btn = (
@@ -17433,7 +17478,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
           })}
           <button onClick={onRefresh} disabled={refreshing} title="Actualiser les vidéos (API YouTube)"
             style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color: refreshing ? C.dim : YT_COLOR, fontSize:12, padding:'0 9px', cursor: refreshing ? 'default' : 'pointer', flexShrink:0 }}>{refreshing ? '…' : '↻'}</button>
-        </div>
+        </div>}
 
         {/* Labels Manga / Dessin animé */}
         <div style={{ display:'flex', gap:8, marginBottom:12 }}>
@@ -17447,6 +17492,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
           </button>
         </div>
 
+        {!item.local && <>
         {/* Tag « garder les Shorts » — SPÉCIFIQUE YouTube : par défaut les vidéos < 3 min sont
             exclues ; coché, elles sont réintégrées (re-télécharge la liste de la chaîne). */}
         <button onClick={() => onKeepShorts(!item.keepShorts)} disabled={refreshing || item.shortsOnly}
@@ -17479,9 +17525,10 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
                 🔒 Reverrouiller (garder seulement les vidéos vues + {new Date().getFullYear()})
               </button>
             </div>}
+        </>}
 
-        {/* Vidéos par année (saison) */}
-        <div style={{ fontSize:10, fontWeight:800, color:YT_COLOR, letterSpacing:'0.05em', marginBottom:6 }}>VIDÉOS PAR ANNÉE</div>
+        {/* Vidéos par année (saison) — pour la pseudo-chaîne locale, l'année est celle du VISIONNAGE */}
+        <div style={{ fontSize:10, fontWeight:800, color:YT_COLOR, letterSpacing:'0.05em', marginBottom:6 }}>{item.local ? 'VIDÉOS PAR ANNÉE DE VISIONNAGE' : 'VIDÉOS PAR ANNÉE'}</div>
         <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
           {years.map(y => {
             const vids = byYear[y];
@@ -17493,7 +17540,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
                 <div onClick={() => setOpenYear(open ? null : y)} title={open ? 'Replier' : 'Voir les vidéos'}
                   style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6, cursor:'pointer', userSelect:'none' }}>
                   <span style={{ display:'inline-block', color:C.dim, fontSize:10, lineHeight:1, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
-                  <div style={{ flex:1, fontSize:12, fontWeight:800, color:C.text }}>Saison {y}</div>
+                  <div style={{ flex:1, fontSize:12, fontWeight:800, color:C.text }}>{item.local ? `Vues en ${y}` : `Saison ${y}`}</div>
                   <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: doneY ? '#4caf50' : C.muted, fontWeight:700 }}>{wY}/{vids.length}</div>
                   <Check done={doneY} onClick={e => { e.stopPropagation(); toggleYear(y, vids); }}
                     title={doneY ? `Décocher toute l'année ${y}` : `Marquer toute l'année ${y} vue`} />
@@ -17529,9 +17576,13 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
             );
           })}
         </div>
-        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
+        {item.local && (
+          <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
+            ℹ Chaîne locale : elle recueille les vidéos lancées depuis ta playlist « {YTSUB_WL_NAME} » (bouton 📺) qui ne sont suivies dans aucune chaîne de TV Time. Une « saison » = l'<b>année où tu l'as regardée</b>, les plus récentes en premier. Rien n'est demandé à YouTube pour cette chaîne.
+          </div>)}
+        {!item.local && <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
           ℹ Les vidéos sont regroupées par année de publication (une « saison » = une année). Chaque vidéo se coche indépendamment. Les vidéos vues et leur durée alimentent les statistiques TV Time. Le bouton ↻ récupère les nouvelles vidéos via l'API YouTube.
-        </div>
+        </div>}
       </div>
     </div>
   );
@@ -18100,6 +18151,16 @@ function TvTimePanel() {
     return { id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: owner ? owner.id : null, channel: v.channel || (owner ? owner.title : ''), fromWl: true };
   };
   const playWl = (list, i) => { openPlayer(list.map(wlQueueEntry), i); };
+  // Vidéo lancée depuis la playlist alors qu'elle n'est suivie NULLE PART dans TV Time
+  // (7.6.85) → elle rejoint la pseudo-chaîne « Chaîne non enregistrée », classée à
+  // l'année de VISIONNAGE. Lecture/écriture via `itemsRef` (le lecteur peut enchaîner
+  // plusieurs vidéos avant un re-render, la closure `items` perdrait les précédentes).
+  const markUnsaved = v => {
+    const prev = itemsRef.current;
+    const next = ytUnsavedAdd(prev, { ...v, pubDate: v.date });
+    if (next === prev) return;
+    itemsRef.current = next; setItems(next); saveTvItems(next);
+  };
   // Toutes les vidéos de MOINS de 3 min (YT_MIN_MINUTES) encore à voir, sur les chaînes
   // pas encore terminées — dans l'ordre chronologique de chaque chaîne. ⚠ Une durée
   // inconnue vaut 0 : elle est traitée comme un Short (même convention que le tag
@@ -18332,7 +18393,10 @@ function TvTimePanel() {
   const ytItems = items.filter(it => it.type === 'youtube' && (!nameQ || (it.title || '').toLowerCase().includes(nameQ))).slice().sort(tvCmp);
   const ytWatching = ytItems.filter(it => it.status === 'watching' || it.status === 'paused');
   const ytTowatch  = ytItems.filter(it => it.status === 'towatch');
-  const ytDone     = ytItems.filter(it => it.status === 'done');
+  // « Chaîne non enregistrée » ÉPINGLÉE en 1re position des VUS (7.6.85) — le reste garde
+  // l'ordre de `tvCmp` (le tri natif est stable).
+  const ytDone     = ytItems.filter(it => it.status === 'done')
+    .sort((a, b) => (ytIsUnsaved(b) ? 1 : 0) - (ytIsUnsaved(a) ? 1 : 0));
   // 📚 Bloc LIVRES séparé (même mécanique que YouTube) : en cours / à lire / lus
   const nbBooks   = items.reduce((a, it) => a + (it.type === 'book' ? 1 : 0), 0);
   const bkItems   = items.filter(it => it.type === 'book' && (!nameQ || (it.title || '').toLowerCase().includes(nameQ))).slice().sort(tvCmp);
@@ -18773,9 +18837,12 @@ function TvTimePanel() {
                     {secTitle('ytDone', '✓', 'VUS', ytDone.length, null, YT_COLOR)}
                     {secOpen.ytDone && (ytDone.length === 0
                       ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucune chaîne vue</div>
-                      : ytDone.map(it => row(it, `${(it.watchedIds || []).length} vidéos vues${it.dropped ? ' · plus suivie' : ''}`,
+                      : ytDone.map(it => row(it, ytIsUnsaved(it)
+                          ? `${(it.videos || []).length} vidéo(s) vues hors chaîne suivie`
+                          : `${(it.watchedIds || []).length} vidéos vues${it.dropped ? ' · plus suivie' : ''}`,
                           <>
-                            <button onClick={() => setStatus(it, 'watching')} title="Repasser en cours" style={abtn(C.muted)}>↩</button>
+                            {/* Pseudo-chaîne locale : « repasser en cours » n'a pas de sens (rien à voir de plus) */}
+                            {!ytIsUnsaved(it) && <button onClick={() => setStatus(it, 'watching')} title="Repasser en cours" style={abtn(C.muted)}>↩</button>}
                             <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
                           </>
                         )))}
@@ -18889,7 +18956,7 @@ function TvTimePanel() {
         onPlaying={v => {
           if (v.fromWl) setWlPlayed(s => { const n = new Set(s); n.add(v.id); return n; });
           if (v.itemId) ytMarkVideoSeen(v.itemId, v.id);
-          else wlForget([v.id]);   // vidéo hors TV Time : au moins la retirer de la playlist
+          else { wlForget([v.id]); markUnsaved(v); }   // suivie nulle part → « Chaîne non enregistrée »
         }} />}
     </div>
   );
