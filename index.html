@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.80';
+const APP_VERSION = '7.6.81';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12407,15 +12407,20 @@ async function actuFetchAll() {
 // Les appels passent par le Bearer OAuth (PAS la clé API : mine=true l'exige).
 // Cache localStorage TTL 30 min (re-fetchable → PAS dans buildBackup).
 // « 🕒 Plus tard » = ajout DIRECT dans une playlist du compte YouTube de
-// l'utilisateur (« À regarder plus tard (Hub) », créée privée si absente).
+// l'utilisateur (« Hub Pierre », créée privée si absente), et RETRAIT automatique
+// dès que la vidéo est marquée vue dans TV Time (7.6.81).
 // ⚠ L'API YouTube INTERDIT d'écrire dans la « À regarder plus tard » NATIVE
 // (playlistId=WL retiré de l'API par Google en 2016) → playlist dédiée, visible
 // dans la bibliothèque YouTube comme n'importe quelle playlist. Nécessite le
 // scope youtube (écriture) sur le token Google. N'ajoute JAMAIS rien dans TV Time.
 const YTSUB_LS           = 'spotifyplus_yt_subs';        // cache { fetched_at, videos }
 const YTSUB_TTL          = 30 * 60 * 1000;
-const YTSUB_WL_NAME      = 'À regarder plus tard (Hub)'; // nom de la playlist YouTube dédiée
+const YTSUB_WL_NAME      = 'Hub Pierre';                 // nom de la playlist YouTube dédiée (7.6.81)
+// Anciens noms de CETTE playlist : retrouvés par titre quand l'id caché a disparu, puis
+// RENOMMÉS (ytWlSyncName) → jamais de doublon après un changement de YTSUB_WL_NAME.
+const YTSUB_WL_OLD_NAMES = ['À regarder plus tard (Hub)'];
 const YTSUB_WL_ID_LS     = 'spotifyplus_yt_wl_playlist'; // id de la playlist (1 seule recherche)
+const YTSUB_WL_NAMED_LS  = 'spotifyplus_yt_wl_named';    // dernier nom réellement appliqué côté YouTube
 const YTSUB_WL_ADDED_LS  = 'spotifyplus_yt_wl_added';    // ids déjà ajoutés (✓ dans l'UI, cap 500)
 const YTSUB_MAX_CHANNELS = 250;                          // garde-fou quota
 const YTSUB_PER_CHANNEL  = 5;                            // vidéos récentes par chaîne
@@ -12482,33 +12487,95 @@ async function ytSubPost(path, params = {}, body = null) {
   } catch { return { __error: 'NET' }; }
 }
 
-// Id de la playlist « À regarder plus tard (Hub) » du compte : cache localStorage →
+// Id de la playlist « Hub Pierre » du compte : cache localStorage →
 // recherche parmi les playlists possédées → création (privée) si absente.
-async function ytWlPlaylistId(skipCache) {
+// DELETE (playlistItems.delete = retirer une vidéo d'une playlist). Réponse 204 sans corps.
+async function ytSubDelete(path, params = {}) {
+  const token = ytgToken();
+  if (!token) return { __error: 'AUTH' };
+  try {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401) { ytgLogout(); return { __error: 'AUTH' }; }
+    if (res.status === 403) {
+      let reason = '';
+      try { const j = await res.json(); reason = j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason || ''; } catch {}
+      return { __error: reason === 'quotaExceeded' || reason === 'rateLimitExceeded' ? 'QUOTA' : 'SCOPE' };
+    }
+    if (res.status === 404) return { __error: 'NOTFOUND' };
+    if (!res.ok) return { __error: 'NET' };
+    return { ok: true };
+  } catch { return { __error: 'NET' }; }
+}
+const YTSUB_WL_DESC = 'Vidéos à regarder plus tard — ajoutées depuis le Hub (section Actu / TV Time).';
+// PUT (playlists.update = renommer une playlist existante).
+async function ytSubPut(path, params = {}, body = null) {
+  const token = ytgToken();
+  if (!token) return { __error: 'AUTH' };
+  try {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : null,
+    });
+    if (res.status === 401) { ytgLogout(); return { __error: 'AUTH' }; }
+    if (res.status === 403) {
+      let reason = '';
+      try { const j = await res.json(); reason = j && j.error && j.error.errors && j.error.errors[0] && j.error.errors[0].reason || ''; } catch {}
+      return { __error: reason === 'quotaExceeded' || reason === 'rateLimitExceeded' ? 'QUOTA' : 'SCOPE' };
+    }
+    if (res.status === 404) return { __error: 'NOTFOUND' };
+    if (!res.ok) return { __error: 'NET' };
+    return await res.json();
+  } catch { return { __error: 'NET' }; }
+}
+// Aligne le TITRE de la playlist sur YTSUB_WL_NAME quand la constante a changé — sinon
+// l'id caché continuerait de pointer sur une playlist portant l'ancien nom (renommage
+// invisible), ou une 2e playlist serait créée. Au plus UN aller-retour par nouveau nom :
+// le nom réellement appliqué est mémorisé dans YTSUB_WL_NAMED_LS. Best effort (un échec
+// ne bloque jamais l'ajout/le retrait, il sera retenté au prochain appel).
+async function ytWlSyncName(pid) {
+  if (!pid) return;
+  try { if (localStorage.getItem(YTSUB_WL_NAMED_LS) === YTSUB_WL_NAME) return; } catch { return; }
+  const d = await ytSubApi('playlists', { part: 'snippet', id: pid, maxResults: '1' });
+  if (d.__error) return;
+  const cur = (d.items || [])[0];
+  if (!cur) return;   // playlist supprimée côté YouTube → l'id caché sera invalidé par l'appel suivant
+  if (cur.snippet && cur.snippet.title === YTSUB_WL_NAME) { try { localStorage.setItem(YTSUB_WL_NAMED_LS, YTSUB_WL_NAME); } catch {} return; }
+  const r = await ytSubPut('playlists', { part: 'snippet' }, { id: pid, snippet: { title: YTSUB_WL_NAME, description: YTSUB_WL_DESC } });
+  if (r && !r.__error) { try { localStorage.setItem(YTSUB_WL_NAMED_LS, YTSUB_WL_NAME); } catch {} }
+}
+// `create = false` → ne CRÉE jamais la playlist (retrait : rien à créer), renvoie null si absente.
+async function ytWlPlaylistId(skipCache, create = true) {
   if (!skipCache) {
     const cached = localStorage.getItem(YTSUB_WL_ID_LS);
-    if (cached) return cached;
+    if (cached) { await ytWlSyncName(cached); return cached; }
   }
   let pageToken = '';
   for (let i = 0; i < 10; i++) {
     const d = await ytSubApi('playlists', { part: 'snippet', mine: 'true', maxResults: '50', ...(pageToken ? { pageToken } : {}) });
     if (d.__error) return d;
-    const hit = (d.items || []).find(p => p.snippet && p.snippet.title === YTSUB_WL_NAME);
-    if (hit) { try { localStorage.setItem(YTSUB_WL_ID_LS, hit.id); } catch {} return hit.id; }
+    // Le nom COURANT d'abord, puis les anciens (playlist créée par une version précédente)
+    const title = p => (p.snippet && p.snippet.title) || '';
+    const hit = (d.items || []).find(p => title(p) === YTSUB_WL_NAME) || (d.items || []).find(p => YTSUB_WL_OLD_NAMES.includes(title(p)));
+    if (hit) { try { localStorage.setItem(YTSUB_WL_ID_LS, hit.id); } catch {} await ytWlSyncName(hit.id); return hit.id; }
     pageToken = d.nextPageToken || '';
     if (!pageToken) break;
   }
+  if (!create) return null;
   const c = await ytSubPost('playlists', { part: 'snippet,status' }, {
-    snippet: { title: YTSUB_WL_NAME, description: 'Vidéos à regarder plus tard — ajoutées depuis le Hub (section Actu).' },
+    snippet: { title: YTSUB_WL_NAME, description: YTSUB_WL_DESC },
     status: { privacyStatus: 'private' },
   });
   if (c.__error) return c;
   if (!c.id) return { __error: 'NET' };
-  try { localStorage.setItem(YTSUB_WL_ID_LS, c.id); } catch {}
+  try { localStorage.setItem(YTSUB_WL_ID_LS, c.id); localStorage.setItem(YTSUB_WL_NAMED_LS, YTSUB_WL_NAME); } catch {}
   return c.id;
 }
 
-// Ajoute une vidéo dans la playlist « À regarder plus tard (Hub) » du compte YouTube.
+// Ajoute une vidéo dans la playlist « Hub Pierre » du compte YouTube.
 // Retourne { ok: true, playlistId } ou { __error }. Si la playlist cachée a été
 // supprimée à la main (404), on invalide le cache et on retente UNE fois (recréation).
 async function ytWatchLaterAdd(videoId) {
@@ -12522,6 +12589,32 @@ async function ytWatchLaterAdd(videoId) {
     if (r.__error === 'NOTFOUND' && attempt === 0) { try { localStorage.removeItem(YTSUB_WL_ID_LS); } catch {} continue; }
     if (r.__error) return r;
     return { ok: true, playlistId: pid };
+  }
+  return { __error: 'NET' };
+}
+
+// Retire une vidéo de la playlist du Hub (7.6.81) — appelée quand la vidéo est marquée
+// VUE dans TV Time. ⚠ playlistItems.delete veut l'id de l'ITEM de playlist, pas celui de
+// la vidéo → un playlistItems.list (filtré par videoId) d'abord. La playlist n'est JAMAIS
+// créée ici (`create = false`) : s'il n'y en a pas, il n'y a rien à retirer.
+// Coût quota : 1 unité (list) + 50 par suppression.
+async function ytWatchLaterRemove(videoId) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const pid = await ytWlPlaylistId(attempt > 0, false);
+    if (pid && pid.__error) return pid;
+    if (!pid || typeof pid !== 'string') return { ok: true, removed: 0 };   // pas de playlist → rien à retirer
+    const d = await ytSubApi('playlistItems', { part: 'id', playlistId: pid, videoId, maxResults: '50' });
+    if (d.__error) {
+      // id caché périmé (playlist supprimée / recréée) → on rejoue une fois en re-cherchant
+      if (attempt === 0 && (d.__error === 'NET' || d.__error === 'NOTFOUND')) { try { localStorage.removeItem(YTSUB_WL_ID_LS); } catch {} continue; }
+      return d;
+    }
+    const ids = (d.items || []).map(i => i.id).filter(Boolean);
+    for (const id of ids) {
+      const r = await ytSubDelete('playlistItems', { id });
+      if (r && r.__error && r.__error !== 'NOTFOUND') return r;   // déjà retiré = succès
+    }
+    return { ok: true, removed: ids.length };
   }
   return { __error: 'NET' };
 }
@@ -12614,7 +12707,7 @@ function ytSubIsShort(v) { return !!v.durSec && v.durSec < YT_MIN_MINUTES * 60; 
 // Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » de la section Actu.
 // Onglets Vidéo / Short en tête (40% de large chacun), lazyload infini par onglet.
 // N'ajoute RIEN dans TV Time.
-// 🕒 = ajout direct dans la playlist YouTube « À regarder plus tard (Hub) » du compte.
+// 🕒 = ajout direct dans la playlist YouTube « Hub Pierre » du compte.
 function ActuYoutubeSection() {
   const [data, setData]       = React.useState(() => loadYtSubs());
   const [added, setAdded]     = React.useState(() => new Set(loadYtWlAdded()));
@@ -17470,7 +17563,7 @@ function TvTimePanel() {
   const [ytMsg, setYtMsg]         = React.useState('');
   const [showYtKey, setShowYtKey] = React.useState(false);
   const [ytKeyInput, setYtKeyInput] = React.useState('');
-  // Vidéos déjà ajoutées à la playlist YouTube « À regarder plus tard (Hub) » (même set
+  // Vidéos déjà ajoutées à la playlist YouTube « Hub Pierre » (même set
   // local que la section Actu → évite les doublons et grise le bouton quand tout est déjà ajouté).
   // 📚 Livres (7.6.52) — module optionnel activé par l'icône 📚 alignée avec le titre
   const [booksOn, setBooksOn]     = React.useState(booksEnabled);
@@ -17706,7 +17799,11 @@ function TvTimePanel() {
     setYtMsg(`Chaîne reverrouillée : ${kept.length} vidéo(s) gardée(s) (vues + ${curYear}).`);
   };
   // Pose la liste des vidéos vues (cochage individuel) + statut auto done/en cours
-  const ytSetWatched = (item, ids) => update(items.map(it => {
+  const ytSetWatched = (item, ids) => {
+    // Vidéos qui viennent d'être cochées → retrait de la playlist du Hub (7.6.81)
+    const was = new Set(item.watchedIds || []);
+    wlForget([...new Set(ids)].filter(id => !was.has(id)));
+    update(items.map(it => {
     if (it.type !== 'youtube' || it.id !== item.id) return it;
     const clean = [...new Set(ids)];
     const next = { ...it, watchedIds: clean };
@@ -17716,7 +17813,8 @@ function TvTimePanel() {
       else if (clean.length < tot && it.status === 'done') next.status = 'watching';
     }
     return next;
-  }));
+    }));
+  };
 
   // Filtre de RECHERCHE Films/Séries — 'all' (« Les deux », défaut) | 'movie' | 'tv'.
   // Non persisté : repart sur « Les deux » à chaque montage. 'all' → /search/multi,
@@ -17768,7 +17866,11 @@ function TvTimePanel() {
     if (results !== null && query.trim()) search(t);
   };
 
-  const setStatus = (item, status) => update(items.map(it => {
+  const setStatus = (item, status) => {
+    // ✓ chaîne YouTube « tout vu » → ses vidéos quittent la playlist du Hub (7.6.81 ;
+    // wlForget ne traite que celles que le Hub y avait mises, pas tout le catalogue)
+    if (status === 'done' && item.type === 'youtube') wlForget((item.videos || []).map(v => v.id));
+    update(items.map(it => {
     if (it.id !== item.id || it.type !== item.type) return it;
     // ✓ série terminée = tous les épisodes cochés (alimente les stats d'épisodes)
     const doneTv = status === 'done' && it.type === 'tv';
@@ -17785,7 +17887,8 @@ function TvTimePanel() {
       // Repasser en actif (watching/towatch/paused) = re-suivre → on lève le drapeau « ne plus suivre »
       dropped: status === 'done' ? it.dropped : false,
     };
-  }));
+    }));
+  };
   // « Ignorer les vidéos non vues » (YouTube uniquement — bouton orange de la fiche) :
   // passe en VUS avec la progression ACTUELLE (ne coche PAS les vidéos non vues) et
   // SANS poser `dropped` → ytCheckNewVideos repassera la chaîne « En cours » dès qu'une
@@ -17841,6 +17944,7 @@ function TvTimePanel() {
     const prev = itemsRef.current;
     const cur = prev.find(x => x.type === 'youtube' && x.id === itemId);
     if (!cur || (cur.watchedIds || []).includes(videoId)) return;
+    wlForget([videoId]);   // vue → retirée de la playlist du Hub (7.6.81)
     const next = prev.map(it => {
       if (it.type !== 'youtube' || it.id !== itemId) return it;
       const clean = [...new Set([...(it.watchedIds || []), videoId])];
@@ -17852,7 +17956,7 @@ function TvTimePanel() {
     itemsRef.current = next; setItems(next); saveTvItems(next);
   };
   // Ajoute toutes les vidéos restantes (non vues ET pas déjà dans la playlist) à la playlist
-  // YouTube « À regarder plus tard (Hub) ». Réutilise le set local wlAdded → skip les doublons.
+  // YouTube « Hub Pierre ». Réutilise le set local wlAdded → skip les doublons.
   const wlAlert = err => {
     if (err === 'AUTH' || err === 'SCOPE') alert('YouTube : reconnecte-toi (accès playlist requis) pour ajouter les vidéos.');
     else if (err === 'QUOTA') alert('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
@@ -17873,6 +17977,23 @@ function TvTimePanel() {
     setWlAdded(done); saveYtWlAdded([...done]);
     setWlBusyId(null);
     wlAlert(err);
+  };
+  // Vidéo VUE → on la retire de la playlist du Hub (7.6.81, demande utilisateur).
+  // ⚠ Seules les vidéos que le Hub y a mises (`wlAdded`) sont traitées : sans ça, chaque
+  // coche déclencherait un aller-retour API inutile (et on toucherait à des vidéos que
+  // l'utilisateur aurait ajoutées lui-même). Silencieux : un échec laisse l'id dans
+  // `wlAdded`, le retrait sera retenté au prochain marquage. `saveYtWlAdded` relit le
+  // localStorage (source de vérité) pour ne pas écraser un ajout concurrent.
+  const wlForget = async ids => {
+    const todo = [...new Set(ids)].filter(id => wlAdded.has(id));
+    if (!todo.length) return;
+    const okIds = [];
+    for (const id of todo) { const r = await ytWatchLaterRemove(id); if (r && r.ok) okIds.push(id); else break; }
+    if (!okIds.length) return;
+    setWlAdded(prev => { const n = new Set(prev); for (const id of okIds) n.delete(id); return n; });
+    const stored = new Set(loadYtWlAdded());
+    for (const id of okIds) stored.delete(id);
+    saveYtWlAdded([...stored]);
   };
   // Même chose pour UNE SEULE vidéo (bouton 🕒 par vidéo non vue dans la fiche d'une
   // chaîne, 7.6.80). Partage l'état `wlBusyId` (une seule écriture playlist à la fois)
@@ -18121,7 +18242,7 @@ function TvTimePanel() {
       title="Arrêter de suivre — passe en Vus avec les vidéos déjà vues, ne resurgira plus avec de nouvelles vidéos"
       style={abtn('#f5b81f')}>⏹</button>);
   // Bouton 🕒 (chaînes YouTube EN COURS) : ajoute les vidéos restantes à la playlist
-  // « À regarder plus tard (Hub) ». Grisé quand toutes les restantes y sont déjà (ou aucune).
+  // « Hub Pierre ». Grisé quand toutes les restantes y sont déjà (ou aucune).
   const wlBtn = it => {
     const remaining = ytUnwatchedIds(it);
     const toAdd = remaining.filter(id => !wlAdded.has(id));
