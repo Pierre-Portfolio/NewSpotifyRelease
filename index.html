@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.81';
+const APP_VERSION = '7.6.82';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -634,7 +634,17 @@ async function megaDownload() {
 //     • Drive  : gdrive_access / gdrive_expiry / gdrive_scopes  (drive.file [+ drive.readonly])
 //     • YouTube: ytg_access    / ytg_expiry    / ytg_scopes     (youtube seul)
 //   Un seul jeton ne peut PAS couvrir les deux (même en consentement incrémental : le
-//   include_granted_scopes referait une requête mixte → même erreur). Conséquence visible :
+//   include_granted_scopes referait une requête mixte → même erreur).
+// ⚠ 7.6.82 — LA SÉPARATION DES JETONS NE SUFFISAIT PAS, le bug 400 persistait : GIS met
+//   `include_granted_scopes` à TRUE PAR DÉFAUT, donc Google RECOLLAIT de lui-même les scopes
+//   Drive déjà accordés au client_id. La requête réellement envoyée par ytgLogin était
+//   « scope=…/auth/youtube …/auth/drive.readonly …/auth/drive.file & include_granted_scopes=true »
+//   (lisible dans le détail de la page d'erreur) alors que le code ne demandait QUE youtube —
+//   d'où « Erreur 400 : invalid_request » juste APRÈS le choix du compte, l'écran de
+//   consentement YouTube s'affichant normalement avant. → `include_granted_scopes: false` est
+//   passé à initTokenClient pour TOUS les appels (voir gdriveRequestToken) : dans l'autre sens
+//   aussi, un jeton YouTube accordé aurait fait échouer la connexion Drive.
+//   Conséquence visible :
 //   la 1re fois, il faut cliquer « Connecter Google (YouTube) » dans Actu EN PLUS de la
 //   connexion Drive d'À propos. Les jetons Drive émis AVANT cette version portaient encore
 //   le scope youtube → ytgToken() les accepte en repli jusqu'à leur expiration (~1 h).
@@ -701,6 +711,14 @@ function gdriveRequestToken(scopes, silent, store) {
     const client = window.google.accounts.oauth2.initTokenClient({
       client_id: GDRIVE_CLIENT_ID,
       scope: scopes,
+      // ⚠ 7.6.82 — INDISPENSABLE : GIS met include_granted_scopes à TRUE par défaut, donc
+      // Google RECOLLE dans la requête tous les scopes déjà accordés à ce client_id. Demander
+      // `auth/youtube` seul repartait en réalité avec « youtube + drive.readonly + drive.file »
+      // → combinaison interdite (cf. 7.6.67) → « Erreur 400 : invalid_request » APRÈS le choix
+      // du compte. Séparer les JETONS ne suffisait pas : il faut aussi couper le recollage.
+      // Vaut dans LES DEUX SENS (une fois YouTube accordé, une demande Drive y ramènerait
+      // youtube et casserait la sauvegarde à son tour) → false pour tous les appels.
+      include_granted_scopes: false,
       prompt: silent ? '' : undefined,
       callback: r => {
         if (r && r.access_token) { keep(r.access_token, r.expires_in, r.scope || scopes); ok(r); }
