@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.90';
+const APP_VERSION = '7.6.91';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17663,7 +17663,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
 // La pop-up reste montée sous le lecteur (z 200 vs 400) → « ← Retour » revient à la liste ;
 // les vidéos déjà lancées y sont grisées (elles ont été retirées de la playlist côté
 // YouTube, ↻ le confirme).
-function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, onRefresh, onClose, onValidate, onUnvalidate, busyId }) {
+function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, onRefresh, onClose, onValidate, onUnvalidate, onRemove, busyId }) {
   // `playedIds` = ids VALIDÉS (bouton ✓ du lecteur, ou sortie/changement de vidéo, ou la
   // coche verte ci-dessous). ⚠ 7.6.89 — ils RESTENT affichés tant que la pop-up est ouverte
   // pour pouvoir les DÉCOCHER ; ils ne disparaissent qu'à la réouverture (le parent vide
@@ -17747,6 +17747,15 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
                       {busyId === v.id ? '…' : '✓'}
                     </button>
                   )}
+                  {/* ✕ rouge (7.6.90) : retire la vidéo de la playlist SANS la marquer vue
+                      — « je ne veux plus l'avoir en attente », ≠ la coche verte. */}
+                  {onRemove && (
+                    <button onClick={() => onRemove(v)} disabled={busyId === v.id}
+                      title={`Retirer de « ${YTSUB_WL_NAME} » sans la marquer vue`}
+                      style={{ width:26, height:26, borderRadius:'50%', flexShrink:0, padding:0, fontSize:15, fontWeight:700, lineHeight:1,
+                        cursor: busyId === v.id ? 'default' : 'pointer', background:'none',
+                        border:'1px solid #e0505066', color:'#e05050', opacity: busyId === v.id ? 0.5 : 1 }}>×</button>
+                  )}
                 </div>
               );
             })}
@@ -17754,7 +17763,7 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
         )}
 
         <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
-          ℹ Contenu réel de ta playlist YouTube{playlistId ? <> <a href={`https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a></> : ` « ${YTSUB_WL_NAME} »`}. Une vidéo est <b>validée</b> quand tu la quittes dans le lecteur (⏭ Suivant, ⏮, ← Retour), avec le bouton <b>✓ Valider</b>, ou avec la <b>coche verte</b> ci-dessus : elle sort de la playlist et rejoint les <b>Vus</b> de TV Time. Elle reste affichée ici tant que tu ne fermes pas cette fenêtre, pour pouvoir la <b>décocher</b> si finalement tu ne l'as pas vue.
+          ℹ Contenu réel de ta playlist YouTube{playlistId ? <> <a href={`https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a></> : ` « ${YTSUB_WL_NAME} »`}. Une vidéo est <b>validée</b> quand tu la quittes dans le lecteur (⏭ Suivant, ⏮, ← Retour), avec le bouton <b>✓ Valider</b>, ou avec la <b>coche verte</b> ci-dessus : elle sort de la playlist et rejoint les <b>Vus</b> de TV Time. Elle reste affichée ici tant que tu ne fermes pas cette fenêtre, pour pouvoir la <b>décocher</b> si finalement tu ne l'as pas vue. Le <b style={{ color:'#e05050' }}>×</b> rouge, lui, la sort de la playlist <b>sans</b> la marquer vue.
         </div>
       </div>
     </div>
@@ -18287,8 +18296,12 @@ function TvTimePanel() {
       wasWatched: !!(ch && (ch.watchedIds || []).includes(v.id)),
       prevStatus: ch ? ch.status : null, prevDoneAt: ch ? ch.doneAt : null };
     setWlValidated(m => (m.has(v.id) ? m : new Map(m).set(v.id, undo)));
-    if (v.itemId) ytMarkVideoSeen(v.itemId, v.id);   // appelle déjà wlForget
-    else { wlForget([v.id]); markUnsaved(v); }
+    // ⚠ Le retrait de la playlist est demandé EXPLICITEMENT ici (force), et AVANT le
+    // marquage : `ytMarkVideoSeen` sort en amont quand la vidéo est déjà cochée dans sa
+    // chaîne, et son propre appel à `wlForget` ne partait alors jamais.
+    wlForget([v.id], true);
+    if (v.itemId) ytMarkVideoSeen(v.itemId, v.id);
+    else markUnsaved(v);
   };
   // ↩ DÉVALIDER (7.6.89, coche verte de la pop-up) : « finalement je ne l'ai pas vue ».
   // Décoche dans TV Time (ou la sort de la pseudo-chaîne) PUIS la remet dans la playlist
@@ -18309,6 +18322,19 @@ function TvTimePanel() {
     if (r && r.__error) { wlAlert(r.__error); return; }
     const added = new Set(loadYtWlAdded()); added.add(v.id);
     setWlAdded(new Set(added)); saveYtWlAdded([...added]);
+  };
+  // ✕ rouge de la pop-up (7.6.90) : sort la vidéo de la playlist YouTube SANS la marquer
+  // vue (≠ coche verte) et la retire de la liste affichée. Rien n'est touché dans TV Time.
+  const removeWlVideo = async v => {
+    if (wlBusyValid) return;
+    setWlBusyValid(v.id);
+    const r = await ytWatchLaterRemove(v.id);
+    setWlBusyValid(null);
+    if (r && r.__error) { wlAlert(r.__error, 'Retrait'); return; }
+    setWlPop(p => (p ? { ...p, videos: (p.videos || []).filter(x => x.id !== v.id) } : p));
+    setWlValidated(m => { if (!m.has(v.id)) return m; const n = new Map(m); n.delete(v.id); return n; });
+    const stored = new Set(loadYtWlAdded()); stored.delete(v.id);
+    setWlAdded(new Set(stored)); saveYtWlAdded([...stored]);
   };
   // Inverse d'ytMarkVideoSeen : décoche la vidéo et restaure le statut d'avant la validation
   // (une chaîne passée en « Vus » parce que c'était la dernière vidéo redevient « En cours »).
@@ -18372,10 +18398,10 @@ function TvTimePanel() {
   };
   // Ajoute toutes les vidéos restantes (non vues ET pas déjà dans la playlist) à la playlist
   // YouTube « Hub Pierre ». Réutilise le set local wlAdded → skip les doublons.
-  const wlAlert = err => {
-    if (err === 'AUTH' || err === 'SCOPE') alert('YouTube : reconnecte-toi (accès playlist requis) pour ajouter les vidéos.');
+  const wlAlert = (err, action = 'Ajout') => {
+    if (err === 'AUTH' || err === 'SCOPE') alert('YouTube : reconnecte-toi (accès playlist requis) pour modifier la playlist.');
     else if (err === 'QUOTA') alert('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
-    else if (err) alert('Ajout impossible (réseau) — réessaie.');
+    else if (err) alert(action + ' impossible (réseau) — réessaie.');
   };
   const queueRemaining = async it => {
     if (wlBusyId) return;
@@ -18399,8 +18425,15 @@ function TvTimePanel() {
   // l'utilisateur aurait ajoutées lui-même). Silencieux : un échec laisse l'id dans
   // `wlAdded`, le retrait sera retenté au prochain marquage. `saveYtWlAdded` relit le
   // localStorage (source de vérité) pour ne pas écraser un ajout concurrent.
-  const wlForget = async ids => {
-    const todo = [...new Set(ids)].filter(id => wlAdded.has(id));
+  const wlForget = async (ids, force = false) => {
+    // ⚠ 7.6.91 — `force` court-circuite le garde-fou `wlAdded`. Ce garde-fou protège le
+    // marquage AUTOMATIQUE (cocher une vidéo dans une fiche ne doit pas toucher à une vidéo
+    // que l'utilisateur a lui-même mise dans la playlist), mais il faisait ÉCHOUER EN SILENCE
+    // le retrait demandé depuis la pop-up 📺 : celle-ci liste le contenu RÉEL de la playlist,
+    // qui contient des vidéos absentes du mémo local (ajoutées depuis un autre appareil,
+    // localStorage vidé, cap de 500 atteint, ou ajoutées à la main sur YouTube) → la vidéo
+    // n'était jamais retirée et réapparaissait à chaque réouverture.
+    const todo = [...new Set(ids)].filter(id => force || wlAdded.has(id));
     if (!todo.length) return;
     const okIds = [];
     for (const id of todo) { const r = await ytWatchLaterRemove(id); if (r && r.ok) okIds.push(id); else break; }
@@ -19130,7 +19163,8 @@ function TvTimePanel() {
       {wlPop && <YtWatchlistModal state={wlPop.state} videos={wlPop.videos} err={wlPop.err}
         playlistId={wlPop.playlistId} playedIds={wlValidated}
         onPlay={(list, i) => playWl(list, i)} onRefresh={loadWlPop}
-        onValidate={v => validateWlVideo(wlQueueEntry(v))} onUnvalidate={v => unvalidateWlVideo(wlQueueEntry(v))} busyId={wlBusyValid}
+        onValidate={v => validateWlVideo(wlQueueEntry(v))} onUnvalidate={v => unvalidateWlVideo(wlQueueEntry(v))}
+        onRemove={removeWlVideo} busyId={wlBusyValid}
         onClose={() => { setWlPop(null); setWlValidated(new Map()); }} />}
       {/* Lecteur plein écran (bouton 🩳 / 📺 ou clic sur une vignette de fiche YouTube).
           ⚠ Une vidéo lancée depuis la playlist (`fromWl`) n'est PLUS marquée vue au
