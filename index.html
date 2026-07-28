@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.92';
+const APP_VERSION = '7.6.93';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2194,6 +2194,19 @@ const C = {
   blue:'oklch(0.65 0.18 250)',
 };
 
+// ── Profil Spotify mis en CACHE (7.6.93) ─────────────────────────────────────────
+// Écrit à chaque `/me` réussi. Sert d'identité affichable en MODE HORS LIGNE : quand
+// `/me` est injoignable, le hub s'ouvre quand même et garde le nom/l'avatar au lieu
+// d'afficher un profil vide. Re-fetchable → volontairement HORS buildBackup.
+const ME_CACHE_KEY = 'spotifyplus_me';
+function meCacheSave(me) {
+  if (!me || !me.id) return;
+  try { lsSet(ME_CACHE_KEY, JSON.stringify({ id: me.id, display_name: me.display_name, images: me.images, product: me.product })); } catch {}
+}
+function meCacheLoad() {
+  try { const r = JSON.parse(localStorage.getItem(ME_CACHE_KEY) || 'null'); return r && r.id ? r : null; } catch { return null; }
+}
+
 // ════════════════════════════════════════════════
 // STORE (contexte global)
 // ════════════════════════════════════════════════
@@ -2205,6 +2218,14 @@ function StoreProvider({ children }) {
   const [user,     setUser]       = React.useState(null);
   // Raison du dernier échec de connexion Spotify — affichée sur l'écran de connexion
   const [authError, setAuthError] = React.useState('');
+  // ── MODE HORS LIGNE (7.6.93) ─────────────────────────────────────────────────────
+  // `offlineReady` : un jeton Spotify EXISTE mais /me n'a pas répondu (panne réseau /
+  // passerelle). L'écran de connexion propose alors « Continuer hors ligne » au lieu de
+  // n'offrir qu'un nouvel aller-retour OAuth qui échouerait pareil.
+  // `offline` : on tourne SANS profil vérifié — tout le hub local (DB, feed, TV Time,
+  // Note, Frigo, Stats…) fonctionne, seules les requêtes Spotify échoueront.
+  const [offlineReady, setOfflineReady] = React.useState(false);
+  const [offline,      setOffline]      = React.useState(false);
 
   const [dbReady,  setDbReady]          = React.useState(false);
   const [resumableSession, setResumableSession] = React.useState(null);
@@ -2387,6 +2408,104 @@ function StoreProvider({ children }) {
     setEta((h > 0 ? `${h}h ` : '') + (m > 0 || h > 0 ? `${m}m ` : '') + `${s}s`);
   }, []);
 
+  // ── Init LOCALE (DB, stats, quota…) ──────────────────────────────────────────────
+  // Extraite de l'effet d'init (7.6.93) : elle ne dépend en RIEN de Spotify, et doit
+  // pouvoir tourner aussi à l'entrée en MODE HORS LIGNE (bouton « Continuer hors ligne »),
+  // sinon la base ne serait jamais chargée et le hub s'ouvrirait vide.
+  // Deps [] : ne référence que des setters d'état et des refs (stables).
+  const bootLocal = React.useCallback(async () => {
+        // ⚠ Le chargement Finance n'est PLUS lancé au login : les APIs dédiées (Alpha
+        // Vantage, Twelve Data, CoinGecko, gold-api) ne sont appelées QUE lorsque
+        // l'utilisateur ouvre l'onglet/section Finance (FinancePanel monte → startFinanceLight).
+
+        // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
+        try { navigator.storage?.persist?.(); } catch {}
+
+        // Remember → To do : ajoute au carrousel « Aujourd'hui » les rappels à ≤ 3 j de l'échéance
+        // ⚠ AVANT notifyDueReminders : les rappels hebdomadaires ne notifient que si leur
+        // tâche est présente dans le To do — elle doit donc être créée d'abord.
+        try { syncRemembersToTodos(); } catch {}
+        // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
+        try { notifyDueReminders(); } catch {}
+
+        // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
+        // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
+        // Fire-and-forget (ne bloque pas l'init) — écrit directement en localStorage.
+        try { ytCheckNewVideos(); } catch {}
+
+        // Init local DB
+        await initDB();
+
+        // Check month/year reset
+        const now2      = new Date();
+        // Mois/année LOCAUX (pas toISOString() qui est en UTC) : sinon le compteur mensuel
+        // bascule à minuit UTC (≈ 01h/02h en France) au lieu de minuit local.
+        const curMonth  = `${now2.getFullYear()}-${String(now2.getMonth() + 1).padStart(2, '0')}`;
+        const curYear   = now2.getFullYear().toString();
+        const statsRow  = dbGet("SELECT last_reset_month, last_reset_year FROM stats WHERE id = 1");
+        if (statsRow?.last_reset_month !== curMonth) {
+          dbRun("UPDATE stats SET listened_this_month = 0, last_reset_month = ? WHERE id = 1", [curMonth]);
+        }
+        if (statsRow?.last_reset_year !== curYear) {
+          dbRun("UPDATE stats SET listened_this_year = 0, last_reset_year = ? WHERE id = 1", [curYear]);
+        }
+
+        // ⚠ 7.6.65 — PLUS D'IMPORT AUTOMATIQUE des Découvertes de la semaine au login
+        // (demande utilisateur : « retire le forcing, on se contentera de moi qui clique »).
+        // L'appel `importDiscoverWeekly` qui tournait ici à chaque connexion — gate 1×/semaine
+        // ISO + re-tentative après le cooldown d'échec — est SUPPRIMÉ : plus aucune requête
+        // playlist n'est émise sans geste de l'utilisateur. Seul le bouton violet/jaune
+        // (`DiscoverWeeklyButton` → `dwManualAccess`, qui ignore tous les cooldowns) déclenche
+        // désormais la lecture de la playlist et l'import. La capture pendant l'ÉCOUTE
+        // (`dwCaptureFromContext`) reste active : elle ne coûte aucune requête dédiée, elle
+        // lit la file du player déjà interrogée par le poll.
+
+        // Load known URIs for dedup (inclut les DW tracks fraîchement importées)
+        const uriRows = dbAll("SELECT spotify_uri FROM tracks");
+        uriRows.forEach(r => knownUrisRef.current.add(r.spotify_uri));
+        // + les titres purgés : sortis de `tracks` par la purge, ils ne doivent jamais
+        // être réinsérés par un re-scan (cf. purged_uris)
+        try { dbAll("SELECT spotify_uri FROM purged_uris").forEach(r => knownUrisRef.current.add(r.spotify_uri)); } catch {}
+
+        // Load feed (not listened) — voir loadFeedFromDB (les filtres/tri re-query la DB, hors cap 1000)
+        // tri par défaut : par artiste (A→Z), aligné sur l'état initial de sortBy
+        setFeed(loadFeedFromDB({ sortBy: 'artist' }));
+
+        // Load listen stats
+        setListenStats(loadListenStatsFromDB());
+        setLikedTracks(loadLikedTracksFromDB());
+        setHistory(loadHistoryFromDB());
+        setArtists(loadArtistsFromDB());
+        // syncInitialLikes est appelé après setDbReady(true) via useEffect
+
+        // Vérifier si une synchro était en cours (reprise possible)
+        try {
+          const saved = localStorage.getItem('spotifyplus_sync_progress');
+          if (saved) {
+            const p = JSON.parse(saved);
+            if (p?.artists_scanned > 0) setResumableSession(p);
+          }
+        } catch {}
+
+        try {
+          setDailyScrapings(loadQuota().count);
+          const until = ensureQuotaWindow(); // expose/ouvre la fenêtre 24h si quota atteint
+          if (until) setQuotaUntil(until);
+        } catch {}
+
+        // Fenêtre rate-limit persistée (déjà relue dans _rlUntil au chargement du module)
+        try {
+          if (_rlUntil > Date.now()) setBlockedUntil(_rlUntil);
+          else localStorage.removeItem(RL_LS_KEY);
+        } catch {}
+
+        setDbReady(true);
+
+        // Proposition de sauvegarde 1×/semaine — différée pour laisser l'UI s'afficher
+        // avant le confirm bloquant (DB déjà prête, buildBackup fonctionne)
+        setTimeout(() => { try { maybeWeeklyBackupPrompt(); } catch {} }, 2500);
+  }, []);
+
   // ── Init OAuth + local DB ──
   React.useEffect(() => {
     (async () => {
@@ -2433,99 +2552,10 @@ function StoreProvider({ children }) {
         // me.rate_limited : fenêtre 429 persistée active au boot — le token existe,
         // on entre quand même en mode connecté (dégradé) au lieu d'éjecter vers le login
         if (me?.id || me?.rate_limited) {
-          if (me?.id) setUser(me);
+          if (me?.id) { setUser(me); meCacheSave(me); }
           setAuthState('connected');
 
-          // ⚠ Le chargement Finance n'est PLUS lancé au login : les APIs dédiées (Alpha
-          // Vantage, Twelve Data, CoinGecko, gold-api) ne sont appelées QUE lorsque
-          // l'utilisateur ouvre l'onglet/section Finance (FinancePanel monte → startFinanceLight).
-
-          // Demander la persistance du stockage (réduit le risque d'éviction IndexedDB, surtout iOS)
-          try { navigator.storage?.persist?.(); } catch {}
-
-          // Remember → To do : ajoute au carrousel « Aujourd'hui » les rappels à ≤ 3 j de l'échéance
-          // ⚠ AVANT notifyDueReminders : les rappels hebdomadaires ne notifient que si leur
-          // tâche est présente dans le To do — elle doit donc être créée d'abord.
-          try { syncRemembersToTodos(); } catch {}
-          // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
-          try { notifyDueReminders(); } catch {}
-
-          // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
-          // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
-          // Fire-and-forget (ne bloque pas l'init) — écrit directement en localStorage.
-          try { ytCheckNewVideos(); } catch {}
-
-          // Init local DB
-          await initDB();
-
-          // Check month/year reset
-          const now2      = new Date();
-          // Mois/année LOCAUX (pas toISOString() qui est en UTC) : sinon le compteur mensuel
-          // bascule à minuit UTC (≈ 01h/02h en France) au lieu de minuit local.
-          const curMonth  = `${now2.getFullYear()}-${String(now2.getMonth() + 1).padStart(2, '0')}`;
-          const curYear   = now2.getFullYear().toString();
-          const statsRow  = dbGet("SELECT last_reset_month, last_reset_year FROM stats WHERE id = 1");
-          if (statsRow?.last_reset_month !== curMonth) {
-            dbRun("UPDATE stats SET listened_this_month = 0, last_reset_month = ? WHERE id = 1", [curMonth]);
-          }
-          if (statsRow?.last_reset_year !== curYear) {
-            dbRun("UPDATE stats SET listened_this_year = 0, last_reset_year = ? WHERE id = 1", [curYear]);
-          }
-
-          // ⚠ 7.6.65 — PLUS D'IMPORT AUTOMATIQUE des Découvertes de la semaine au login
-          // (demande utilisateur : « retire le forcing, on se contentera de moi qui clique »).
-          // L'appel `importDiscoverWeekly` qui tournait ici à chaque connexion — gate 1×/semaine
-          // ISO + re-tentative après le cooldown d'échec — est SUPPRIMÉ : plus aucune requête
-          // playlist n'est émise sans geste de l'utilisateur. Seul le bouton violet/jaune
-          // (`DiscoverWeeklyButton` → `dwManualAccess`, qui ignore tous les cooldowns) déclenche
-          // désormais la lecture de la playlist et l'import. La capture pendant l'ÉCOUTE
-          // (`dwCaptureFromContext`) reste active : elle ne coûte aucune requête dédiée, elle
-          // lit la file du player déjà interrogée par le poll.
-
-          // Load known URIs for dedup (inclut les DW tracks fraîchement importées)
-          const uriRows = dbAll("SELECT spotify_uri FROM tracks");
-          uriRows.forEach(r => knownUrisRef.current.add(r.spotify_uri));
-          // + les titres purgés : sortis de `tracks` par la purge, ils ne doivent jamais
-          // être réinsérés par un re-scan (cf. purged_uris)
-          try { dbAll("SELECT spotify_uri FROM purged_uris").forEach(r => knownUrisRef.current.add(r.spotify_uri)); } catch {}
-
-          // Load feed (not listened) — voir loadFeedFromDB (les filtres/tri re-query la DB, hors cap 1000)
-          // tri par défaut : par artiste (A→Z), aligné sur l'état initial de sortBy
-          setFeed(loadFeedFromDB({ sortBy: 'artist' }));
-
-          // Load listen stats
-          setListenStats(loadListenStatsFromDB());
-          setLikedTracks(loadLikedTracksFromDB());
-          setHistory(loadHistoryFromDB());
-          setArtists(loadArtistsFromDB());
-          // syncInitialLikes est appelé après setDbReady(true) via useEffect
-
-          // Vérifier si une synchro était en cours (reprise possible)
-          try {
-            const saved = localStorage.getItem('spotifyplus_sync_progress');
-            if (saved) {
-              const p = JSON.parse(saved);
-              if (p?.artists_scanned > 0) setResumableSession(p);
-            }
-          } catch {}
-
-          try {
-            setDailyScrapings(loadQuota().count);
-            const until = ensureQuotaWindow(); // expose/ouvre la fenêtre 24h si quota atteint
-            if (until) setQuotaUntil(until);
-          } catch {}
-
-          // Fenêtre rate-limit persistée (déjà relue dans _rlUntil au chargement du module)
-          try {
-            if (_rlUntil > Date.now()) setBlockedUntil(_rlUntil);
-            else localStorage.removeItem(RL_LS_KEY);
-          } catch {}
-
-          setDbReady(true);
-
-          // Proposition de sauvegarde 1×/semaine — différée pour laisser l'UI s'afficher
-          // avant le confirm bloquant (DB déjà prête, buildBackup fonctionne)
-          setTimeout(() => { try { maybeWeeklyBackupPrompt(); } catch {} }, 2500);
+          await bootLocal();
         } else {
           // Jeton valide MAIS Spotify refuse /me : c'est la panne la plus déroutante
           // (l'utilisateur voit le consentement réussir puis revient sur le login). Le corps
@@ -2540,10 +2570,14 @@ function StoreProvider({ children }) {
           if (st === 403) msg += " → ouvre developer.spotify.com/dashboard, ton appli, « User Management », et ajoute-toi (nom + e-mail du compte Spotify) ; en Development Mode chaque compte doit y figurer.";
           if (st === 401) msg += " → le jeton a été refusé : déconnecte-toi puis reconnecte-toi.";
           setAuthError(msg);
+          // ⚠ 7.6.93 — le jeton EXISTE : la session n'est pas jetée et l'écran de connexion
+          // propose « Continuer hors ligne » plutôt que d'être un cul-de-sac (cf. offlineReady).
+          setOfflineReady(true);
           setAuthState('login');
         }
       } catch (e) {
         setAuthError('Échec de la connexion à Spotify : ' + ((e && e.message) || 'erreur inconnue') + '.');
+        setOfflineReady(true);
         setAuthState('login');
       }
     })();
@@ -3445,8 +3479,22 @@ function StoreProvider({ children }) {
     log('🔄 Quota 24h réinitialisé manuellement — synchro de nouveau disponible.', 'info');
   };
 
+  // ── Entrée en MODE HORS LIGNE (7.6.93) ───────────────────────────────────────────
+  // Déclenchée par le bouton « Continuer hors ligne » de l'écran de connexion, quand un
+  // jeton existe mais que /me n'a pas répondu. On lance la MÊME init locale que la
+  // connexion normale (sinon la base ne serait jamais chargée) et on affiche le profil
+  // mis en cache au dernier succès, faute de pouvoir le vérifier maintenant.
+  // ⚠ Rien n'est purgé : le jeton reste en place, un simple rechargement retentera /me.
+  const enterOffline = React.useCallback(() => {
+    setUser(meCacheLoad());
+    setOffline(true);
+    setAuthError('');
+    setAuthState('connected');
+    bootLocal();
+  }, [bootLocal]);
+
   const api = {
-    authState, user, otherTab, authError,
+    authState, user, otherTab, authError, offline, offlineReady, enterOffline,
     syncState, scraping, paused, rlWaiting, blockedUntil, togglePause, startSync, logout,
     stats, progress, currentArtist, statusMsg, statusMode,
     nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs, now,
@@ -7931,8 +7979,12 @@ function Home({ isMobile }) {
   const [tool, setTool] = React.useState(null);   // null | 'notes' | 'calc' | 'games'
   // Raison du dernier échec de connexion : sans ça, un retour OAuth raté renvoyait ici
   // sans le moindre indice (« ça ne se connecte pas et ça revient au login »).
-  const { authError } = useStore();
+  const { authError, offlineReady, enterOffline } = useStore();
   const onConnect = () => { setConnecting(true); loginWithSpotify(); };
+  // Hauteur du CTA Spotify, fixée explicitement pour que le bouton « Continuer hors
+  // ligne » fasse EXACTEMENT la moitié (demande utilisateur) — la valeur reprend la
+  // hauteur que le CTA rendait déjà avec ses paddings (14/16 px + contenu 19/21 px).
+  const ctaH = isMobile ? 47 : 53;
   // Taille calibrée pour tenir « Hub de Pierre » sur UNE seule ligne (nowrap) sans déborder
   const titleSize = isMobile ? 'clamp(26px,10.5vw,52px)' : 'clamp(48px,8vw,104px)';
   const padX      = isMobile ? 20 : 56;
@@ -8005,12 +8057,21 @@ function Home({ isMobile }) {
               </div>
             )}
             <button onClick={onConnect} disabled={connecting} className={connecting ? undefined : 'hub-cta'}
-              style={{ width:'100%', background:'linear-gradient(90deg,#1ed760,#1fc95a)', border:'none', borderRadius:12, padding: isMobile?'14px 0':'16px 0', cursor: connecting?'default':'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:12, transition:'opacity 0.3s, transform 0.2s', opacity: connecting?0.75:1, boxShadow:'0 10px 30px rgba(30,215,96,0.35)' }}>
+              style={{ width:'100%', height:ctaH, background:'linear-gradient(90deg,#1ed760,#1fc95a)', border:'none', borderRadius:12, padding:0, cursor: connecting?'default':'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:12, transition:'opacity 0.3s, transform 0.2s', opacity: connecting?0.75:1, boxShadow:'0 10px 30px rgba(30,215,96,0.35)' }}>
               <SpotifyIcon size={isMobile?19:21} />
               <span style={{ fontSize: isMobile?14:15.5, fontWeight:800, color:'#00140a', letterSpacing:'0.01em' }}>
                 {connecting ? 'Redirection…' : 'Se connecter avec Spotify'}
               </span>
             </button>
+            {/* ⚠ 7.6.93 — proposé UNIQUEMENT quand un jeton Spotify existe mais que /me n'a pas
+                répondu : relancer OAuth ne servirait à rien, alors que tout le hub local est
+                utilisable. Hauteur = la MOITIÉ du CTA Spotify (demande utilisateur). */}
+            {offlineReady && (
+              <button onClick={enterOffline}
+                style={{ width:'100%', height:ctaH/2, marginTop:8, background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.22)', borderRadius:10, padding:0, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:7, color:'#c9c9d6' }}>
+                <span style={{ fontSize: isMobile?11:12, fontWeight:700 }}>📴 Continuer hors ligne</span>
+              </button>
+            )}
             <div style={{ display:'flex', alignItems:'center', gap:8, marginTop:14 }}>
               <span style={{ display:'inline-block', width:8, height:8, borderRadius:'50%', background: connecting?'#1ed760':'#55556a', boxShadow: connecting?'0 0 8px #1ed760':'none', flexShrink:0, transition:'all 0.3s' }} />
               <span style={{ fontFamily:'DM Mono,monospace', fontSize: isMobile?10:11, color: connecting?'#1ed760':'#8a8a9a' }}>
@@ -24010,7 +24071,7 @@ function MobileApp() {
           <div style={{ minWidth:0 }}>
             <div style={{ fontSize:12, fontWeight:700, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:96 }}>{s.user?.display_name || s.user?.id || '—'}</div>
             <div style={{ fontSize:9, color:C.muted, display:'flex', alignItems:'center', gap:4 }}>
-              <StatusDot active={true} /> {s.user?.product || 'connecté'}
+              <StatusDot active={!s.offline} /> {s.offline ? 'hors ligne' : (s.user?.product || 'connecté')}
             </div>
           </div>
         </div>
@@ -24290,7 +24351,7 @@ function WebApp() {
           <UserChip size="sm" />
           <div style={{ minWidth:0 }}>
             <div style={{ fontSize:13, fontWeight:800, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:150 }}>{s.user?.display_name || s.user?.id || '—'}</div>
-            <div style={{ fontSize:10, color:C.muted }}>{s.user?.product || 'connecté'}</div>
+            <div style={{ fontSize:10, color:C.muted }}>{s.offline ? 'hors ligne' : (s.user?.product || 'connecté')}</div>
           </div>
         </div>
         <div style={{ flex:1, display:'flex', gap:6, overflowX:'auto', minWidth:0 }}>
