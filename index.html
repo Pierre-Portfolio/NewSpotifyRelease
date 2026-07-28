@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.79';
+const APP_VERSION = '7.6.80';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17169,7 +17169,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onSe
 
 // ── Fiche YouTube (clic sur l'affiche d'une chaîne/playlist suivie) — vidéos groupées
 // en SAISONS = ANNÉES de publication, cochage INDIVIDUEL par vidéo (watchedIds).
-function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onShortsOnly, onIgnore, onPlay }) {
+function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onShortsOnly, onIgnore, onPlay, wlAdded, wlBusyId, onWatchLater }) {
   const [openYear, setOpenYear] = React.useState(null);
   const seen = new Set(item.watchedIds || []);
   const total = item.totalEps || (item.videos || []).length;
@@ -17193,6 +17193,23 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
         background: done ? '#4caf50' : 'none', border:`1px solid ${done ? '#4caf50' : C.border}`,
         color: done ? '#fff' : C.dim, fontSize:12, lineHeight:1, padding:0, fontWeight:800 }}>✓</button>
   );
+  // 🕒 « À regarder plus tard » pour UNE vidéo (7.6.80) — même playlist et même set
+  // anti-doublon que le 🕒 de la chaîne entière, affiché seulement sur les vidéos NON
+  // COCHÉES. Grisé quand la vidéo y est déjà (ou pendant un ajout en cours).
+  const wlSet = wlAdded || new Set();
+  const WatchLater = ({ v }) => {
+    const already = wlSet.has(v.id);
+    const busy = wlBusyId === v.id;
+    const off = already || !!wlBusyId;
+    return (
+      <button onClick={() => { if (!off) onWatchLater(v); }} disabled={off}
+        title={already ? `Déjà dans « ${YTSUB_WL_NAME} »` : `Ajouter à la playlist YouTube « ${YTSUB_WL_NAME} »`}
+        style={{ width:24, height:24, borderRadius:'50%', flexShrink:0, cursor: off ? 'default' : 'pointer',
+          background:'none', border:`1px solid ${already ? '#4caf5088' : C.border}`,
+          color: already ? '#4caf50' : (off ? C.dim : YT_COLOR), fontSize:11, lineHeight:1, padding:0,
+          opacity: (off && !already) ? 0.4 : 1 }}>{busy ? '…' : '🕒'}</button>
+    );
+  };
   const toggleVideo = v => onSetWatched(seen.has(v.id) ? [...seen].filter(x => x !== v.id) : [...seen, v.id]);
   // Clic sur la vignette → lecture PLEIN ÉCRAN dans l'app (7.6.78), file = toutes les
   // vidéos de la fiche dans l'ordre affiché (années décroissantes) à partir de celle
@@ -17340,6 +17357,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
                               style={{ fontSize:11, fontWeight:600, color:C.text, textDecoration:'none', display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</a>
                             <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2 }}>{v.date || '—'}{v.dur ? ` · ${v.dur} min` : ''}</div>
                           </div>
+                          {!vseen && onWatchLater && <WatchLater v={v} />}
                           <Check done={vseen} onClick={() => toggleVideo(v)}
                             title={vseen ? 'Marquer non vue' : 'Marquer vue'} />
                         </div>
@@ -17835,6 +17853,11 @@ function TvTimePanel() {
   };
   // Ajoute toutes les vidéos restantes (non vues ET pas déjà dans la playlist) à la playlist
   // YouTube « À regarder plus tard (Hub) ». Réutilise le set local wlAdded → skip les doublons.
+  const wlAlert = err => {
+    if (err === 'AUTH' || err === 'SCOPE') alert('YouTube : reconnecte-toi (accès playlist requis) pour ajouter les vidéos.');
+    else if (err === 'QUOTA') alert('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
+    else if (err) alert('Ajout impossible (réseau) — réessaie.');
+  };
   const queueRemaining = async it => {
     if (wlBusyId) return;
     const todo = ytUnwatchedIds(it).filter(id => !wlAdded.has(id));
@@ -17849,9 +17872,19 @@ function TvTimePanel() {
     }
     setWlAdded(done); saveYtWlAdded([...done]);
     setWlBusyId(null);
-    if (err === 'AUTH' || err === 'SCOPE') alert('YouTube : reconnecte-toi (accès playlist requis) pour ajouter les vidéos.');
-    else if (err === 'QUOTA') alert('Quota YouTube épuisé pour aujourd\'hui — réessaie demain.');
-    else if (err) alert('Ajout impossible (réseau) — réessaie.');
+    wlAlert(err);
+  };
+  // Même chose pour UNE SEULE vidéo (bouton 🕒 par vidéo non vue dans la fiche d'une
+  // chaîne, 7.6.80). Partage l'état `wlBusyId` (une seule écriture playlist à la fois)
+  // et le set local `wlAdded` avec le bouton 🕒 de la chaîne entière → anti-doublon commun.
+  const queueOneVideo = async v => {
+    if (wlBusyId || wlAdded.has(v.id)) return;
+    setWlBusyId(v.id);
+    const r = await ytWatchLaterAdd(v.id);
+    setWlBusyId(null);
+    if (r && r.__error) { wlAlert(r.__error); return; }
+    const done = new Set(wlAdded); done.add(v.id);
+    setWlAdded(done); saveYtWlAdded([...done]);
   };
 
   const addItem = async (r, status) => {
@@ -18509,7 +18542,8 @@ function TvTimePanel() {
         onKeepShorts={v => setKeepShorts(detailItem, v)}
         onShortsOnly={v => setShortsOnly(detailItem, v)}
         onIgnore={() => ignoreUnwatched(detailItem)}
-        onPlay={(vids, i) => openPlayer(vids.map(v => ytQueueEntry(detailItem, v)), i)} />}
+        onPlay={(vids, i) => openPlayer(vids.map(v => ytQueueEntry(detailItem, v)), i)}
+        wlAdded={wlAdded} wlBusyId={wlBusyId} onWatchLater={queueOneVideo} />}
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
