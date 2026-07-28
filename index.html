@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.88';
+const APP_VERSION = '7.6.89';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16847,6 +16847,18 @@ function ytUnsavedAdd(items, v, when = Date.now()) {
     : [next, ...items];
 }
 
+// Inverse d'`ytUnsavedAdd` (7.6.89) : retire une vidéo de la pseudo-chaîne quand on
+// DÉVALIDE depuis la pop-up 📺 (« finalement je ne l'ai pas vue »). La pseudo-chaîne
+// disparaît si elle se vide. Renvoie `items` inchangé par identité s'il n'y a rien à faire.
+function ytUnsavedRemove(items, videoId) {
+  const pseudo = items.find(ytIsUnsaved);
+  if (!pseudo || !(pseudo.videos || []).some(v => v.id === videoId)) return items;
+  const rest = (pseudo.videos || []).filter(v => v.id !== videoId);
+  if (!rest.length) return items.filter(it => !ytIsUnsaved(it));
+  const next = { ...pseudo, videos: rest, watchedIds: rest.map(v => v.id), totalEps: rest.length };
+  return items.map(it => (ytIsUnsaved(it) ? next : it));
+}
+
 // Une chaîne vient d'être AJOUTÉE (ou actualisée) : ses vidéos que j'avais déjà regardées
 // via la playlist « Hub Pierre » dorment dans la pseudo-chaîne. On les lui REND — cochées
 // « vues » dans SA chaîne — et on les retire de la pseudo-chaîne, qui DISPARAÎT si elle se
@@ -17644,8 +17656,12 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
 // La pop-up reste montée sous le lecteur (z 200 vs 400) → « ← Retour » revient à la liste ;
 // les vidéos déjà lancées y sont grisées (elles ont été retirées de la playlist côté
 // YouTube, ↻ le confirme).
-function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, onRefresh, onClose }) {
-  const played = playedIds || new Set();   // ids VALIDÉS (bouton ✓ du lecteur), pas simplement lancés
+function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, onRefresh, onClose, onValidate, onUnvalidate, busyId }) {
+  // `playedIds` = ids VALIDÉS (bouton ✓ du lecteur, ou sortie/changement de vidéo, ou la
+  // coche verte ci-dessous). ⚠ 7.6.89 — ils RESTENT affichés tant que la pop-up est ouverte
+  // pour pouvoir les DÉCOCHER ; ils ne disparaissent qu'à la réouverture (le parent vide
+  // l'ensemble à la fermeture, et YouTube ne les renvoie plus : ils ont quitté la playlist).
+  const played = playedIds || new Set();
   const pending = (videos || []).filter(v => !played.has(v.id));
   const errMsg = {
     AUTH:  'Connecte-toi à YouTube (section Actu → ▶ Vidéos) pour lire ta playlist.',
@@ -17696,22 +17712,34 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
               const seen = played.has(v.id);
               const idx = pending.findIndex(x => x.id === v.id);
               return (
-                <div key={v.id} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52, opacity: seen ? 0.45 : 1 }}>
+                <div key={v.id} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52 }}>
                   <button onClick={() => onPlay(seen ? [v] : pending, seen ? 0 : Math.max(0, idx))}
-                    title={seen ? 'Revoir cette vidéo en plein écran' : 'Lire en plein écran ici (à partir de cette vidéo) — le bouton ✓ Valider du lecteur la retire de la playlist'}
-                    style={{ position:'relative', width:82, height:46, borderRadius:6, flexShrink:0, display:'block', overflow:'hidden', background:'#1a1a1a', cursor:'pointer', padding:0, border:'none' }}>
+                    title={seen ? 'Revoir cette vidéo en plein écran' : 'Lire en plein écran ici (à partir de cette vidéo) — quitter la vidéo la valide'}
+                    style={{ position:'relative', width:82, height:46, borderRadius:6, flexShrink:0, display:'block', overflow:'hidden', background:'#1a1a1a', cursor:'pointer', padding:0, border:'none', opacity: seen ? 0.45 : 1 }}>
                     {v.thumb
                       ? <img src={v.thumb} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', display:'block', background:'#1a1a1a' }} />
                       : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16 }}>▶️</div>}
                     <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(0,0,0,0.28)', color:'#fff', fontSize:16, textShadow:'0 1px 3px rgba(0,0,0,0.8)' }}>▶</div>
                   </button>
-                  <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ flex:1, minWidth:0, opacity: seen ? 0.55 : 1 }}>
                     <a href={`https://www.youtube.com/watch?v=${v.id}`} target="_blank" rel="noopener noreferrer"
-                      style={{ fontSize:11, fontWeight:600, color: seen ? C.muted : C.text, textDecoration:'none', display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</a>
+                      style={{ fontSize:11, fontWeight:600, color: seen ? C.muted : C.text, textDecoration: seen ? 'line-through' : 'none', display:'block', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</a>
                     <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
                       {seen ? '✓ validée · ' : ''}{v.channel ? v.channel + ' · ' : ''}{v.date || '—'}{v.dur ? ` · ${v.dur} min` : ''}
                     </div>
                   </div>
+                  {/* Coche VERTE (7.6.89) : valide (retire de la playlist YouTube + classe
+                      dans les Vus) ou DÉVALIDE (la remet dans la playlist et décoche). */}
+                  {onValidate && (
+                    <button onClick={() => (seen ? onUnvalidate(v) : onValidate(v))} disabled={busyId === v.id}
+                      title={seen ? 'Décocher : je ne l\'ai finalement pas vue — la vidéo repart dans la playlist' : `Valider : retirer de « ${YTSUB_WL_NAME} » et classer dans les Vus`}
+                      style={{ width:26, height:26, borderRadius:'50%', flexShrink:0, padding:0, fontSize:13, fontWeight:800, lineHeight:1,
+                        cursor: busyId === v.id ? 'default' : 'pointer',
+                        background: seen ? '#4caf50' : 'none', border:`1px solid ${seen ? '#4caf50' : C.border}`,
+                        color: seen ? '#fff' : C.dim, opacity: busyId === v.id ? 0.5 : 1 }}>
+                      {busyId === v.id ? '…' : '✓'}
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -17719,7 +17747,7 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
         )}
 
         <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:10 }}>
-          ℹ Contenu réel de ta playlist YouTube{playlistId ? <> <a href={`https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a></> : ` « ${YTSUB_WL_NAME} »`}. Lancer une vidéo ne la retire de rien : c'est le bouton <b>✓ Valider</b> du lecteur plein écran qui la sort de la playlist et la classe dans les <b>Vus</b> de TV Time. ↻ pour recharger.
+          ℹ Contenu réel de ta playlist YouTube{playlistId ? <> <a href={`https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a></> : ` « ${YTSUB_WL_NAME} »`}. Une vidéo est <b>validée</b> quand tu la quittes dans le lecteur (⏭ Suivant, ⏮, ← Retour), avec le bouton <b>✓ Valider</b>, ou avec la <b>coche verte</b> ci-dessus : elle sort de la playlist et rejoint les <b>Vus</b> de TV Time. Elle reste affichée ici tant que tu ne fermes pas cette fenêtre, pour pouvoir la <b>décocher</b> si finalement tu ne l'as pas vue.
         </div>
       </div>
     </div>
@@ -17752,13 +17780,21 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       if (document.fullscreenElement && document.exitFullscreen) { try { const p = document.exitFullscreen(); if (p && p.catch) p.catch(() => {}); } catch {} }
     };
   }, []);
-  const go = d => { const n = index + d; if (n >= 0 && n < queue.length) onIndex(n); };
+  // ⚠ 7.6.89 — QUITTER une vidéo de la file playlist la VALIDE (demande utilisateur) :
+  // passer à la suivante, revenir à la précédente ou fermer le lecteur valide la vidéo
+  // courante. Le bouton ✓ Valider reste en plus, pour valider sans bouger. Idempotent
+  // (une vidéo déjà validée n'est pas re-signalée), et sans effet hors file playlist.
+  const leaveCurrent = () => {
+    if (v && v.fromWl && onValidate && !(validatedIds && validatedIds.has(v.id))) onValidate(v);
+  };
+  const go = d => { const n = index + d; if (n >= 0 && n < queue.length) { leaveCurrent(); onIndex(n); } };
+  const closePlayer = () => { leaveCurrent(); onClose(); };
   // Effet SANS tableau de deps (ré-attaché à chaque render) → jamais de closure périmée
   // sur `index`. ⚠ Échap en plein écran natif = sortie du plein écran (géré par le
   // navigateur) : on ne ferme le lecteur que si on n'y est plus.
   React.useEffect(() => {
     const onKey = e => {
-      if (e.key === 'Escape') { if (!document.fullscreenElement) onClose(); }
+      if (e.key === 'Escape') { if (!document.fullscreenElement) closePlayer(); }
       else if (e.key === 'ArrowRight') go(+1);
       else if (e.key === 'ArrowLeft') go(-1);
     };
@@ -17778,7 +17814,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       {/* Barre d'actions EN OVERLAY sur la vidéo : retour + navigation dans la file */}
       <div style={{ position:'absolute', top:0, left:0, right:0, padding:'10px 12px', display:'flex', alignItems:'center', gap:8,
         background:'linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0))', pointerEvents:'none', flexWrap:'wrap' }}>
-        <button onClick={onClose} title="Fermer le lecteur (Échap)" style={obtn('#e05050')}>← Retour</button>
+        <button onClick={closePlayer} title="Fermer le lecteur (Échap) — valide la vidéo en cours" style={obtn('#e05050')}>← Retour</button>
         <button onClick={() => go(-1)} disabled={index <= 0} title="Vidéo précédente (←)" style={obtn(YT_COLOR, index <= 0)}>⏮</button>
         <button onClick={() => go(+1)} disabled={index >= queue.length - 1} title="Vidéo suivante (→)" style={obtn(YT_COLOR, index >= queue.length - 1)}>⏭ Suivant</button>
         {/* ✓ Valider (7.6.87) — file venant de la playlist « Hub Pierre » (bouton 📺) : la
@@ -17787,7 +17823,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         {onValidate && v.fromWl && (() => {
           const done = !!(validatedIds && validatedIds.has(v.id));
           return (
-            <button onClick={() => { if (done) return; onValidate(v); if (index < queue.length - 1) go(+1); }} disabled={done}
+            <button onClick={() => { if (done) return; onValidate(v); if (index < queue.length - 1) onIndex(index + 1); }} disabled={done}
               title={done ? 'Déjà validée — retirée de la playlist et classée dans les Vus' : 'Valider : retire la vidéo de la playlist « ' + YTSUB_WL_NAME + ' » et la classe dans les Vus, puis passe à la suivante'}
               style={{ ...obtn('#4caf50', done), color: done ? '#4caf50' : '#fff', borderColor:'#4caf50aa' }}>
               {done ? '✓ Validée' : '✓ Valider'}
@@ -18199,11 +18235,14 @@ function TvTimePanel() {
 
   // ── 📺 Playlist « Hub Pierre » — vidéos en attente (7.6.84) ─────────────────────────
   // `wlPop` = { state:'loading'|'ok'|'err', videos, err, playlistId } | null (fermée).
-  // `wlValidated` = ids VALIDÉS depuis le lecteur (bouton ✓) : retirés de la playlist et
-  // classés dans les VUS → grisés dans la liste. ⚠ Le simple LANCEMENT ne valide plus rien
-  // (7.6.87) : on peut ouvrir une vidéo, la passer, et la retrouver en attente.
+  // `wlValidated` = Map id → infos d'ANNULATION des vidéos validées (retirées de la playlist
+  // et classées dans les VUS). ⚠ 7.6.89 : elles restent AFFICHÉES dans la pop-up, cochées en
+  // vert, tant qu'elle est ouverte → la coche permet de revenir en arrière ; l'ensemble est
+  // vidé à la fermeture, donc à la réouverture elles ont disparu (YouTube ne les renvoie plus).
+  // Une Map (et non un Set) pour savoir quoi restaurer exactement : `.has()` marche pareil.
   const [wlPop, setWlPop]       = React.useState(null);
-  const [wlValidated, setWlValidated] = React.useState(() => new Set());
+  const [wlValidated, setWlValidated] = React.useState(() => new Map());
+  const [wlBusyValid, setWlBusyValid] = React.useState(null);   // id en cours de dévalidation (aller-retour API)
   const loadWlPop = async () => {
     setWlPop(p => ({ state: 'loading', videos: (p && p.videos) || [], err: '', playlistId: p && p.playlistId }));
     const r = await ytWlListVideos();
@@ -18214,9 +18253,14 @@ function TvTimePanel() {
   // Entrée de file pour une vidéo de la playlist : `itemId` seulement si la vidéo est
   // suivie quelque part dans TV Time (→ elle sera marquée vue dans SA chaîne) ; sinon
   // null → elle atterrira dans « Hub Pierre » (pseudo-chaîne).
+  // ⚠ C'est ICI que se joue « si la vidéo appartient à un vidéaste que je suis, coche-la
+  // chez lui » : `itemId` = la chaîne PROPRIÉTAIRE (pseudo-chaîne exclue), résolue à chaque
+  // validation depuis `itemsRef.current` (état frais) → `validateWlVideo` appelle alors
+  // `ytMarkVideoSeen` sur CETTE chaîne. `null` = suivie nulle part → « Hub Pierre ».
   const wlQueueEntry = v => {
-    const owner = itemsRef.current.find(it => it.type === 'youtube' && (it.videos || []).some(x => x.id === v.id));
-    return { id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: owner ? owner.id : null, channel: v.channel || (owner ? owner.title : ''), fromWl: true };
+    const owner = itemsRef.current.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id));
+    return { id: v.id, title: v.title, date: v.date, dur: v.dur, thumb: v.thumb || v.still || '',
+      itemId: owner ? owner.id : null, channel: v.channel || (owner ? owner.title : ''), fromWl: true };
   };
   const playWl = (list, i) => { openPlayer(list.map(wlQueueEntry), i); };
   // Vidéo lancée depuis la playlist alors qu'elle n'est suivie NULLE PART dans TV Time
@@ -18228,9 +18272,50 @@ function TvTimePanel() {
   // retire la vidéo de « Hub Pierre » ET la classe dans les VUS de TV Time (dans SA chaîne
   // si elle y est suivie, sinon dans « Hub Pierre » (pseudo-chaîne)). Idempotent.
   const validateWlVideo = v => {
-    setWlValidated(s => (s.has(v.id) ? s : new Set(s).add(v.id)));
+    if (wlValidated.has(v.id)) return;
+    // Photo de l'état AVANT, pour pouvoir annuler proprement : si la vidéo était DÉJÀ cochée
+    // dans sa chaîne, la dévalidation ne doit pas la décocher.
+    const ch = v.itemId ? itemsRef.current.find(x => x.type === 'youtube' && x.id === v.itemId) : null;
+    const undo = { itemId: v.itemId || null,
+      wasWatched: !!(ch && (ch.watchedIds || []).includes(v.id)),
+      prevStatus: ch ? ch.status : null, prevDoneAt: ch ? ch.doneAt : null };
+    setWlValidated(m => (m.has(v.id) ? m : new Map(m).set(v.id, undo)));
     if (v.itemId) ytMarkVideoSeen(v.itemId, v.id);   // appelle déjà wlForget
     else { wlForget([v.id]); markUnsaved(v); }
+  };
+  // ↩ DÉVALIDER (7.6.89, coche verte de la pop-up) : « finalement je ne l'ai pas vue ».
+  // Décoche dans TV Time (ou la sort de la pseudo-chaîne) PUIS la remet dans la playlist
+  // YouTube. ⚠ L'ordre compte : le retour dans la playlist est le seul aller-retour réseau,
+  // s'il échoue l'état local est déjà cohérent et la coche est retombée.
+  const unvalidateWlVideo = async v => {
+    if (wlBusyValid) return;
+    const undo = wlValidated.get(v.id) || { itemId: v.itemId || null };
+    setWlValidated(m => { const n = new Map(m); n.delete(v.id); return n; });
+    if (undo.itemId) { if (!undo.wasWatched) ytUnmarkVideoSeen(undo.itemId, v.id, undo.prevStatus, undo.prevDoneAt); }
+    else {
+      const prev = itemsRef.current, next = ytUnsavedRemove(prev, v.id);
+      if (next !== prev) { itemsRef.current = next; setItems(next); saveTvItems(next); }
+    }
+    setWlBusyValid(v.id);
+    const r = await ytWatchLaterAdd(v.id);
+    setWlBusyValid(null);
+    if (r && r.__error) { wlAlert(r.__error); return; }
+    const added = new Set(loadYtWlAdded()); added.add(v.id);
+    setWlAdded(new Set(added)); saveYtWlAdded([...added]);
+  };
+  // Inverse d'ytMarkVideoSeen : décoche la vidéo et restaure le statut d'avant la validation
+  // (une chaîne passée en « Vus » parce que c'était la dernière vidéo redevient « En cours »).
+  const ytUnmarkVideoSeen = (itemId, videoId, prevStatus, prevDoneAt) => {
+    const prev = itemsRef.current;
+    const cur = prev.find(x => x.type === 'youtube' && x.id === itemId);
+    if (!cur || !(cur.watchedIds || []).includes(videoId)) return;
+    const next = prev.map(it => {
+      if (it.type !== 'youtube' || it.id !== itemId) return it;
+      const nx = { ...it, watchedIds: (it.watchedIds || []).filter(x => x !== videoId) };
+      if (prevStatus) { nx.status = prevStatus; nx.doneAt = prevDoneAt; }
+      return nx;
+    });
+    itemsRef.current = next; setItems(next); saveTvItems(next);
   };
   const markUnsaved = v => {
     const prev = itemsRef.current;
@@ -19029,7 +19114,9 @@ function TvTimePanel() {
           le lecteur (z 200 vs 400) pour que « ← Retour » revienne à la liste. */}
       {wlPop && <YtWatchlistModal state={wlPop.state} videos={wlPop.videos} err={wlPop.err}
         playlistId={wlPop.playlistId} playedIds={wlValidated}
-        onPlay={(list, i) => playWl(list, i)} onRefresh={loadWlPop} onClose={() => setWlPop(null)} />}
+        onPlay={(list, i) => playWl(list, i)} onRefresh={loadWlPop}
+        onValidate={v => validateWlVideo(wlQueueEntry(v))} onUnvalidate={v => unvalidateWlVideo(wlQueueEntry(v))} busyId={wlBusyValid}
+        onClose={() => { setWlPop(null); setWlValidated(new Map()); }} />}
       {/* Lecteur plein écran (bouton 🩳 / 📺 ou clic sur une vignette de fiche YouTube).
           ⚠ Une vidéo lancée depuis la playlist (`fromWl`) n'est PLUS marquée vue au
           lancement (7.6.87) : c'est le bouton ✓ Valider qui décide. Les autres files
