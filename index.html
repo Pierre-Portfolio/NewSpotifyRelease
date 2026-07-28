@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.87';
+const APP_VERSION = '7.6.88';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16612,9 +16612,18 @@ function tmdbKey() { try { return (localStorage.getItem(TMDB_KEY_LS) || '').trim
 // Tous les callers lisent le tableau sans le muter en place (map/filter/find) → cache par
 // référence sûr. Invalidé/mis à jour par saveTvItems (et par applyBackup, cf. plus bas).
 let _tvItemsCache = null;
+// ── Identité de la pseudo-chaîne « Hub Pierre » (7.6.85, renommée en 7.6.88) ──────────
+// Déclarée ICI (et non avec ses helpers plus bas) parce que `loadTvItems` s'en sert pour
+// renommer l'item déjà stocké : le titre vit DANS l'item, changer la constante ne suffit pas.
+const YT_UNSAVED_ID    = '__hub_unsaved';
+const YT_UNSAVED_TITLE = YTSUB_WL_NAME;   // même nom que la playlist YouTube dont elle est le pendant
+const ytIsUnsaved = it => !!it && it.type === 'youtube' && it.id === YT_UNSAVED_ID;
+
 function loadTvItems() {
   if (_tvItemsCache) return _tvItemsCache;
   try { _tvItemsCache = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)) || []; } catch { _tvItemsCache = []; }
+  // Titre de la pseudo-chaîne aligné sur la constante (il a été stocké avec l'item)
+  _tvItemsCache = _tvItemsCache.map(it => (ytIsUnsaved(it) && it.title !== YT_UNSAVED_TITLE) ? { ...it, title: YT_UNSAVED_TITLE } : it);
   return _tvItemsCache;
 }
 function saveTvItems(items) { _tvItemsCache = items; lsSet(TVTIME_LS_KEY, JSON.stringify(items)); }
@@ -16800,7 +16809,7 @@ async function ytBuildItem(raw, opts = {}) {
 // vues (watchedIds), le statut (sauf le repassage en cours) et les labels manga/cartoon.
 // Écrit directement dans localStorage (loadTvItems/saveTvItems) — ne dépend pas du montage du
 // panneau TV Time. Retourne true si au moins un item a changé.
-// ── « Chaîne non enregistrée » (7.6.85) ────────────────────────────────────────────────
+// ── Pseudo-chaîne « Hub Pierre » (7.6.85, renommée en 7.6.88) ─────────────────────────
 // Pseudo-chaîne 100 % LOCALE (drapeau `local`, id qui n'existe pas côté YouTube, JAMAIS
 // interrogée par l'API) qui recueille les vidéos regardées depuis la playlist « Hub
 // Pierre » (bouton 📺) et qui ne sont suivies dans AUCUNE chaîne/playlist de TV Time —
@@ -16810,9 +16819,6 @@ async function ytBuildItem(raw, opts = {}) {
 // la fiche groupe les vidéos par année de `date` → une « saison » = l'année où je l'ai
 // regardée (demande utilisateur). La date de publication réelle est gardée à part
 // (`pubDate`) pour ne rien perdre.
-const YT_UNSAVED_ID    = '__hub_unsaved';
-const YT_UNSAVED_TITLE = 'Chaîne non enregistrée';
-const ytIsUnsaved = it => !!it && it.type === 'youtube' && it.id === YT_UNSAVED_ID;
 function ytUnsavedBlank() {
   return { id: YT_UNSAVED_ID, type: 'youtube', local: true, ytKind: 'channel',
     title: YT_UNSAVED_TITLE, poster: null, status: 'done', videos: [], watchedIds: [],
@@ -16841,6 +16847,47 @@ function ytUnsavedAdd(items, v, when = Date.now()) {
     : [next, ...items];
 }
 
+// Une chaîne vient d'être AJOUTÉE (ou actualisée) : ses vidéos que j'avais déjà regardées
+// via la playlist « Hub Pierre » dorment dans la pseudo-chaîne. On les lui REND — cochées
+// « vues » dans SA chaîne — et on les retire de la pseudo-chaîne, qui DISPARAÎT si elle se
+// vide (7.6.88, demande utilisateur). Réconciliation GLOBALE (toutes les chaînes suivies),
+// donc idempotente et auto-réparante ; renvoie `items` inchangé par identité s'il n'y a rien
+// à déplacer. ⚠ Une vidéo présente dans plusieurs chaînes suivies va à la PREMIÈRE trouvée.
+function ytUnsavedReconcile(items) {
+  const pseudo = items.find(ytIsUnsaved);
+  if (!pseudo || !(pseudo.videos || []).length) return items;
+  const owner = new Map();   // id de vidéo → id de la chaîne RÉELLE qui la contient
+  for (const it of items) {
+    if (it.type !== 'youtube' || ytIsUnsaved(it)) continue;
+    for (const v of (it.videos || [])) if (!owner.has(v.id)) owner.set(v.id, it.id);
+  }
+  const claimed = (pseudo.videos || []).filter(v => owner.has(v.id));
+  if (!claimed.length) return items;
+  const byChannel = new Map();
+  for (const v of claimed) {
+    const cid = owner.get(v.id);
+    if (!byChannel.has(cid)) byChannel.set(cid, []);
+    byChannel.get(cid).push(v.id);
+  }
+  const rest = (pseudo.videos || []).filter(v => !owner.has(v.id));
+  const nextPseudo = rest.length
+    ? { ...pseudo, videos: rest, watchedIds: rest.map(v => v.id), totalEps: rest.length }
+    : null;
+  const out = [];
+  for (const it of items) {
+    if (ytIsUnsaved(it)) { if (nextPseudo) out.push(nextPseudo); continue; }
+    const ids = it.type === 'youtube' ? byChannel.get(it.id) : null;
+    if (!ids) { out.push(it); continue; }
+    const watched = [...new Set([...(it.watchedIds || []), ...ids])];
+    const nx = { ...it, watchedIds: watched };
+    const tot = it.totalEps || (it.videos || []).length;
+    // Tout vu d'un coup → la chaîne part directement dans les VUS (même règle qu'ytSetWatched)
+    if (tot > 0 && watched.length >= tot && it.status !== 'done') { nx.status = 'done'; nx.doneAt = Date.now(); }
+    out.push(nx);
+  }
+  return out;
+}
+
 async function ytCheckNewVideos() {
   if (!ytKey()) return false;
   const cur = loadTvItems();
@@ -16849,7 +16896,7 @@ async function ytCheckNewVideos() {
   const now = Date.now();
   const patches = new Map();   // id → { built, hasNew }
   for (const it of yts) {
-    if (it.local) continue;     // pseudo-chaîne locale (« Chaîne non enregistrée ») : aucun id YouTube à interroger
+    if (it.local) continue;     // pseudo-chaîne locale (« Hub Pierre » (pseudo-chaîne)) : aucun id YouTube à interroger
     if (it.dropped) continue;   // « ne plus suivre » → jamais de recherche de nouveautés
     if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
     const built = await ytBuildItem(it.id, { unlimited: it.unlimited, keepShorts: it.keepShorts, shortsOnly: it.shortsOnly });   // préserve plafond retiré + tags Shorts
@@ -16874,7 +16921,9 @@ async function ytCheckNewVideos() {
     changed = true;
     return merged;
   });
-  if (changed) saveTvItems(next);
+  // Une chaîne actualisée peut faire apparaître une vidéo déjà regardée via la playlist
+  // → la pseudo-chaîne la lui rend (7.6.88).
+  if (changed) saveTvItems(ytUnsavedReconcile(next));
   return changed;
 }
 
@@ -17451,7 +17500,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
             (À voir) et le rouge (En cours) : passe la chaîne en Vu SANS cocher les vidéos
             non vues et SANS `dropped` → elle repassera « En cours » à la prochaine
             nouvelle vidéo (ytCheckNewVideos). */}
-        {/* ⚠ Pseudo-chaîne locale « Chaîne non enregistrée » (7.6.85) : ni statut, ni ↻,
+        {/* ⚠ Pseudo-chaîne locale « Hub Pierre » (pseudo-chaîne) (7.6.85) : ni statut, ni ↻,
             ni tags Shorts, ni plafond — elle n'a pas d'id YouTube à interroger et ne
             contient QUE des vidéos déjà vues. */}
         {!item.local && <div style={{ display:'flex', gap:5, marginBottom:8 }}>
@@ -17933,12 +17982,17 @@ function TvTimePanel() {
         if (full && !full.error) merged = full;
       }
       // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé / plafond / tags Shorts
-      update(items.map(x => (x.type === 'youtube' && x.id === built.id)
-        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x));
+      update(ytUnsavedReconcile(items.map(x => (x.type === 'youtube' && x.id === built.id)
+        ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x)));
       setYtMsg(`Mis à jour : ${merged.title} (${merged.totalEps} vidéos)`);
     } else {
-      update([built, ...items]);
-      setYtMsg(`Ajouté : ${built.title} (${built.totalEps} vidéos)`);
+      // ⚠ 7.6.88 : la chaîne récupère au passage les vidéos que j'avais déjà regardées via
+      // « Hub Pierre » — elles sont cochées vues chez elle et quittent la pseudo-chaîne.
+      const next = ytUnsavedReconcile([built, ...items]);
+      update(next);
+      const claimed = (next.find(x => x.type === 'youtube' && x.id === built.id) || {}).watchedIds || [];
+      setYtMsg(`Ajouté : ${built.title} (${built.totalEps} vidéos)`
+        + (claimed.length ? ` · ${claimed.length} déjà vue(s) via « ${YTSUB_WL_NAME} »` : ''));
     }
     setYtInput('');
   };
@@ -17949,8 +18003,8 @@ function TvTimePanel() {
     const built = await ytBuildItem(item.id, { unlimited: item.unlimited, keepShorts: item.keepShorts, shortsOnly: item.shortsOnly });
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de l\'actualisation.')); return; }
-    update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x));
+    update(ytUnsavedReconcile(items.map(x => (x.type === 'youtube' && x.id === item.id)
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x)));
   };
   // Tag « garder les Shorts (< 3 min) » d'une chaîne/playlist YouTube. Re-fetch complet car les
   // Shorts filtrés ne sont pas stockés : ON = les réintègre, OFF = les retire. Préserve vues/statut.
@@ -17988,8 +18042,8 @@ function TvTimePanel() {
     const built = await ytBuildItem(item.id, { unlimited: true, keepShorts: item.keepShorts, shortsOnly: item.shortsOnly });
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
-    update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x));
+    update(ytUnsavedReconcile(items.map(x => (x.type === 'youtube' && x.id === item.id)
+      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x)));
     setYtMsg(`Toutes les vidéos récupérées : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Reverrouille une chaîne dont le plafond avait été retiré : ne conserve que les vidéos
@@ -18159,20 +18213,20 @@ function TvTimePanel() {
   const openWlPop = () => { setWlPop({ state: 'loading', videos: [], err: '', playlistId: null }); loadWlPop(); };
   // Entrée de file pour une vidéo de la playlist : `itemId` seulement si la vidéo est
   // suivie quelque part dans TV Time (→ elle sera marquée vue dans SA chaîne) ; sinon
-  // null → elle atterrira dans « Chaîne non enregistrée ».
+  // null → elle atterrira dans « Hub Pierre » (pseudo-chaîne).
   const wlQueueEntry = v => {
     const owner = itemsRef.current.find(it => it.type === 'youtube' && (it.videos || []).some(x => x.id === v.id));
     return { id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: owner ? owner.id : null, channel: v.channel || (owner ? owner.title : ''), fromWl: true };
   };
   const playWl = (list, i) => { openPlayer(list.map(wlQueueEntry), i); };
   // Vidéo lancée depuis la playlist alors qu'elle n'est suivie NULLE PART dans TV Time
-  // (7.6.85) → elle rejoint la pseudo-chaîne « Chaîne non enregistrée », classée à
+  // (7.6.85) → elle rejoint la pseudo-chaîne « Hub Pierre » (pseudo-chaîne), classée à
   // l'année de VISIONNAGE. Lecture/écriture via `itemsRef` (le lecteur peut enchaîner
   // plusieurs vidéos avant un re-render, la closure `items` perdrait les précédentes).
   // ✓ VALIDER une vidéo de la playlist (7.6.87, demande utilisateur) — geste EXPLICITE
   // depuis le lecteur plein écran, alors qu'auparavant le simple lancement suffisait :
   // retire la vidéo de « Hub Pierre » ET la classe dans les VUS de TV Time (dans SA chaîne
-  // si elle y est suivie, sinon dans « Chaîne non enregistrée »). Idempotent.
+  // si elle y est suivie, sinon dans « Hub Pierre » (pseudo-chaîne)). Idempotent.
   const validateWlVideo = v => {
     setWlValidated(s => (s.has(v.id) ? s : new Set(s).add(v.id)));
     if (v.itemId) ytMarkVideoSeen(v.itemId, v.id);   // appelle déjà wlForget
@@ -18416,7 +18470,7 @@ function TvTimePanel() {
   const ytItems = items.filter(it => it.type === 'youtube' && (!nameQ || (it.title || '').toLowerCase().includes(nameQ))).slice().sort(tvCmp);
   const ytWatching = ytItems.filter(it => it.status === 'watching' || it.status === 'paused');
   const ytTowatch  = ytItems.filter(it => it.status === 'towatch');
-  // « Chaîne non enregistrée » ÉPINGLÉE en 1re position des VUS (7.6.85) — le reste garde
+  // « Hub Pierre » (pseudo-chaîne) ÉPINGLÉE en 1re position des VUS (7.6.85) — le reste garde
   // l'ordre de `tvCmp` (le tri natif est stable).
   const ytDone     = ytItems.filter(it => it.status === 'done')
     .sort((a, b) => (ytIsUnsaved(b) ? 1 : 0) - (ytIsUnsaved(a) ? 1 : 0));
