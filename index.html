@@ -114,7 +114,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.82';
+const APP_VERSION = '7.6.83';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18986,10 +18986,65 @@ async function foodAiSuggest(provider, q) {
   };
 }
 
+// ── PHOTO DU PLAT → CALORIES (7.6.83, demande utilisateur) ───────────────────
+// L'utilisateur photographie son assiette, Claude et Gemini l'analysent EN PARALLÈLE
+// (mêmes clés que les suggestions texte) et renvoient le plat identifié, le poids estimé
+// de la portion, les calories et les macros → même forme de résultat qu'Open Food Facts,
+// donc même ligne, même portion ajustable, même bouton +.
+// ⚠ LA PHOTO N'EST JAMAIS CONSERVÉE : redimensionnée en mémoire (`frigoPhotoData`),
+// envoyée aux fournisseurs, puis l'aperçu (object URL) est révoqué et le base64 lâché dès
+// que le résultat est ajouté ou fermé. Rien n'est écrit en localStorage, sur Drive, ni dans
+// le backup — seul le repas ajouté (nom + kcal + macros) est persisté, comme une saisie
+// normale. C'est une contrainte explicite de la demande, ne pas « mettre en cache » ça.
+const FOOD_PHOTO_SCHEMA = {
+  type:'object', additionalProperties:false,
+  required:['plat', 'portion_g', 'kcal', 'glucides', 'proteines', 'graisses'],
+  properties: {
+    plat:      { type:'string' },
+    portion_g: { type:'number' },
+    kcal:      { type:'number' },
+    glucides:  { type:'number' },
+    proteines: { type:'number' },
+    graisses:  { type:'number' },
+    aliments:  { type:'array', items:{ type:'string' } },
+    note:      { type:'string' },
+  },
+};
+const FOOD_PHOTO_PROMPT = `Tu es un nutritionniste. Voici la photo d'un plat / d'une assiette.
+Identifie le plat et estime, POUR LA PORTION VISIBLE SUR LA PHOTO (pas pour 100 g) : son poids en grammes, ses calories et ses macronutriments.
+Réponds UNIQUEMENT en JSON, sans texte autour :
+{"plat":"nom court du plat en français","portion_g":poids estimé de la portion en grammes,"kcal":calories de cette portion,"glucides":grammes,"proteines":grammes,"graisses":grammes,"aliments":["aliment visible 1","aliment visible 2"],"note":"hypothèse de préparation en moins de 60 caractères"}
+Nombres seuls, sans unité. Estime au mieux même si la photo est imparfaite (dis ton hypothèse dans "note"). Si la photo ne montre aucun aliment, renvoie {"plat":""}.`;
+// img = { mimeType, data(base64) } tel que produit par frigoPhotoData.
+async function foodPhotoAnalyze(provider, img) {
+  const raw = provider === 'gemini'
+    ? await geminiGenerate([{ text: FOOD_PHOTO_PROMPT }, { inline_data: { mime_type: img.mimeType, data: img.data } }])
+    : await claudeGenerate({ text: FOOD_PHOTO_PROMPT, images: [img], schema: FOOD_PHOTO_SCHEMA, maxTokens: 2000 });
+  const j = geminiExtract(raw, '{', '}');
+  if (!j || !j.plat) return null;
+  const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : null; };
+  const kcal = num(j.kcal);
+  if (!kcal) return null;
+  // Poids de la portion : sert à ramener les valeurs à 100 g (format attendu par
+  // FoodResultRow) ET à pré-remplir le champ « grammes ». Estimation aberrante ou absente
+  // → 250 g (assiette moyenne), l'utilisateur corrige le champ, tout se recalcule.
+  const pg  = num(j.portion_g);
+  const por = pg && pg >= 10 && pg <= 3000 ? Math.round(pg) : 250;
+  const per100 = v => (v == null ? null : Math.round(v / por * 100 * 10) / 10);
+  const items = Array.isArray(j.aliments) ? j.aliments.map(x => String(x)).filter(Boolean).slice(0, 8) : [];
+  return {
+    name: String(j.plat).slice(0, 80), brand: '', kcal100: Math.round(kcal / por * 100),
+    c100: per100(num(j.glucides)), p100: per100(num(j.proteines)), f100: per100(num(j.graisses)),
+    ai: provider, photo: true, portionG: por, items,
+    note: [j.note ? String(j.note) : '', items.join(' + ')].filter(Boolean).join(' · ').slice(0, 140),
+  };
+}
+
 // Une ligne de résultat : portion en grammes ajustable → calcule les kcal ET les macros en
 // direct, bouton + ajoute le repas dans la catégorie sélectionnée.
-function FoodResultRow({ r, onAdd }) {
-  const [grams, setGrams] = React.useState('100');
+// `defaultGrams` : portion pré-remplie (photo de plat → poids estimé par l'IA ; défaut 100 g).
+function FoodResultRow({ r, onAdd, defaultGrams }) {
+  const [grams, setGrams] = React.useState(String(defaultGrams || 100));
   const g = parseInt(grams, 10) || 0;
   const kcal = Math.round(r.kcal100 * g / 100);
   const scale = k => (r[k] == null ? null : Math.round(r[k] * g / 100 * 10) / 10);
@@ -19042,6 +19097,12 @@ function NourriturePanel() {
   // [{ provider, state:'loading'|'ok'|'err'|'none', data, err }] — arrivent indépendamment
   // d'Open Food Facts, chacune s'affiche dès qu'elle répond.
   const [aiRows, setAiRows] = React.useState([]);
+  // 📷 Photo du plat (7.6.83) : mêmes lignes que les suggestions IA, une par fournisseur.
+  // `photoPrev` = aperçu MÉMOIRE (object URL) — jamais persisté, révoqué dès qu'on ferme.
+  const [photoRows, setPhotoRows] = React.useState([]);
+  const [photoPrev, setPhotoPrev] = React.useState('');
+  const photoUrlRef = React.useRef('');   // miroir de l'aperçu, pour révoquer au démontage
+  const photoInputRef = React.useRef(null);
   // Journée dont le détail des macros est déplié dans l'historique (APPUI LONG sur la ligne)
   const [macroDay, setMacroDay] = React.useState(null);
   const histHold = React.useRef({ timer:null, fired:false });
@@ -19118,7 +19179,42 @@ function NourriturePanel() {
       setSearching(false);
     }
   };
-  const clearSearch = () => { setName(''); setResults(null); setSearchErr(''); setAiRows([]); };
+  const clearSearch = () => { setName(''); setResults(null); setSearchErr(''); setAiRows([]); dropPhoto(); };
+
+  // ── 📷 Photo du plat → calories (7.6.83) ────────────────────────────────────
+  // ⚠ Rien n'est conservé : l'aperçu est un object URL révoqué ici même, et le base64
+  // envoyé aux IA n'est référencé que par les promesses en vol (libéré après résolution).
+  const setPreview = (url) => {
+    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+    photoUrlRef.current = url;
+    setPhotoPrev(url);
+  };
+  const dropPhoto = () => { setPreview(''); setPhotoRows([]); };
+  React.useEffect(() => () => { if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current); }, []);
+  const analyzeDish = async (file) => {
+    if (!file) return;
+    const providers = [];
+    if (claudeKey()) providers.push('claude');
+    if (geminiKey()) providers.push('gemini');
+    if (!providers.length) {
+      setPreview('');
+      setPhotoRows([{ provider:'none', state:'err', err:'aucune clé IA (Claude dans Revente / Gemini dans Frigo).' }]);
+      return;
+    }
+    setPreview(URL.createObjectURL(file));
+    setPhotoRows(providers.map(p => ({ provider:p, state:'loading' })));
+    const img = await frigoPhotoData(file);   // redimensionnée ~900 px, en mémoire seulement
+    if (!img) {
+      setPhotoRows(providers.map(p => ({ provider:p, state:'err', err:'image illisible.' })));
+      return;
+    }
+    providers.forEach(p => {
+      foodPhotoAnalyze(p, img)
+        .then(d => setPhotoRows(rows => rows.map(r => r.provider === p ? { ...r, state: d ? 'ok' : 'none', data: d } : r)))
+        .catch(e => setPhotoRows(rows => rows.map(r => r.provider === p ? { ...r, state:'err', err: String((e && e.message) || e).slice(0, 90) } : r)));
+    });
+  };
+
   // Ajoute directement un résultat (portion en grammes → kcal ET macros calculées).
   const addFromResult = (r, grams, kcalVal, macros) => {
     const label = grams && grams !== 100 ? `${r.name} (${grams} g)` : r.name;
@@ -19270,11 +19366,46 @@ function NourriturePanel() {
             style={{ ...inputSt, flex:2, width:'auto', minWidth:0 }} />
           <button onClick={searchFood} disabled={searching || name.trim().length < 2} title="Trouver les calories"
             style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'0 10px', cursor: searching || name.trim().length < 2 ? 'default' : 'pointer', opacity: searching || name.trim().length < 2 ? 0.5 : 1, flexShrink:0 }}>{searching ? '…' : '🔎'}</button>
-          {(name || results !== null || searchErr || aiRows.length > 0) && (
+          {/* 📷 Photo du plat : Claude + Gemini identifient le plat et estiment les calories.
+              `capture="environment"` ouvre directement l'appareil photo sur mobile. */}
+          <button onClick={() => photoInputRef.current && photoInputRef.current.click()} title="Photographier mon plat (l'IA trouve le plat et les calories)"
+            style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'0 10px', cursor:'pointer', flexShrink:0 }}>📷</button>
+          <input ref={photoInputRef} type="file" accept="image/*" capture="environment" style={{ display:'none' }}
+            onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; analyzeDish(f); }} />
+          {(name || results !== null || searchErr || aiRows.length > 0 || photoRows.length > 0) && (
             <button onClick={clearSearch} title="Effacer la recherche"
               style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:13, lineHeight:1, padding:'0 8px', cursor:'pointer', flexShrink:0 }}>×</button>
           )}
         </div>
+        {/* 0) Analyse de la PHOTO du plat — au-dessus des suggestions texte.
+            L'aperçu vit en mémoire (object URL) et disparaît avec les résultats : la photo
+            n'est ni enregistrée, ni sauvegardée, ni exportée. */}
+        {photoRows.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:4, background:C.surface, border:`1px solid ${FOOD_COLOR}44`, borderRadius:8, padding:'6px 8px' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              {photoPrev && <img src={photoPrev} alt="" style={{ width:44, height:44, objectFit:'cover', borderRadius:6, flexShrink:0 }} />}
+              <div style={{ flex:1, minWidth:0, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.35 }}>
+                {photoPrev ? "📷 Analyse du plat — la photo n'est pas conservée." : '📷 Photo du plat'}
+              </div>
+              <button onClick={dropPhoto} title="Retirer la photo"
+                style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:12, lineHeight:1, padding:'2px 7px', cursor:'pointer', flexShrink:0 }}>×</button>
+            </div>
+            {photoRows.map(row => {
+              const tint = row.provider === 'gemini' ? '#8b7bf5' : '#d97757';
+              const nom  = row.provider === 'gemini' ? 'Gemini' : 'Claude';
+              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} defaultGrams={row.data.portionG} />;
+              return (
+                <div key={row.provider} style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: row.state === 'err' ? C.dim : tint,
+                  background:C.surfaceHigh, border:`1px solid ${row.state === 'err' ? C.border : tint + '44'}`, borderRadius:8, padding:'5px 8px' }}>
+                  {row.provider === 'none' ? `📷 Analyse impossible — ${row.err}`
+                    : row.state === 'loading' ? `⏳ ${nom} regarde la photo…`
+                    : row.state === 'none' ? `✨ ${nom} : aucun plat reconnu sur la photo.`
+                    : `✨ ${nom} indisponible — ${row.err || 'erreur'}`}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {/* 1) Suggestions IA (Claude + Gemini) — EN TÊTE des résultats */}
         {aiRows.length > 0 && (
           <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
