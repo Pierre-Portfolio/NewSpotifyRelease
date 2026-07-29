@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.95';
+const APP_VERSION = '7.6.96';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -24055,6 +24055,20 @@ function deltaGuard(d) {
   if (d?.rate_limited) throw new Error('RATE_LIMIT');
   return d;
 }
+// Empreinte d'une entrée BRUTE de l'API (mode debug) : de quoi reconnaître une forme de
+// payload inattendue sans jamais recopier tout l'objet dans le cache. Aucune donnée perso
+// au-delà de ce qui est déjà affiché (nom du titre).
+function deltaSample(it) {
+  if (!it || typeof it !== 'object') return { type: typeof it };
+  const inner = it.track || it.item || it.episode || null;
+  return {
+    keys:      Object.keys(it).slice(0, 12),
+    innerKey:  it.track ? 'track' : it.item ? 'item' : it.episode ? 'episode' : '(aucune)',
+    innerKeys: inner && typeof inner === 'object' ? Object.keys(inner).slice(0, 12) : [],
+    uri:       (inner && inner.uri) || it.uri || '(pas d\'uri)',
+    name:      (inner && inner.name) || it.name || '(pas de nom)',
+  };
+}
 
 // Titres likés (bibliothèque). ⚠ Seuls /me/tracks/contains et PUT/DELETE /me/tracks ont été
 // supprimés par la migration fév. 2026 : GET /me/tracks reste l'endpoint de LISTE. /me/library
@@ -24066,11 +24080,13 @@ async function deltaFetchLiked(onProgress) {
   ];
   for (const base of bases) {
     const out = [], seen = new Set();
-    let url = base, pages = 0;
+    let url = base, pages = 0, received = 0, sample = null;
     while (url && out.length < DELTA_LIKED_MAX && pages < 90) {
       const d = deltaGuard(await apiGet(url));
       if (!Array.isArray(d?.items)) break;
       for (const it of d.items) {
+        received++;
+        if (!sample) sample = deltaSample(it);
         const t = deltaTrack(it?.track || it);
         if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); }
       }
@@ -24079,9 +24095,9 @@ async function deltaFetchLiked(onProgress) {
       url = d.next || null;
       if (url) await sleep(DELTA_GAP_MS);
     }
-    if (out.length) return out;
+    if (out.length) return { tracks: out, received, sample };
   }
-  return [];
+  return { tracks: [], received: 0, sample: null };
 }
 
 // Playlists du compte (possédées ET suivies — « toutes les playlists de mon compte »).
@@ -24121,12 +24137,14 @@ async function deltaFetchPlaylistTracks(pid) {
   ];
   for (const base of bases) {
     const out = [], seen = new Set();
-    let url = base, pages = 0, ok = false;
+    let url = base, pages = 0, ok = false, received = 0, sample = null;
     while (url && out.length < DELTA_PL_TRK_MAX && pages < 45) {
       const d = deltaGuard(await apiGet(url));
       if (!Array.isArray(d?.items)) break;
       ok = true; // l'endpoint a répondu une liste : playlist lisible (même si elle est vide)
       for (const it of d.items) {
+        received++;
+        if (!sample) sample = deltaSample(it);
         const t = deltaTrack(it?.track || it);
         if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); }
       }
@@ -24134,16 +24152,23 @@ async function deltaFetchPlaylistTracks(pid) {
       url = d.next || null;
       if (url) await sleep(DELTA_GAP_MS);
     }
-    if (ok) return out;
+    // ⚠ « received > 0 mais out vide » = les entrées arrivent mais ne sont PAS reconnues comme
+    // des titres (forme de payload inattendue) — c'est un cas très différent d'une playlist
+    // vide, d'où `received`/`sample` conservés et affichés par le mode debug.
+    if (ok) return { tracks: out, endpoint: base.includes('/items?') ? 'items' : 'tracks', received, sample };
   }
   return null;
 }
 
 // Scan complet. Les likés « orphelins » ne peuvent être connus qu'APRÈS avoir vu toutes les
 // playlists → le calcul se fait en sortie de boucle.
+// ⚠ Chaque section porte SES DEUX listes : `tracks` = le delta (vue normale) et `all` = tout
+// le contenu lu (mode debug « tout afficher »). Sans `all`, le mode debug afficherait le delta
+// déguisé et ne prouverait rien.
 async function deltaScan(onProgress) {
   onProgress('Lecture des titres likés…');
-  const liked = await deltaFetchLiked(n => onProgress(`Titres likés : ${n} lus…`));
+  const lk = await deltaFetchLiked(n => onProgress(`Titres likés : ${n} lus…`));
+  const liked = lk.tracks;
   const likedSet = new Set(liked.map(t => t.uri));
 
   onProgress('Lecture des playlists…');
@@ -24155,17 +24180,24 @@ async function deltaScan(onProgress) {
   for (let i = 0; i < metas.length; i++) {
     const p = metas[i];
     onProgress(`Playlist ${i + 1}/${metas.length} · ${p.name}`);
-    const tracks = await deltaFetchPlaylistTracks(p.id);
-    if (tracks === null) { playlists.push({ ...p, unreadable: true, read: 0, tracks: [] }); }
+    const r = await deltaFetchPlaylistTracks(p.id);
+    if (r === null) { playlists.push({ ...p, unreadable: true, read: 0, received: 0, tracks: [], all: [] }); }
     else {
-      for (const t of tracks) inPlaylists.add(t.uri);
-      playlists.push({ ...p, unreadable: false, read: tracks.length, tracks: tracks.filter(t => !likedSet.has(t.uri)) });
+      for (const t of r.tracks) inPlaylists.add(t.uri);
+      playlists.push({
+        ...p, unreadable: false, read: r.tracks.length, received: r.received,
+        endpoint: r.endpoint, sample: r.sample,
+        all: r.tracks, tracks: r.tracks.filter(t => !likedSet.has(t.uri)),
+      });
     }
     if (i < metas.length - 1) await sleep(DELTA_GAP_MS);
   }
   return {
     at: Date.now(),
     likedTotal: liked.length,
+    likedReceived: lk.received,
+    likedSample: lk.sample,
+    likedAll: liked,
     likedOnly: liked.filter(t => !inPlaylists.has(t.uri)),
     playlists,
   };
@@ -24175,7 +24207,8 @@ async function deltaScan(onProgress) {
 // n'est volontairement PAS mémorisé (voir DELTA_CACHE_MAX).
 function deltaCacheSave(d) {
   try {
-    const n = d.likedOnly.length + d.playlists.reduce((s, p) => s + p.tracks.length, 0);
+    // `all` est mémorisé en plus du delta (mode debug) → il compte dans le volume
+    const n = (d.likedAll || d.likedOnly).length + d.playlists.reduce((s, p) => s + (p.all || p.tracks).length, 0);
     if (n > DELTA_CACHE_MAX) { localStorage.removeItem(DELTA_CACHE_KEY); return false; }
     localStorage.setItem(DELTA_CACHE_KEY, JSON.stringify(d));
     return true;
@@ -24235,6 +24268,34 @@ function DeltaTrackRow({ t }) {
   );
 }
 
+// Détail technique d'une section (mode debug seulement) : ce que Spotify a RÉELLEMENT renvoyé.
+// `announced` = le total annoncé par /me/playlists, `received` = entrées reçues page par page,
+// `parsed` = entrées reconnues comme des titres. Trois écarts possibles, trois causes :
+//   announced > received → pagination interrompue (cap, 429, `next` absent)
+//   received  > parsed   → forme de payload inattendue / titres locaux / podcasts
+//   announced = received = parsed → la lecture est bonne, le problème est ailleurs (filtre)
+function DeltaDebug({ received, parsed, sample, endpoint, announced, legacy }) {
+  const bad = received > 0 && parsed === 0;
+  return (
+    <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: bad ? '#e05050' : C.muted, background: bad ? '#e0505012' : C.surfaceHigh, border:`1px solid ${bad ? '#e0505044' : C.border}`, borderRadius:8, padding:'8px 10px', display:'flex', flexDirection:'column', gap:3, overflowX:'auto' }}>
+      {legacy && <span style={{ color:'#f5a623' }}>⚠ Analyse antérieure au mode debug : relance l'analyse pour ce détail (liste ci-dessous = le delta, pas le contenu brut).</span>}
+      <span>
+        {announced != null && `annoncés par Spotify : ${announced} · `}
+        entrées reçues : {received ?? '?'} · titres reconnus : {parsed ?? '?'}
+        {endpoint && ` · endpoint : /${endpoint}`}
+      </span>
+      {bad && <span>⚠ Des entrées arrivent mais aucune n'est reconnue comme un titre — la forme du payload ne correspond pas à ce que l'app attend.</span>}
+      {sample && (
+        <>
+          <span>1re entrée · champs : {(sample.keys || []).join(', ') || '—'}</span>
+          <span>piste imbriquée sous : {sample.innerKey} · champs : {(sample.innerKeys || []).join(', ') || '—'}</span>
+          <span>uri : {sample.uri} · nom : {sample.name}</span>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Liste paginée (les collapses peuvent contenir des centaines de titres)
 function DeltaTrackList({ tracks, empty }) {
   const [max, setMax] = React.useState(DELTA_PAGE);
@@ -24268,7 +24329,7 @@ function DeltaPlaylistPanel() {
     return () => { _delta.subs.delete(force); };
   }, []);
 
-  const { state, progress, err, data, cached } = _delta;
+  const { state, progress, err, data, cached, showAll } = _delta;
   const loading = state === 'loading';
   const cnt = n => <span style={{ color:C.dim, fontWeight:400 }}>· {n}</span>;
   // ⚠ CAUSE N°1 d'une liste de playlists incomplète : sans le scope playlist-read-private,
@@ -24297,10 +24358,23 @@ function DeltaPlaylistPanel() {
           style={{ background:`${DELTA_COLOR}22`, border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px', fontSize:11, fontWeight:700, cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.5 : 1, fontFamily:'inherit' }}>
           {loading ? '⏳ Analyse…' : (data ? '↻ Relancer l\'analyse' : '▶ Lancer l\'analyse')}
         </button>
+        {/* Bascule DEBUG : « tout afficher » rend le contenu BRUT lu par l'analyse (aucun
+            filtre likés/non-likés) → permet de voir si un titre a bien été lu dans une
+            playlist mais écarté par le filtre, ou s'il n'a jamais été lu du tout. */}
+        <button onClick={() => deltaSet({ showAll: !_delta.showAll })}
+          title={showAll ? 'Revenir au delta (titres filtrés)' : 'Afficher tout le contenu lu, sans aucun filtre'}
+          style={{ background: showAll ? `${DELTA_COLOR}22` : 'none', border:`1px solid ${showAll ? DELTA_COLOR + '66' : C.border}`, color: showAll ? DELTA_COLOR : C.muted, borderRadius:8, padding:'7px 12px', fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>
+          {showAll ? '🐞 Tout afficher : ACTIVÉ' : '🐞 Tout afficher'}
+        </button>
         <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
           {data ? `Analyse du ${deltaWhen(data.at)}` : 'Aucune analyse — rien n\'est interrogé tant que tu ne cliques pas.'}
         </span>
       </div>
+      {showAll && (
+        <div style={{ fontSize:10, color:DELTA_COLOR, fontFamily:'DM Mono,monospace' }}>
+          Mode debug : chaque section liste TOUT ce que l'analyse a lu (aucun filtre), avec le détail des réponses de Spotify.
+        </div>
+      )}
 
       {loading && (
         <div style={{ fontSize:11, color:C.muted, fontFamily:'DM Mono,monospace' }}>
@@ -24320,23 +24394,42 @@ function DeltaPlaylistPanel() {
             {!cached && ' · résultat trop volumineux pour être mémorisé (relance l\'analyse au prochain chargement)'}
           </div>
 
+          {/* ⚠ Les listes `all` n'existent pas dans un cache écrit avant 7.6.96 → repli sur le
+              delta (le mode debug le dit, plutôt que d'afficher un tableau vide trompeur). */}
           <StatsCollapse defaultOpen={false} color="#e05050"
-            title={<span>❤ TITRES LIKÉS {cnt(data.likedOnly.length)}</span>}>
-            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>Likés présents dans aucune de tes playlists.</div>
-            <DeltaTrackList tracks={data.likedOnly} empty="Tous tes titres likés sont rangés dans au moins une playlist." />
+            title={<span>❤ TITRES LIKÉS {cnt(showAll ? (data.likedAll || data.likedOnly).length : data.likedOnly.length)}</span>}>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+              {showAll ? 'Mode debug : TOUS les titres likés lus par l\'analyse.' : 'Likés présents dans aucune de tes playlists.'}
+            </div>
+            {showAll && <DeltaDebug received={data.likedReceived} parsed={data.likedTotal} sample={data.likedSample} legacy={!data.likedAll} />}
+            <DeltaTrackList
+              tracks={showAll ? (data.likedAll || data.likedOnly) : data.likedOnly}
+              empty={showAll ? 'Aucun titre liké lu.' : 'Tous tes titres likés sont rangés dans au moins une playlist.'} />
           </StatsCollapse>
 
-          {data.playlists.map(p => (
-            <StatsCollapse key={p.id} defaultOpen={false} color={DELTA_COLOR}
-              title={<span>{p.name} {cnt(p.unreadable ? '?' : p.tracks.length)}</span>}>
-              <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-                {p.unreadable
-                  ? 'Contenu refusé par Spotify (playlist éditoriale non lisible depuis la migration de février 2026).'
-                  : `Titres de cette playlist qui ne sont pas likés — ${p.read} titre(s) lu(s)${p.owner ? ` · par ${p.owner}` : ''}.`}
-              </div>
-              {!p.unreadable && <DeltaTrackList tracks={p.tracks} empty="Tous les titres de cette playlist sont likés." />}
-            </StatsCollapse>
-          ))}
+          {data.playlists.map(p => {
+            const list = showAll ? (p.all || p.tracks) : p.tracks;
+            return (
+              <StatsCollapse key={p.id} defaultOpen={false} color={DELTA_COLOR}
+                title={<span>{p.name} {cnt(p.unreadable ? '?' : list.length)}</span>}>
+                <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                  {p.unreadable
+                    ? 'Contenu refusé par Spotify (playlist éditoriale non lisible depuis la migration de février 2026).'
+                    : showAll
+                      ? `Mode debug : TOUT le contenu lu dans cette playlist${p.owner ? ` · par ${p.owner}` : ''}.`
+                      : `Titres de cette playlist qui ne sont pas likés — ${p.read} titre(s) lu(s)${p.owner ? ` · par ${p.owner}` : ''}.`}
+                </div>
+                {showAll && !p.unreadable && (
+                  <DeltaDebug received={p.received} parsed={p.read} sample={p.sample} endpoint={p.endpoint}
+                    announced={p.total} legacy={!p.all} />
+                )}
+                {!p.unreadable && (
+                  <DeltaTrackList tracks={list}
+                    empty={showAll ? 'Aucun titre lu dans cette playlist.' : 'Tous les titres de cette playlist sont likés.'} />
+                )}
+              </StatsCollapse>
+            );
+          })}
         </>
       )}
     </div>
