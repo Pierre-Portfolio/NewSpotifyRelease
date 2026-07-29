@@ -95,7 +95,10 @@
 // Dashboard »…) au lieu d'un retour muet à la page de connexion.
 // v146 : bump de cache — Musique : nouveau collapse « 🔀 Delta Playlist » (likés rangés dans
 // aucune playlist, puis les titres non likés de chaque playlist ; analyse déclenchée à la main).
-const CACHE  = 'spotifyplus-v146';
+// v147 : bump de cache — Delta Playlist ne voyait AUCUNE playlist perso : le scope
+// playlist-read-private manquait (Spotify renvoyait 200 avec les seules playlists publiques).
+// Scope ajouté + bandeau « déconnecte-toi/reconnecte-toi » tant qu'il n'est pas accordé.
+const CACHE  = 'spotifyplus-v147';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',

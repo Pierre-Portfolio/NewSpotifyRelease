@@ -46,6 +46,8 @@ Un onglet qui regroupe **❤ Likés**, **🕘 Historique**, **🎤 Artistes suiv
 - **❤ Titres likés** : tes titres likés qui ne sont rangés dans **aucune** de tes playlists (ceux qu'il reste à classer)
 - **puis un collapse par playlist**, au nom de la playlist : les titres qu'elle contient et que tu **n'as pas likés**
 
+⚠ **Une reconnexion est nécessaire une fois** : jusqu'ici l'app ne demandait pas la permission de lire tes playlists privées, et Spotify ne renvoyait donc que tes playlists **publiques** (sans le dire — la liste arrivait juste incomplète). C'est corrigé ; tant que la permission n'est pas accordée, un bandeau te le signale avec un bouton pour te déconnecter — reconnecte-toi et toutes tes playlists (privées et collaboratives comprises) apparaissent.
+
 Chaque titre est écoutable d'un clic. **Rien ne part tout seul** : l'analyse ne se lance qu'avec le bouton **▶ Lancer l'analyse** (elle interroge une fois ta bibliothèque puis chaque playlist, ça peut prendre une minute). Le résultat est gardé en local avec sa date, et tu le rafraîchis quand tu veux avec **↻ Relancer l'analyse**. Les playlists dont Spotify refuse de renvoyer le contenu (les éditoriales, depuis la migration de février 2026) sont affichées comme telles plutôt que comptées à tort.
 
 ### Stats

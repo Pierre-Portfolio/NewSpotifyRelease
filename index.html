@@ -108,13 +108,18 @@ const REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/';
 // ⚠ user-read-playback-state (6.4.5) : requis par GET /me/player/queue — capture des
 // Découvertes de la semaine par la lecture. Token émis AVANT cet ajout → 403 sur la file
 // d'attente tant que l'utilisateur ne s'est pas déconnecté/reconnecté (log explicite).
-const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-read-playback-state user-modify-playback-state user-library-read user-library-modify';
+// ⚠ playlist-read-private / playlist-read-collaborative (7.6.95) : SANS EUX, GET /me/playlists
+// ne renvoie QUE les playlists PUBLIQUES. Une playlist créée depuis l'app Spotify est privée
+// par défaut → Delta Playlist ne voyait aucune playlist perso (seulement les suivies/publiques),
+// SANS aucune erreur : l'API répond 200 avec une liste incomplète. Token émis avant cet ajout →
+// même symptôme tant que l'utilisateur ne s'est pas déconnecté/reconnecté (bandeau dédié).
+const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative';
 const ESTIMATED_TOTAL = 1400;
 // Version de l'app : MAJ.MIN.U = nombre de commits du dépôt découpé en
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.94';
+const APP_VERSION = '7.6.95';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -208,6 +213,7 @@ async function exchangeCode(code) {
       localStorage.setItem('spotify_token', data.access_token);
       localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
       if (data.refresh_token) localStorage.setItem('spotify_refresh', data.refresh_token);
+      spotifyStoreScopes(data.scope);
     } catch {
       // Quota localStorage : le jeton n'est PAS enregistré → sans ce message, connexion en
       // boucle sans explication (chaque retour repartait sur l'écran de login).
@@ -247,6 +253,7 @@ function refreshToken() {
       localStorage.setItem('spotify_token', data.access_token);
       localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
       if (data.refresh_token) localStorage.setItem('spotify_refresh', data.refresh_token); // rotation : stocker le nouveau
+      spotifyStoreScopes(data.scope);
       return true;
     }
     if (data.error === 'invalid_grant') {
@@ -265,8 +272,26 @@ async function getToken() {
   if (Date.now() > expiry - 60000) await refreshToken();
   return localStorage.getItem('spotify_token');
 }
+// ── Scopes réellement ACCORDÉS au jeton courant (7.6.95) ──────────────────────
+// Le token endpoint renvoie `scope` (liste séparée par des espaces). On la mémorise pour
+// pouvoir dire à l'utilisateur qu'une permission manque AVANT qu'il ne constate un résultat
+// silencieusement incomplet — cas de playlist-read-private, où Spotify répond 200 avec une
+// liste tronquée au lieu d'un 403 (un 403 aurait été rattrapé par libraryScopeAlert).
+// ⚠ Un jeton émis avant cet ajout n'a AUCUNE valeur stockée → `spotifyHasScope` renvoie
+// `null` (« inconnu »), que les appelants doivent traiter comme « probablement absent ».
+const SPOTIFY_SCOPES_LS = 'spotify_scopes';
+function spotifyStoreScopes(scope) {
+  if (typeof scope !== 'string' || !scope.trim()) return;
+  try { localStorage.setItem(SPOTIFY_SCOPES_LS, scope.trim()); } catch {}
+}
+function spotifyHasScope(s) {
+  let raw = null;
+  try { raw = localStorage.getItem(SPOTIFY_SCOPES_LS); } catch {}
+  if (!raw) return null;                       // inconnu (session antérieure à 7.6.95)
+  return raw.split(/\s+/).includes(s);
+}
 function logoutClear() {
-  ['spotify_token','spotify_token_expiry','spotify_refresh','pkce_verifier','pkce_state'].forEach(k => localStorage.removeItem(k));
+  ['spotify_token','spotify_token_expiry','spotify_refresh','pkce_verifier','pkce_state',SPOTIFY_SCOPES_LS].forEach(k => localStorage.removeItem(k));
 }
 
 // ── Écriture localStorage centralisée ──────────────────────────────────────────
@@ -24071,9 +24096,10 @@ async function deltaFetchPlaylists() {
       seen.add(p.id);
       const imgs = p.images || [];
       out.push({
-        id:    p.id,
-        name:  p.name || '(sans nom)',
-        owner: p.owner?.display_name || p.owner?.id || '',
+        id:      p.id,
+        name:    p.name || '(sans nom)',
+        owner:   p.owner?.display_name || p.owner?.id || '',
+        ownerId: p.owner?.id || '',
         image: imgs.length ? (imgs[imgs.length - 1]?.url || '') : '',
         total: Number.isFinite(p.tracks?.total) ? p.tracks.total : null,
       });
@@ -24229,6 +24255,7 @@ function DeltaTrackList({ tracks, empty }) {
 }
 
 function DeltaPlaylistPanel() {
+  const { user, logout } = useStore();
   const [, force] = React.useReducer(x => x + 1, 0);
   React.useEffect(() => {
     _delta.subs.add(force);
@@ -24244,9 +24271,27 @@ function DeltaPlaylistPanel() {
   const { state, progress, err, data, cached } = _delta;
   const loading = state === 'loading';
   const cnt = n => <span style={{ color:C.dim, fontWeight:400 }}>· {n}</span>;
+  // ⚠ CAUSE N°1 d'une liste de playlists incomplète : sans le scope playlist-read-private,
+  // /me/playlists ne renvoie que les playlists PUBLIQUES — en 200, sans erreur. Un jeton
+  // antérieur à 7.6.95 n'a pas de scopes mémorisés (null) : on avertit aussi dans ce cas.
+  const plScope = spotifyHasScope('playlist-read-private');
+  // `ownerId` n'existe pas dans un cache écrit avant 7.6.95 → on n'affiche rien plutôt qu'un « 0 » faux
+  const mine = data && user?.id && data.playlists.some(p => p.ownerId !== undefined)
+    ? data.playlists.filter(p => p.ownerId === user.id).length : null;
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      {plScope !== true && (
+        <div style={{ fontSize:11, color:'#f5a623', background:'#f5a62315', border:'1px solid #f5a62344', borderRadius:8, padding:'9px 11px', display:'flex', flexDirection:'column', gap:8 }}>
+          <span>
+            ⚠ <b>Tes playlists privées ne sont pas visibles.</b> Spotify ne renvoie que les playlists <b>publiques</b> tant que la permission « playlist-read-private » n'a pas été accordée — et une playlist que tu crées est privée par défaut. Déconnecte-toi puis reconnecte-toi une fois pour l'accorder.
+          </span>
+          <button onClick={logout}
+            style={{ alignSelf:'flex-start', background:'#f5a62322', border:'1px solid #f5a62366', color:'#f5a623', borderRadius:8, padding:'6px 12px', fontSize:11, fontWeight:700, cursor:'pointer', fontFamily:'inherit' }}>
+            ⎋ Se déconnecter pour accorder la permission
+          </button>
+        </div>
+      )}
       <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
         <button onClick={deltaRun} disabled={loading}
           style={{ background:`${DELTA_COLOR}22`, border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px', fontSize:11, fontWeight:700, cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.5 : 1, fontFamily:'inherit' }}>
@@ -24271,6 +24316,7 @@ function DeltaPlaylistPanel() {
         <>
           <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
             {data.likedTotal} titre(s) liké(s) · {data.playlists.length} playlist(s)
+            {mine !== null && ` (dont ${mine} créée(s) par toi)`}
             {!cached && ' · résultat trop volumineux pour être mémorisé (relance l\'analyse au prochain chargement)'}
           </div>
 
