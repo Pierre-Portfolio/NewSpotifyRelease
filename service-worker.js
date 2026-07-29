@@ -93,7 +93,9 @@
 // v130 : bump de cache — connexion Spotify : la raison de l'échec est enfin AFFICHÉE sur
 // l'écran de connexion (code refusé, state invalide, /me en 403 « compte non déclaré dans le
 // Dashboard »…) au lieu d'un retour muet à la page de connexion.
-const CACHE  = 'spotifyplus-v145';
+// v146 : bump de cache — Musique : nouveau collapse « 🔀 Delta Playlist » (likés rangés dans
+// aucune playlist, puis les titres non likés de chaque playlist ; analyse déclenchée à la main).
+const CACHE  = 'spotifyplus-v146';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
