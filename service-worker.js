@@ -100,7 +100,10 @@
 // Scope ajouté + bandeau « déconnecte-toi/reconnecte-toi » tant qu'il n'est pas accordé.
 // v148 : bump de cache — Delta Playlist : bouton debug « Tout afficher » (contenu brut lu,
 // sans filtre) + détail des réponses Spotify (entrées reçues vs titres reconnus).
-const CACHE  = 'spotifyplus-v148';
+// v149 : bump de cache — Delta Playlist : correctif « aucun titre trouvé dans les playlists »
+// (la migration 2026 a renommé le champ track → item dans les entrées de playlist) + la
+// cascade /items → /tracks n'est plus court-circuitée par une réponse « items: [] ».
+const CACHE  = 'spotifyplus-v149';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',

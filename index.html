@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.96';
+const APP_VERSION = '7.6.97';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -24037,6 +24037,15 @@ const DELTA_PAGE        = 60;    // titres rendus par page dans une liste
 // Sont écartés : les titres LOCAUX (pas d'URI Spotify comparable), les épisodes de podcast
 // (uri « spotify:episode: ») et les entrées vides (une playlist peut contenir des `track:null`
 // quand un titre a été retiré du catalogue).
+// ⚠ 7.6.97 — LA PISTE EST SOUS `item`, PAS SOUS `track`. La migration Spotify de février 2026
+// a RENOMMÉ le champ des entrées de playlist (`track` → `item`) ; l'import des Découvertes le
+// documentait déjà (« champ renommé track → item par la migration 2026 »), mais Delta Playlist
+// ne lisait que `.track` → toutes les entrées de `/playlists/{id}/items` tombaient à null et
+// AUCUN titre n'était trouvé dans les playlists. `item` d'abord, `track` en repli (c'est encore
+// la forme renvoyée par /me/tracks et par l'ancien endpoint /playlists/{id}/tracks).
+function deltaEntry(it) {
+  return (it && (it.item || it.track)) || it;
+}
 function deltaTrack(t) {
   if (!t || t.is_local) return null;
   const uri = t.uri || (t.id ? `spotify:track:${t.id}` : '');
@@ -24060,10 +24069,10 @@ function deltaGuard(d) {
 // au-delà de ce qui est déjà affiché (nom du titre).
 function deltaSample(it) {
   if (!it || typeof it !== 'object') return { type: typeof it };
-  const inner = it.track || it.item || it.episode || null;
+  const inner = it.item || it.track || it.episode || null;
   return {
     keys:      Object.keys(it).slice(0, 12),
-    innerKey:  it.track ? 'track' : it.item ? 'item' : it.episode ? 'episode' : '(aucune)',
+    innerKey:  it.item ? 'item' : it.track ? 'track' : it.episode ? 'episode' : '(aucune)',
     innerKeys: inner && typeof inner === 'object' ? Object.keys(inner).slice(0, 12) : [],
     uri:       (inner && inner.uri) || it.uri || '(pas d\'uri)',
     name:      (inner && inner.name) || it.name || '(pas de nom)',
@@ -24087,7 +24096,7 @@ async function deltaFetchLiked(onProgress) {
       for (const it of d.items) {
         received++;
         if (!sample) sample = deltaSample(it);
-        const t = deltaTrack(it?.track || it);
+        const t = deltaTrack(deltaEntry(it));
         if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); }
       }
       pages++;
@@ -24135,29 +24144,42 @@ async function deltaFetchPlaylistTracks(pid) {
     `https://api.spotify.com/v1/playlists/${pid}/items?limit=50&additional_types=track`,
     `https://api.spotify.com/v1/playlists/${pid}/tracks?limit=50&additional_types=track`,
   ];
+  // ⚠ Un endpoint qui répond « items: [] » ne prouve PAS que la playlist est vide : il peut
+  // simplement ne pas être le bon pour cette app (c'est déjà la raison d'être de la cascade
+  // dans `fetchPlaylistItems`, qui exige `items.length` avant d'accepter une réponse). On
+  // essaie donc TOUS les endpoints et on garde le premier qui ramène au moins un titre ;
+  // « vide partout » = playlist réellement vide, « aucune liste nulle part » = illisible.
+  const attempts = [];
+  let best = null, anyList = false;
   for (const base of bases) {
+    const endpoint = base.includes('/items?') ? 'items' : 'tracks';
     const out = [], seen = new Set();
     let url = base, pages = 0, ok = false, received = 0, sample = null;
     while (url && out.length < DELTA_PL_TRK_MAX && pages < 45) {
       const d = deltaGuard(await apiGet(url));
       if (!Array.isArray(d?.items)) break;
-      ok = true; // l'endpoint a répondu une liste : playlist lisible (même si elle est vide)
+      ok = true;
       for (const it of d.items) {
         received++;
         if (!sample) sample = deltaSample(it);
-        const t = deltaTrack(it?.track || it);
+        const t = deltaTrack(deltaEntry(it));
         if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); }
       }
       pages++;
       url = d.next || null;
       if (url) await sleep(DELTA_GAP_MS);
     }
-    // ⚠ « received > 0 mais out vide » = les entrées arrivent mais ne sont PAS reconnues comme
-    // des titres (forme de payload inattendue) — c'est un cas très différent d'une playlist
-    // vide, d'où `received`/`sample` conservés et affichés par le mode debug.
-    if (ok) return { tracks: out, endpoint: base.includes('/items?') ? 'items' : 'tracks', received, sample };
+    attempts.push({ endpoint, listed: ok, received, parsed: out.length });
+    if (!ok) continue;
+    anyList = true;
+    // ⚠ « received > 0 mais aucun titre reconnu » = forme de payload inattendue — cas très
+    // différent d'une playlist vide, d'où `received`/`sample` conservés pour le mode debug.
+    if (out.length) { best = { tracks: out, endpoint, received, sample }; break; }
+    if (!best) best = { tracks: [], endpoint, received, sample };
+    await sleep(DELTA_GAP_MS);
   }
-  return null;
+  if (!anyList) return null;
+  return { ...best, attempts };
 }
 
 // Scan complet. Les likés « orphelins » ne peuvent être connus qu'APRÈS avoir vu toutes les
@@ -24186,7 +24208,7 @@ async function deltaScan(onProgress) {
       for (const t of r.tracks) inPlaylists.add(t.uri);
       playlists.push({
         ...p, unreadable: false, read: r.tracks.length, received: r.received,
-        endpoint: r.endpoint, sample: r.sample,
+        endpoint: r.endpoint, sample: r.sample, attempts: r.attempts,
         all: r.tracks, tracks: r.tracks.filter(t => !likedSet.has(t.uri)),
       });
     }
@@ -24274,7 +24296,7 @@ function DeltaTrackRow({ t }) {
 //   announced > received → pagination interrompue (cap, 429, `next` absent)
 //   received  > parsed   → forme de payload inattendue / titres locaux / podcasts
 //   announced = received = parsed → la lecture est bonne, le problème est ailleurs (filtre)
-function DeltaDebug({ received, parsed, sample, endpoint, announced, legacy }) {
+function DeltaDebug({ received, parsed, sample, endpoint, announced, attempts, legacy }) {
   const bad = received > 0 && parsed === 0;
   return (
     <div style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: bad ? '#e05050' : C.muted, background: bad ? '#e0505012' : C.surfaceHigh, border:`1px solid ${bad ? '#e0505044' : C.border}`, borderRadius:8, padding:'8px 10px', display:'flex', flexDirection:'column', gap:3, overflowX:'auto' }}>
@@ -24285,6 +24307,9 @@ function DeltaDebug({ received, parsed, sample, endpoint, announced, legacy }) {
         {endpoint && ` · endpoint : /${endpoint}`}
       </span>
       {bad && <span>⚠ Des entrées arrivent mais aucune n'est reconnue comme un titre — la forme du payload ne correspond pas à ce que l'app attend.</span>}
+      {Array.isArray(attempts) && attempts.length > 1 && (
+        <span>endpoints essayés : {attempts.map(a => `/${a.endpoint} → ${a.listed ? `${a.received} reçus, ${a.parsed} reconnus` : 'aucune liste'}`).join(' · ')}</span>
+      )}
       {sample && (
         <>
           <span>1re entrée · champs : {(sample.keys || []).join(', ') || '—'}</span>
@@ -24421,7 +24446,7 @@ function DeltaPlaylistPanel() {
                 </div>
                 {showAll && !p.unreadable && (
                   <DeltaDebug received={p.received} parsed={p.read} sample={p.sample} endpoint={p.endpoint}
-                    announced={p.total} legacy={!p.all} />
+                    announced={p.total} attempts={p.attempts} legacy={!p.all} />
                 )}
                 {!p.unreadable && (
                   <DeltaTrackList tracks={list}
