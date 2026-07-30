@@ -110,7 +110,9 @@
 // de 10 à 100 via le bouton 💣 (la grille s'agrandit), drapeau réduit de 20 %.
 // v152 : bump de cache — Finance : axe horizontal daté sur les graphiques (6 graduations
 // « 23/03 » avec un petit trait au-dessus de chaque date).
-const CACHE  = 'spotifyplus-v152';
+// v153 : bump de cache — nouveau module « Collection » (4 boutons carrés Cartes /
+// Displate / Pop / Autres, sans action pour l'instant).
+const CACHE  = 'spotifyplus-v153';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
