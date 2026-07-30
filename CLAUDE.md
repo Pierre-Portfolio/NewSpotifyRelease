@@ -61,7 +61,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // perso. Voir « Scopes accordés » ci-dessous pour la détection côté client.
 ```
 
-### `APP_VERSION` (actuellement `'7.7.4'`)
+### `APP_VERSION` (actuellement `'7.7.5'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -227,6 +227,8 @@ Export : `EXPORT_SECTIONS` (boutons dans « ↧ EXPORTER » d'À propos) → `do
 **Players** : `PlayerBar` (desktop) · `MobilePlayer` (25vh) · `SeekBar` (mouse+touch, listeners attachés dans `onMouseDown` pas useEffect). Bouton loop partagé `loopEnabled`. Like : `isLiked` init local, `libraryContains` seulement si titre inconnu.
 
 **Musique** (`MusiquePanel`, violet) : fusion 3 collapses `LikerPanel` (❤ Likés) / `HistoryPanel` (🕘 Historique) / `ArtistsPanel` (🎤 Artistes suivis) **+ 🔀 DELTA PLAYLIST en 4e (7.6.94)**. Anciens onglets dédiés supprimés (valeurs héritées mappées sur `musique`).
+
+**⚠ 7.7.5 — 🙈 ET ⏹ RETIRÉS DES LIGNES DE LA SECTION YOUTUBE de TV Time** (demande utilisateur) : dans « ▶️ YT → EN COURS », la ligne d'une chaîne ne porte plus que **✓ · 🕒 · ×**. Sont supprimés le **🙈 « Ignorer non vues »** (`ignoreUnwatched`, qui reste branché sur les SÉRIES) et le **⏹ « Arrêter de suivre »** — dont le helper `unfollowBtn` ET la fonction `unfollow` sont **supprimés** faute d'appelant. ⚠ Le drapeau **`dropped`** qu'`unfollow` posait reste **lu partout** (`ytCheckNewVideos` skippe une chaîne `dropped`, la ligne des VUS affiche « · plus suivie ») : les chaînes déjà arrêtées gardent exactement leur comportement, seul le moyen d'en arrêter une NOUVELLE depuis cette liste disparaît. `abandonSeries` (🚫, séries) n'est pas touché.
 
 **⚠ 7.6.94 — 🔀 DELTA PLAYLIST** (demande utilisateur) : 4e collapse de Musique (`DeltaPlaylistPanel`, `DELTA_COLOR='#f5813c'`) = l'**écart** entre les titres likés et le contenu des playlists du compte, en sous-collapses `StatsCollapse` : (1) **« ❤ TITRES LIKÉS »** = les likés présents dans **AUCUNE** playlist ; (2) **un sous-collapse par playlist** (titre = nom de la playlist) = les titres de CETTE playlist qui ne sont **PAS** likés. Les deux listes sont donc symétriques, jamais redondantes.
 - **AUCUNE requête automatique** (même philosophie que le bouton Découvertes de 7.6.65) : le scan ne part **que** sur le bouton « ▶ Lancer l'analyse ». Au montage on relit seulement le cache localStorage `spotifyplus_delta_playlist` (`deltaCacheLoad`/`deltaCacheSave`, **sans TTL** — la date de l'analyse est affichée, c'est l'utilisateur qui décide de relancer). Cache re-fetchable ⇒ `catch {}` muet, **PAS dans buildBackup**, PAS dans `EXPORT_SECTIONS`. ⚠ Un résultat de plus de `DELTA_CACHE_MAX` (1500) titres n'est **volontairement PAS mémorisé** (quota localStorage partagé par tout le Hub) → l'UI le dit, l'analyse repartira au prochain chargement.
