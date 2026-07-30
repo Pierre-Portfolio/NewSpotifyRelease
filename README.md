@@ -105,6 +105,8 @@ Mode **🧮 Calculatrice** entre Full et BullRun : calculatrice de poche 100 % l
 
 Activable/désactivable dans le Paramétrage comme les autres modules.
 
+**🃏 Analyse Cardmarket (nouveau)** : tout en bas de Bon Plan, une section **Analyse Cardmarket**. Un clic ouvre pour l'instant une petite fenêtre **« 🚧 En cours de construction »** — la place est réservée, la fonctionnalité arrive.
+
 ### Collection
 🗃️ **Module Collection** (entre Bon Plan et Emploi). Les cinq catégories — **🃏 Cartes**, **🖼️ Displate**, **🧸 Pop**, **🎮 Jeux vidéo** et **📦 Autre** — sont des **sections dépliables**, **toutes repliées à l'ouverture**.
 
