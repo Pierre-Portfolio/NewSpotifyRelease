@@ -73,13 +73,16 @@ Données live via **APIs gratuites sans clé** (fiabilité variable). Light / Fu
 **📊 RSI (nouveau)** — sous la section Crypto, une section repliable donne le **RSI (indicateur de surachat / survente)** de tes actifs. Pour **les cryptos, c'est bien du RSI sur 24 h** : il est calculé sur des **bougies horaires**, et chaque ligne affiche la valeur du moment, sa **variation en points sur les dernières 24 h** et l'**amplitude min → max** sur la période, avec une jauge où les zones **survente (< 30, vert)** et **surachat (> 70, rouge)** sont matérialisées. Les autres actifs (actions, indices, or/argent, EUR/USD) sont affichés avec un **RSI journalier**, clairement étiqueté « 1j » : **aucune source gratuite sans clé ne publie leur cours heure par heure**, un RSI 24 h y serait donc inventé. Tout est **calculé en local** (lissage de Wilder, aucune API d'indicateurs — elles sont toutes payantes) ; rien ne se charge tant que tu n'ouvres pas la section, et un bouton **↻ Recalculer** force la mise à jour.
 
 ### BullRun (dans Finance)
-Mode **BullRun** entre Calculatrice et Mes Actifs : un tableau de bord de **cycle de marché**, avec sa **propre rangée de boutons** (qui n'apparaît que dans ce mode) donnant accès à 6 vues —
-- **📈 Trends** : l'intérêt de recherche Google sur *bitcoin · coinbase · crypto* sur 5 ans ;
-- **📱 Coinbase Play** : la **position de l'appli Coinbase dans le Play Store** (toutes applications gratuites + catégorie Finance). ⚠️ Google ne publie **aucune API** de classement et les services qui les revendent sont payants : le rang est donc **cherché sur le web par l'IA** (Claude ou Gemini, avec les clés que tu as déjà), et des **liens directs vers les tops du Play Store** sont fournis à côté pour recouper ;
-- **🌊 Altcoin Season** : la page de référence *blockchaincenter*, **plus un indice recalculé en direct** dans le Hub (part du top 50, hors stablecoins, qui fait mieux que le Bitcoin, sur 7 j / 30 j / 1 an) — l'indice officiel se calcule sur 90 jours, fenêtre que CoinGecko ne donne pas gratuitement, c'est donc la **même méthode sur d'autres horizons**, pas une copie ;
-- **🫧 Crypto Bubbles**, **🏛️ MacroÉconomie** (calendrier des publications économiques) et **🌈 Bitcoin Rainbow Chart**.
+Mode **BullRun** entre Calculatrice et Mes Actifs : un tableau de bord de **cycle de marché**. **Nouveau : ce ne sont plus des boutons mais des sections dépliables**, toutes **repliées à l'arrivée** — rien ne se charge tant que tu n'ouvres pas, et tu peux en ouvrir plusieurs à la fois. Dans l'ordre :
+- **🫧 Crypto Bubbles** : les bulles proportionnelles à la performance ;
+- **🏛️ MacroÉconomie** : le calendrier des publications économiques (inflation, emploi, taux) ;
+- **📈 Trends** : **corrigé** — le cadre Google Trends affichait une **page vide** (Google a arrêté son widget d'intégration, et il n'existe aucune API Trends utilisable depuis un navigateur). À la place, la section montre en direct les **cryptos les plus recherchées des dernières 24 h** (source CoinGecko, sans clé), avec leur variation, et un bouton **↗ Google Trends** pour ouvrir la courbe historique *bitcoin · coinbase · crypto* dans un onglet ;
+- **🌈 Bitcoin Rainbow Chart** : les bandes de régression logarithmique depuis 2010 ;
+- **🌊 Altcoins Season** : la page de référence *blockchaincenter*, **plus un indice recalculé en direct** dans le Hub (part du top 50, hors stablecoins, qui fait mieux que le Bitcoin, sur 7 j / 30 j / 1 an) — l'indice officiel se calcule sur 90 jours, fenêtre que CoinGecko ne donne pas gratuitement, c'est donc la **même méthode sur d'autres horizons**, pas une copie.
 
-Chaque vue s'affiche **dans l'app**, avec **⛶ Plein écran** et, si un site refuse d'être intégré, un bouton **↗ Nouvel onglet** en repli.
+La vue **📱 Coinbase Play** a été **retirée**, avec tout ce qui allait avec (plus aucune requête IA depuis BullRun).
+
+Les pages embarquées s'affichent **dans l'app**, avec **⛶ Plein écran** et, si un site refuse d'être intégré, un bouton **↗ Nouvel onglet** en repli.
 
 ### Calculatrice (dans Finance)
 Mode **🧮 Calculatrice** entre Full et BullRun : calculatrice de poche 100 % locale (4 opérations, %, ±, historique des 5 derniers calculs), clavier physique supporté. Également **accessible dès la page de connexion** (tuile 🧮 Calculatrice de la grille de modules, aucune connexion Spotify requise).
