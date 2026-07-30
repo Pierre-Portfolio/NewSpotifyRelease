@@ -106,7 +106,12 @@ Mode **🧮 Calculatrice** entre Full et BullRun : calculatrice de poche 100 % l
 Activable/désactivable dans le Paramétrage comme les autres modules.
 
 ### Collection
-🗃️ **Module Collection** (entre Bon Plan et Emploi). Les cinq catégories — **🃏 Cartes**, **🖼️ Displate**, **🧸 Pop**, **🎮 Jeux vidéo** et **📦 Autre** — sont désormais des **sections dépliables** (elles étaient des boutons carrés), **toutes repliées à l'ouverture** : tu ouvres celle qui t'intéresse, et rien d'autre ne se charge. Le contenu de chaque catégorie arrive progressivement. Activable/désactivable dans le Paramétrage comme les autres modules.
+🗃️ **Module Collection** (entre Bon Plan et Emploi). Les cinq catégories — **🃏 Cartes**, **🖼️ Displate**, **🧸 Pop**, **🎮 Jeux vidéo** et **📦 Autre** — sont des **sections dépliables**, **toutes repliées à l'ouverture**.
+
+**🃏 Cartes (nouveau)** : deux sous-sections, **🔴 Pokémon** et **🟣 Magic**. Chacune commence par une **bannière** qui résume ta collection — nombre de cartes, nombre de références différentes et **valeur totale**. Un clic sur cette bannière affiche le **visuel de toutes les cartes que tu possèdes** (avec leur prix, un compteur ×N et une croix pour retirer), et juste en dessous une **barre de recherche** : tape n'importe quel nom de carte, l'app te propose les cartes correspondantes avec leur image et leur prix, et **+ Ajouter** la met dans ta collection (si tu ajoutes deux fois la même, elle compte simplement ×2).
+- **Pokémon** : source **Pokémon TCG API**, sans compte ni clé. Le prix affiché est le **prix moyen de vente récent sur Cardmarket** quand il est publié (sinon le prix de tendance).
+- **Magic** : source **Scryfall**, sans compte ni clé, prix en euros repris de Cardmarket.
+- **Tout est exportable et part dans tes sauvegardes** (Drive, Dropbox, pCloud, MEGA, export JSON) — avec une section d'export « Collection » dédiée. ⚠️ **Les images ne sont pas enregistrées**, seulement leur adresse : ta sauvegarde reste légère, et les visuels ont besoin d'être en ligne pour s'afficher.
 
 ### Emploi
 💼 **Marché de l'emploi 100 % local**, en deux temps. **💰 Mon salaire vs secteur** : saisis ton salaire brut (par mois ou par an) et choisis ton secteur → l'appli le compare à la **moyenne du secteur** (ordres de grandeur indicatifs pour la France) et affiche l'écart en euros et en pourcentage avec une double barre « Moi / Secteur ». **📋 Offres du moment** : cherche un métier et un lieu pour voir des **offres publiées en ce moment** (récupérées de sources publiques gratuites, orientées tech / international / télétravail), chaque offre menant à l'annonce d'origine. Ton salaire et ton secteur sont mémorisés localement.
