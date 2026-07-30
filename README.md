@@ -119,6 +119,8 @@ Activable/désactivable dans le Paramétrage comme les autres modules.
 
 **🎮 Jeux vidéo (nouveau)** : même principe, avec une question en plus — **au moment de l'ajout, l'app te demande sur quelle plateforme tu possèdes le jeu** (Steam, Epic Games, Ubisoft, Wii, DS), et c'est cette plateforme qui s'affiche sous la jaquette. Tu peux répondre par le numéro ou par le nom ; « Annuler » n'ajoute rien. La recherche interroge le **catalogue Steam** (sans clé) pour la jaquette et le prix — un jeu Wii ou DS n'y figure évidemment pas, dans ce cas utilise l'**ajout à la main**, qui te demande la plateforme lui aussi.
 
+**📦 Autre (nouveau)** : trois sous-sections — **💎 Pierre précieuse**, **⌚ Montre** et **🍷 Vin**. Aucune base gratuite n'existe pour ces objets, alors ici **tu prends une photo et l'IA estime le prix** : elle identifie l'objet (nature de la pierre, marque et modèle de la montre, domaine et millésime du vin), donne un **prix moyen de vente**, une fourchette et son **niveau de confiance**, et tu ajoutes le résultat en un clic. ⚠️ **Ta photo n'est jamais enregistrée** — ni en local, ni sur Drive, ni dans les sauvegardes : elle sert à l'analyse puis disparaît, seuls le nom et le prix estimé sont conservés. Une estimation n'est pas une expertise. Là encore, l'**ajout à la main** fonctionne sans aucune clé.
+
 - **Tout est exportable et part dans tes sauvegardes** (Drive, Dropbox, pCloud, MEGA, export JSON) — avec une section d'export « Collection » dédiée. ⚠️ **Les images ne sont pas enregistrées**, seulement leur adresse : ta sauvegarde reste légère, et les visuels ont besoin d'être en ligne pour s'afficher.
 
 ### Emploi
