@@ -108,7 +108,9 @@
 // MacroÉconomie, Rainbow Chart).
 // v151 : bump de cache — Démineur : appui long 2 s = drapeau, nombre de mines réglable
 // de 10 à 100 via le bouton 💣 (la grille s'agrandit), drapeau réduit de 20 %.
-const CACHE  = 'spotifyplus-v151';
+// v152 : bump de cache — Finance : axe horizontal daté sur les graphiques (6 graduations
+// « 23/03 » avec un petit trait au-dessus de chaque date).
+const CACHE  = 'spotifyplus-v152';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',

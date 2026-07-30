@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.99';
+const APP_VERSION = '7.7.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -15774,6 +15774,18 @@ function fmtChartDate(t, range) {
   if (range === '1a') return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: '2-digit' });
   return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 }
+// Libellé COURT des graduations de l'axe horizontal (« 23/03 »). ⚠ Volontairement
+// différent de `fmtChartDate` (readout du survol, en toutes lettres) : il faut que 6
+// libellés tiennent côte à côte sans se chevaucher. Le format suit la période pour
+// rester non ambigu — une fenêtre d'un an ou plus chevauche deux années civiles, donc
+// jour/mois n'y suffirait pas.
+function fmtChartTick(t, range) {
+  const d = new Date(t), p2 = n => String(n).padStart(2, '0');
+  if (range === '24h') return `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  if (range === '1a' || range === '5a' || range === '10a') return `${p2(d.getMonth() + 1)}/${String(d.getFullYear()).slice(2)}`;
+  return `${p2(d.getDate())}/${p2(d.getMonth() + 1)}`;
+}
+const CHART_TICKS = 6;   // nb de graduations de l'axe horizontal
 
 // Courbe SVG pure (aucune lib → CSP inchangée) : aire dégradée + ligne 2px, couleur
 // hausse/baisse sur la période (FIN_UP/FIN_DOWN), 3 gridlines discrètes, crosshair
@@ -15781,7 +15793,10 @@ function fmtChartDate(t, range) {
 function FinanceChart({ pts, fmtV, range }) {
   const [hover, setHover] = React.useState(null);        // index du point survolé | null
   const svgRef = React.useRef(null);
-  const W = 400, H = 170, PT = 8, PB = 6, PL = 4, PR = 4;
+  // AX = bande réservée SOUS la courbe aux graduations de l'axe horizontal (trait + date).
+  // La zone de tracé garde exactement sa hauteur d'avant (H) : seule la hauteur totale
+  // du SVG augmente, donc la courbe n'est ni écrasée ni décalée.
+  const W = 400, H = 170, AX = 21, PT = 8, PB = 6, PL = 4, PR = 4;
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t, tSpan = (t1 - t0) || 1;
   let vmin = Infinity, vmax = -Infinity;
   for (const p of pts) { if (p.v < vmin) vmin = p.v; if (p.v > vmax) vmax = p.v; }
@@ -15807,7 +15822,7 @@ function FinanceChart({ pts, fmtV, range }) {
       <div style={{ height:16, fontSize:11, fontWeight:700, fontFamily:'DM Mono,monospace', color: hp ? C.text : C.dim, textAlign:'center', marginBottom:2 }}>
         {hp ? `${fmtChartDate(hp.t, range)} · ${fmtV(hp.v)}` : ''}
       </div>
-      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'auto', display:'block', touchAction:'none', cursor:'crosshair' }}
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H + AX}`} style={{ width:'100%', height:'auto', display:'block', touchAction:'none', cursor:'crosshair' }}
         onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
         <defs>
           <linearGradient id="finchartgrad" x1="0" y1="0" x2="0" y2="1">
@@ -15827,17 +15842,31 @@ function FinanceChart({ pts, fmtV, range }) {
         <path d={`${line}L${X(t1).toFixed(1)},${H}L${X(t0).toFixed(1)},${H}Z`} fill="url(#finchartgrad)" />
         <path d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
         <circle cx={X(t1)} cy={Y(pts[pts.length - 1].v)} r="3" fill={col} />
+        {/* Axe horizontal : graduations réparties dans le TEMPS entre t0 et t1, chacune
+            avec un petit trait vertical au-dessus de sa date pour la situer précisément
+            sur la courbe. Les libellés des extrémités sont ancrés start/end, sinon un
+            texte centré déborderait du viewBox. */}
+        <line x1={PL} x2={W - PR} y1={H} y2={H} stroke={C.border} strokeWidth="1" />
+        {Array.from({ length: CHART_TICKS }, (_, i) => {
+          const t = t0 + (tSpan * i) / (CHART_TICKS - 1);
+          const x = X(t), last = i === CHART_TICKS - 1;
+          return (
+            <g key={i}>
+              <line x1={x} x2={x} y1={H - 4} y2={H + 4} stroke={C.muted} strokeWidth="1" />
+              <text x={x} y={H + 15} fill={C.dim} fontSize="8.5" fontFamily="DM Mono,monospace"
+                textAnchor={i === 0 ? 'start' : last ? 'end' : 'middle'}>
+                {fmtChartTick(t, range)}
+              </text>
+            </g>
+          );
+        })}
         {hp && (
           <g>
-            <line x1={X(hp.t)} x2={X(hp.t)} y1={PT} y2={H - PB} stroke={C.muted} strokeWidth="1" strokeDasharray="2 3" />
+            <line x1={X(hp.t)} x2={X(hp.t)} y1={PT} y2={H} stroke={C.muted} strokeWidth="1" strokeDasharray="2 3" />
             <circle cx={X(hp.t)} cy={Y(hp.v)} r="4" fill={col} stroke={C.surface} strokeWidth="2" />
           </g>
         )}
       </svg>
-      <div style={{ display:'flex', justifyContent:'space-between', fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:3 }}>
-        <span>{fmtChartDate(t0, range)}</span>
-        <span>{fmtChartDate(t1, range)}</span>
-      </div>
       <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:6 }}>
         <span>⬇ {fmtV(vmin)}</span>
         <span>⬆ {fmtV(vmax)}</span>
