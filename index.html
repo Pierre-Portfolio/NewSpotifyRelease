@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.7.2';
+const APP_VERSION = '7.7.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12267,6 +12267,10 @@ function actuFavicon(link) {
 }
 // Image d'un item d'actu : photo du flux si fournie, sinon favicon de la source.
 const actuThumb = a => a.image || actuFavicon(a.sourceUrl || a.link);
+// ⚠ 7.7.3 — Les cartes « façon vidéo YouTube » de la section Actualité distinguent la
+// PHOTO de l'article (vignette 16/9 pleine largeur) du LOGO de la source (petite icône
+// de repli) : `actuThumb` fusionne les deux, il faut donc pouvoir demander le favicon seul.
+const actuFav = a => actuFavicon(a.sourceUrl || a.link);
 
 // Icône de l'ENTREPRISE concernée par une fuite de données (pas la source du flux) :
 // on devine son domaine à partir du titre / du slug de l'ancre, puis on affiche
@@ -13637,6 +13641,68 @@ function ActuWikiSection({ row }) {
   );
 }
 
+// ── Carte d'actu « façon vidéo YouTube » (7.7.3, demande utilisateur : le même design
+// que ▶️ VIDÉOS YOUTUBE pour TOUT le contenu de « 📰 ACTUALITÉ ») ─────────────────────
+// Reprend la maquette de `vidCard` d'ActuYoutubeSection : vignette 16/9 pleine largeur
+// (coins arrondis, `object-fit:cover`), puis titre en gras sur 3 lignes maxi et ligne de
+// méta grise « source · il y a 2 h ». Les boutons ▶ / 🕒 / badge de durée n'ont pas
+// d'équivalent ici (un article n'est pas une vidéo) : la carte entière est le lien.
+// ⚠ Toutes les actus n'ont pas de photo — `actuThumb` retombe sur le FAVICON de la
+// source, et un favicon 64 px étiré en 16/9 serait une bouillie. Deux replis :
+//   · `onError`  → l'image est morte : plus de vignette du tout, on garde le favicon ;
+//   · `onLoad` + `naturalWidth < ACTU_CARD_MIN_W` → l'image existe mais est trop petite
+//     pour la pleine largeur (typiquement les vignettes Wikipédia ~200-320 px) : elle
+//     repasse en petite icône à gauche du titre au lieu d'être affichée floue.
+// Signature alignée sur le `row` d'ActuPanel (k, href, main, sub, right, rightColor,
+// image) + un `fav` optionnel, pour que les appelants — dont ActuWikiSection, qui reçoit
+// le rendu en prop — n'aient rien à réécrire.
+const ACTU_CARD_MIN_W = 300;
+function ActuCard({ href, main, sub, right, rightColor, image, fav }) {
+  const [heroKo, setHeroKo] = React.useState(null); // null = OK | 'small' | 'err'
+  const safe = safeHref(href);
+  const hero = image && !heroKo ? safeHref(image) : null;
+  // Repli : la photo trop petite reprend sa place en icône ; sinon le favicon de la source.
+  const iconRaw  = (heroKo === 'small' && image) || fav;
+  const iconSrc  = iconRaw ? safeHref(iconRaw) : null;
+  const iconIsPhoto = heroKo === 'small';
+  const inner = (<>
+    {hero && (
+      <div style={{ position:'relative', borderRadius:12, overflow:'hidden', background:'#000', aspectRatio:'16 / 9' }}>
+        <img src={hero} alt="" loading="lazy"
+          onError={() => setHeroKo('err')}
+          onLoad={e => { const w = e.currentTarget.naturalWidth; if (w && w < ACTU_CARD_MIN_W) setHeroKo('small'); }}
+          style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+      </div>
+    )}
+    <div style={{ display:'flex', gap:9, marginTop: hero ? 9 : 0, alignItems:'flex-start' }}>
+      {!hero && iconSrc && (
+        <img src={iconSrc} alt="" loading="lazy"
+          onError={e => { e.currentTarget.style.display = 'none'; }}
+          style={{ width:46, height:46, flexShrink:0, borderRadius:8, display:'block',
+            objectFit: iconIsPhoto ? 'cover' : 'contain',
+            // Beaucoup de logos/favicons sont transparents → illisibles sur fond sombre
+            background: iconIsPhoto ? `${C.border}55` : '#fff', padding: iconIsPhoto ? 0 : 5 }} />
+      )}
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontSize:13.5, fontWeight:600, color:C.text, lineHeight:1.32,
+          display:'-webkit-box', WebkitLineClamp:3, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{main}</div>
+        {(sub || right) && (
+          <div style={{ fontSize:11.5, color:C.dim, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+            {sub}{sub && right ? ' · ' : ''}
+            {right ? <span style={rightColor ? { color:rightColor } : null}>{right}</span> : null}
+          </div>
+        )}
+      </div>
+    </div>
+  </>);
+  const style = { display:'block', textDecoration:'none', padding:'12px 0', borderBottom:`1px solid ${C.border}44` };
+  // ⚠ Même garde-fou que `row` : les liens transitent par des proxies CORS publics, un
+  // href non http(s) rend l'entrée non cliquable plutôt que d'exposer un `javascript:`.
+  return safe
+    ? <a href={safe} target="_blank" rel="noopener noreferrer" style={style}>{inner}</a>
+    : <div style={style}>{inner}</div>;
+}
+
 function ActuPanel() {
   const [data, setData]   = React.useState(() => loadActu());
   const [loading, setLoad] = React.useState(false);
@@ -13685,6 +13751,11 @@ function ActuPanel() {
       ? <a key={k} href={safe} target="_blank" rel="noopener noreferrer" style={style}>{inner}</a>
       : <div key={k} style={style}>{inner}</div>;
   };
+  // Rendu « façon vidéo YouTube » réservé au collapse 📰 ACTUALITÉ (7.7.3). Même
+  // signature que `row`, qui reste en place pour les 🔓 Dernières fuites de données
+  // (lignes fines + LeakIcon, une liste de 10 lignes n'a rien à gagner en cartes).
+  const acard = (k, href, main, sub, right, rightColor, image, fav) =>
+    <ActuCard key={k} href={href} main={main} sub={sub} right={right} rightColor={rightColor} image={image} fav={fav} />;
   const empty = txt => <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>{loading ? 'Chargement…' : txt}</div>;
 
   const d = data || {};
@@ -13717,7 +13788,7 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🔥 TENDANCES DU JOUR <span style={{ color:C.dim, fontWeight:400 }}>· Google Trends</span></span>}>
             {(d.trends && d.trends.length)
-              ? d.trends.map((t, i) => row('tr' + i, t.link,
+              ? d.trends.map((t, i) => acard('tr' + i, t.link,
                   <span><span style={{ color:ACTU_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', marginRight:6 }}>{t.rank}</span>{t.title}</span>,
                   null, t.traffic))
               : empty('Indisponible (proxy CORS injoignable).')}
@@ -13728,7 +13799,7 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🌍 ACTU MONDIAL <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.monde && d.monde.length)
-              ? d.monde.map((a, i) => row('mo' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
+              ? d.monde.map((a, i) => acard('mo' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
           </StatsCollapse>
 
@@ -13738,7 +13809,7 @@ function ActuPanel() {
               de data/actu.json. */}
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>📚 WIKIPÉDIA <span style={{ color:C.dim, fontWeight:400 }}>· fr.wikipedia.org</span></span>}>
-            <ActuWikiSection row={row} />
+            <ActuWikiSection row={acard} />
           </StatsCollapse>
 
           {/* 1.1c LinkedIn — placé JUSTE SOUS Wikipédia (demande utilisateur) */}
@@ -13751,7 +13822,7 @@ function ActuPanel() {
             {(() => {
               const src = Array.isArray(d.linkedin) ? d.linkedin : [];
               const li = actuRecentFirst(src.filter(actuIsLinkedin), ACTU_LI_MAX_DAYS);
-              if (li.length) return li.map((a, i) => row('li' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)));
+              if (li.length) return li.map((a, i) => acard('li' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)));
               return empty(src.length
                 ? `Aucune publication LinkedIn dans les ${ACTU_LI_MAX_DAYS} derniers jours.`
                 : 'Indisponible (proxy CORS injoignable).');
@@ -13765,7 +13836,7 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>💹 BOURSE &amp; CRYPTO <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.bourse && d.bourse.length)
-              ? d.bourse.map((a, i) => row('bo' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
+              ? d.bourse.map((a, i) => acard('bo' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
           </StatsCollapse>
 
@@ -13773,12 +13844,12 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🇫🇷 IA &amp; SCIENCE <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.presse && d.presse.length)
-              ? d.presse.map((a, i) => row('pr' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
+              ? d.presse.map((a, i) => acard('pr' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
             {(d.hn && d.hn.length) ? (
               <React.Fragment>
                 <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.07em', color:C.dim, marginTop:8 }}>▲ HACKER NEWS (EN)</div>
-                {d.hn.map((a, i) => row('hn' + i, a.link, a.title, null, `▲ ${a.points}`, ACTU_COLOR, actuFavicon(a.link)))}
+                {d.hn.map((a, i) => acard('hn' + i, a.link, a.title, null, `▲ ${a.points}`, ACTU_COLOR, null, actuFavicon(a.link)))}
               </React.Fragment>
             ) : null}
           </StatsCollapse>
@@ -13787,7 +13858,7 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🛡️ CYBER SECU <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.cyber && d.cyber.length)
-              ? d.cyber.map((a, i) => row('cy' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
+              ? d.cyber.map((a, i) => acard('cy' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
           </StatsCollapse>
 
@@ -13795,7 +13866,7 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🎭 INSOLITE <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.insolite && d.insolite.length)
-              ? d.insolite.map((a, i) => row('in' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
+              ? d.insolite.map((a, i) => acard('in' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
           </StatsCollapse>
 
@@ -13803,7 +13874,7 @@ function ActuPanel() {
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🎮 JEUX <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.jeux && d.jeux.length)
-              ? d.jeux.map((a, i) => row('je' + i, a.link, a.title, a.source, actuAgo(a.date), null, actuThumb(a)))
+              ? d.jeux.map((a, i) => acard('je' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
           </StatsCollapse>
 
