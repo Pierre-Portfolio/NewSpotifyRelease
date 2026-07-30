@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.8.6';
+const APP_VERSION = '7.8.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8045,7 +8045,10 @@ function CollectionSub({ sub, data, onData }) {
           name, sub: 'ajouté à la main', price: (typeof price === 'number' && price >= 0) ? price : null, meta: { manual: true } });
     setMName(''); setMPrice('');
   };
-  const add = r => {
+  const add = r0 => {
+    // Copie : `onAdd` peut retoucher l'item avant enregistrement (les jeux vidéo y posent
+    // la plateforme choisie) sans altérer la liste de résultats affichée.
+    const r = { ...r0 };
     const extra = sub.onAdd ? sub.onAdd(r) : null;
     if (extra === false) return;                      // ajout annulé (ex. plateforme non choisie)
     const next = collAdd(data, sub.id, r, extra || null);
@@ -8359,6 +8362,55 @@ function popNote() {
   return `Aucune API Funko gratuite n'existe : la recherche interroge ${provider === 'gemini' ? 'Gemini' : 'Claude'} avec recherche web (la clé du module API), et demande le PRIX MOYEN DE VENTE RÉCENT d'occasion. Une estimation d'IA n'est pas une cotation — d'où le badge ✨. L'ajout manuel juste au-dessus fonctionne sans aucune clé.`;
 }
 
+// ── 🎮 JEUX VIDÉO (7.8.7) ────────────────────────────────────────────────────────
+// Même moteur que les autres catégories, avec UNE différence demandée : à l'ajout, on
+// demande SUR QUELLE PLATEFORME le jeu est possédé. C'est le rôle du `onAdd` de
+// `CollectionSub`, qui peut renvoyer des métadonnées à stocker — ou `false` pour ANNULER
+// l'ajout (ici : « Annuler » dans la boîte de dialogue).
+// Recherche : `cmpSteamSearch` (déjà dans le Hub pour Bon Plan) = catalogue Steam via
+// l'API storesearch, sans clé, à travers les proxies CORS. ⚠ Elle ne connaît QUE les jeux
+// PC vendus sur Steam : un jeu Wii ou DS n'y sera pas, d'où l'ajout MANUEL toujours
+// disponible (qui demande la plateforme lui aussi).
+const GAME_PLATFORMS = ['Steam', 'Epic Games', 'Ubisoft', 'Wii', 'DS'];
+// Boîte de dialogue de choix : `prompt` numéroté plutôt qu'une modale maison — c'est le
+// même parti pris que `askBookPage` (TV Time) et ça garde l'ajout en UN geste.
+// Renvoie `{ plateforme }` ou `false` (annulation / saisie invalide).
+function gamePickPlatform(name) {
+  const lines = GAME_PLATFORMS.map((p, i) => `${i + 1}. ${p}`).join('\n');
+  const r = prompt(`Sur quelle plateforme possèdes-tu « ${name} » ?\n\n${lines}\n\nEntre le numéro (ou le nom) :`, '1');
+  if (r == null) return false;                       // Annuler
+  const t = String(r).trim();
+  if (!t) return false;
+  const n = parseInt(t, 10);
+  if (n >= 1 && n <= GAME_PLATFORMS.length) return { plateforme: GAME_PLATFORMS[n - 1] };
+  const hit = GAME_PLATFORMS.find(p => p.toLowerCase() === t.toLowerCase())
+           || GAME_PLATFORMS.find(p => p.toLowerCase().startsWith(t.toLowerCase()));
+  if (hit) return { plateforme: hit };
+  alert(`Plateforme « ${t} » inconnue — ajout annulé. Choisis parmi : ${GAME_PLATFORMS.join(', ')}.`);
+  return false;
+}
+async function gameSearch(q) {
+  const items = await cmpSteamSearch(q);
+  if (items === null) throw new Error('Catalogue Steam injoignable (les proxies ne répondent pas). Tu peux ajouter le jeu à la main ci-dessus.');
+  return items.map(it => ({
+    id: 'game:steam:' + it.appid,
+    name: String(it.name || ''),
+    sub: 'Steam',
+    img: it.thumb || '',
+    price: typeof it.priceCents === 'number' ? it.priceCents / 100 : null,
+    url: it.appid ? `https://store.steampowered.com/app/${it.appid}` : '',
+    meta: { appid: it.appid },
+  })).filter(r => r.name);
+}
+// La plateforme choisie remplace le sous-titre (« Steam » du catalogue) : ce qui compte
+// dans MA collection, c'est où JE possède le jeu, pas où il est vendu.
+function gameOnAdd(r) {
+  const pick = gamePickPlatform(r.name);
+  if (!pick) return false;
+  r.sub = pick.plateforme;
+  return pick;
+}
+
 // Sous-collections par catégorie. `CARTES` (7.8.3) = Pokémon + Magic, chacune avec sa
 // propre source de recherche ; les autres catégories arrivent ensuite.
 const COLLECTION_SUBS = {
@@ -8378,6 +8430,15 @@ const COLLECTION_SUBS = {
     { id:'pop', label:'Pop', icon:'🧸', unit:'figurine', article:'une première figurine',
       search: popSearch, placeholder:'Chercher une figurine Funko Pop…',
       manual: true, manualPlaceholder:'Ajouter à la main : nom de la figurine…', note: popNote },
+  ],
+  jeuxvideo: [
+    { id:'jeuxvideo', label:'Jeux vidéo', icon:'🎮', unit:'jeu', article:'un premier jeu',
+      search: gameSearch, placeholder:'Chercher un jeu…', onAdd: gameOnAdd,
+      manual: true, manualPlaceholder:'Ajouter à la main : nom du jeu…',
+      // ⚠ `note` en FONCTION et non en gabarit : une chaîne construite ici serait évaluée à
+      // l'initialisation de COLLECTION_SUBS, donc AVANT `GAME_PLATFORMS` si la déclaration
+      // venait à passer plus bas un jour (TDZ = écran noir). En fonction, c'est différé.
+      note: () => `À l'ajout, l'app demande sur quelle plateforme tu possèdes le jeu (${GAME_PLATFORMS.join(', ')}) — c'est elle qui s'affiche sous la vignette. La recherche interroge le catalogue Steam (sans clé) : un jeu Wii ou DS n'y figure pas, ajoute-le à la main.` },
   ],
 };
 

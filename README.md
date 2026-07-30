@@ -117,6 +117,8 @@ Activable/désactivable dans le Paramétrage comme les autres modules.
 
 **🧸 Pop (nouveau)** : même principe encore une fois. ⚠️ Il n'existe **aucune base Funko gratuite et ouverte** (Funko n'en publie pas, les bases communautaires sont payantes) — la recherche passe donc par **l'IA avec recherche web**, avec la clé Claude ou Gemini que tu as déjà renseignée dans le module API : tu tapes un nom, elle te propose des figurines avec leur série, leur numéro et le **prix moyen de vente récent d'occasion**. Ces lignes portent un badge **✨** : c'est une estimation, pas une cotation. Et comme une clé peut manquer, un **ajout à la main** (nom + prix, la virgule fonctionne) est toujours disponible juste au-dessus — la section marche donc sans aucune clé.
 
+**🎮 Jeux vidéo (nouveau)** : même principe, avec une question en plus — **au moment de l'ajout, l'app te demande sur quelle plateforme tu possèdes le jeu** (Steam, Epic Games, Ubisoft, Wii, DS), et c'est cette plateforme qui s'affiche sous la jaquette. Tu peux répondre par le numéro ou par le nom ; « Annuler » n'ajoute rien. La recherche interroge le **catalogue Steam** (sans clé) pour la jaquette et le prix — un jeu Wii ou DS n'y figure évidemment pas, dans ce cas utilise l'**ajout à la main**, qui te demande la plateforme lui aussi.
+
 - **Tout est exportable et part dans tes sauvegardes** (Drive, Dropbox, pCloud, MEGA, export JSON) — avec une section d'export « Collection » dédiée. ⚠️ **Les images ne sont pas enregistrées**, seulement leur adresse : ta sauvegarde reste légère, et les visuels ont besoin d'être en ligne pour s'afficher.
 
 ### Emploi
