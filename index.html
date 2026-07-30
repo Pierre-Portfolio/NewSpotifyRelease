@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.6.98';
+const APP_VERSION = '7.6.99';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4015,23 +4015,41 @@ function demGen(N, mines, safe) {
   cells.forEach((cell, i) => { if (!cell.mine) cell.count = nb(i).filter(n => cells[n].mine).length; });
   return { cells, nb };
 }
+// Nombre de mines réglable AVANT la 1re case révélée (bouton 💣 de la barre).
+const DEM_PRESETS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+const DEM_HOLD_MS = 2000;   // appui long sur une case = poser/retirer un drapeau
+// ⚠ La grille 9×9 d'origine (81 cases) ne peut pas porter 100 mines : le côté est
+// recalculé pour garder une densité jouable (~16 %, entre le niveau intermédiaire et
+// expert du Démineur classique), borné à 20 pour rester lisible sur un téléphone.
+// 10 → 9×9 (12 %) · 40 → 16×16 (16 %) · 100 → 20×20 (25 %, dur mais volontaire).
+function demGridSize(mines) { return Math.max(9, Math.min(20, Math.ceil(Math.sqrt(mines / 0.16)))); }
+function demBlank(n) { return Array.from({ length: n * n }, () => ({ mine:false, revealed:false, flag:false, count:0 })); }
 function GameDemineur() {
-  const N = 9, MINES = 10;
-  const [cells, setCells] = React.useState(() => Array.from({ length: N * N }, () => ({ mine:false, revealed:false, flag:false, count:0 })));
+  const [mines, setMines] = React.useState(DEM_PRESETS[0]);
+  const N = demGridSize(mines);
+  const [cells, setCells] = React.useState(() => demBlank(demGridSize(DEM_PRESETS[0])));
   const [started, setStarted] = React.useState(false);
   const [state, setState] = React.useState('play');
   const [flagMode, setFlagMode] = React.useState(false);
+  const [pick, setPick] = React.useState(false);      // sélecteur de nb de mines ouvert
   const nbRef = React.useRef(null);
-  const restart = () => { setCells(Array.from({ length: N * N }, () => ({ mine:false, revealed:false, flag:false, count:0 }))); setStarted(false); setState('play'); setFlagMode(false); };
+  // Un seul appui long à la fois. `fired` neutralise le clic qui suit le relâchement,
+  // sinon poser un drapeau révélerait la case dans la foulée.
+  const holdRef = React.useRef({ timer: null, fired: false });
+  const reset = m => { setCells(demBlank(demGridSize(m))); setStarted(false); setState('play'); setFlagMode(false); };
+  const restart = () => reset(mines);
+  // Changer le nombre de mines relance une partie vierge (la grille change de taille).
+  const chooseMines = m => { setMines(m); setPick(false); reset(m); };
   const revealFlood = (arr, i, nb) => {
     const stack = [i];
     while (stack.length) { const cur = stack.pop(); const cell = arr[cur]; if (cell.revealed || cell.flag) continue; cell.revealed = true; if (cell.count === 0 && !cell.mine) nb(cur).forEach(n => { if (!arr[n].revealed) stack.push(n); }); }
   };
+  const toggleFlag = i => { if (state === 'play') setCells(cs => cs.map((c, k) => k === i && !c.revealed ? { ...c, flag: !c.flag } : c)); };
   const click = i => {
     if (state !== 'play') return;
-    if (flagMode) { setCells(cs => cs.map((c, k) => k === i && !c.revealed ? { ...c, flag: !c.flag } : c)); return; }
+    if (flagMode) { toggleFlag(i); return; }
     let arr, nb;
-    if (!started) { const g = demGen(N, MINES, i); arr = g.cells; nb = g.nb; nbRef.current = nb; setStarted(true); }
+    if (!started) { const g = demGen(N, mines, i); arr = g.cells; nb = g.nb; nbRef.current = nb; setStarted(true); }
     else { arr = cells.map(c => ({ ...c })); nb = nbRef.current; }
     if (arr[i].flag) return;
     if (arr[i].mine) { arr.forEach(c => { if (c.mine) c.revealed = true; }); setCells(arr); setState('lost'); return; }
@@ -4039,20 +4057,55 @@ function GameDemineur() {
     setCells(arr);
     if (arr.every(c => c.mine || c.revealed)) setState('won');
   };
+  // Appui long (2 s) → drapeau, sans passer par le mode 🚩.
+  const holdStart = i => {
+    holdRef.current.fired = false;
+    clearTimeout(holdRef.current.timer);
+    holdRef.current.timer = setTimeout(() => { holdRef.current.fired = true; toggleFlag(i); }, DEM_HOLD_MS);
+  };
+  const holdClear = () => clearTimeout(holdRef.current.timer);
+  React.useEffect(() => () => clearTimeout(holdRef.current.timer), []);
+  const onCell = i => { if (holdRef.current.fired) { holdRef.current.fired = false; return; } click(i); };
+
   const flags = cells.filter(c => c.flag).length;
+  // La grille rétrécit quand N grandit : gap et police suivent, sinon les chiffres
+  // deviennent illisibles au-delà de 16 colonnes.
+  const gap  = N >= 16 ? 1.5 : N >= 12 ? 2 : 3;
+  const font = N >= 18 ? 9 : N >= 15 ? 11 : N >= 12 ? 12 : 14;
   return (
-    <GameWrap hint={`Trouve les ${MINES} mines. Touche 🚩 pour poser/retirer un drapeau, sinon révèle la case.`}
-      bar={<><span style={{ fontSize:12, color:C.muted }}>💣 {MINES - flags}</span>
+    <GameWrap hint={`Trouve les ${mines} mines. Appui long (2 s) sur une case = drapeau (ou active le mode 🚩). Touche 💣 pour choisir de 10 à 100 mines avant de commencer.`}
+      bar={<><button onClick={() => setPick(p => !p)} disabled={started}
+          title={started ? 'Partie en cours — ↻ pour changer le nombre de mines' : 'Choisir le nombre de mines'}
+          style={gameBtn(started ? { opacity:0.55, cursor:'default' } : (pick ? { background:`${GAMES_COLOR}33` } : {}))}>
+          💣 {mines - flags}
+        </button>
         <div style={{ display:'flex', gap:6 }}>
           <button onClick={() => setFlagMode(f => !f)} style={gameBtn(flagMode ? { background:`${GAMES_COLOR}33` } : {})}>🚩 {flagMode ? 'ON' : 'OFF'}</button>
           <button onClick={restart} style={gameBtn()}>↻</button>
         </div></>}>
-      <div style={{ display:'grid', gridTemplateColumns:`repeat(${N},1fr)`, gap:3, width:'100%', maxWidth:340, aspectRatio:'1' }}>
+      {pick && !started && (
+        <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center', width:'100%', maxWidth:340 }}>
+          {DEM_PRESETS.map(m => (
+            <button key={m} onClick={() => chooseMines(m)}
+              style={gameBtn(m === mines ? { background:`${GAMES_COLOR}33`, color:GAMES_COLOR } : {})}>{m}</button>
+          ))}
+          <div style={{ width:'100%', textAlign:'center', fontSize:10, color:C.dim }}>
+            grille {demGridSize(mines)}×{demGridSize(mines)} — la taille s'adapte au nombre de mines
+          </div>
+        </div>
+      )}
+      <div style={{ display:'grid', gridTemplateColumns:`repeat(${N},1fr)`, gap, width:'100%', maxWidth:340, aspectRatio:'1' }}>
         {cells.map((c, i) => (
-          <button key={i} onClick={() => click(i)} style={{ display:'flex', alignItems:'center', justifyContent:'center', borderRadius:4, border:'none', cursor:'pointer', fontWeight:800, fontSize:14, padding:0,
+          <button key={i} onClick={() => onCell(i)}
+            onPointerDown={() => holdStart(i)} onPointerUp={holdClear}
+            onPointerLeave={holdClear} onPointerCancel={holdClear}
+            onContextMenu={e => e.preventDefault()}
+            style={{ display:'flex', alignItems:'center', justifyContent:'center', borderRadius:4, border:'none', cursor:'pointer', fontWeight:800, fontSize:font, padding:0,
+            userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none', WebkitTapHighlightColor:'transparent',
             background: c.revealed ? (c.mine ? '#c0392b' : '#20202a') : '#3a3a48',
             color: c.mine ? '#fff' : ['#888','#39b2d1','#3fae6a','#f5b81f','#f5813c','#e05050','#b06cf5','#fff','#fff'][c.count] }}>
-            {c.flag && !c.revealed ? '🚩' : c.revealed ? (c.mine ? '💣' : (c.count || '')) : ''}
+            {/* Drapeau réduit de 20 % par rapport au reste du contenu de la case */}
+            {c.flag && !c.revealed ? <span style={{ fontSize:'0.8em' }}>🚩</span> : c.revealed ? (c.mine ? '💣' : (c.count || '')) : ''}
           </button>
         ))}
       </div>

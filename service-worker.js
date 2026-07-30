@@ -106,7 +106,9 @@
 // v150 : bump de cache — Finance : section RSI (24 h en crypto, journalier ailleurs) +
 // nouveau mode « BullRun » (Trends, Coinbase Play, Altcoin Season, Crypto Bubbles,
 // MacroÉconomie, Rainbow Chart).
-const CACHE  = 'spotifyplus-v150';
+// v151 : bump de cache — Démineur : appui long 2 s = drapeau, nombre de mines réglable
+// de 10 à 100 via le bouton 💣 (la grille s'agrandit), drapeau réduit de 20 %.
+const CACHE  = 'spotifyplus-v151';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
