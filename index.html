@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.7.1';
+const APP_VERSION = '7.7.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18638,6 +18638,16 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
 // unpkg + accounts.google.com). Le passage à la suivante est donc MANUEL (⏭ / flèche →).
 // La vidéo affichée est marquée VUE dès son lancement — même règle que le clic sur une
 // miniature dans la fiche YtDetailModal.
+// ⚠ 7.7.2 — SWIPE : glisser vers la DROITE = vidéo suivante (demande utilisateur), vers la
+// gauche = précédente. L'iframe étant CROSS-ORIGIN, elle avale tous les événements
+// tactiles : impossible d'écouter le swipe « à travers » elle, il faut une COUCHE de
+// capture posée par-dessus. Elle s'arrête `YT_SWIPE_BOTTOM` px au-dessus du bas pour
+// laisser la barre de contrôle YouTube (lecture/pause + barre de progression) cliquable —
+// sans cette réserve, le lecteur deviendrait impilotable (on ne peut pas relayer un clic
+// dans une iframe cross-origin, aucun contournement côté page).
+const YT_SWIPE_MIN     = 60;   // px parcourus horizontalement pour valider le geste
+const YT_SWIPE_MAX_MS  = 900;  // au-delà, c'est un déplacement, pas un swipe
+const YT_SWIPE_BOTTOM  = 68;   // bande basse laissée aux contrôles YouTube
 function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds }) {
   const boxRef = React.useRef(null);
   const v = queue[index] || null;
@@ -18682,6 +18692,22 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
+  // Swipe horizontal (7.7.2) : droite = suivante, gauche = précédente. `go` s'occupe déjà
+  // des bornes de la file et de la validation de la vidéo quittée (leaveCurrent).
+  const swipeRef = React.useRef(null);
+  const onSwipeDown = e => {
+    swipeRef.current = { x:e.clientX, y:e.clientY, t:Date.now(), id:e.pointerId };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const onSwipeUp = e => {
+    const s = swipeRef.current;
+    swipeRef.current = null;
+    if (!s || s.id !== e.pointerId || Date.now() - s.t > YT_SWIPE_MAX_MS) return;
+    const dx = e.clientX - s.x, dy = e.clientY - s.y;
+    // Geste franchement horizontal seulement (un scroll/glissé vertical ne doit rien faire)
+    if (Math.abs(dx) < YT_SWIPE_MIN || Math.abs(dx) < Math.abs(dy) * 1.4) return;
+    go(dx > 0 ? +1 : -1);
+  };
   if (!v) return null;
   const obtn = (color, disabled) => ({
     pointerEvents:'auto', background:'rgba(0,0,0,0.66)', border:`1px solid ${disabled ? '#ffffff33' : color + 'aa'}`,
@@ -18692,6 +18718,14 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       <iframe key={v.id} src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1`}
         title={v.title || 'Vidéo YouTube'} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowFullScreen
         style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
+      {/* Couche de capture du SWIPE (7.7.2), posée SUR l'iframe mais SOUS la barre d'actions
+          (ordre du DOM) → les boutons du haut restent cliquables. `touchAction:'none'` évite
+          que le navigateur interprète le geste (retour arrière, pull-to-refresh). */}
+      {queue.length > 1 && (
+        <div onPointerDown={onSwipeDown} onPointerUp={onSwipeUp} onPointerCancel={() => { swipeRef.current = null; }}
+          style={{ position:'absolute', left:0, right:0, top:0, bottom:YT_SWIPE_BOTTOM, touchAction:'none',
+            userSelect:'none', WebkitUserSelect:'none', WebkitTapHighlightColor:'transparent' }} />
+      )}
       {/* Barre d'actions EN OVERLAY sur la vidéo : retour + navigation dans la file */}
       <div style={{ position:'absolute', top:0, left:0, right:0, padding:'10px 12px', display:'flex', alignItems:'center', gap:8,
         background:'linear-gradient(rgba(0,0,0,0.72), rgba(0,0,0,0))', pointerEvents:'none', flexWrap:'wrap' }}>
@@ -18724,6 +18758,11 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         <div style={{ fontSize:10, color:'#ffffffaa', fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
           {v.channel ? v.channel + ' · ' : ''}{v.date || ''}{v.dur ? ` · ${v.dur} min` : ''}
         </div>
+        {queue.length > 1 && (
+          <div style={{ fontSize:9, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:3 }}>
+            👉 glisse vers la droite = vidéo suivante · vers la gauche = précédente
+          </div>
+        )}
       </div>
     </div>
   );
