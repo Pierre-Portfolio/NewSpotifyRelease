@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.1.7';
+const APP_VERSION = '8.1.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7883,6 +7883,9 @@ const vetDestin = d => VET_DESTINS.find(x => x[0] === d) || null;
 // ⚠ `destin:'none'` = « sans marqueur » — distinct de `''` (= aucun filtre) : sans cette
 // 3e valeur, impossible de demander les vêtements qu'on GARDE.
 function vetMatch(it, f) {
+  // ⚠ `ids` (recherche par IMAGE, 8.1.8) est un filtre à part : il ne se déduit d'aucun champ
+  // de la fiche, c'est l'IA qui a désigné ces vêtements. Il se COMBINE avec les autres (ET).
+  if (f.ids && f.ids.indexOf(it.id) < 0) return false;
   const q = String(f.q || '').trim().toLowerCase();
   if (q) {
     const hay = [it.name, it.taille, it.etat, it.lieu, vetTypeLabel(it.type)]
@@ -7896,7 +7899,62 @@ function vetMatch(it, f) {
   else if (f.destin && it.destin !== f.destin) return false;
   return true;
 }
-const vetFiltersOn = f => !!(String(f.q || '').trim() || f.type || f.etat || f.lieu || f.destin);
+const vetFiltersOn = f => !!(String(f.q || '').trim() || f.type || f.etat || f.lieu || f.destin || f.ids);
+
+// ── 8.1.8 · RECHERCHE PAR IMAGE (IA) DANS MA GARDE-ROBE ──
+// « Je photographie un vêtement, l'IA me dit lesquels des MIENS lui ressemblent. »
+// ⚠ C'est une VRAIE recherche visuelle : on n'envoie pas que du texte, on joint aussi les
+// PHOTOS Drive de mes vêtements — sinon la comparaison se réduirait au nom tapé à la main,
+// qui est souvent vide. Les fiches sans photo restent candidates, mais sur leur texte seul
+// (l'IA sait lesquelles : c'est écrit dans le prompt).
+const VET_AI_MAX_PHOTOS = 8;     // photos de MA garde-robe jointes (borne le coût et la latence)
+const VET_AI_SCHEMA = {
+  type:'object',
+  properties: {
+    description: { type:'string' },
+    ids:         { type:'array', items:{ type:'string' } },
+    note:        { type:'string' },
+  },
+  required:['description', 'ids'],
+  additionalProperties: false,
+};
+function vetAiPrompt(rows) {
+  return [
+    "Tu es mon assistant garde-robe. La PREMIÈRE image est la photo que je cherche à retrouver.",
+    "Les images suivantes sont des vêtements QUE JE POSSÈDE DÉJÀ, dans l'ordre de la liste ci-dessous",
+    "(seules les lignes marquées « photo jointe » ont une image).",
+    "",
+    "MA GARDE-ROBE :",
+    ...rows.map(r => `- id=${r.id} | ${r.type}${r.name ? ' « ' + r.name + ' »' : ''}`
+      + `${r.taille ? ' | taille ' + r.taille : ''}${r.etat ? ' | ' + r.etat : ''}${r.lieu ? ' | ' + r.lieu : ''}`
+      + (r.hasPhoto ? ' | photo jointe' : ' | sans photo')),
+    "",
+    "Rends UNIQUEMENT du JSON :",
+    '{"description":"ce que montre ma photo (type, couleur, motif, coupe)",',
+    '"ids":["id des vêtements de MA garde-robe qui correspondent, du plus ressemblant au moins"],',
+    '"note":"une phrase pour expliquer ton choix"}',
+    "",
+    "Règles : n'invente JAMAIS un id absent de la liste. Si rien ne correspond vraiment,",
+    "renvoie une liste ids vide et dis-le dans la note. Réponds en français.",
+  ].join('\n');
+}
+// Renvoie { description, ids, note }. `images[0]` = la photo cherchée, la suite = mes vêtements.
+async function vetAiSearch(provider, images, rows) {
+  const text = vetAiPrompt(rows);
+  let raw;
+  if (provider === 'gemini') {
+    raw = await geminiGenerate([{ text }, ...images.map(im => ({ inline_data: im }))]);
+  } else {
+    raw = await claudeGenerate({ text, images, schema: VET_AI_SCHEMA, maxTokens: 2000 });
+  }
+  const j = geminiExtract(raw, '{', '}');
+  if (!j) throw new Error("Réponse de l'IA illisible.");
+  const known = new Set(rows.map(r => r.id));
+  // ⚠ On JETTE tout id inconnu : une hallucination donnerait sinon un filtre vide et
+  // incompréhensible (« 3 résultats » mais rien à l'écran).
+  const ids = (Array.isArray(j.ids) ? j.ids : []).map(String).filter(x => known.has(x));
+  return { description: String(j.description || '').trim(), note: String(j.note || '').trim(), ids };
+}
 // Types d'articles pour la section « Mes marques » (indépendants de l'inventaire ci-dessus :
 // plus larges, ex. sac / bob que l'inventaire ne liste pas).
 const VET_BRAND_ARTICLES = ['Haut', 'Pantalon', 'Jean', 'Short', 'Veste', 'Manteau', 'Chaussures', 'Sac', 'Bob / Casquette', 'Accessoire', 'Sous-vêtements'];
@@ -7987,8 +8045,12 @@ function VetementPanel() {
   const [editBrandId, setEditBrandId] = React.useState(null); // marque dont le formulaire d'édition est déplié
   // Filtres de « Mes vêtements » (non persistés : on repart d'une garde-robe complète à
   // chaque ouverture — un filtre oublié donnerait l'impression d'avoir perdu des vêtements).
-  const [flt, setFlt] = React.useState({ q:'', type:'', etat:'', lieu:'', destin:'' });
+  const [flt, setFlt] = React.useState({ q:'', type:'', etat:'', lieu:'', destin:'', ids:null });
   const setF = (k, v) => setFlt(f => ({ ...f, [k]: v }));
+  // Recherche par image (IA) : état de l'appel + résultat affiché en bandeau. ⚠ La photo
+  // cherchée n'est JAMAIS conservée (ni localStorage, ni Drive) — seul le résultat vit ici.
+  const [aiBusy, setAiBusy] = React.useState(false);
+  const [aiRes, setAiRes]   = React.useState(null);   // { description, note, ids, n } | { err }
   // ── Photos Google Drive (HUB_Pierre/Vetement) ──
   const [photos, setPhotos]   = React.useState({});         // idFiche → fileId Drive
   const [drive, setDrive]     = React.useState('idle');     // idle | loading | ready | off | error
@@ -8122,6 +8184,47 @@ function VetementPanel() {
     finally { if (!silent) setBusyPhoto(null); }
   };
 
+  // ── Recherche par image (IA) sur MA garde-robe ──
+  // ⚠ La photo cherchée reste EN MÉMOIRE le temps de l'appel : rien n'est écrit en
+  // localStorage ni envoyé sur Drive (même règle que la photo de plat de Santé, 7.6.83).
+  const aiSearch = async file => {
+    if (!file) return;
+    const provider = cmpAiProvider();
+    const hasKey = provider === 'gemini' ? !!geminiKey() : !!claudeKey();
+    if (!hasKey) {
+      setAiRes({ err:`Aucune clé ${provider === 'gemini' ? 'Gemini' : 'Claude'} enregistrée — ajoute-la dans le module API (ou change de fournisseur dans Bon Plan → Tous produits).` });
+      return;
+    }
+    setAiBusy(true); setAiRes(null);
+    try {
+      const shot = await frigoPhotoData(file);
+      if (!shot) throw new Error("Photo illisible.");
+      // Candidats = ce qui est ACTUELLEMENT affiché (on peut donc pré-filtrer par type/lieu
+      // avant de lancer la recherche), photos d'abord pour tenir dans VET_AI_MAX_PHOTOS.
+      const base = (flt.ids ? data.items : shown);
+      const withPhoto = base.filter(it => photosRef.current[it.id]).slice(0, VET_AI_MAX_PHOTOS);
+      const images = [shot];
+      const okPhoto = new Set();
+      for (const it of withPhoto) {
+        try {
+          const d = await revImgToData(await gdriveBlobUrl(photosRef.current[it.id]));
+          if (d) { images.push(d); okPhoto.add(it.id); }
+        } catch {}
+      }
+      // ⚠ L'ordre des lignes « photo jointe » DOIT suivre celui des images envoyées.
+      const rows = [...base].sort((a, b) => (okPhoto.has(b.id) ? 1 : 0) - (okPhoto.has(a.id) ? 1 : 0))
+        .map(it => ({ id:it.id, type:vetTypeLabel(it.type), name:it.name || '', taille:it.taille || '',
+                      etat:it.etat || '', lieu:it.lieu || '', hasPhoto:okPhoto.has(it.id) }));
+      if (!rows.length) throw new Error("Aucun vêtement à comparer.");
+      const res = await vetAiSearch(provider, images, rows);
+      setAiRes({ ...res, n: res.ids.length, photos: okPhoto.size });
+      setFlt(f => ({ ...f, ids: res.ids.length ? res.ids : [] }));
+    } catch (e) {
+      setAiRes({ err: (e && e.message) || 'Recherche impossible.' });
+    } finally { setAiBusy(false); }
+  };
+  const aiClear = () => { setAiRes(null); setFlt(f => ({ ...f, ids:null })); };
+
   const counts = vetCounts(data.items);
   const totalCount = data.items.length;
   const selStyle = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', width:'100%' };
@@ -8186,11 +8289,41 @@ function VetementPanel() {
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
               <input type="text" value={flt.q} placeholder="🔎 Rechercher (nom, taille, état, lieu, type…)"
                 onChange={e => setF('q', e.target.value)} style={{ ...selStyle, flex:1, minWidth:0 }} />
+              {/* 📷 Recherche par IMAGE (IA) : je photographie un vêtement, l'IA me dit
+                  lesquels des MIENS lui ressemblent. La photo n'est jamais conservée. */}
+              <label title="Rechercher par image avec l'IA"
+                style={{ flexShrink:0, display:'inline-flex', alignItems:'center', gap:4, background: aiBusy ? C.surface : `${VETEMENT_COLOR}18`,
+                         border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:6, padding:'6px 10px', fontSize:11, fontWeight:700,
+                         color: aiBusy ? C.muted : VETEMENT_COLOR, cursor: aiBusy ? 'default' : 'pointer' }}>
+                {aiBusy ? '⏳' : '📷 IA'}
+                <input type="file" accept="image/*" disabled={aiBusy}
+                  onChange={e => { aiSearch(e.target.files && e.target.files[0]); e.target.value = ''; }}
+                  style={{ display:'none' }} />
+              </label>
               {filtersOn && (
-                <button onClick={() => setFlt({ q:'', type:'', etat:'', lieu:'', destin:'' })} title="Réinitialiser les filtres"
+                <button onClick={() => { setFlt({ q:'', type:'', etat:'', lieu:'', destin:'', ids:null }); setAiRes(null); }} title="Réinitialiser les filtres"
                   style={{ flexShrink:0, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'6px 10px', fontSize:11, color:C.muted, cursor:'pointer', fontFamily:'inherit' }}>✕</button>
               )}
             </div>
+            {/* Résultat de la recherche par image */}
+            {aiBusy && <div style={{ fontSize:10.5, color:C.dim }}>⏳ L'IA compare ta photo à ta garde-robe…</div>}
+            {aiRes && (
+              <div style={{ display:'flex', alignItems:'flex-start', gap:8, background: aiRes.err ? '#e0505012' : `${VETEMENT_COLOR}12`,
+                            border:`1px solid ${aiRes.err ? '#e0505055' : VETEMENT_COLOR + '55'}`, borderRadius:8, padding:'7px 9px' }}>
+                <span style={{ fontSize:10.5, lineHeight:1.55, color: aiRes.err ? '#ff8a8a' : C.text, flex:1 }}>
+                  {aiRes.err ? aiRes.err : <>
+                    <b style={{ color:VETEMENT_COLOR }}>📷 {aiRes.n} vêtement{aiRes.n > 1 ? 's' : ''} trouvé{aiRes.n > 1 ? 's' : ''}</b>
+                    {aiRes.description && <> · <i>{aiRes.description}</i></>}
+                    {aiRes.note && <span style={{ display:'block', color:C.muted }}>{aiRes.note}</span>}
+                    <span style={{ display:'block', color:C.dim }}>
+                      {aiRes.photos} photo{aiRes.photos > 1 ? 's' : ''} de ta garde-robe comparée{aiRes.photos > 1 ? 's' : ''} · ta photo n'a pas été enregistrée.
+                    </span>
+                  </>}
+                </span>
+                <button onClick={aiClear} title="Effacer ce résultat"
+                  style={{ flexShrink:0, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'3px 8px', fontSize:11, color:C.muted, cursor:'pointer', fontFamily:'inherit' }}>✕</button>
+              </div>
+            )}
             <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
               <select value={flt.type} onChange={e => setF('type', e.target.value)} style={{ ...selStyle, flex:'1 1 110px', width:'auto' }}>
                 <option value="">Tous les types</option>
