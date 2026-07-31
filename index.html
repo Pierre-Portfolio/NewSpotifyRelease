@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.9.6';
+const APP_VERSION = '7.9.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8032,6 +8032,20 @@ function CollectionSub({ sub, data, onData }) {
   const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
     padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
   const unit = sub.unit || 'élément';
+  // ⚠ `collItem` fige les champs d'une référence à l'AJOUT : une image trouvée plus tard ne
+  // remonterait jamais jusqu'à ce qui est déjà enregistré. `sub.hydrate(list)` complète donc
+  // les références stockées (image manquante) à partir de ce qui est en mémoire/en cache —
+  // ZÉRO requête — au montage puis après chaque recherche. Il DOIT renvoyer `null` quand
+  // rien ne change, sinon on réécrirait le stockage à chaque rendu.
+  const dataRef = React.useRef(data); dataRef.current = data;
+  const hydrate = () => {
+    if (!sub.hydrate) return;
+    const cur = collList(dataRef.current, sub.id);
+    let next = null;
+    try { next = sub.hydrate(cur); } catch {}
+    if (next && next !== cur) onData({ ...dataRef.current, [sub.id]: next });
+  };
+  React.useEffect(() => { hydrate(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
   const run = async () => {
     const term = q.trim();
     if (!term || st.busy || !sub.search) return;
@@ -8039,6 +8053,7 @@ function CollectionSub({ sub, data, onData }) {
     try {
       const r = await sub.search(term);
       setSt({ busy: false, results: r || [], err: '' });
+      hydrate();                                // le catalogue vient d'être chargé
     } catch (e) {
       const msg = String((e && e.message) || e);
       setSt({ busy: false, results: null, err: /abort/i.test(msg) ? 'Source injoignable (délai dépassé).' : msg });
@@ -8359,13 +8374,93 @@ function displateScore(built) {
 // ⚠ Chaque tentative est journalisée (`diag`) et AFFICHÉE dans la note quand aucune image
 // n'est trouvée : sans ça, « pas d'images » est indiscernable de « page injoignable », de
 // « page reçue mais sans <img> » et de « images trouvées mais refusées par Google ».
+// ⚠ 7.9.7 — DEUX CAUSES DISTINCTES AU « on ne voit toujours pas les images ».
+// (1) **Les éléments DÉJÀ dans ma collection ont été enregistrés SANS adresse d'image** :
+//     `collItem` fige `img` à l'ajout, donc même une récupération parfaite ne les remplirait
+//     jamais — ils resteraient sur l'icône de repli indéfiniment. D'où `displateHydrate`,
+//     branché sur le crochet générique `sub.hydrate` de `CollectionSub` : au montage et
+//     après chaque recherche, les références stockées récupèrent l'image du catalogue (ou du
+//     cache d'images), SANS aucune requête supplémentaire.
+// (2) **Le délai des proxies était trop court pour la vue HTML.** `corsFetchText` avorte à
+//     12 s ; or `/htmlview` rend le classeur ENTIER (413 lignes de catalogue + les milliers
+//     de lignes de « Sales »/« Raw ») → plusieurs Mo que le proxy doit d'abord télécharger
+//     en entier avant de répondre. D'où `displateProxyText(url, ms)` avec un budget de 30 s,
+//     et la mémorisation du gid pour ne plus charger qu'UNE feuille ensuite.
+// Les adresses trouvées sont enfin MÉMORISÉES (`DISPLATE_IMG_LS`) : une fois la grosse page
+// lue une fois, les vignettes survivent au rechargement et au TTL de 6 h.
+// ⚠ On ne mémorise que des URL, jamais d'image encodée (règle « ne save pas les images »).
+const DISPLATE_IMG_LS  = 'spotifyplus_displate_img';   // { "id:<ID>" | "n:<nom>" : url }
+const DISPLATE_IMG_MAX = 600;
+const DISPLATE_HTML_MS = 30000;                        // budget par tentative de vue HTML
+function displateImgCache() {
+  try { const o = JSON.parse(localStorage.getItem(DISPLATE_IMG_LS) || '{}'); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; }
+  catch { return {}; }
+}
+// ⚠ Jamais bloquant : un stockage plein (ou indisponible) ne doit pas faire perdre les
+// vignettes qu'on vient de résoudre — elles restent valides pour la session en cours.
+function displateImgCacheSave(map) {
+  try {
+    const keys = Object.keys(map || {});
+    const kept = keys.length > DISPLATE_IMG_MAX ? keys.slice(keys.length - DISPLATE_IMG_MAX) : keys;
+    const out = {}; for (const k of kept) out[k] = map[k];
+    lsSet(DISPLATE_IMG_LS, out);
+  } catch {}
+}
+// Deux clés par référence : l'ID du tableur (stable) et le nom normalisé (repli pour les
+// références enregistrées avant que `meta.code` n'existe).
+function displateImgKeys(it) {
+  const code = it && it.meta && it.meta.code;
+  return [code ? 'id:' + code : '', 'n:' + displateNorm(it && it.name)].filter(Boolean);
+}
+function displateImgFromCache(it, cache) {
+  for (const k of displateImgKeys(it)) if (cache[k]) return cache[k];
+  return '';
+}
+// Crochet `sub.hydrate` : complète les références DÉJÀ enregistrées. Renvoie `null` quand
+// il n'y a rien à changer — ⚠ sans ça, `CollectionSub` réécrirait le stockage à chaque
+// rendu (boucle de re-render). Aucune requête : catalogue en mémoire + cache local.
+function displateHydrate(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const byId = new Map();
+  if (_displateCache && Array.isArray(_displateCache.list)) for (const it of _displateCache.list) byId.set(it.id, it);
+  const cache = displateImgCache();
+  let changed = false;
+  const out = list.map(it => {
+    if (!it || it.img) return it;
+    const from = byId.get(it.id);
+    const img = (from && from.img) || displateImgFromCache(it, cache);
+    if (!img) return it;
+    changed = true;
+    return { ...it, img };
+  });
+  return changed ? out : null;
+}
+// Proxies CORS avec un budget de temps PROPRE (`corsFetchText` est figé à 12 s, trop court
+// pour une page de plusieurs Mo). Mêmes origines, déjà présentes dans la CSP.
+async function displateProxyText(url, ms) {
+  const tries = [
+    'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url),
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    'https://cors.eu.org/' + url,
+  ];
+  for (const u of tries) {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+    try {
+      const r = await fetch(u, ctrl ? { signal: ctrl.signal } : undefined);
+      if (r.ok) { const txt = await r.text(); if (txt && /<table/i.test(txt)) return txt; }
+    } catch {} finally { if (timer) clearTimeout(timer); }
+  }
+  return '';
+}
 const DISPLATE_GID_LS = 'spotifyplus_displate_gid';
 function displateGid() { try { const v = localStorage.getItem(DISPLATE_GID_LS) || ''; return /^\d+$/.test(v) ? v : ''; } catch { return ''; } }
 function displateGidSave(gid) { try { if (/^\d+$/.test(String(gid))) localStorage.setItem(DISPLATE_GID_LS, String(gid)); } catch {} }
 function displateHtmlSources() {
   const gid = displateGid();
   const out = [];
-  if (gid) out.push(`${_dspBase}/pubhtml?gid=${gid}&single=true`);   // une seule feuille = léger
+  // Une seule feuille = quelques centaines de Ko au lieu de plusieurs Mo.
+  if (gid) out.push(`${_dspBase}/htmlembed?gid=${gid}`, `${_dspBase}/pubhtml?gid=${gid}&single=true`, `${_dspBase}/htmlview?gid=${gid}&single=true`);
   out.push(`${_dspBase}/gviz/tq?tqx=out:html&sheet=${_dspTab}`);      // léger + CORS ouvert
   out.push(DISPLATE_HTML_URL);                                        // classeur entier
   out.push(`${_dspBase}/pubhtml`);                                    // idem, si publié au web
@@ -8423,7 +8518,7 @@ async function displateFetchImages(list) {
       let html = '';
       try {
         if (via === 'direct') { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) html = await r.text(); }
-        else html = (await corsFetchText(url)) || '';
+        else html = (await displateProxyText(url, DISPLATE_HTML_MS)) || '';
       } catch {}
       const step = { url, via, bytes: (html || '').length, rows: 0, imgs: 0, hit: 0 };
       if (html && /<table/i.test(html)) {
@@ -8448,7 +8543,14 @@ async function displateFetchImages(list) {
         }
       }
       diag.push(step);
-      if (step.hit) return { n: step.hit, diag };   // une source qui marche suffit
+      if (step.hit) {
+        // Mémorisé : la grosse page n'est relue qu'une fois, et les vignettes survivent au
+        // rechargement comme au TTL de 6 h.
+        const cache = displateImgCache();
+        for (const it of list) if (it.img) for (const k of displateImgKeys(it)) cache[k] = it.img;
+        displateImgCacheSave(cache);
+        return { n: step.hit, diag };               // une source qui marche suffit
+      }
       if (step.bytes) break;                        // page reçue mais inexploitable → source suivante
     }
   }
@@ -8495,6 +8597,11 @@ async function displateFetchSheet(force) {
   try { rate = await cmpUsdToEur(); } catch {}
   if (typeof rate === 'number' && rate > 0) {
     for (const it of built.list) if (typeof it.priceUsd === 'number') it.price = Math.round(it.priceUsd * rate * 100) / 100;
+  }
+  // Vignettes déjà connues d'un chargement précédent (aucune requête).
+  const imgCache = displateImgCache();
+  if (Object.keys(imgCache).length) {
+    for (const it of built.list) if (!it.img) { const u = displateImgFromCache(it, imgCache); if (u) it.img = u; }
   }
   let imgN = built.list.filter(x => x.img).length, imgDiag = null;
   // Le CSV n'a (presque) rien donné en images ⇒ on va les chercher dans la vue HTML.
@@ -8801,7 +8908,8 @@ const COLLECTION_SUBS = {
   ],
   displate: [
     { id:'displate', label:'Displate', icon:'🖼️', unit:'Displate', article:'un premier Displate',
-      search: displateSearch, placeholder:'Chercher un Displate (titre ou artiste)…', note: displateNote },
+      search: displateSearch, placeholder:'Chercher un Displate (titre ou artiste)…',
+      hydrate: displateHydrate, note: displateNote },
   ],
   pop: [
     { id:'pop', label:'Pop', icon:'🧸', unit:'figurine', article:'une première figurine',
