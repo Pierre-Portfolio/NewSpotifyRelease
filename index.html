@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.9.4';
+const APP_VERSION = '7.9.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8318,7 +8318,8 @@ function displateBuild(rows) {
       // Le lien du tableur est un hyperlien : le CSV n'en rend que le TEXTE. La colonne ID
       // permet en revanche de reconstruire la fiche produit.
       url: displateImgUrl(at(r, 'url')) || (/^\d+$/.test(code) ? `https://displate.com/displate/${code}` : ''),
-      meta: { artist, size, date },
+      // `code` (colonne ID) sert aussi de 2e clé d'appariement pour les images.
+      meta: { artist, size, date, code },
     });
   }
   return { list, cols, header };
@@ -8343,46 +8344,113 @@ function displateScore(built) {
 // Le tout est mis en cache avec le reste (TTL 6 h) → une seule requête supplémentaire.
 // Échec (page privée, proxy KO, structure différente) ⇒ 0 image, le reste fonctionne quand
 // même et `CollImg` retombe sur l'icône de la sous-collection.
-// La vue HTML rend TOUTES les feuilles du classeur : le menu d'onglets donne le gid de
-// chacune (`<li id="sheet-button-<gid>"><a href="#gid=<gid>">Displates</a>`) et son tableau
-// vit dans `<div id="<gid>">`. On restreint donc la recherche d'images à l'onglet du
-// catalogue — sinon on balaierait aussi les milliers de lignes de « Sales »/« Raw ».
-function displateHtmlRows(doc) {
+// ⚠ 7.9.5 — les prix sont bons depuis 7.9.3 mais les IMAGES manquaient toujours. Une seule
+// source était tentée (`/htmlview`, la vue HTML du classeur ENTIER) et, si elle échouait,
+// rien ne le disait. Or elle a deux façons d'échouer en silence : Google n'envoie PAS
+// d'en-tête CORS dessus (le fetch direct est donc bloqué → il faut passer par les proxies)
+// et la page rend TOUTES les feuilles, y compris les milliers de lignes de « Sales »/« Raw »
+// → plusieurs Mo, ce qui peut dépasser le délai de 12 s des proxies.
+// → On essaie donc PLUSIEURS sources, de la plus légère à la plus lourde, chacune en direct
+// puis via les proxies, et on retient la 1re qui donne des images. Le gid de l'onglet
+// « Displates », appris dès qu'une page contient le menu des feuilles, est mémorisé : les
+// chargements suivants attaquent directement la page d'UNE seule feuille (bien plus légère).
+// ⚠ Chaque tentative est journalisée (`diag`) et AFFICHÉE dans la note quand aucune image
+// n'est trouvée : sans ça, « pas d'images » est indiscernable de « page injoignable », de
+// « page reçue mais sans <img> » et de « images trouvées mais refusées par Google ».
+const DISPLATE_GID_LS = 'spotifyplus_displate_gid';
+function displateGid() { try { const v = localStorage.getItem(DISPLATE_GID_LS) || ''; return /^\d+$/.test(v) ? v : ''; } catch { return ''; } }
+function displateGidSave(gid) { try { if (/^\d+$/.test(String(gid))) localStorage.setItem(DISPLATE_GID_LS, String(gid)); } catch {} }
+function displateHtmlSources() {
+  const gid = displateGid();
+  const out = [];
+  if (gid) out.push(`${_dspBase}/pubhtml?gid=${gid}&single=true`);   // une seule feuille = léger
+  out.push(`${_dspBase}/gviz/tq?tqx=out:html&sheet=${_dspTab}`);      // léger + CORS ouvert
+  out.push(DISPLATE_HTML_URL);                                        // classeur entier
+  out.push(`${_dspBase}/pubhtml`);                                    // idem, si publié au web
+  return out;
+}
+// Le menu des feuilles de la vue HTML : `<li id="sheet-button-<gid>"><a href="#gid=<gid>">Displates</a>`.
+function displateSheetGid(doc) {
   try {
     const want = displateNorm(DISPLATE_SHEET_NAME);
     for (const a of Array.from(doc.querySelectorAll('a[href*="gid="]'))) {
       if (displateNorm(a.textContent) !== want) continue;
       const gid = (a.getAttribute('href') || '').split('gid=').pop().replace(/[^0-9].*$/, '');
-      const box = gid && doc.getElementById(gid);
-      const rows = box && box.querySelectorAll('tr');
-      if (rows && rows.length) return Array.from(rows);
+      if (/^\d+$/.test(gid)) return gid;
     }
   } catch {}
-  return Array.from(doc.querySelectorAll('tr'));   // structure inattendue → tout le document
+  return '';
+}
+// On restreint la recherche d'images au tableau de l'onglet du catalogue (`<div id="<gid>">`)
+// — sinon on balaierait aussi « Sales »/« Raw ». ⚠ Repli sur tout le document si ce
+// découpage ne donne aucune ligne PORTANT UNE IMAGE : mieux vaut chercher trop large que
+// de ne rien trouver à cause d'une structure inattendue.
+function displateHtmlRows(doc) {
+  const all = Array.from(doc.querySelectorAll('tr'));
+  try {
+    const gid = displateSheetGid(doc);
+    const box = gid && doc.getElementById(gid);
+    const rows = box ? Array.from(box.querySelectorAll('tr')) : [];
+    if (rows.length && rows.some(tr => displateImgSrc(tr))) return rows;
+  } catch {}
+  return all;
+}
+// `src` d'une vignette : Google peut servir une adresse absolue, protocole-relative (`//…`)
+// ou relative, et différer le chargement via `data-src`.
+function displateImgSrc(tr) {
+  for (const im of Array.from(tr.querySelectorAll('img'))) {
+    let s = (im.getAttribute('src') || im.getAttribute('data-src') || '').trim();
+    if (!s || /^data:/i.test(s)) continue;
+    if (s.startsWith('//')) s = 'https:' + s;
+    else if (s.startsWith('/')) s = 'https://docs.google.com' + s;
+    if (/^https?:\/\//i.test(s)) return s;
+  }
+  return '';
 }
 async function displateFetchImages(list) {
-  let html = '';
-  try { const r = await fetch(DISPLATE_HTML_URL, { cache: 'no-store' }); if (r.ok) html = await r.text(); } catch {}
-  if (!html || !/<table/i.test(html)) { try { html = (await corsFetchText(DISPLATE_HTML_URL)) || ''; } catch {} }
-  if (!html || !/<table/i.test(html)) return 0;
-  let doc;
-  try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch { return 0; }
-  // ⚠ `DOMParser` n'exécute AUCUN script et ne charge aucune ressource : on ne fait
-  // qu'analyser du texte, rien n'est injecté dans la page (jamais de innerHTML ici).
-  const byName = new Map();
-  for (const it of list) { const k = displateNorm(it.name); if (k && !byName.has(k)) byName.set(k, it); }
-  let n = 0;
-  for (const tr of displateHtmlRows(doc)) {
-    const im = tr.querySelector('img[src]');
-    if (!im) continue;
-    const src = im.getAttribute('src') || '';
-    if (!/^https?:\/\//i.test(src)) continue;
-    for (const td of Array.from(tr.children)) {
-      const it = byName.get(displateNorm(td.textContent));
-      if (it && !it.img) { it.img = src; n++; break; }
+  // Deux clés d'appariement : le nom (colonne « Name / Link ») et l'ID (colonne « ID »),
+  // ce dernier étant insensible aux différences d'accents/ponctuation.
+  const byName = new Map(), byCode = new Map();
+  for (const it of list) {
+    const k = displateNorm(it.name); if (k && !byName.has(k)) byName.set(k, it);
+    const c = it.meta && it.meta.code; if (c && !byCode.has(String(c))) byCode.set(String(c), it);
+  }
+  const diag = [];
+  for (const url of displateHtmlSources()) {
+    for (const via of ['direct', 'proxy']) {
+      let html = '';
+      try {
+        if (via === 'direct') { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) html = await r.text(); }
+        else html = (await corsFetchText(url)) || '';
+      } catch {}
+      const step = { url, via, bytes: (html || '').length, rows: 0, imgs: 0, hit: 0 };
+      if (html && /<table/i.test(html)) {
+        let doc = null;
+        // ⚠ `DOMParser` n'exécute AUCUN script et ne charge aucune ressource : on ne fait
+        // qu'analyser du texte, rien n'est injecté dans la page (jamais de innerHTML ici).
+        try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch {}
+        if (doc) {
+          const gid = displateSheetGid(doc); if (gid) displateGidSave(gid);
+          const rows = displateHtmlRows(doc);
+          step.rows = rows.length;
+          for (const tr of rows) {
+            const src = displateImgSrc(tr);
+            if (!src) continue;
+            step.imgs++;
+            for (const td of Array.from(tr.children)) {
+              const raw = String(td.textContent || '').trim();
+              const it = byName.get(displateNorm(raw)) || byCode.get(raw);
+              if (it && !it.img) { it.img = src; step.hit++; break; }
+            }
+          }
+        }
+      }
+      diag.push(step);
+      if (step.hit) return { n: step.hit, diag };   // une source qui marche suffit
+      if (step.bytes) break;                        // page reçue mais inexploitable → source suivante
     }
   }
-  return n;
+  return { n: 0, diag };
 }
 async function displateFetchSheet(force) {
   if (!force && _displateCache && Date.now() - _displateCache.at < DISPLATE_TTL) return _displateCache;
@@ -8426,13 +8494,13 @@ async function displateFetchSheet(force) {
   if (typeof rate === 'number' && rate > 0) {
     for (const it of built.list) if (typeof it.priceUsd === 'number') it.price = Math.round(it.priceUsd * rate * 100) / 100;
   }
-  let imgN = built.list.filter(x => x.img).length;
+  let imgN = built.list.filter(x => x.img).length, imgDiag = null;
   // Le CSV n'a (presque) rien donné en images ⇒ on va les chercher dans la vue HTML.
   if (imgN < built.list.length * 0.2) {
-    try { imgN += await displateFetchImages(built.list); } catch {}
+    try { const r = await displateFetchImages(built.list); imgN += r.n; imgDiag = r.diag; } catch {}
   }
   _displateCache = { at: Date.now(), list: built.list, cols: built.cols, header: built.header,
-                     total: built.list.length, imgN, rate, src: built.src, score: built.score };
+                     total: built.list.length, imgN, imgDiag, rate, src: built.src, score: built.score };
   return _displateCache;
 }
 // Recherche = filtre LOCAL du catalogue (une seule requête réseau, puis tout est en mémoire).
@@ -8459,10 +8527,25 @@ function displateNote() {
         {' · '}{d.total} ligne(s) · colonne nom {lbl('name')} · prix {lbl('price')} · image {lbl('img')} · artiste {lbl('artist')}
       </div>
       <div style={{ marginTop:3 }}>
-        {d.imgN} image(s) récupérée(s){d.imgN === 0 ? " — les vignettes du tableur sont des images posées DANS les cellules : aucun export CSV ne les contient, elles sont lues dans la vue HTML du tableur (qui doit rester partagée par lien)." : ''}
+        {d.imgN} image(s) récupérée(s){d.imgN === 0 ? " — les vignettes du tableur sont des images posées DANS les cellules : aucun export CSV ne les contient, elles sont lues dans la vue HTML du tableur (qui doit rester partagée par lien). Si des adresses sont trouvées ci-dessous mais que rien ne s'affiche, c'est que Google refuse de les servir hors de son site." : ''}
         {' · '}
         {d.rate ? `prix convertis en euros (1 $ = ${d.rate.toLocaleString('fr-FR', { maximumFractionDigits:4 })} €)` : 'taux de change indisponible : les montants restent en dollars'}
       </div>
+      {/* Journal des tentatives : affiché SEULEMENT quand aucune image n'a été trouvée —
+          sans lui, « page injoignable », « page reçue sans <img> » et « <img> trouvées mais
+          non appariées » sont indiscernables, et le problème n'est pas réparable à l'aveugle. */}
+      {d.imgN === 0 && Array.isArray(d.imgDiag) && d.imgDiag.length > 0 && (
+        <div style={{ marginTop:3, fontFamily:'DM Mono,monospace', fontSize:8.5, color:C.dim, whiteSpace:'pre-wrap', wordBreak:'break-all' }}>
+          {d.imgDiag.map((s, i) => (
+            <div key={i}>
+              {s.via === 'direct' ? '→ direct  ' : '→ proxy   '}
+              {String(s.url).replace(`${_dspBase}/`, '').slice(0, 46)}
+              {' · '}{s.bytes ? `${Math.round(s.bytes / 1024)} Ko` : 'rien reçu'}
+              {s.bytes ? ` · ${s.rows} ligne(s) · ${s.imgs} image(s) · ${s.hit} appariée(s)` : ''}
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{ marginTop:3 }}>{base} <a href={DISPLATE_SHEET_URL} target="_blank" rel="noopener noreferrer" style={{ color:COLLECTION_COLOR }}>Ouvrir le tableur ↗</a></div>
     </>
   );
