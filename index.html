@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.0.9';
+const APP_VERSION = '8.1.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7250,6 +7250,26 @@ const VET_DESTINS = [
   ['donner', '🎁 À donner', '#4caf50'],
 ];
 const vetDestin = d => VET_DESTINS.find(x => x[0] === d) || null;
+// ── Filtres de « Mes vêtements » (8.1.0) ── helpers PURS (donc testables), le state vit
+// dans VetementPanel. `q` cherche dans TOUT ce qui identifie un vêtement (nom, taille, état,
+// lieu ET libellé du type) : on tape « massy », « usé » ou « jean » sans changer de champ.
+// ⚠ `destin:'none'` = « sans marqueur » — distinct de `''` (= aucun filtre) : sans cette
+// 3e valeur, impossible de demander les vêtements qu'on GARDE.
+function vetMatch(it, f) {
+  const q = String(f.q || '').trim().toLowerCase();
+  if (q) {
+    const hay = [it.name, it.taille, it.etat, it.lieu, vetTypeLabel(it.type)]
+      .map(v => String(v == null ? '' : v).toLowerCase()).join(' ');
+    if (!hay.includes(q)) return false;
+  }
+  if (f.type && it.type !== f.type) return false;
+  if (f.etat && it.etat !== f.etat) return false;
+  if (f.lieu && it.lieu !== f.lieu) return false;
+  if (f.destin === 'none') { if (it.destin) return false; }
+  else if (f.destin && it.destin !== f.destin) return false;
+  return true;
+}
+const vetFiltersOn = f => !!(String(f.q || '').trim() || f.type || f.etat || f.lieu || f.destin);
 // Types d'articles pour la section « Mes marques » (indépendants de l'inventaire ci-dessus :
 // plus larges, ex. sac / bob que l'inventaire ne liste pas).
 const VET_BRAND_ARTICLES = ['Haut', 'Pantalon', 'Jean', 'Short', 'Veste', 'Manteau', 'Chaussures', 'Sac', 'Bob / Casquette', 'Accessoire', 'Sous-vêtements'];
@@ -7338,6 +7358,10 @@ function VetementPanel() {
   const [data, setData]     = React.useState(() => vetLoad());
   const [confirmId, setConfirmId] = React.useState(null);   // fiche en attente de confirmation de suppression
   const [editBrandId, setEditBrandId] = React.useState(null); // marque dont le formulaire d'édition est déplié
+  // Filtres de « Mes vêtements » (non persistés : on repart d'une garde-robe complète à
+  // chaque ouverture — un filtre oublié donnerait l'impression d'avoir perdu des vêtements).
+  const [flt, setFlt] = React.useState({ q:'', type:'', etat:'', lieu:'', destin:'' });
+  const setF = (k, v) => setFlt(f => ({ ...f, [k]: v }));
   // ── Photos Google Drive (HUB_Pierre/Vetement) ──
   const [photos, setPhotos]   = React.useState({});         // idFiche → fileId Drive
   const [drive, setDrive]     = React.useState('idle');     // idle | loading | ready | off | error
@@ -7477,6 +7501,9 @@ function VetementPanel() {
   const fieldLabel = txt => <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:C.dim, marginBottom:4 }}>{txt}</div>;
 
   const nPhotos = Object.keys(photos).length;
+  // ⚠ Déclarés APRÈS `flt` et AVANT le JSX qui les lit (règle Babel hoisting du projet).
+  const filtersOn = vetFiltersOn(flt);
+  const shown = filtersOn ? data.items.filter(it => vetMatch(it, flt)) : data.items;
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
@@ -7520,15 +7547,66 @@ function VetementPanel() {
         })}
       </StatsCollapse>
 
-      {/* 2. Mes vêtements — PILOTÉ par l'inventaire : vide au départ, un sous-collapse par
-          TYPE présent (T-shirt, Chaussettes…), contenant une fiche par unité comptée. */}
-      <StatsCollapse title={`🧥 MES VÊTEMENTS${data.items.length ? ' · ' + data.items.length : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
+      {/* 2. Mes vêtements — PILOTÉ par l'inventaire : vide au départ, rangé comme l'inventaire
+          en SOUS-CATÉGORIE → TYPE → fiche, avec une barre de filtres pour retrouver vite. */}
+      <StatsCollapse title={`🧥 MES VÊTEMENTS${data.items.length ? ' · ' + (filtersOn ? shown.length + '/' + data.items.length : data.items.length) : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
         {!data.items.length && <div style={{ fontSize:11, color:C.dim }}>Vide pour l'instant. Ajoute des vêtements avec les boutons + de l'inventaire ci-dessus : chaque type apparaîtra ici avec une fiche par unité à remplir.</div>}
-        {VET_TYPES.map(([t, lbl]) => {
-          const group = data.items.filter(it => it.type === t);
+
+        {/* Barre de filtres — visible dès qu'il y a un vêtement. La recherche libre balaie
+            nom / taille / état / lieu / type, les 4 sélecteurs affinent. */}
+        {!!data.items.length && (
+          <div style={{ display:'flex', flexDirection:'column', gap:6, background:`${VETEMENT_COLOR}0e`, border:`1px solid ${C.border}`, borderRadius:8, padding:'8px 10px' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <input type="text" value={flt.q} placeholder="🔎 Rechercher (nom, taille, état, lieu, type…)"
+                onChange={e => setF('q', e.target.value)} style={{ ...selStyle, flex:1, minWidth:0 }} />
+              {filtersOn && (
+                <button onClick={() => setFlt({ q:'', type:'', etat:'', lieu:'', destin:'' })} title="Réinitialiser les filtres"
+                  style={{ flexShrink:0, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'6px 10px', fontSize:11, color:C.muted, cursor:'pointer', fontFamily:'inherit' }}>✕</button>
+              )}
+            </div>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+              <select value={flt.type} onChange={e => setF('type', e.target.value)} style={{ ...selStyle, flex:'1 1 110px', width:'auto' }}>
+                <option value="">Tous les types</option>
+                {VET_TYPES.map(([t, tl]) => <option key={t} value={t}>{tl}</option>)}
+              </select>
+              <select value={flt.etat} onChange={e => setF('etat', e.target.value)} style={{ ...selStyle, flex:'1 1 100px', width:'auto' }}>
+                <option value="">Tous les états</option>
+                {VET_ETATS.map(e => <option key={e} value={e}>{e}</option>)}
+              </select>
+              <select value={flt.lieu} onChange={e => setF('lieu', e.target.value)} style={{ ...selStyle, flex:'1 1 110px', width:'auto' }}>
+                <option value="">Partout</option>
+                {VET_LIEUX.map(l => <option key={l} value={l}>{l}</option>)}
+              </select>
+              <select value={flt.destin} onChange={e => setF('destin', e.target.value)} style={{ ...selStyle, flex:'1 1 110px', width:'auto' }}>
+                <option value="">Marqueur : tous</option>
+                <option value="none">Sans marqueur</option>
+                {VET_DESTINS.map(([d, dl]) => <option key={d} value={d}>{dl}</option>)}
+              </select>
+            </div>
+            {filtersOn && (
+              <div style={{ fontSize:10.5, color: shown.length ? VETEMENT_COLOR : '#ff8a8a' }}>
+                {shown.length ? `${shown.length} vêtement${shown.length > 1 ? 's' : ''} sur ${data.items.length}` : 'Aucun vêtement ne correspond à ces filtres.'}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Un sous-collapse par SOUS-CATÉGORIE (les mêmes que l'Inventaire), puis par TYPE.
+            ⚠ `defaultOpen` n'est que l'état INITIAL de StatsCollapse : pour que les groupes
+            s'ouvrent vraiment quand un filtre est posé, la clé porte `filtersOn` → le
+            sous-arbre est remonté au passage filtre actif ⇄ inactif (et à ce moment-là
+            seulement, pas à chaque frappe, sinon la liste clignoterait). */}
+        {VET_GROUPS.map(([g, gLbl]) => {
+          const types = vetTypesOfGroup(g).filter(([t]) => shown.some(it => it.type === t));
+          if (!types.length) return null;
+          const nGroup = types.reduce((n, [t]) => n + shown.filter(it => it.type === t).length, 0);
+          return (
+            <StatsCollapse key={g + (filtersOn ? '-on' : '-off')} title={`${gLbl} · ${nGroup}`} color={VETEMENT_COLOR} defaultOpen={filtersOn}>
+        {types.map(([t, lbl]) => {
+          const group = shown.filter(it => it.type === t);
           if (!group.length) return null;
           return (
-            <StatsCollapse key={t} title={`${lbl} · ${group.length}`} color={VETEMENT_COLOR} defaultOpen={false}>
+            <StatsCollapse key={t} title={`${lbl} · ${group.length}`} color={VETEMENT_COLOR} defaultOpen={filtersOn}>
               {group.map(it => {
                 const fid = photos[it.id];
                 const titleNode = (
@@ -7601,6 +7679,9 @@ function VetementPanel() {
                   </StatsCollapse>
                 );
               })}
+            </StatsCollapse>
+          );
+        })}
             </StatsCollapse>
           );
         })}
