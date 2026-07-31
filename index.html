@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.9.1';
+const APP_VERSION = '7.9.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8180,23 +8180,41 @@ function CollectionSub({ sub, data, onData }) {
 // tableur bouge, on voit immédiatement ce qui a été pris pour quoi.
 const DISPLATE_SHEET_ID  = '1VQklhZs6vdYVuYK_dliG8BGDXSijjtOfxXN5YIRfVq0';
 const DISPLATE_SHEET_URL = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/edit#gid=0`;
-const DISPLATE_CSV_URL   = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/gviz/tq?tqx=out:csv`;
+// ⚠ Deux exports CSV possibles : `export?format=csv` est un dump BRUT de la feuille (aucune
+// inférence), tandis que `gviz/tq` en fait une table et peut réécrire la 1re ligne en
+// en-tête — or ici la vraie ligne d'en-tête est la **2e** (la 1re porte « Updated Weekly »,
+// « Last Updated: », « Join Discord »…). On prend donc le brut d'abord, le gviz en secours.
+const DISPLATE_CSV_URL   = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/export?format=csv&gid=0`;
+const DISPLATE_CSV_ALT   = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/gviz/tq?tqx=out:csv`;
+const DISPLATE_HTML_URL  = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/htmlview`;
 const DISPLATE_TTL       = 6 * 3600 * 1000;   // 6 h — un catalogue d'éditions limitées bouge peu
 const DISPLATE_MAX       = 60;                // résultats affichés par recherche
-let _displateCache = null;                    // { at, list, cols, total } — survit au repli du collapse
+let _displateCache = null;                    // { at, list, cols, total, imgN, rate } — survit au repli du collapse
 
-// Détection des colonnes. Chaque entrée = liste de motifs, du plus précis au plus large ;
-// le PREMIER motif qui matche un en-tête gagne, ce qui garantit que « recent average sale
-// price » l'emporte sur un simple « price » (c'est le prix de référence demandé).
+// ⚠ COLONNES RÉELLES DU TABLEUR (relevées sur les captures fournies par l'utilisateur ;
+// la ligne d'en-tête est la 2e) :
+//   ID · Release Date · Image · Name / Link · Quantity · Type · Number · Cost · Artist ·
+//   Normal Version · Normal Name / Link · # Resales · High Price · Weighted Avg ·
+//   Avg Price · Low Price · Total Sales · Last Sale
+// Le prix VOULU est « Avg Price » (prix moyen de revente eBay) — surtout PAS « Cost »
+// (prix d'origine, 139 $ pour toutes les éditions) ni « # Resales » / « Total Sales »
+// (des COMPTEURS). C'est précisément ce que faisait l'ancienne détection : son motif
+// `resale|revente|market` attrapait « # Resales » avant tout vrai prix, d'où des « prix »
+// à 0, 2 ou 5 € — ou vides. D'où cette liste de REJET, appliquée à la seule clé `price`.
+const DISPLATE_PRICE_NO = /^\s*#|^\s*(number|quantity|type|id|cost|last\s*sale)\s*$|resales?\s*$|total\s*sales/i;
 const DISPLATE_COLS = {
-  price:  [/(average|avg|moyen).*(sale|sold|sell|vente)|(sale|sold|vente).*(average|avg|moyen)/i,
-           /recent.*(price|prix)|(price|prix).*recent/i, /resale|revente|market/i, /price|prix|value|valeur/i],
-  name:   [/^(title|titre|name|nom|displate)$/i, /title|titre|artwork|name\b|nom\b/i],
-  artist: [/artist|auteur|créateur|createur/i],
-  img:    [/image|img|visuel|picture|photo|thumb|vignette/i],
+  // Ordre d'insertion = ordre d'attribution (une colonne prise n'est plus disponible).
+  code:   [/^\s*id\s*$/i],
+  name:   [/^\s*(name|nom|title|titre|displate)(\s*\/\s*link)?\s*$/i, /title|titre|artwork|name\b|nom\b/i],
+  artist: [/^\s*artist\s*$/i, /artist|auteur|créateur|createur/i],
+  img:    [/^\s*image\s*$/i, /image|img|visuel|picture|photo|thumb|vignette/i],
+  img2:   [/normal\s*version/i, /image|img|visuel|picture|photo/i],
   url:    [/link|lien|url|displate\.com/i],
-  size:   [/edition size|nb|quantit|copies|pieces|pièces|limited to/i],
-  date:   [/date|release|sortie|drop/i],
+  size:   [/edition size|quantit|copies|pieces|pièces|limited to/i],
+  date:   [/^\s*release\s*date\s*$/i, /date|release|sortie|drop/i],
+  price:  [/^\s*avg\.?\s*price\s*$/i, /^\s*average\s*price\s*$/i, /^\s*weighted\s*avg\.?\s*$/i,
+           /(average|avg|moyen).*(price|prix|sale|sold|vente)/i,
+           /recent.*(price|prix)/i, /^\s*(high|low)\s*price\s*$/i, /price|prix|value|valeur/i],
 };
 function displatePickCols(header) {
   const h = header.map(x => String(x || '').trim());
@@ -8204,13 +8222,15 @@ function displatePickCols(header) {
   const taken = new Set();
   for (const key of Object.keys(DISPLATE_COLS)) {
     for (const re of DISPLATE_COLS[key]) {
-      const i = h.findIndex((c, idx) => c && !taken.has(idx) && re.test(c));
+      const i = h.findIndex((c, idx) => c && !taken.has(idx)
+        && !(key === 'price' && DISPLATE_PRICE_NO.test(c))    // jamais un compteur comme prix
+        && re.test(c));
       if (i >= 0) { out[key] = i; taken.add(i); break; }
     }
   }
   return out;
 }
-// Choisit la ligne d'en-tête : certains tableurs commencent par un titre ou une ligne vide.
+// Choisit la ligne d'en-tête : ce tableur commence par une ligne de liens/annonces.
 // On garde, parmi les 6 premières lignes, celle qui fait reconnaître le PLUS de colonnes.
 function displateHeaderRow(rows) {
   let best = { i: 0, cols: {}, score: -1 };
@@ -8229,6 +8249,19 @@ function displateImgUrl(raw) {
   const m = s.match(/https?:\/\/[^\s")]+/);
   return m ? m[0] : '';
 }
+// ⚠ MONTANTS EN DOLLARS AU FORMAT US : « $2,942 », « $1,336 » — la virgule est un
+// séparateur de MILLIERS, jamais une décimale. `actifsNum` est pensé pour le clavier FR
+// (virgule = décimale) et lisait donc « $1,336 » comme **1,336** : c'est l'autre moitié du
+// « on ne voit pas les prix » (des montants à ~1 €, ou écartés). On retire donc les
+// virgules suivies de 3 chiffres AVANT de parser.
+function displateUsd(raw) {
+  const s = String(raw == null ? '' : raw).replace(/[\u00a0\s$]/g, '');
+  if (!s || /^[-—–]+$/.test(s)) return null;
+  const n = parseFloat(s.replace(/,(?=\d{3}(\D|$))/g, '').replace(',', '.'));
+  return (isFinite(n) && n >= 0) ? n : null;
+}
+function displateNorm(x) { return String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+
 function displateBuild(rows) {
   const { i: hi, cols } = displateHeaderRow(rows);
   const header = rows[hi] || [];
@@ -8240,37 +8273,94 @@ function displateBuild(rows) {
     // mieux vaut un catalogue au libellé approximatif qu'un écran vide.
     const name = at(r, 'name') || String((r.find(c => String(c || '').trim()) || '')).trim();
     if (!name) continue;
-    const price = cols.price != null ? actifsNum(r[cols.price]) : null;
+    const price = cols.price != null ? displateUsd(r[cols.price]) : null;
     const artist = at(r, 'artist');
     const size = at(r, 'size');
     const date = at(r, 'date');
+    const code = at(r, 'code');
     list.push({
       id: 'dsp:' + name.toLowerCase().replace(/\s+/g, '-') + (artist ? ':' + artist.toLowerCase().replace(/\s+/g, '-') : ''),
       name,
       sub: [artist, size && `× ${size}`, date].filter(Boolean).join(' · '),
-      img: displateImgUrl(at(r, 'img')),
-      price: (typeof price === 'number' && price >= 0) ? price : null,
-      url: displateImgUrl(at(r, 'url')),
+      // Deux colonnes visuelles dans le tableur (« Image » = version limitée, « Normal
+      // Version » = le visuel standard) : on prend la 1re qui donne réellement une URL.
+      img: displateImgUrl(at(r, 'img')) || displateImgUrl(at(r, 'img2')),
+      priceUsd: price,
+      price,
+      // Le lien du tableur est un hyperlien : le CSV n'en rend que le TEXTE. La colonne ID
+      // permet en revanche de reconstruire la fiche produit.
+      url: displateImgUrl(at(r, 'url')) || (/^\d+$/.test(code) ? `https://displate.com/displate/${code}` : ''),
       meta: { artist, size, date },
     });
   }
   return { list, cols, header };
 }
+
+// ⚠ LES IMAGES NE SONT PAS DANS LE CSV, ET NE PEUVENT PAS Y ÊTRE. Les vignettes du tableur
+// sont des images POSÉES DANS la cellule (ou des formules `=IMAGE(…)`) : tout export CSV les
+// rend VIDES — c'est la cause du « on ne voit pas les images ». La seule vue de Google Sheets
+// qui les restitue est la vue HTML (`/htmlview`), où elles deviennent de vrais `<img src>`.
+// On la lit donc UNE fois en plus du CSV et on complète le catalogue par nom.
+// Le tout est mis en cache avec le reste (TTL 6 h) → une seule requête supplémentaire.
+// Échec (page privée, proxy KO, structure différente) ⇒ 0 image, le reste fonctionne quand
+// même et `CollImg` retombe sur l'icône de la sous-collection.
+async function displateFetchImages(list) {
+  let html = '';
+  try { const r = await fetch(DISPLATE_HTML_URL, { cache: 'no-store' }); if (r.ok) html = await r.text(); } catch {}
+  if (!html || !/<table/i.test(html)) { try { html = (await corsFetchText(DISPLATE_HTML_URL)) || ''; } catch {} }
+  if (!html || !/<table/i.test(html)) return 0;
+  let doc;
+  try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch { return 0; }
+  // ⚠ `DOMParser` n'exécute AUCUN script et ne charge aucune ressource : on ne fait
+  // qu'analyser du texte, rien n'est injecté dans la page (jamais de innerHTML ici).
+  const byName = new Map();
+  for (const it of list) { const k = displateNorm(it.name); if (k && !byName.has(k)) byName.set(k, it); }
+  let n = 0;
+  for (const tr of Array.from(doc.querySelectorAll('tr'))) {
+    const im = tr.querySelector('img[src]');
+    if (!im) continue;
+    const src = im.getAttribute('src') || '';
+    if (!/^https?:\/\//i.test(src)) continue;
+    for (const td of Array.from(tr.children)) {
+      const it = byName.get(displateNorm(td.textContent));
+      if (it && !it.img) { it.img = src; n++; break; }
+    }
+  }
+  return n;
+}
 async function displateFetchSheet(force) {
   if (!force && _displateCache && Date.now() - _displateCache.at < DISPLATE_TTL) return _displateCache;
-  // Direct d'abord (le tableur est public) ; Google n'envoie pas toujours les en-têtes CORS
-  // → repli sur les proxies déjà utilisés partout ailleurs dans le Hub.
+  // Direct d'abord (le tableur est public et docs.google.com est en connect-src) ; Google
+  // n'envoie pas toujours les en-têtes CORS → repli sur les proxies du Hub, puis sur le
+  // second point d'export.
   let text = '';
-  try {
-    const r = await fetch(DISPLATE_CSV_URL, { cache: 'no-store' });
-    if (r.ok) text = await r.text();
-  } catch {}
-  if (!text || !text.trim()) text = (await corsFetchText(DISPLATE_CSV_URL)) || '';
+  for (const url of [DISPLATE_CSV_URL, DISPLATE_CSV_ALT]) {
+    try { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) text = await r.text(); } catch {}
+    if (text && text.trim() && !/^\s*</.test(text)) break;
+    try { text = (await corsFetchText(url)) || ''; } catch { text = ''; }
+    if (text && text.trim() && !/^\s*</.test(text)) break;
+    text = '';
+  }
   if (!text || !text.trim()) throw new Error("Tableur Displate injoignable (Google n'a rien renvoyé, proxies compris).");
   if (/^\s*</.test(text)) throw new Error('Tableur Displate inaccessible : Google a renvoyé une page HTML — il doit être partagé « en lecture pour tous ceux qui ont le lien ».');
   const built = displateBuild(actifsParseCsvRows(text));
   if (!built.list.length) throw new Error('Tableur lu mais aucune ligne exploitable.');
-  _displateCache = { at: Date.now(), list: built.list, cols: built.cols, header: built.header, total: built.list.length };
+  // Prix en DOLLARS dans le tableur (données eBay US) → conversion en euros, comme partout
+  // ailleurs dans le Hub (`cmpUsdToEur`, taux Frankfurter mis en cache). Taux indisponible
+  // ⇒ on garde le montant en dollars plutôt que d'afficher « — » : `rate === null` le dit
+  // dans la note sous la liste.
+  let rate = null;
+  try { rate = await cmpUsdToEur(); } catch {}
+  if (typeof rate === 'number' && rate > 0) {
+    for (const it of built.list) if (typeof it.priceUsd === 'number') it.price = Math.round(it.priceUsd * rate * 100) / 100;
+  }
+  let imgN = built.list.filter(x => x.img).length;
+  // Le CSV n'a (presque) rien donné en images ⇒ on va les chercher dans la vue HTML.
+  if (imgN < built.list.length * 0.2) {
+    try { imgN += await displateFetchImages(built.list); } catch {}
+  }
+  _displateCache = { at: Date.now(), list: built.list, cols: built.cols, header: built.header,
+                     total: built.list.length, imgN, rate };
   return _displateCache;
 }
 // Recherche = filtre LOCAL du catalogue (une seule requête réseau, puis tout est en mémoire).
@@ -8279,18 +8369,24 @@ async function displateSearch(q) {
   const t = q.trim().toLowerCase();
   return d.list.filter(x => (x.name + ' ' + x.sub).toLowerCase().includes(t)).slice(0, DISPLATE_MAX);
 }
-// Ligne de diagnostic affichée sous la section : quelles colonnes ont été reconnues, et
-// combien de lignes ont été lues. ⚠ Rendue via la `note` (une FONCTION, donc réévaluée à
-// chaque rendu de la section) : le tableur étant un document tiers, c'est le seul moyen de
-// voir tout de suite si une colonne a changé de nom.
+// Ligne de diagnostic affichée sous la section : quelles colonnes ont été retenues, combien
+// de lignes ont été lues, combien d'images récupérées et quel taux de change a été appliqué.
+// ⚠ Rendue via la `note` (une FONCTION, donc réévaluée à chaque rendu de la section) : le
+// tableur étant un document tiers, c'est le seul moyen de voir tout de suite si une colonne
+// a changé de nom ou si les images n'ont pas pu être récupérées.
 function displateNote() {
   const d = _displateCache;
-  const base = "Source : le tableur « Displate Limited Edition Information » (et lui seul). Le prix affiché est celui de la colonne de PRIX MOYEN DE VENTE RÉCENT du tableur. Seules les références sont enregistrées, jamais les images.";
+  const base = "Source : le tableur « Displate Limited Edition Information » (et lui seul). Le prix affiché est celui de la colonne « Avg Price » (prix MOYEN DE REVENTE eBay), converti en euros — ce n'est pas le prix d'origine. Seules les références sont enregistrées, jamais les images.";
   if (!d) return base;
   const lbl = k => (d.cols[k] != null ? `« ${d.header[d.cols[k]] || '?'} »` : 'non trouvée');
   return (
     <>
       <div>{d.total} ligne(s) lues · colonne nom {lbl('name')} · prix {lbl('price')} · image {lbl('img')} · artiste {lbl('artist')}</div>
+      <div style={{ marginTop:3 }}>
+        {d.imgN} image(s) récupérée(s){d.imgN === 0 ? " — les vignettes du tableur sont des images posées DANS les cellules : aucun export CSV ne les contient, elles sont lues dans la vue HTML du tableur (qui doit rester partagée par lien)." : ''}
+        {' · '}
+        {d.rate ? `prix convertis en euros (1 $ = ${d.rate.toLocaleString('fr-FR', { maximumFractionDigits:4 })} €)` : 'taux de change indisponible : les montants restent en dollars'}
+      </div>
       <div style={{ marginTop:3 }}>{base} <a href={DISPLATE_SHEET_URL} target="_blank" rel="noopener noreferrer" style={{ color:COLLECTION_COLOR }}>Ouvrir le tableur ↗</a></div>
     </>
   );
