@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.1.5';
+const APP_VERSION = '8.1.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3791,6 +3791,7 @@ const GAMES_COLOR = '#39b2d1';   // bleu-cyan de l'arc-en-ciel (entre Finance et
 const GAMES = [
   { id:'2048',       label:'2048',            min:1, max:1 },
   { id:'bataille',   label:'Bataille navale', min:2, max:2 },
+  { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
   { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
   { id:'flappy',     label:'Flappy Bird',     min:1, max:1 },
@@ -3880,6 +3881,7 @@ function GameHost({ game, label }) {
   switch (game) {
     case '2048':       return <Game2048 />;
     case 'bataille':   return <GameBataille />;
+    case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
     case 'doodle':     return <GameDoodle />;
     case 'flappy':     return <GameFlappy />;
@@ -4236,6 +4238,345 @@ function GameFlappy() {
       </div>
     </GameWrap>
   );
+}
+
+// ════════ Crossy Road (solo) ════════
+// Portage maison du jeu culte : on fait traverser une poule sur des prairies, des routes et
+// des rivières. Tout est DESSINÉ AU CANVAS (aucun asset externe, zéro réseau) : bandes de
+// terrain, voitures/camions avec reflet + pare-brise + phares, rondins avec anneaux, eau
+// animée, arbres avec ombre portée, poule avec crête/bec/barbillon et saut « squash ».
+// Score = la rangée la plus haute atteinte ; record local `gameHi('crossy')`.
+// Règles : voiture = mort · eau sans rondin = noyade · rondin qui sort de l'écran = emporté ·
+// arbre = mur infranchissable · rester trop longtemps en arrière = rattrapé (la caméra pousse).
+const CR_CELL = 40, CR_COLS = 9, CR_W = CR_CELL * CR_COLS, CR_H = 480;
+const CR_BACK = 3;        // le joueur est rendu 3 rangées au-dessus du bas de l'écran
+const CR_HOP = 0.19;      // progression d'un saut par frame (~5 frames)
+const CR_CAR_COLORS = ['#e05050', '#f5b81f', '#5383e8', '#3fae6a', '#b06cf5', '#f5813c', '#e8e8ee'];
+// Fabrique une rangée. Les 3 premières sont de l'herbe SÛRE (départ), ensuite le type est tiré
+// au sort avec des garde-fous : jamais plus de 3 rivières ni 4 routes d'affilée (sinon la
+// traversée devient un couloir de la mort), et une prairie garde toujours ≥ 5 colonnes libres.
+function crMakeRow(i, prev) {
+  const diff = Math.min(1, i / 240);   // difficulté : 0 au départ → 1 vers la rangée 240
+  if (i < 3) return { i, type:'grass', run:1, trees:[], ents:[], dir:1, speed:0 };
+  const prevT = prev ? prev.type : 'grass', run = prev ? prev.run : 0, r = Math.random();
+  let type;
+  if (prevT === 'water' && run >= 3) type = r < 0.55 ? 'road' : 'grass';
+  else if (prevT === 'road' && run >= 4) type = r < 0.5 ? 'water' : 'grass';
+  else type = r < 0.40 ? 'road' : (r < 0.66 ? 'water' : 'grass');
+  const row = { i, type, run: type === prevT ? run + 1 : 1, trees:[], ents:[], dir: Math.random() < 0.5 ? -1 : 1, speed:0 };
+  if (type === 'grass') {
+    let free = CR_COLS;
+    for (let c = 0; c < CR_COLS; c++) if (free > 5 && Math.random() < 0.2 + diff * 0.1) { row.trees.push(c); free--; }
+  } else if (type === 'road') {
+    row.speed = 0.016 + Math.random() * 0.022 + diff * 0.026;
+    let x = -2 - Math.random() * 3;
+    while (x < CR_COLS + 2) {
+      const len = Math.random() < 0.25 ? 2 : 1;   // 2 = camion
+      row.ents.push({ x, len, color: CR_CAR_COLORS[Math.floor(Math.random() * CR_CAR_COLORS.length)] });
+      x += len + 1.7 + Math.random() * Math.max(1.4, 3.4 - diff * 1.4);
+    }
+  } else {
+    row.speed = 0.011 + Math.random() * 0.015 + diff * 0.015;
+    let x = -2 - Math.random() * 2;
+    while (x < CR_COLS + 2) {
+      const len = 2 + Math.floor(Math.random() * 2);
+      row.ents.push({ x, len });
+      x += len + 1 + Math.random() * 2.1;
+    }
+  }
+  return row;
+}
+// Génère les rangées manquantes jusqu'à `upTo` et purge celles sorties par le bas (mémoire).
+function crEnsure(s, upTo) {
+  while (s.gen <= upTo) { s.rows[s.gen] = crMakeRow(s.gen, s.rows[s.gen - 1]); s.gen++; }
+  if (s.t % 60 === 0) for (const k in s.rows) if (+k < s.cam - 8) delete s.rows[k];
+}
+// Déplace les véhicules/rondins d'une rangée. Une entité sortie d'un côté est replacée derrière
+// la file (et non « téléportée » n'importe où) : l'espacement reste jouable indéfiniment.
+function crStepRow(row) {
+  if (!row.speed || !row.ents.length) return;
+  const v = row.speed * row.dir;
+  row.ents.forEach(e => { e.x += v; });
+  row.ents.forEach(e => {
+    if (row.dir > 0 && e.x > CR_COLS + 2.5) {
+      let min = e.x; row.ents.forEach(o => { if (o.x < min) min = o.x; });
+      e.x = min - e.len - 1.2 - Math.random() * 2.4;
+    } else if (row.dir < 0 && e.x + e.len < -2.5) {
+      let max = e.x; row.ents.forEach(o => { if (o.x > max) max = o.x; });
+      e.x = max + e.len + 1.2 + Math.random() * 2.4;
+    }
+  });
+}
+// Chemin d'un rectangle arrondi (tracé seul : à l'appelant de fill()/stroke()).
+function crRR(ctx, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr); ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr); ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
+function crDrawRow(ctx, row, y, t) {
+  if (row.type === 'grass') {
+    ctx.fillStyle = row.i % 2 ? '#7fc94e' : '#74bf45'; ctx.fillRect(0, y, CR_W, CR_CELL);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(0, y, CR_W, 3);
+    ctx.fillStyle = 'rgba(0,0,0,0.07)'; ctx.fillRect(0, y + CR_CELL - 3, CR_W, 3);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';   // touffes d'herbe
+    for (let x = (row.i * 13) % 20; x < CR_W; x += 20) ctx.fillRect(x, y + 8 + ((x + row.i) % 3) * 7, 5, 2);
+  } else if (row.type === 'road') {
+    ctx.fillStyle = '#3b3b46'; ctx.fillRect(0, y, CR_W, CR_CELL);
+    ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fillRect(0, y + 4, CR_W, CR_CELL - 8);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';   // pointillés centraux
+    for (let x = 6; x < CR_W; x += 26) ctx.fillRect(x, y + CR_CELL / 2 - 1.5, 13, 3);
+    ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.fillRect(0, y, CR_W, 2); ctx.fillRect(0, y + CR_CELL - 2, CR_W, 2);
+  } else {
+    const g = ctx.createLinearGradient(0, y, 0, y + CR_CELL);
+    g.addColorStop(0, '#2775c9'); g.addColorStop(0.5, '#3a97e6'); g.addColorStop(1, '#2775c9');
+    ctx.fillStyle = g; ctx.fillRect(0, y, CR_W, CR_CELL);
+    ctx.strokeStyle = 'rgba(255,255,255,0.26)'; ctx.lineWidth = 2;   // vaguelettes animées
+    for (let k = 0; k < 2; k++) {
+      ctx.beginPath();
+      const yy = y + 13 + k * 15, ph = t * 0.045 + row.i * 1.7 + k * 2;
+      for (let x = 0; x <= CR_W; x += 8) ctx.lineTo(x, yy + Math.sin(x * 0.085 + ph) * 2.3);
+      ctx.stroke();
+    }
+  }
+}
+function crTree(ctx, x, y) {
+  const cx = x + CR_CELL / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.17)';
+  ctx.beginPath(); ctx.ellipse(cx, y + CR_CELL - 5, 13, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#6b4a2b'; ctx.fillRect(cx - 4, y + CR_CELL - 19, 8, 15);
+  ctx.fillStyle = '#2c7536';
+  [[0, -2, 14], [-9, 5, 10.5], [9, 5, 10.5], [0, 11, 11]].forEach(([dx, dy, r]) => {
+    ctx.beginPath(); ctx.arc(cx + dx, y + CR_CELL / 2 + dy - 7, r, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.fillStyle = '#3f9c4a';   // éclairage venant du haut-gauche
+  ctx.beginPath(); ctx.arc(cx - 4, y + 11, 9, 0, Math.PI * 2); ctx.fill();
+}
+// Véhicule vu DE HAUT (la route est vue de dessus) : roues qui dépassent, toit, pare-brise à
+// l'avant + lunette à l'arrière, phares blancs devant et feux rouges derrière. Un `len` de 2
+// donne un camion (remorque blanche derrière la cabine).
+function crCar(ctx, x, y, w, h, color, dir) {
+  const truck = w > CR_CELL * 1.5;
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; crRR(ctx, x + 3, y + 4, w, h, 6); ctx.fill();   // ombre portée
+  ctx.fillStyle = '#22222a';                                                          // roues
+  [x + w * 0.15, x + w * (truck ? 0.5 : 0.68)].forEach(wx => { crRR(ctx, wx, y - 2.5, Math.max(4, w * 0.11), h + 5, 3); ctx.fill(); });
+  crRR(ctx, x, y + 1, w, h - 2, 6); ctx.fillStyle = color; ctx.fill();                // carrosserie
+  ctx.fillStyle = 'rgba(255,255,255,0.16)'; crRR(ctx, x + 2, y + 2.5, w - 4, (h - 2) * 0.3, 4); ctx.fill();
+  const cabW = truck ? w * 0.34 : w * 0.46;                                           // cabine
+  const cabX = dir > 0 ? x + w - cabW - 2 : x + 2;
+  if (truck) {   // remorque blanche à l'arrière
+    const tw = w - cabW - 8, tx = dir > 0 ? x + 2 : x + cabW + 6;
+    ctx.fillStyle = '#f2f2f6'; crRR(ctx, tx, y + 2, tw, h - 4, 4); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.16)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,0.10)';
+    for (let k = 1; k * 12 < tw - 6; k++) ctx.fillRect(tx + k * 12, y + 4, 1.5, h - 8);
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.20)'; crRR(ctx, cabX, y + 4, cabW, h - 8, 3); ctx.fill();   // toit
+  ctx.fillStyle = '#d9edfb';                                                          // pare-brise
+  crRR(ctx, dir > 0 ? cabX + cabW - 4.5 : cabX + 0.5, y + 4.5, 4, h - 9, 2); ctx.fill();
+  ctx.fillStyle = 'rgba(217,237,251,0.75)';                                           // lunette arrière
+  crRR(ctx, dir > 0 ? cabX + 0.5 : cabX + cabW - 4.5, y + 5.5, 3, h - 11, 2); ctx.fill();
+  ctx.fillStyle = '#fff6c4';                                                          // phares
+  const fx = dir > 0 ? x + w - 3.5 : x + 0.5;
+  ctx.fillRect(fx, y + 4, 3, 4.5); ctx.fillRect(fx, y + h - 8.5, 3, 4.5);
+  ctx.fillStyle = '#e0483c';                                                          // feux arrière
+  const rx = dir > 0 ? x + 0.5 : x + w - 3.5;
+  ctx.fillRect(rx, y + 4, 3, 4); ctx.fillRect(rx, y + h - 8, 3, 4);
+}
+function crLog(ctx, x, y, w, h) {
+  ctx.fillStyle = 'rgba(0,0,0,0.20)'; crRR(ctx, x + 3, y + 5, w, h, h / 2); ctx.fill();
+  crRR(ctx, x, y, w, h, h / 2); ctx.fillStyle = '#7a5230'; ctx.fill();
+  ctx.fillStyle = '#8f6339'; crRR(ctx, x + 4, y + 3, w - 8, h * 0.4, h * 0.2); ctx.fill();
+  ctx.strokeStyle = 'rgba(58,36,18,0.5)'; ctx.lineWidth = 1.5;
+  for (let k = 1; k * 20 < w - 8; k++) {
+    ctx.beginPath(); ctx.moveTo(x + k * 20, y + 3); ctx.lineTo(x + k * 20, y + h - 3); ctx.stroke();
+  }
+  ctx.fillStyle = '#a97a4a';   // bout du rondin (anneaux)
+  ctx.beginPath(); ctx.ellipse(x + 4.5, y + h / 2, 4, h / 2 - 1.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#6d4826'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.ellipse(x + 4.5, y + h / 2, 2, h / 2 - 4.5, 0, 0, Math.PI * 2); ctx.stroke();
+}
+// La poule. `face` = -1 gauche / +1 droite / 0 de face (déplacement vertical) ; `lift` = hauteur
+// du saut en cours (l'ombre rétrécit quand elle décolle → sensation de saut).
+function crChicken(ctx, cx, cy, lift, face) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.24)';
+  ctx.beginPath(); ctx.ellipse(cx, cy + 11, Math.max(6, 12 - lift * 0.32), Math.max(2.5, 4.5 - lift * 0.1), 0, 0, Math.PI * 2); ctx.fill();
+  ctx.translate(cx, cy - lift);
+  const f = face;
+  ctx.strokeStyle = '#f0a02a'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';   // pattes
+  ctx.beginPath(); ctx.moveTo(-4, 8); ctx.lineTo(-5, 12.5); ctx.moveTo(4, 8); ctx.lineTo(5, 12.5); ctx.stroke();
+  ctx.fillStyle = '#fdfdfd'; ctx.strokeStyle = '#d6d6e0'; ctx.lineWidth = 1.2;   // corps
+  ctx.beginPath(); ctx.ellipse(0, 1, 11, 10, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  if (f) { ctx.fillStyle = '#ececf2'; ctx.beginPath(); ctx.ellipse(f * 4, 3, 5.5, 6, 0, 0, Math.PI * 2); ctx.fill(); }   // aile
+  ctx.fillStyle = '#fdfdfd'; ctx.strokeStyle = '#d6d6e0';   // tête
+  ctx.beginPath(); ctx.arc(f * 3, -9, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#e05050';   // crête
+  ctx.beginPath();
+  ctx.arc(f * 3 - 3, -15, 3, 0, Math.PI * 2); ctx.arc(f * 3, -16.5, 2.7, 0, Math.PI * 2); ctx.arc(f * 3 + 3, -15, 2.4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#f5a623';   // bec (de profil si on va sur le côté, vers le bas de face)
+  ctx.beginPath();
+  if (f) { ctx.moveTo(f * 8, -9.5); ctx.lineTo(f * 15, -7.5); ctx.lineTo(f * 8, -5.5); }
+  else { ctx.moveTo(-3, -6); ctx.lineTo(3, -6); ctx.lineTo(0, -1); }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#e05050'; ctx.beginPath(); ctx.arc(f ? f * 8 : 0, f ? -4.5 : 0.5, 2.3, 0, Math.PI * 2); ctx.fill();   // barbillon
+  ctx.fillStyle = '#222';   // yeux
+  ctx.beginPath();
+  if (f) ctx.arc(f * 5, -10.5, 1.8, 0, Math.PI * 2);
+  else { ctx.arc(-3.4, -10.5, 1.8, 0, Math.PI * 2); ctx.arc(3.4, -10.5, 1.8, 0, Math.PI * 2); }
+  ctx.fill();
+  ctx.restore();
+}
+const CR_CAUSES = { car:'🚗 Écrasé !', water:'💧 Noyée !', drift:'🌊 Emportée par le courant !', back:'🦅 Rattrapée — trop lente !' };
+function GameCrossy() {
+  const canvasRef = React.useRef(null);
+  const g = React.useRef(null);
+  const phaseRef = React.useRef('ready');
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi('crossy'));
+  const [phase, setPhase] = React.useState('ready');
+  const [cause, setCause] = React.useState('car');
+  const setPh = p => { phaseRef.current = p; setPhase(p); };
+  const build = () => ({ rows:{}, gen:-3, cam:-3, push:-3, t:0, row:0, cx:4, fromR:0, fromC:4, hop:1, face:0, score:0 });
+  const reset = () => { g.current = build(); crEnsure(g.current, 18); setScore(0); };
+  // Un seul saut à la fois (pas de file d'attente : on garde le contrôle case par case).
+  const move = (dr, dc) => {
+    const s = g.current;
+    if (!s || phaseRef.current !== 'playing' || s.hop < 1) return;
+    const tr = s.row + dr, tc = Math.max(0, Math.min(CR_COLS - 1, Math.round(s.cx) + dc));
+    if (tr < Math.ceil(s.cam)) return;                     // pas de sortie par le bas
+    crEnsure(s, tr + 18);
+    const row = s.rows[tr];
+    if (row && row.type === 'grass' && row.trees.indexOf(tc) >= 0) return;   // arbre = mur
+    s.fromR = s.row; s.fromC = s.cx; s.row = tr; s.cx = tc; s.hop = 0;
+    s.face = dc ? (dc > 0 ? 1 : -1) : 0;
+    if (tr > s.score) { s.score = tr; setScore(tr); }
+  };
+  const start = () => { reset(); setPh('playing'); };
+  const tap = () => { if (phaseRef.current === 'playing') move(1, 0); else start(); };
+  React.useEffect(() => { reset(); }, []);
+  // Écran figé (prêt / mort) : on redessine une fois pour ne pas laisser un canvas vide.
+  React.useEffect(() => {
+    const ctx = canvasRef.current && canvasRef.current.getContext('2d');
+    if (ctx && g.current && phase !== 'playing') crRender(ctx, g.current);
+  }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    const die = why => {
+      if (!alive) return;
+      alive = false; cancelAnimationFrame(raf);
+      const sc = g.current.score;
+      setBest(b => { const nb = Math.max(b, sc); setGameHi('crossy', nb); return nb; });
+      setCause(why); setPh('dead');
+    };
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current, ctx = canvasRef.current.getContext('2d');
+      s.t++;
+      crEnsure(s, Math.ceil(s.cam) + 18);
+      // Caméra : suit le joueur ET pousse toute seule (l'« aigle » du jeu d'origine). Elle ne
+      // décroche jamais de plus de 4 rangées → rester immobile finit toujours par tuer.
+      const diff = Math.min(1, s.score / 240);
+      s.push += 0.0030 + diff * 0.0055;
+      if (s.push < s.row - CR_BACK - 4) s.push = s.row - CR_BACK - 4;
+      s.cam += (Math.max(s.row - CR_BACK, s.push) - s.cam) * 0.12;
+      for (let k = Math.floor(s.cam) - 2; k < s.cam + 15; k++) { const r = s.rows[k]; if (r) crStepRow(r); }
+      if (s.hop < 1) s.hop = Math.min(1, s.hop + CR_HOP);
+      else {
+        const r = s.rows[s.row];
+        if (r && r.type === 'water') {
+          const log = r.ents.find(e => s.cx + 0.5 >= e.x && s.cx + 0.5 <= e.x + e.len);
+          if (!log) { crRender(ctx, s); die('water'); return; }
+          s.cx += r.speed * r.dir;                                   // on dérive avec le rondin
+          if (s.cx < -0.55 || s.cx > CR_COLS - 0.45) { crRender(ctx, s); die('drift'); return; }
+        } else if (r && r.type === 'road') {
+          if (r.ents.some(e => s.cx + 0.85 > e.x && s.cx + 0.15 < e.x + e.len)) { crRender(ctx, s); die('car'); return; }
+        }
+      }
+      if (s.row < s.cam - 0.05) { crRender(ctx, s); die('back'); return; }
+      crRender(ctx, s);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  React.useEffect(() => {
+    const onKey = e => {
+      const k = e.key.toLowerCase();
+      if (['arrowup', 'z', 'w', 'arrowdown', 's', 'arrowleft', 'q', 'a', 'arrowright', 'd', ' '].indexOf(k) < 0) return;
+      e.preventDefault();
+      if (phaseRef.current !== 'playing') { start(); return; }
+      if (k === 'arrowup' || k === 'z' || k === 'w' || k === ' ') move(1, 0);
+      else if (k === 'arrowdown' || k === 's') move(-1, 0);
+      else if (k === 'arrowleft' || k === 'q' || k === 'a') move(0, -1);
+      else move(0, 1);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  // Tap = avancer (comme le jeu d'origine), glissé = direction libre (dont marche arrière).
+  const sw = React.useRef({ x:0, y:0 });
+  const down = e => { sw.current = { x:e.clientX, y:e.clientY }; };
+  const up = e => {
+    const dx = e.clientX - sw.current.x, dy = e.clientY - sw.current.y;
+    if (Math.abs(dx) < 20 && Math.abs(dy) < 20) { tap(); return; }
+    if (phaseRef.current !== 'playing') { start(); return; }
+    if (Math.abs(dx) > Math.abs(dy)) move(0, dx > 0 ? 1 : -1); else move(dy > 0 ? -1 : 1, 0);
+  };
+  return (
+    <GameWrap hint="Touche l'écran pour avancer d'une case · glisse (ou flèches / ZQSD) pour te décaler et reculer. Évite les voitures, saute de rondin en rondin, ne traîne pas : l'écran te rattrape."
+      bar={<>
+        <span style={{ fontSize:12, color:C.muted }}>Rangées <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>
+        {phase === 'playing' && <button onClick={() => setPh('dead')} style={gameBtn()}>⏹ Stop</button>}
+      </>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:CR_W }}>
+        <canvas ref={canvasRef} width={CR_W} height={CR_H} onPointerDown={down} onPointerUp={up}
+          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={e => { e.stopPropagation(); start(); }}
+            style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', background:'rgba(0,0,0,0.35)', borderRadius:12, cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:34 }}>{phase === 'dead' ? '💥' : '🐔'}</div>
+            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? CR_CAUSES[cause] : 'Crossy Road'}</div>
+            {phase === 'dead' && <div style={{ fontSize:13 }}>{score} rangée{score > 1 ? 's' : ''} franchie{score > 1 ? 's' : ''}</div>}
+            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'rejouer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
+    </GameWrap>
+  );
+}
+// Rendu d'une frame. Sorti du composant pour être réutilisable par l'écran figé (prêt / mort).
+function crRender(ctx, s) {
+  const first = Math.floor(s.cam) - 1, last = Math.floor(s.cam) + 14;
+  ctx.clearRect(0, 0, CR_W, CR_H);
+  for (let k = first; k <= last; k++) {
+    const r = s.rows[k]; if (!r) continue;
+    crDrawRow(ctx, r, CR_H - (k - s.cam + 1) * CR_CELL, s.t);
+  }
+  // 2e passe : les décors et véhicules se dessinent APRÈS toutes les bandes, sinon la rangée
+  // suivante recouvrirait les ombres portées qui débordent d'une case sur l'autre.
+  for (let k = first; k <= last; k++) {
+    const r = s.rows[k]; if (!r) continue;
+    const y = CR_H - (k - s.cam + 1) * CR_CELL;
+    if (r.type === 'water') r.ents.forEach(e => crLog(ctx, e.x * CR_CELL, y + 8, e.len * CR_CELL - 4, CR_CELL - 16));
+    else if (r.type === 'road') r.ents.forEach(e => crCar(ctx, e.x * CR_CELL + 3, y + 7, e.len * CR_CELL - 6, CR_CELL - 14, e.color, r.dir));
+    else r.trees.forEach(c => crTree(ctx, c * CR_CELL, y));
+  }
+  const pr = s.fromR + (s.row - s.fromR) * s.hop, pc = s.fromC + (s.cx - s.fromC) * s.hop;
+  crChicken(ctx, pc * CR_CELL + CR_CELL / 2, CR_H - (pr - s.cam + 1) * CR_CELL + CR_CELL * 0.62,
+    Math.sin(Math.min(1, s.hop) * Math.PI) * 13, s.face);
+  // Score en surimpression, dans une pastille sombre : posé à même le décor il devenait
+  // illisible dès qu'un arbre ou un rondin clair passait dessous.
+  const lbl = String(s.score);
+  ctx.font = '700 21px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  const pw = Math.max(38, ctx.measureText(lbl).width + 24);
+  ctx.fillStyle = 'rgba(0,0,0,0.42)'; crRR(ctx, 10, 10, pw, 30, 15); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillText(lbl, 10 + pw / 2, 25.5);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
 
 // ════════ Doodle Jump (solo) ════════
@@ -24738,6 +25079,7 @@ function statCardEl({ label, value, sub, icon, color }) {
 // hors-ligne, aucune requête. Ordre = ordre des jeux (GAMES). Un jeu jamais joué → « — ».
 const GAMES_HUB_STATS = [
   { id:'2048',   label:'2048',        icon:'🔢', metric:'meilleur score' },
+  { id:'crossy', label:'Crossy Road', icon:'🐔', metric:'rangées franchies' },
   { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
