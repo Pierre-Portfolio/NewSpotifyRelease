@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.1.6';
+const APP_VERSION = '8.1.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3790,6 +3790,7 @@ const GAMES_COLOR = '#39b2d1';   // bleu-cyan de l'arc-en-ciel (entre Finance et
 // jeux multijoueurs (> 1) avec un suffixe « ( Nj ) » / « ( a - bj ) » (demande utilisateur).
 const GAMES = [
   { id:'2048',       label:'2048',            min:1, max:1 },
+  { id:'airhockey',  label:'Air Hockey',      min:2, max:2 },
   { id:'bataille',   label:'Bataille navale', min:2, max:2 },
   { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
@@ -3880,6 +3881,7 @@ function JeuxPanel() {
 function GameHost({ game, label }) {
   switch (game) {
     case '2048':       return <Game2048 />;
+    case 'airhockey':  return <GameAirHockey />;
     case 'bataille':   return <GameBataille />;
     case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
@@ -4577,6 +4579,287 @@ function crRender(ctx, s) {
   ctx.fillStyle = 'rgba(0,0,0,0.42)'; crRR(ctx, 10, 10, pw, 30, 15); ctx.fill();
   ctx.fillStyle = '#fff'; ctx.fillText(lbl, 10 + pw / 2, 25.5);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+
+// ════════ Air Hockey (2 joueurs sur le même appareil) ════════
+// Table VERTICALE : le joueur 1 défend la cage du HAUT, le joueur 2 celle du BAS, chacun glisse
+// SON maillet dans SA moitié. ⚠ Multi-touch obligatoire (les deux jouent EN MÊME TEMPS, ce n'est
+// pas un passe-l'appareil) : on retient un `pointerId` par maillet, la moitié touchée décide du
+// joueur. Tout est dessiné au canvas — aucun asset externe.
+const AH_W = 330, AH_H = 560;
+const AH_PAD = 12;                          // épaisseur des bandes
+const AH_PUCK_R = 12, AH_MAL_R = 26;
+const AH_GOAL_W = 132;                      // largeur des cages
+const AH_WIN = 7;                           // manche gagnée au 7e but
+const AH_SPD_MAX = 17;                      // vitesse max du palet (px/frame)
+const AH_FRICT = 0.9965;                    // glisse sur la glace (frottement quasi nul)
+const AH_WALL = 0.93;                       // restitution sur les bandes
+const AH_HIT_MIN = 2.4;                     // vitesse minimale rendue par un maillet
+const AH_GOAL_FRAMES = 66;                  // pause après un but (~1,1 s)
+const AH_TRAIL = 9;                         // longueur de la traînée du palet
+const AH_COLORS = [
+  { base:'#57a8f5', light:'#b3daff', dark:'#1f5f9e' },   // joueur 1 (haut)
+  { base:'#f4693f', light:'#ffb394', dark:'#a83a1c' },   // joueur 2 (bas)
+];
+const ahBuild = () => ({
+  puck:{ x:AH_W / 2, y:AH_H / 2, vx:0, vy:0, trail:[] },
+  mal:[
+    { x:AH_W / 2, y:AH_H * 0.16, tx:AH_W / 2, ty:AH_H * 0.16, vx:0, vy:0 },
+    { x:AH_W / 2, y:AH_H * 0.84, tx:AH_W / 2, ty:AH_H * 0.84, vx:0, vy:0 },
+  ],
+  score:[0, 0], goal:0, flash:0, t:0,
+});
+// Un maillet ne sort jamais de la patinoire NI de sa propre moitié (on peut tirer le doigt
+// au-delà de la ligne médiane : le maillet s'arrête dessus).
+function ahClamp(x, y, i) {
+  const mn = AH_PAD + AH_MAL_R;
+  const cx = Math.max(mn, Math.min(AH_W - mn, x));
+  const lo = i === 0 ? mn : AH_H / 2 + AH_MAL_R;
+  const hi = i === 0 ? AH_H / 2 - AH_MAL_R : AH_H - mn;
+  return [cx, Math.max(lo, Math.min(hi, y))];
+}
+// Remise en jeu dans la moitié de celui qui vient d'encaisser.
+function ahServe(s, conceder) {
+  const p = s.puck;
+  p.x = AH_W / 2; p.y = conceder === 0 ? AH_H * 0.30 : AH_H * 0.70;
+  p.vx = 0; p.vy = 0; p.trail.length = 0;
+}
+// Une frame de physique. Renvoie l'index du buteur, ou -1.
+function ahStep(s) {
+  s.t++;
+  // Les maillets rejoignent la cible du doigt ; leur déplacement RÉEL sert de vitesse pour le
+  // transfert d'énergie au palet (bouger vite = frapper fort).
+  s.mal.forEach((m, i) => {
+    const [nx, ny] = ahClamp(m.tx, m.ty, i);
+    m.vx = nx - m.x; m.vy = ny - m.y; m.x = nx; m.y = ny;
+  });
+  if (s.goal > 0) { s.goal--; return -1; }
+  const p = s.puck;
+  p.x += p.vx; p.y += p.vy;
+  p.vx *= AH_FRICT; p.vy *= AH_FRICT;
+  // Bandes latérales.
+  if (p.x < AH_PAD + AH_PUCK_R) { p.x = AH_PAD + AH_PUCK_R; p.vx = Math.abs(p.vx) * AH_WALL; }
+  if (p.x > AH_W - AH_PAD - AH_PUCK_R) { p.x = AH_W - AH_PAD - AH_PUCK_R; p.vx = -Math.abs(p.vx) * AH_WALL; }
+  // Fonds : cage au centre (le palet passe), bande partout ailleurs. ⚠ Le test porte sur « au
+  // delà de » et non « à », donc un palet rapide ne peut pas traverser sans être vu.
+  const mouth = Math.abs(p.x - AH_W / 2) < AH_GOAL_W / 2 - AH_PUCK_R * 0.35;
+  if (p.y < AH_PAD + AH_PUCK_R) {
+    if (!mouth) { p.y = AH_PAD + AH_PUCK_R; p.vy = Math.abs(p.vy) * AH_WALL; }
+    else if (p.y < AH_PAD - AH_PUCK_R) { ahGoal(s, 1); return 1; }     // le bas marque en haut
+  }
+  if (p.y > AH_H - AH_PAD - AH_PUCK_R) {
+    if (!mouth) { p.y = AH_H - AH_PAD - AH_PUCK_R; p.vy = -Math.abs(p.vy) * AH_WALL; }
+    else if (p.y > AH_H - AH_PAD + AH_PUCK_R) { ahGoal(s, 0); return 0; }
+  }
+  // Maillets : réflexion sur la normale + apport de la vitesse du maillet.
+  s.mal.forEach(m => {
+    const dx = p.x - m.x, dy = p.y - m.y;
+    const d = Math.hypot(dx, dy) || 0.001, min = AH_PUCK_R + AH_MAL_R;
+    if (d >= min) return;
+    const nx = dx / d, ny = dy / d;
+    p.x = m.x + nx * min; p.y = m.y + ny * min;          // on décolle (sinon le palet reste collé)
+    const dot = p.vx * nx + p.vy * ny;
+    if (dot < 0) { p.vx -= 2 * dot * nx; p.vy -= 2 * dot * ny; }
+    p.vx += m.vx * 0.7; p.vy += m.vy * 0.7;
+    const out = p.vx * nx + p.vy * ny;                    // toujours repartir VERS L'AVANT
+    if (out < AH_HIT_MIN) { p.vx += (AH_HIT_MIN - out) * nx; p.vy += (AH_HIT_MIN - out) * ny; }
+  });
+  const sp = Math.hypot(p.vx, p.vy);
+  if (sp > AH_SPD_MAX) { p.vx = p.vx / sp * AH_SPD_MAX; p.vy = p.vy / sp * AH_SPD_MAX; }
+  p.trail.push({ x:p.x, y:p.y });
+  if (p.trail.length > AH_TRAIL) p.trail.shift();
+  return -1;
+}
+function ahGoal(s, scorer) {
+  s.score[scorer]++; s.flash = scorer; s.goal = AH_GOAL_FRAMES;
+  ahServe(s, scorer === 0 ? 1 : 0);
+}
+// ── Dessin ──
+function ahMallet(ctx, m, col) {
+  ctx.fillStyle = 'rgba(15,30,60,0.20)';
+  ctx.beginPath(); ctx.ellipse(m.x + 2, m.y + 6, AH_MAL_R, AH_MAL_R * 0.9, 0, 0, Math.PI * 2); ctx.fill();
+  const g = ctx.createRadialGradient(m.x - 8, m.y - 10, 2, m.x, m.y, AH_MAL_R);
+  g.addColorStop(0, col.light); g.addColorStop(0.6, col.base); g.addColorStop(1, col.dark);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(m.x, m.y, AH_MAL_R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(m.x, m.y, AH_MAL_R - 4, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  ctx.beginPath(); ctx.arc(m.x, m.y, AH_MAL_R * 0.42, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = col.base;
+  ctx.beginPath(); ctx.arc(m.x, m.y, AH_MAL_R * 0.29, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.30)';
+  ctx.beginPath(); ctx.ellipse(m.x - 8, m.y - 11, 8, 5, -0.5, 0, Math.PI * 2); ctx.fill();
+}
+function ahRender(ctx, s) {
+  const iw = AH_W - AH_PAD * 2, ih = AH_H - AH_PAD * 2, mid = AH_H / 2, gx = AH_W / 2 - AH_GOAL_W / 2;
+  ctx.clearRect(0, 0, AH_W, AH_H);
+  // Bandes (cadre).
+  const frame = ctx.createLinearGradient(0, 0, AH_W, AH_H);
+  frame.addColorStop(0, '#2b3654'); frame.addColorStop(1, '#151c2c');
+  ctx.fillStyle = frame; crRR(ctx, 0, 0, AH_W, AH_H, 20); ctx.fill();
+  // Cages creusées dans les bandes (fond sombre + filet), dessinées AVANT la glace.
+  [0, 1].forEach(i => {
+    const y = i === 0 ? 0 : AH_H - AH_PAD - 4;
+    ctx.fillStyle = '#0b111d'; ctx.fillRect(gx, y, AH_GOAL_W, AH_PAD + 4);
+    ctx.save(); ctx.beginPath(); ctx.rect(gx, y, AH_GOAL_W, AH_PAD + 4); ctx.clip();
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1;
+    for (let k = -AH_PAD; k < AH_GOAL_W + AH_PAD; k += 7) {
+      ctx.beginPath(); ctx.moveTo(gx + k, y); ctx.lineTo(gx + k + AH_PAD + 4, y + AH_PAD + 4); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle = AH_COLORS[i].base; ctx.fillRect(gx, i === 0 ? AH_PAD + 2 : AH_H - AH_PAD - 6, AH_GOAL_W, 4);
+  });
+  // Glace.
+  ctx.save(); crRR(ctx, AH_PAD, AH_PAD, iw, ih, 14); ctx.clip();
+  const ice = ctx.createLinearGradient(0, AH_PAD, 0, AH_H - AH_PAD);
+  ice.addColorStop(0, '#e6f0fa'); ice.addColorStop(0.5, '#f8fbff'); ice.addColorStop(1, '#e6f0fa');
+  ctx.fillStyle = ice; ctx.fillRect(AH_PAD, AH_PAD, iw, ih);
+  // Zones de but teintées + demi-cercle de surface + gros score (celui du haut à l'endroit
+  // pour le joueur d'en face : il lit son écran dans l'autre sens).
+  [0, 1].forEach(i => {
+    const top = i === 0, gy = top ? AH_PAD : AH_H - AH_PAD;
+    const zg = ctx.createLinearGradient(0, gy, 0, gy + (top ? 130 : -130));
+    zg.addColorStop(0, AH_COLORS[i].base + '44'); zg.addColorStop(1, AH_COLORS[i].base + '00');
+    ctx.fillStyle = zg; ctx.fillRect(AH_PAD, top ? AH_PAD : AH_H - AH_PAD - 130, iw, 130);
+    ctx.strokeStyle = AH_COLORS[i].base + 'aa'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(AH_W / 2, gy, 76, top ? 0 : Math.PI, top ? Math.PI : Math.PI * 2); ctx.stroke();
+    ctx.save();
+    ctx.translate(AH_W / 2, top ? AH_H * 0.30 : AH_H * 0.70);
+    if (top) ctx.rotate(Math.PI);
+    ctx.font = '800 84px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = AH_COLORS[i].base + '26'; ctx.fillText(String(s.score[i]), 0, 0);
+    ctx.restore();
+  });
+  // Ligne médiane + rond central + points d'engagement.
+  ctx.strokeStyle = '#d94055'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(AH_PAD, mid); ctx.lineTo(AH_W - AH_PAD, mid); ctx.stroke();
+  ctx.strokeStyle = '#c3d6e8'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(AH_W / 2, mid, 56, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#d94055';
+  ctx.beginPath(); ctx.arc(AH_W / 2, mid, 5, 0, Math.PI * 2); ctx.fill();
+  [[AH_W * 0.26, AH_H * 0.19], [AH_W * 0.74, AH_H * 0.19], [AH_W * 0.26, AH_H * 0.81], [AH_W * 0.74, AH_H * 0.81]]
+    .forEach(([x, y]) => { ctx.fillStyle = '#c3d6e8'; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill(); });
+  ctx.restore();
+  // Mobiles, clippés à la TABLE entière → on voit le palet entrer dans le filet.
+  ctx.save(); crRR(ctx, 0, 0, AH_W, AH_H, 20); ctx.clip();
+  const p = s.puck;
+  p.trail.forEach((t, k) => {
+    const a = (k + 1) / p.trail.length;
+    ctx.fillStyle = `rgba(40,52,76,${(a * 0.15).toFixed(3)})`;
+    ctx.beginPath(); ctx.arc(t.x, t.y, AH_PUCK_R * (0.45 + a * 0.55), 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.fillStyle = 'rgba(20,35,60,0.22)';
+  ctx.beginPath(); ctx.ellipse(p.x + 2, p.y + 5, AH_PUCK_R, AH_PUCK_R * 0.85, 0, 0, Math.PI * 2); ctx.fill();
+  const pg = ctx.createRadialGradient(p.x - 4, p.y - 5, 1, p.x, p.y, AH_PUCK_R);
+  pg.addColorStop(0, '#5d687e'); pg.addColorStop(0.55, '#2b3242'); pg.addColorStop(1, '#12161f');
+  ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(p.x, p.y, AH_PUCK_R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.24)'; ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.arc(p.x, p.y, AH_PUCK_R - 3.5, Math.PI * 0.85, Math.PI * 1.75); ctx.stroke();
+  s.mal.forEach((m, i) => ahMallet(ctx, m, AH_COLORS[i]));
+  ctx.restore();
+  // Éclat de but.
+  if (s.goal > 0) {
+    const a = Math.min(1, s.goal / 40), col = AH_COLORS[s.flash];
+    ctx.save();
+    ctx.globalAlpha = a * 0.30; ctx.fillStyle = col.base;
+    crRR(ctx, 0, 0, AH_W, AH_H, 20); ctx.fill();
+    ctx.globalAlpha = Math.min(1, a * 1.2);
+    ctx.translate(AH_W / 2, AH_H / 2); if (s.flash === 0) ctx.rotate(Math.PI);
+    ctx.font = '800 42px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 7; ctx.strokeStyle = 'rgba(0,0,0,0.40)'; ctx.strokeText('BUT !', 0, 0);
+    ctx.fillStyle = '#fff'; ctx.fillText('BUT !', 0, 0);
+    ctx.restore();
+  }
+  // Liseré de table.
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 2;
+  crRR(ctx, 1, 1, AH_W - 2, AH_H - 2, 19); ctx.stroke();
+}
+function GameAirHockey() {
+  const canvasRef = React.useRef(null);
+  const g = React.useRef(null);
+  const phaseRef = React.useRef('ready');
+  const [phase, setPhase] = React.useState('ready');
+  const [score, setScore] = React.useState([0, 0]);
+  const [winner, setWinner] = React.useState(0);
+  const setPh = p => { phaseRef.current = p; setPhase(p); };
+  const reset = () => { g.current = ahBuild(); setScore([0, 0]); };
+  const start = () => { reset(); setPh('playing'); };
+  React.useEffect(() => { reset(); }, []);
+  // Écran figé (prêt / fin de manche) : on redessine une fois, sinon le canvas resterait vide.
+  React.useEffect(() => {
+    const ctx = canvasRef.current && canvasRef.current.getContext('2d');
+    if (ctx && g.current && phase !== 'playing') ahRender(ctx, g.current);
+  }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current, ctx = canvasRef.current.getContext('2d');
+      const scorer = ahStep(s);
+      if (scorer >= 0) {
+        setScore([s.score[0], s.score[1]]);
+        if (s.score[scorer] >= AH_WIN) {
+          ahRender(ctx, s); alive = false; setWinner(scorer); setPh('over'); return;
+        }
+      }
+      ahRender(ctx, s);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  // ⚠ Un pointerId par maillet : c'est ce qui permet aux DEUX joueurs de bouger en même temps.
+  const ptr = React.useRef({});
+  const at = e => {
+    const r = canvasRef.current.getBoundingClientRect();
+    return { x:(e.clientX - r.left) * (AH_W / r.width), y:(e.clientY - r.top) * (AH_H / r.height) };
+  };
+  const down = e => {
+    if (phaseRef.current !== 'playing') { start(); return; }
+    const q = at(e), i = q.y < AH_H / 2 ? 0 : 1;
+    ptr.current[e.pointerId] = i;
+    g.current.mal[i].tx = q.x; g.current.mal[i].ty = q.y;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const move = e => {
+    const i = ptr.current[e.pointerId];
+    if (i === undefined || !g.current) return;
+    const q = at(e);
+    g.current.mal[i].tx = q.x; g.current.mal[i].ty = q.y;
+  };
+  const up = e => { delete ptr.current[e.pointerId]; };
+  return (
+    <GameWrap hint={`Chacun sa moitié : glisse ton maillet avec le doigt — les deux joueurs en même temps. Premier à ${AH_WIN} buts. Le joueur 🔵 défend la cage du haut, le 🟠 celle du bas.`}
+      bar={<>
+        <span style={{ fontSize:12, color:C.muted }}>
+          <b style={{ color:AH_COLORS[0].base }}>🔵 {score[0]}</b>
+          <span style={{ margin:'0 6px' }}>—</span>
+          <b style={{ color:AH_COLORS[1].base }}>{score[1]} 🟠</b>
+          <span style={{ marginLeft:8 }}>· en {AH_WIN} buts</span>
+        </span>
+        {phase === 'playing' && <button onClick={() => setPh('ready')} style={gameBtn()}>⏹ Stop</button>}
+      </>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:'min(100%, 46vh)' }}>
+        <canvas ref={canvasRef} width={AH_W} height={AH_H}
+          onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+          style={{ width:'100%', height:'auto', borderRadius:14, touchAction:'none', display:'block', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={e => { e.stopPropagation(); start(); }}
+            style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', background:'rgba(0,0,0,0.42)', borderRadius:14, cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:36 }}>{phase === 'over' ? '🏆' : '🏒'}</div>
+            <div style={{ fontSize:17, fontWeight:800, color:phase === 'over' ? AH_COLORS[winner].light : '#fff' }}>
+              {phase === 'over' ? `Joueur ${winner + 1} gagne !` : 'Air Hockey'}
+            </div>
+            <div style={{ fontSize:13 }}>{phase === 'over' ? `${score[0]} — ${score[1]}` : '2 joueurs · un maillet chacun'}</div>
+            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>
+              Touche pour {phase === 'over' ? 'rejouer' : 'commencer'}
+            </div>
+          </div>
+        )}
+      </div>
+    </GameWrap>
+  );
 }
 
 // ════════ Doodle Jump (solo) ════════
