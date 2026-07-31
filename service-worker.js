@@ -112,7 +112,7 @@
 // « 23/03 » avec un petit trait au-dessus de chaque date).
 // v153 : bump de cache — nouveau module « Collection » (4 boutons carrés Cartes /
 // Displate / Pop / Autres, sans action pour l'instant).
-const CACHE  = 'spotifyplus-v193';
+const CACHE  = 'spotifyplus-v194';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
