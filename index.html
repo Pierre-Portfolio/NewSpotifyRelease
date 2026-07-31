@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.9.7';
+const APP_VERSION = '7.9.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20021,11 +20021,20 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
 // ── Lecteur YouTube PLEIN ÉCRAN (7.6.78) — lit une FILE de vidéos (`queue`) dans un
 // embed youtube-nocookie qui couvre tout le viewport, avec une barre en OVERLAY
 // « ← Retour · ⏮ · ⏭ Suivant » posée sur la vidéo en cours.
-// ⚠ Pas d'auto-avance en fin de vidéo : la connaître exigerait l'IFrame API de YouTube,
-// donc un script tiers (www.youtube.com) que la CSP interdit (`script-src` = 'self' +
-// unpkg + accounts.google.com). Le passage à la suivante est donc MANUEL (⏭ / flèche →).
 // La vidéo affichée est marquée VUE dès son lancement — même règle que le clic sur une
 // miniature dans la fiche YtDetailModal.
+// ⚠ 7.9.8 — AUTO-AVANCE `YT_END_NEXT_MS` APRÈS LA FIN (demande utilisateur, prop `autoNext`,
+// activée pour la seule file 🩳 des Shorts en attente) : la fin de la vidéo est connue SANS
+// le script `www.youtube.com/iframe_api` — que la CSP interdit toujours (`script-src` =
+// 'self' + unpkg + accounts.google.com) et qu'il n'est pas question d'ouvrir. L'embed
+// expose le MÊME protocole `postMessage` que ce script pilote : on envoie le handshake
+// `{event:'listening'}` à `iframe.contentWindow` et YouTube répond en boucle des messages
+// `infoDelivery` portant `playerState` (0 = terminée) et `currentTime`/`duration`. Tout est
+// donc fait EN PAGE, sans une ligne de code tiers. La note « pas d'auto-avance possible »
+// des versions précédentes portait sur le SCRIPT, pas sur le protocole.
+// ⚠ « si j'ai toujours rien fait » = tout état de lecture ≠ terminée DÉSARME le compte à
+// rebours (relancer la vidéo, la mettre en pause, revenir en arrière), et un changement de
+// vidéo (swipe, ⏭, ⏮) le désarme par le nettoyage de l'effet.
 // ⚠ 7.7.8 — SWIPE INVERSÉ (demande utilisateur, était l'inverse en 7.7.2) : glisser vers la
 // GAUCHE = vidéo suivante, vers la DROITE = précédente — c'est la convention carrousel /
 // Shorts (on pousse la vidéo courante hors de l'écran pour amener la suivante).
@@ -20041,8 +20050,13 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
 const YT_SWIPE_MIN     = 60;   // px parcourus (horizontalement OU verticalement) pour valider le geste
 const YT_SWIPE_MAX_MS  = 900;  // au-delà, c'est un déplacement, pas un swipe
 const YT_SWIPE_BOTTOM  = 68;   // bande basse laissée aux contrôles YouTube
-function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds }) {
+const YT_EMBED_ORIGIN   = 'https://www.youtube-nocookie.com';  // cible des postMessage (jamais '*')
+const YT_END_NEXT_MS    = 5000; // inactivité après la FIN d'une vidéo avant de passer à la suivante
+const YT_JSAPI_HELLO_MS = 600;  // cadence du handshake `listening` (le player n'est pas prêt tout de suite)
+const YT_JSAPI_HELLO_N  = 15;   // nb de handshakes (~9 s) avant d'abandonner
+function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds, autoNext }) {
   const boxRef = React.useRef(null);
+  const frameRef = React.useRef(null);
   const v = queue[index] || null;
   const vid = v ? v.id : null;
   // ⚠ 7.6.92 — Le lecteur est monté ⇒ layout responsive GELÉ (cf. useImmersiveLock).
@@ -20073,6 +20087,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   };
   const go = d => { const n = index + d; if (n >= 0 && n < queue.length) { leaveCurrent(); onIndex(n); } };
   const closePlayer = () => { leaveCurrent(); onClose(); };
+  // ⚠ `goRef` : l'écouteur de messages est attaché par vidéo (deps [vid, …]), il ne doit
+  // pas figer un `go` périmé — la ref pointe toujours sur celui du dernier rendu.
+  const goRef = React.useRef(go);
+  goRef.current = go;
   // Effet SANS tableau de deps (ré-attaché à chaque render) → jamais de closure périmée
   // sur `index`. ⚠ Échap en plein écran natif = sortie du plein écran (géré par le
   // navigateur) : on ne ferme le lecteur que si on n'y est plus.
@@ -20085,6 +20103,65 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
+  // ⚠ 7.9.8 — AUTO-AVANCE 5 s APRÈS LA FIN (file 🩳). Handshake `listening` vers l'embed
+  // puis écoute des `infoDelivery` renvoyés par YouTube : `playerState === 0` = terminée
+  // → on arme le compte à rebours ; TOUT autre état (1 lecture, 2 pause, 3 mise en
+  // mémoire tampon, 5 en attente) = « l'utilisateur a fait quelque chose » → on désarme.
+  // ⚠ Rien n'est armé sur la DERNIÈRE vidéo de la file (il n'y a nulle part où aller) ni
+  // hors `autoNext` : les files 📺 (playlist) et « vignette de fiche » sont inchangées —
+  // avancer y validerait la vidéo toute seule (leaveCurrent), ce que 7.6.87/7.6.89 ont
+  // justement rendu manuel.
+  const [endWait, setEndWait] = React.useState(0);   // secondes restantes (0 = désarmé)
+  const endTimerRef = React.useRef(null);
+  React.useEffect(() => {
+    setEndWait(0);
+    if (!autoNext || !vid || index >= queue.length - 1) return;
+    const clear = () => {
+      if (endTimerRef.current) { clearInterval(endTimerRef.current); endTimerRef.current = null; }
+      setEndWait(0);
+    };
+    const arm = () => {
+      if (endTimerRef.current) return;   // déjà armé : `infoDelivery` répète l'état en boucle
+      let left = Math.round(YT_END_NEXT_MS / 1000);
+      setEndWait(left);
+      endTimerRef.current = setInterval(() => {
+        left -= 1;
+        if (left > 0) { setEndWait(left); return; }
+        clear();
+        goRef.current(+1);
+      }, 1000);
+    };
+    const frameWin = () => { const f = frameRef.current; return (f && f.contentWindow) || null; };
+    let hellos = 0, helloTimer = null, talking = false;
+    const hello = () => {
+      const w = frameWin();
+      if (w) { try { w.postMessage(JSON.stringify({ event:'listening', id:'hub-yt', channel:'widget' }), YT_EMBED_ORIGIN); } catch {} }
+      if (talking || ++hellos >= YT_JSAPI_HELLO_N) { clearInterval(helloTimer); helloTimer = null; }
+    };
+    const onMsg = e => {
+      const w = frameWin();
+      if (!w || e.source !== w) return;   // ne lit QUE les messages de NOTRE iframe
+      let d = e.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
+      const info = d && d.info;
+      if (!info) return;
+      talking = true;
+      if (info.playerState === 0) arm();
+      else if (typeof info.playerState === 'number') clear();
+      // Filet : certains embeds ne renvoient pas l'état 0 mais continuent d'annoncer la
+      // position — arrivé au bout, on considère la vidéo terminée.
+      else if (info.duration > 0 && info.currentTime >= info.duration - 0.25) arm();
+    };
+    window.addEventListener('message', onMsg);
+    hello();
+    helloTimer = setInterval(hello, YT_JSAPI_HELLO_MS);
+    return () => {
+      window.removeEventListener('message', onMsg);
+      if (helloTimer) clearInterval(helloTimer);
+      clear();
+    };
+  }, [vid, index, queue.length, autoNext]);
+
   // Swipe horizontal (7.7.8, sens inversé) : GAUCHE = suivante, DROITE = précédente.
   // Swipe VERTICAL (7.7.9, demande utilisateur) : BAS = suivante, HAUT = précédente — même
   // couche de capture, même seuils, on regarde juste quel axe domine le geste. `go`
@@ -20112,7 +20189,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     cursor: disabled ? 'default' : 'pointer', fontFamily:'DM Mono,monospace', flexShrink:0, backdropFilter:'blur(2px)' });
   return (
     <div ref={boxRef} style={{ position:'fixed', inset:0, zIndex:400, background:'#000' }}>
-      <iframe key={v.id} src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1`}
+      {/* `enablejsapi=1` + `origin=` = ce qui autorise le dialogue postMessage avec l'embed
+          (fin de vidéo → auto-avance, cf. 7.9.8). Aucun script tiers n'est chargé pour ça. */}
+      <iframe key={v.id} ref={frameRef}
+        src={`${YT_EMBED_ORIGIN}/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}`}
         title={v.title || 'Vidéo YouTube'} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowFullScreen
         style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
       {/* Couche de capture du SWIPE (7.7.2, sens inversé en 7.7.8), posée SUR l'iframe mais SOUS la barre d'actions
@@ -20145,6 +20225,13 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         {queue.length > 1 && (
           <div style={{ fontSize:11, fontWeight:700, color:'#fff', fontFamily:'DM Mono,monospace', background:'rgba(0,0,0,0.6)', borderRadius:20, padding:'6px 10px', flexShrink:0 }}>
             {index + 1}/{queue.length}
+          </div>
+        )}
+        {/* Compte à rebours d'auto-avance (7.9.8) : relancer ou mettre en pause l'annule. */}
+        {endWait > 0 && (
+          <div title={`Vidéo terminée — passage à la suivante dans ${endWait} s (relance la lecture pour rester)`}
+            style={{ fontSize:11, fontWeight:700, color:'#fff', fontFamily:'DM Mono,monospace', background:YT_COLOR + 'cc', borderRadius:20, padding:'6px 10px', flexShrink:0 }}>
+            ⏱ suivante dans {endWait} s
           </div>
         )}
       </div>
@@ -20573,10 +20660,13 @@ function TvTimePanel() {
   // File de lecture = tableau de { id, title, date, dur, itemId, channel } ; `itemId`
   // porte la chaîne d'origine pour marquer la bonne vidéo vue (une file peut mélanger
   // plusieurs chaînes).
-  const [player, setPlayer] = React.useState(null);   // { queue, i } | null
-  const openPlayer = (queue, i = 0) => {
+  // `auto` (7.9.8) = auto-avance 5 s après la fin de la vidéo. Posé UNIQUEMENT par la file
+  // 🩳 des Shorts en attente (demande utilisateur) : sur la file 📺 de la playlist, avancer
+  // tout seul validerait la vidéo (leaveCurrent), or c'est un geste volontaire depuis 7.6.87.
+  const [player, setPlayer] = React.useState(null);   // { queue, i, auto } | null
+  const openPlayer = (queue, i = 0, opts = {}) => {
     if (!queue || !queue.length) return;
-    setPlayer({ queue, i: Math.max(0, Math.min(i, queue.length - 1)) });
+    setPlayer({ queue, i: Math.max(0, Math.min(i, queue.length - 1)), auto: !!opts.auto });
   };
   const ytQueueEntry = (it, v) => ({ id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: it.id, channel: it.title });
 
@@ -21068,8 +21158,8 @@ function TvTimePanel() {
         {(() => {
           const q = ytShortsQueue();
           return (
-            <button onClick={() => openPlayer(q, 0)} disabled={!q.length}
-              title={q.length ? `Lancer en plein écran les ${q.length} vidéo(s) de moins de ${YT_MIN_MINUTES} min qu'il te reste à regarder` : `Aucune vidéo de moins de ${YT_MIN_MINUTES} min à regarder`}
+            <button onClick={() => openPlayer(q, 0, { auto: true })} disabled={!q.length}
+              title={q.length ? `Lancer en plein écran les ${q.length} vidéo(s) de moins de ${YT_MIN_MINUTES} min qu'il te reste à regarder — passage automatique à la suivante ${Math.round(YT_END_NEXT_MS / 1000)} s après la fin` : `Aucune vidéo de moins de ${YT_MIN_MINUTES} min à regarder`}
               style={hbtn(!q.length)}>
               🩳{q.length > 0 && <span style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace' }}> {q.length}</span>}
             </button>
@@ -21512,7 +21602,7 @@ function TvTimePanel() {
         onIndex={i => setPlayer(p => (p ? { ...p, i } : p))}
         onClose={() => setPlayer(null)}
         onPlaying={v => { if (!v.fromWl) ytMarkVideoSeen(v.itemId, v.id); }}
-        onValidate={validateWlVideo} validatedIds={wlValidated} />}
+        onValidate={validateWlVideo} validatedIds={wlValidated} autoNext={!!player.auto} />}
     </div>
   );
 }
