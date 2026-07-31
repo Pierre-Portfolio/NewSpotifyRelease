@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.9.8';
+const APP_VERSION = '7.9.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20018,6 +20018,116 @@ function YtWatchlistModal({ state, videos, err, playedIds, playlistId, onPlay, o
   );
 }
 
+// ── 💬 COMMENTAIRES D'UNE VIDÉO (7.9.9) ─────────────────────────────────────────────
+// ⚠ Le lecteur intégré n'affiche JAMAIS les commentaires et YouTube ne publie aucun embed
+// pour eux : la seule voie est de les LIRE par l'API Data v3 (`commentThreads.list`, part
+// `snippet` = 1 unité de quota) avec la clé déjà utilisée par TV Time, et de les rendre
+// nous-mêmes. ⚠ `textFormat=plainText` : sans lui YouTube renvoie du HTML (liens, <br>) —
+// et il n'est PAS question de l'injecter (`dangerouslySetInnerHTML` proscrit dans ce projet).
+// `order=relevance` = l'ordre « Top » de YouTube.
+const YT_COMMENTS_MAX = 40;
+async function ytFetchComments(videoId) {
+  const key = ytKey();
+  if (!key) return { error: 'NOKEY' };
+  const q = new URLSearchParams({ key, part: 'snippet', videoId, order: 'relevance',
+    maxResults: String(YT_COMMENTS_MAX), textFormat: 'plainText' });
+  let res;
+  try { res = await fetch(`https://www.googleapis.com/youtube/v3/commentThreads?${q}`); }
+  catch { return { error: 'NET' }; }
+  const body = await res.json().catch(() => null);
+  const err = body && body.error;
+  if (!res.ok) {
+    // ⚠ Le STATUT ne suffit pas : « commentaires désactivés » et « quota épuisé » sont
+    // tous les deux des 403 — c'est `error.errors[0].reason` qui les distingue.
+    const reason = (err && err.errors && err.errors[0] && err.errors[0].reason) || '';
+    if (reason === 'commentsDisabled') return { error: 'DISABLED' };
+    if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') return { error: 'QUOTA' };
+    if (res.status === 404 || reason === 'videoNotFound') return { error: 'NOTFOUND' };
+    return { error: (err && err.message) || `Erreur ${res.status}` };
+  }
+  const items = ((body && body.items) || []).map(t => {
+    const s = t && t.snippet && t.snippet.topLevelComment && t.snippet.topLevelComment.snippet;
+    if (!s) return null;
+    return { id: t.id, author: s.authorDisplayName || '', avatar: s.authorProfileImageUrl || '',
+      text: s.textOriginal || s.textDisplay || '', likes: +s.likeCount || 0,
+      date: s.publishedAt || '', replies: +(t.snippet.totalReplyCount || 0) };
+  }).filter(Boolean);
+  return { items };
+}
+const YT_COMMENT_ERRORS = {
+  NOKEY:    'Aucune clé API YouTube enregistrée — ajoute-la dans TV Time (⚙) ou dans le module API.',
+  DISABLED: 'Les commentaires sont désactivés sur cette vidéo.',
+  QUOTA:    'Quota de l\'API YouTube épuisé pour aujourd\'hui — réessaie demain.',
+  NOTFOUND: 'Vidéo introuvable (supprimée ou privée).',
+  NET:      'YouTube injoignable (réseau).'
+};
+// Feuille de commentaires du lecteur plein écran : recharge dès que la vidéo change
+// (les boutons ⏭/⏮ de la barre restent accessibles pendant la lecture des commentaires).
+function YtCommentsPanel({ video, onClose }) {
+  const vid = video ? video.id : null;
+  const [st, setSt] = React.useState({ state: 'loading', items: [], err: '' });
+  const load = React.useCallback(async () => {
+    if (!vid) return;
+    setSt({ state: 'loading', items: [], err: '' });
+    const r = await ytFetchComments(vid);
+    if (r.error) setSt({ state: 'err', items: [], err: YT_COMMENT_ERRORS[r.error] || r.error });
+    else setSt({ state: 'ok', items: r.items, err: '' });
+  }, [vid]);
+  React.useEffect(() => { load(); }, [load]);
+  const hbtn = { background:'none', border:'1px solid #ffffff33', borderRadius:16, color:'#fff',
+    fontSize:11, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace', flexShrink:0 };
+  return (
+    <div style={{ position:'absolute', left:0, right:0, bottom:0, top:'38%', background:'rgba(8,8,10,0.97)',
+      borderTop:`2px solid ${YT_COLOR}`, display:'flex', flexDirection:'column', overflow:'hidden' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 12px', borderBottom:'1px solid #ffffff1a', flexShrink:0 }}>
+        <div style={{ flex:1, fontSize:12, fontWeight:700, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+          💬 Commentaires{st.state === 'ok' ? ` · ${st.items.length}` : ''}
+        </div>
+        <button onClick={load} title="Recharger les commentaires" style={hbtn}>↻</button>
+        <button onClick={onClose} title="Fermer les commentaires (Échap)" style={{ ...hbtn, borderColor:'#e0505088', color:'#e05050' }}>✕ Fermer</button>
+      </div>
+      <div style={{ flex:1, overflowY:'auto', padding:'10px 12px', WebkitOverflowScrolling:'touch' }}>
+        {st.state === 'loading' && <div style={{ fontSize:11, color:'#ffffff88', fontFamily:'DM Mono,monospace' }}>⏳ Chargement…</div>}
+        {st.state === 'err' && (
+          <div style={{ fontSize:11, color:'#ffb0b0', lineHeight:1.6 }}>
+            ⚠ {st.err}
+            {video && <div style={{ marginTop:8 }}>
+              <a href={`https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`} target="_blank" rel="noopener noreferrer"
+                style={{ color:YT_COLOR, fontSize:11, fontFamily:'DM Mono,monospace' }}>↗ Ouvrir la vidéo sur YouTube</a>
+            </div>}
+          </div>
+        )}
+        {st.state === 'ok' && !st.items.length && (
+          <div style={{ fontSize:11, color:'#ffffff88', lineHeight:1.6 }}>Aucun commentaire sur cette vidéo.</div>
+        )}
+        {st.state === 'ok' && st.items.map(c => (
+          <div key={c.id} style={{ display:'flex', gap:9, padding:'8px 0', borderBottom:'1px solid #ffffff12' }}>
+            {c.avatar
+              ? <img src={c.avatar} alt="" loading="lazy" style={{ width:30, height:30, borderRadius:'50%', flexShrink:0, objectFit:'cover' }} />
+              : <div style={{ width:30, height:30, borderRadius:'50%', flexShrink:0, background:'#ffffff1a' }} />}
+            <div style={{ flex:1, minWidth:0 }}>
+              <div style={{ fontSize:10.5, color:'#ffffffaa', fontFamily:'DM Mono,monospace', display:'flex', gap:6, flexWrap:'wrap' }}>
+                <span style={{ color:'#fff', fontWeight:700 }}>{c.author}</span>
+                <span>{actuAgo(c.date)}</span>
+              </div>
+              {/* ⚠ texte BRUT (textFormat=plainText) rendu par React → jamais d'HTML injecté */}
+              <div style={{ fontSize:12, color:'#fff', lineHeight:1.5, marginTop:3, whiteSpace:'pre-wrap', wordBreak:'break-word' }}>{c.text}</div>
+              <div style={{ fontSize:10, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:4 }}>
+                👍 {c.likes}{c.replies ? ` · 💬 ${c.replies} réponse${c.replies > 1 ? 's' : ''}` : ''}
+              </div>
+            </div>
+          </div>
+        ))}
+        {st.state === 'ok' && st.items.length >= YT_COMMENTS_MAX && (
+          <div style={{ fontSize:10, color:'#ffffff66', fontFamily:'DM Mono,monospace', padding:'8px 0' }}>
+            {YT_COMMENTS_MAX} commentaires les plus pertinents — la suite est sur YouTube.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Lecteur YouTube PLEIN ÉCRAN (7.6.78) — lit une FILE de vidéos (`queue`) dans un
 // embed youtube-nocookie qui couvre tout le viewport, avec une barre en OVERLAY
 // « ← Retour · ⏮ · ⏭ Suivant » posée sur la vidéo en cours.
@@ -20057,6 +20167,8 @@ const YT_JSAPI_HELLO_N  = 15;   // nb de handshakes (~9 s) avant d'abandonner
 function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds, autoNext }) {
   const boxRef = React.useRef(null);
   const frameRef = React.useRef(null);
+  // 💬 Feuille de commentaires (7.9.9), ouverte par le bouton en HAUT À DROITE.
+  const [showComments, setShowComments] = React.useState(false);
   const v = queue[index] || null;
   const vid = v ? v.id : null;
   // ⚠ 7.6.92 — Le lecteur est monté ⇒ layout responsive GELÉ (cf. useImmersiveLock).
@@ -20096,7 +20208,8 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // navigateur) : on ne ferme le lecteur que si on n'y est plus.
   React.useEffect(() => {
     const onKey = e => {
-      if (e.key === 'Escape') { if (!document.fullscreenElement) closePlayer(); }
+      // Échap ferme d'abord les commentaires (7.9.9), sinon le lecteur.
+      if (e.key === 'Escape') { if (showComments) setShowComments(false); else if (!document.fullscreenElement) closePlayer(); }
       else if (e.key === 'ArrowRight') go(+1);
       else if (e.key === 'ArrowLeft') go(-1);
     };
@@ -20115,7 +20228,9 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   const endTimerRef = React.useRef(null);
   React.useEffect(() => {
     setEndWait(0);
-    if (!autoNext || !vid || index >= queue.length - 1) return;
+    // ⚠ Commentaires ouverts = l'utilisateur EST en train de faire quelque chose : aucune
+    // auto-avance, sinon la vidéo changerait sous ses yeux pendant qu'il lit (7.9.9).
+    if (!autoNext || !vid || showComments || index >= queue.length - 1) return;
     const clear = () => {
       if (endTimerRef.current) { clearInterval(endTimerRef.current); endTimerRef.current = null; }
       setEndWait(0);
@@ -20160,7 +20275,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       if (helloTimer) clearInterval(helloTimer);
       clear();
     };
-  }, [vid, index, queue.length, autoNext]);
+  }, [vid, index, queue.length, autoNext, showComments]);
 
   // Swipe horizontal (7.7.8, sens inversé) : GAUCHE = suivante, DROITE = précédente.
   // Swipe VERTICAL (7.7.9, demande utilisateur) : BAS = suivante, HAUT = précédente — même
@@ -20198,7 +20313,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       {/* Couche de capture du SWIPE (7.7.2, sens inversé en 7.7.8), posée SUR l'iframe mais SOUS la barre d'actions
           (ordre du DOM) → les boutons du haut restent cliquables. `touchAction:'none'` évite
           que le navigateur interprète le geste (retour arrière, pull-to-refresh). */}
-      {queue.length > 1 && (
+      {queue.length > 1 && !showComments && (
         <div onPointerDown={onSwipeDown} onPointerUp={onSwipeUp} onPointerCancel={() => { swipeRef.current = null; }}
           style={{ position:'absolute', left:0, right:0, top:0, bottom:YT_SWIPE_BOTTOM, touchAction:'none',
             userSelect:'none', WebkitUserSelect:'none', WebkitTapHighlightColor:'transparent' }} />
@@ -20234,6 +20349,14 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             ⏱ suivante dans {endWait} s
           </div>
         )}
+        {/* 💬 Commentaires (7.9.9) — rendu EN DERNIER + `marginLeft:'auto'` : il reste collé
+            EN HAUT À DROITE quoi qu'affichent les autres éléments de la barre (position
+            demandée). Il n'existe pas d'embed de commentaires chez YouTube : la feuille les
+            lit par l'API Data v3 et les rend elle-même (cf. YtCommentsPanel). */}
+        <button onClick={() => setShowComments(o => !o)}
+          title={showComments ? 'Masquer les commentaires' : 'Voir les commentaires de la vidéo'}
+          style={{ ...obtn(YT_COLOR, false), marginLeft:'auto',
+            ...(showComments ? { background:YT_COLOR + 'dd', borderColor:YT_COLOR } : null) }}>💬</button>
       </div>
       {/* Titre + chaîne en bas (n'entrave pas les contrôles YouTube, qui sont plus haut) */}
       <div style={{ position:'absolute', left:0, right:0, bottom:0, padding:'26px 14px 8px', pointerEvents:'none',
@@ -20242,12 +20365,18 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         <div style={{ fontSize:10, color:'#ffffffaa', fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
           {v.channel ? v.channel + ' · ' : ''}{v.date || ''}{v.dur ? ` · ${v.dur} min` : ''}
         </div>
-        {queue.length > 1 && (
+        {queue.length > 1 && !showComments && (
           <div style={{ fontSize:9, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:3 }}>
-            👉 glisse vers la droite = vidéo suivante · vers la gauche = précédente
+            👉 glisse vers la gauche ou vers le bas = vidéo suivante
           </div>
         )}
       </div>
+      {/* 💬 Feuille de commentaires (7.9.9) : rendue EN DERNIER donc AU-DESSUS du reste,
+          mais elle démarre à 38 % de la hauteur → la barre d'actions (⏭, ← Retour…) reste
+          visible et cliquable, et on voit toujours la vidéo. Tant qu'elle est ouverte, la
+          couche de capture du swipe n'est PAS rendue (sinon lire les commentaires ferait
+          défiler la file) et l'auto-avance est suspendue. */}
+      {showComments && <YtCommentsPanel video={v} onClose={() => setShowComments(false)} />}
     </div>
   );
 }
