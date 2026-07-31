@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.0.0';
+const APP_VERSION = '8.0.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7904,7 +7904,20 @@ function collLoad() {
   try { const d = JSON.parse(localStorage.getItem(COLLECTION_LS)); return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {}; }
   catch { return {}; }
 }
-function collSave(data) { lsSet(COLLECTION_LS, data); }
+// ⚠ `lsSet` écrit la valeur TELLE QUELLE (c'est un simple `localStorage.setItem` gardé) :
+// lui passer l'objet enregistrait la chaîne « [object Object] », que `collLoad` n'arrivait
+// évidemment plus à parser → TOUTE la collection disparaissait au rechargement de l'app.
+// La sérialisation est donc obligatoire ici (8.0.1).
+function collSave(data) { return lsSet(COLLECTION_LS, JSON.stringify(data || {})); }
+// État PARTAGÉ (pattern `_finance`/`_delta`) : plusieurs `CollectionCat` peuvent être montés
+// en même temps (deux catégories dépliées), chacun avec SA copie de la map chargée à son
+// montage. Sans diffusion, la sauvegarde de l'un écraserait les ajouts de l'autre.
+const _coll = { subs: new Set() };
+function collPublish(data) {
+  const ok = collSave(data);
+  for (const f of _coll.subs) { try { f(data); } catch {} }
+  return ok;
+}
 function collList(data, subId) { return Array.isArray(data && data[subId]) ? data[subId] : []; }
 function collCount(data) { return Object.keys(data || {}).reduce((a, k) => a + collList(data, k).length, 0); }
 // Normalise un résultat de recherche en item stockable (jette ce qui n'a ni id ni nom).
@@ -8403,7 +8416,7 @@ function displateImgCacheSave(map) {
     const keys = Object.keys(map || {});
     const kept = keys.length > DISPLATE_IMG_MAX ? keys.slice(keys.length - DISPLATE_IMG_MAX) : keys;
     const out = {}; for (const k of kept) out[k] = map[k];
-    lsSet(DISPLATE_IMG_LS, out);
+    lsSet(DISPLATE_IMG_LS, JSON.stringify(out));   // ⚠ lsSet n'appelle PAS JSON.stringify
   } catch {}
 }
 // Deux clés par référence : l'ID du tableur (stable) et le nom normalisé (repli pour les
@@ -8939,7 +8952,14 @@ const COLLECTION_SUBS = {
 // partagent le même stockage) — vide tant que la catégorie n'a pas encore de contenu.
 function CollectionCat({ cat }) {
   const [data, setData] = React.useState(collLoad);
-  const save = next => { setData(next); collSave(next); };
+  const save = next => { setData(next); collPublish(next); };
+  // Les autres catégories dépliées suivent la même map (sinon elles réécriraient une copie
+  // périmée par-dessus l'ajout qu'on vient de faire).
+  React.useEffect(() => {
+    const f = d => setData(d);
+    _coll.subs.add(f);
+    return () => { _coll.subs.delete(f); };
+  }, []);
   const subs = COLLECTION_SUBS[cat.id] || [];
   if (!subs.length) return (
     <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', lineHeight:1.5, padding:'2px 0' }}>
