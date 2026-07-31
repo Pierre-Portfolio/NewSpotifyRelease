@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.2.0';
+const APP_VERSION = '8.2.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7892,7 +7892,7 @@ function vetMatch(it, f) {
   if (f.ids && f.ids.indexOf(it.id) < 0) return false;
   const q = String(f.q || '').trim().toLowerCase();
   if (q) {
-    const hay = [it.name, it.taille, it.etat, it.lieu, vetTypeLabel(it.type)]
+    const hay = [it.name, it.marque, it.taille, it.etat, it.lieu, vetTypeLabel(it.type)]
       .map(v => String(v == null ? '' : v).toLowerCase()).join(' ');
     if (!hay.includes(q)) return false;
   }
@@ -7962,10 +7962,13 @@ async function vetAiSearch(provider, images, rows) {
 // Types d'articles pour la section « Mes marques » (indépendants de l'inventaire ci-dessus :
 // plus larges, ex. sac / bob que l'inventaire ne liste pas).
 const VET_BRAND_ARTICLES = ['Haut', 'Pantalon', 'Jean', 'Short', 'Veste', 'Manteau', 'Chaussures', 'Sac', 'Bob / Casquette', 'Accessoire', 'Sous-vêtements'];
+// Valeur sentinelle du <select> MARQUE d'une fiche : ouvre la saisie d'une nouvelle marque.
+// ⚠ Doit rester impossible à confondre avec un vrai nom de marque.
+const VET_BRAND_NEW = '__vet_new_brand__';
 const vetBlankBrand = () => ({ id: vetNewId(), name: '', articles: [] });
 const vetTypeLabel = t => (VET_TYPES.find(x => x[0] === t) || [,'Vêtement'])[1];
 const vetNewId = () => Date.now() + '' + Math.floor(Math.random() * 1000);
-const vetBlankItem = t => ({ id: vetNewId(), name: '', type: t, taille: '', photo: null, etat: 'Bon état', lieu: VET_LIEUX[0], destin: null });
+const vetBlankItem = t => ({ id: vetNewId(), name: '', type: t, marque: '', taille: '', photo: null, etat: 'Bon état', lieu: VET_LIEUX[0], destin: null });
 // counts est DÉRIVÉ des fiches : autant de fiches d'un type = son compteur d'inventaire.
 const vetCounts = items => { const c = {}; items.forEach(it => { c[it.type] = (c[it.type] || 0) + 1; }); return c; };
 function vetLoad() {
@@ -8129,6 +8132,25 @@ function VetementPanel() {
     saveItems(items);
   };
   const updItem = (id, patch) => saveItems(data.items.map(it => it.id === id ? { ...it, ...patch } : it));
+  // ── Marque d'un vêtement (8.2.1) ── options = « ❤️ Mes marques », triées, sans doublon.
+  // ⚠ `cur` est réinjecté s'il n'est plus dans la liste (marque supprimée depuis) : sans ça le
+  // <select> ne trouverait pas sa valeur et afficherait « — », donnant l'illusion d'une perte.
+  const brandOptions = cur => {
+    const names = (data.brands || []).map(b => String(b.name || '').trim()).filter(Boolean);
+    if (cur && !names.includes(cur)) names.push(cur);
+    return [...new Set(names)].sort((a, b) => a.localeCompare(b, 'fr'));
+  };
+  // « ➕ Nouvelle marque… » : on la crée AUSSI dans « Mes marques » pour la retrouver sur les
+  // vêtements suivants (une marque saisie une fois ne doit pas être à retaper).
+  const pickBrand = (it, v) => {
+    if (v !== VET_BRAND_NEW) { updItem(it.id, { marque: v }); return; }
+    const name = String(window.prompt('Marque du vêtement ?', '') || '').trim();
+    if (!name) return;                                   // Annuler → on ne touche à rien
+    const known = (data.brands || []).some(b => String(b.name || '').trim().toLowerCase() === name.toLowerCase());
+    const brands = known ? (data.brands || []) : [...(data.brands || []), { ...vetBlankBrand(), name }];
+    save({ ...data, brands, counts: vetCounts(data.items),
+           items: data.items.map(x => x.id === it.id ? { ...x, marque: name } : x) });
+  };
   const delItem = id => {
     setConfirmId(null);
     saveItems(data.items.filter(it => it.id !== id));
@@ -8408,6 +8430,7 @@ function VetementPanel() {
                       ? <VetPhotoImg fileId={fid} size={22} rev={photoRev} radius={4} />
                       : <span style={{ fontSize:14, flexShrink:0 }}>👕</span>}
                     <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.name || lbl}</span>
+                    {it.marque ? <span style={{ fontSize:9.5, color:C.muted, flexShrink:0, fontWeight:700 }}>· {it.marque}</span> : null}
                     {it.taille ? <span style={{ fontSize:9.5, color:VETEMENT_COLOR, flexShrink:0, fontWeight:700 }}>· T.{it.taille}</span> : null}
                     <span style={{ fontSize:9.5, color:C.dim, flexShrink:0 }}>· {it.lieu === VET_LIEUX[1] ? 'Massy' : 'SQY'}</span>
                     {/* Marqueur « je m'en sépare » visible SANS déplier la fiche. */}
@@ -8433,6 +8456,17 @@ function VetementPanel() {
                       <div style={{ flex:1, minWidth:150, display:'flex', flexDirection:'column', gap:8 }}>
                         <div>{fieldLabel('NOM')}
                           <input type="text" value={it.name} placeholder={lbl} onChange={e => updItem(it.id, { name: e.target.value })} style={selStyle} /></div>
+                        {/* MARQUE (8.2.1) : liste déroulante alimentée par « ❤️ Mes marques ».
+                            ⚠ On stocke le NOM et non l'id de la marque — supprimer une marque
+                            de la liste ne doit pas effacer celle des vêtements déjà remplis ;
+                            `brandOptions` réinjecte d'ailleurs une marque devenue inconnue pour
+                            qu'elle reste sélectionnée au lieu de retomber sur « — ». */}
+                        <div>{fieldLabel('MARQUE')}
+                          <select value={it.marque || ''} onChange={e => pickBrand(it, e.target.value)} style={selStyle}>
+                            <option value="">—</option>
+                            {brandOptions(it.marque).map(n => <option key={n} value={n}>{n}</option>)}
+                            <option value={VET_BRAND_NEW}>➕ Nouvelle marque…</option>
+                          </select></div>
                         <div>{fieldLabel('TAILLE')}
                           <input type="text" value={it.taille || ''} placeholder="ex. M, 40, 42…" onChange={e => updItem(it.id, { taille: e.target.value })} style={selStyle} /></div>
                         <div>{fieldLabel('ÉTAT')}
