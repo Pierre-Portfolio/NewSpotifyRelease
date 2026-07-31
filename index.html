@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.0.4';
+const APP_VERSION = '8.0.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7959,6 +7959,23 @@ function collAdd(data, subId, r, extraMeta) {
   }
   return { ...data, [subId]: list };
 }
+// Ajout EN LOT (import d'une bibliothèque entière — cf. Steam pour les jeux vidéo).
+// ⚠ Contrairement à `collAdd`, un id DÉJÀ présent est **ignoré** et n'incrémente PAS la
+// quantité : réimporter sa bibliothèque ne doit pas transformer chaque jeu en « ×2 ».
+// Renvoie { data, added, skipped, full } — `full` = quota `COLLECTION_MAX` atteint.
+function collAddMany(data, subId, rows, extraMeta) {
+  let next = data, added = 0, skipped = 0, full = false;
+  for (const r of (rows || [])) {
+    const it = collItem(r, subId);
+    if (!it) { skipped++; continue; }
+    if (collList(next, subId).some(x => x && x.id === it.id)) { skipped++; continue; }
+    if (collCount(next) >= COLLECTION_MAX) { full = true; break; }
+    if (extraMeta) it.meta = { ...it.meta, ...extraMeta };
+    next = { ...next, [subId]: collList(next, subId).concat([it]) };
+    added++;
+  }
+  return { data: next, added, skipped, full };
+}
 function collRemove(data, subId, id) { return { ...data, [subId]: collList(data, subId).filter(x => x && x.id !== id) }; }
 function collBump(data, subId, id, d) {
   const list = collList(data, subId).map(x => (x && x.id === id) ? { ...x, qty: Math.max(1, (x.qty || 1) + d) } : x);
@@ -8096,6 +8113,13 @@ function CollectionSub({ sub, data, onData }) {
           name, sub: 'ajouté à la main', price: (typeof price === 'number' && price >= 0) ? price : null, meta: { manual: true } });
     setMName(''); setMPrice('');
   };
+  // Ajout EN LOT (import d'une bibliothèque) : `onAdd` n'est PAS appelé — la source connaît
+  // déjà la plateforme, et poser 300 fois la question serait absurde. Renvoie le bilan.
+  const addMany = (rows, extraMeta) => {
+    const r = collAddMany(dataRef.current, sub.id, rows, extraMeta);
+    if (r.added) onData(r.data);
+    return r;
+  };
   const add = r0 => {
     // Copie : `onAdd` peut retoucher l'item avant enregistrement (les jeux vidéo y posent
     // la plateforme choisie) sans altérer la liste de résultats affichée.
@@ -8212,6 +8236,9 @@ function CollectionSub({ sub, data, onData }) {
               cursor: mName.trim() ? 'pointer' : 'default', flexShrink:0, fontFamily:'DM Mono,monospace' }}>+ Ajouter</button>
         </div>
       )}
+
+      {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (jeux vidéo → Steam) */}
+      {sub.importer && <sub.importer onImport={addMany} />}
 
       {/* ESTIMATION PAR PHOTO (Pierre précieuse / Montre / Vin) */}
       {sub.photo && <CollPhotoEstimate kind={sub.photo} onAdd={add} />}
@@ -8806,6 +8833,125 @@ function gameOnAdd(r) {
   return pick;
 }
 
+// ── 📥 IMPORT AUTOMATIQUE D'UNE BIBLIOTHÈQUE (8.0.5) ────────────────────────────
+// Demande utilisateur : « pour les jeux dans collection tu peux les retrouver
+// automatiquement depuis steam epicgame ubisoftstore ? » — réponse : **UNE seule des
+// trois est possible depuis une page statique**, et il faut le dire au lieu de faire
+// semblant :
+//   • **Steam : OUI.** `IPlayerService/GetOwnedGames` renvoie toute la bibliothèque avec
+//     un SteamID64 + une clé Web API — les deux sont DÉJÀ configurés dans le Hub (Bon Plan
+//     → Bibliothèque Steam, module API). Rien de nouveau à saisir.
+//   • **Epic Games : NON.** Aucune API publique de bibliothèque. Le launcher passe par des
+//     endpoints internes qui exigent un `client_secret` (donc un backend) et n'envoient
+//     aucun en-tête CORS ; l'API Store publique ne connaît que le CATALOGUE, jamais ce
+//     qu'un compte possède.
+//   • **Ubisoft Connect / Ubisoft Store : NON.** `public-ubiservices.ubi.com` exige un
+//     ticket de session obtenu par login e-mail/mot de passe, sans CORS non plus.
+// → Ces deux-là restent en ajout manuel (qui demande la plateforme, comme avant).
+const STEAM_LIB_LS  = 'spotifyplus_steam_lib';   // cache re-fetchable — JAMAIS exporté
+const STEAM_LIB_MAX = 400;                       // garde-fou : très grosses bibliothèques
+// { fetchedAt, id, total, games:[{appid,name,image,priceCents,minutes}] } | { error }
+// Les prix viennent du magasin (valeur ACTUELLE du jeu) : Steam ne dit jamais à quel prix
+// on a acheté, et `GetOwnedGames` ne renvoie ni prix ni visuel exploitable.
+async function steamOwnedGames(force) {
+  const id = steamId(), key = steamKey();
+  if (!id || !key) return { error: 'CONFIG' };
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(STEAM_LIB_LS)); } catch {}
+  if (!force && cache && cache.id === id && Array.isArray(cache.games) && Date.now() - cache.fetchedAt < STEAM_TTL) return cache;
+  const url = 'https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=' + encodeURIComponent(key)
+            + '&steamid=' + encodeURIComponent(id) + '&include_appinfo=1&include_played_free_games=1';
+  const owned = await steamGetJson(url);
+  if (!owned) return { error: 'NET' };
+  if (owned.__denied) return { error: 'KEY' };
+  const raw = (owned.response && owned.response.games) || [];
+  // Profil privé : Steam répond 200 avec une enveloppe vide (pas d'erreur HTTP).
+  if (!raw.length) return { error: 'PRIVATE' };
+  // Au-delà du plafond, on garde les plus joués (ce sont ceux qui comptent dans une collection).
+  const wanted = raw.slice().sort((a, b) => (steamNum(b.playtime_forever) || 0) - (steamNum(a.playtime_forever) || 0)).slice(0, STEAM_LIB_MAX);
+  let infos = {};
+  try { infos = await steamStoreItems(wanted.map(g => g.appid)); } catch {}
+  const games = wanted.map(g => {
+    const appid = String(steamNum(g.appid) || '');
+    const info = infos[appid] || null;
+    return {
+      appid,
+      name: (info && info.name) || g.name || ('App ' + appid),
+      image: (info && info.image) || steamAssetUrl(null, appid),
+      priceCents: info ? info.priceCents : null,
+      minutes: steamNum(g.playtime_forever) || 0,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+  const data = { fetchedAt: Date.now(), id, total: raw.length, games };
+  try { localStorage.setItem(STEAM_LIB_LS, JSON.stringify(data)); } catch {}
+  return data;
+}
+// Jeu Steam → résultat de collection. ⚠ MÊME `id` que `gameSearch` (`game:steam:<appid>`)
+// pour qu'un jeu déjà ajouté à la main ne soit pas dupliqué par l'import.
+function steamLibRow(g) {
+  return { id: 'game:steam:' + g.appid, name: g.name, sub: 'Steam', img: g.image || '',
+           price: typeof g.priceCents === 'number' ? g.priceCents / 100 : null,
+           url: 'https://store.steampowered.com/app/' + g.appid + '/',
+           meta: { appid: g.appid, plateforme: 'Steam', source: 'steam' } };
+}
+const STEAM_LIB_ERR = {
+  CONFIG:  "SteamID64 et clé Web API requis — renseigne-les ci-dessous (ils servent aussi à Bon Plan et aux Stats).",
+  KEY:     "Clé Web API refusée par Steam (401/403). Vérifie-la sur steamcommunity.com/dev/apikey.",
+  PRIVATE: "Steam n'a renvoyé aucun jeu : ta liste de jeux est probablement privée (Profil → Confidentialité → « Détails du jeu » en public).",
+  NET:     "Steam injoignable (réseau ou proxies indisponibles).",
+};
+// Bloc « importer ma bibliothèque » rendu par `CollectionSub` quand `sub.importer` existe.
+// `onImport(rows)` = ajout EN LOT côté parent (renvoie le nombre réellement ajouté).
+function SteamLibraryImport({ onImport }) {
+  const [cfg, setCfg]   = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg]   = React.useState('');
+  const [err, setErr]   = React.useState('');
+  const [tick, bump]    = React.useReducer(x => x + 1, 0);
+  const ready = !!steamId() && !!steamKey();
+  const run = async force => {
+    if (busy) return;
+    setBusy(true); setErr(''); setMsg('');
+    const d = await steamOwnedGames(force);
+    setBusy(false);
+    if (d && d.error) { setErr(STEAM_LIB_ERR[d.error] || STEAM_LIB_ERR.NET); if (d.error === 'CONFIG') setCfg(true); return; }
+    const rows = (d.games || []).map(steamLibRow);
+    const r = onImport(rows);
+    const parts = [`${r.added} jeu${r.added > 1 ? 'x' : ''} ajouté${r.added > 1 ? 's' : ''}`];
+    if (r.skipped) parts.push(`${r.skipped} déjà dans ta collection`);
+    if (d.total > rows.length) parts.push(`bibliothèque tronquée à ${STEAM_LIB_MAX} sur ${d.total}`);
+    if (r.full) parts.push(`collection pleine (${COLLECTION_MAX} références)`);
+    setMsg('✓ ' + parts.join(' · '));
+  };
+  const btn = (on) => ({ background: on ? `${STEAM_COLOR}22` : 'none', border:`1px solid ${on ? STEAM_COLOR + '88' : C.border}`,
+    borderRadius:6, color: on ? STEAM_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
+    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
+  return (
+    <div key={tick} style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
+      background:`${STEAM_COLOR}10`, border:`1px solid ${STEAM_COLOR}44`, borderRadius:8 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+        <span style={{ fontSize:11, fontWeight:800, color:STEAM_COLOR }}>📥 Importer ma bibliothèque Steam</span>
+        <button onClick={() => run(false)} disabled={busy || !ready} style={btn(!busy && ready)}>
+          {busy ? '⏳ Lecture de Steam…' : 'Importer'}
+        </button>
+        {ready && <button onClick={() => run(true)} disabled={busy} title="Ignorer le cache de 30 min"
+          style={{ ...btn(!busy), fontWeight:400, padding:'5px 8px' }}>↻</button>}
+        <button onClick={() => setCfg(c => !c)} title="SteamID64 et clé Web API"
+          style={{ ...btn(true), fontWeight:400, padding:'5px 8px' }}>⚙</button>
+      </div>
+      {msg && <div style={{ fontSize:10, color:STEAM_COLOR, fontWeight:600 }}>{msg}</div>}
+      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
+      {cfg && <SteamConfigForm showKey onSaved={() => { setCfg(false); setErr(''); bump(); }} onCancel={() => setCfg(false)} />}
+      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+        Les jeux arrivent en plateforme « Steam », avec leur jaquette et leur prix ACTUEL en boutique
+        (Steam ne dit jamais à quel prix tu les as achetés). Un jeu déjà présent n'est pas dupliqué.
+        ⚠ <b>Epic Games et Ubisoft n'ont aucune API de bibliothèque utilisable depuis un navigateur</b>
+        (identifiants secrets côté serveur, pas d'en-têtes CORS) : leurs jeux restent à ajouter à la main.
+      </div>
+    </div>
+  );
+}
+
 // ── 📦 AUTRE (7.8.8) : 💎 Pierre précieuse · ⌚ Montre · 🍷 Vin ──────────────────
 // Ces trois-là n'ont AUCUN catalogue interrogeable (pas d'API de gemmologie, d'horlogerie
 // ni de cotation de vin gratuite et à CORS ouvert), et c'est précisément pourquoi la
@@ -8948,10 +9094,11 @@ const COLLECTION_SUBS = {
     { id:'jeuxvideo', label:'Jeux vidéo', icon:'🎮', unit:'jeu', article:'un premier jeu',
       search: gameSearch, placeholder:'Chercher un jeu…', onAdd: gameOnAdd,
       manual: true, manualPlaceholder:'Ajouter à la main : nom du jeu…',
+      importer: SteamLibraryImport,
       // ⚠ `note` en FONCTION et non en gabarit : une chaîne construite ici serait évaluée à
       // l'initialisation de COLLECTION_SUBS, donc AVANT `GAME_PLATFORMS` si la déclaration
       // venait à passer plus bas un jour (TDZ = écran noir). En fonction, c'est différé.
-      note: () => `À l'ajout, l'app demande sur quelle plateforme tu possèdes le jeu (${GAME_PLATFORMS.join(', ')}) — c'est elle qui s'affiche sous la vignette. La recherche interroge le catalogue Steam (sans clé) : un jeu Wii ou DS n'y figure pas, ajoute-le à la main.` },
+      note: () => `À l'ajout, l'app demande sur quelle plateforme tu possèdes le jeu (${GAME_PLATFORMS.join(', ')}) — c'est elle qui s'affiche sous la vignette. La recherche interroge le catalogue Steam (sans clé) : un jeu Wii ou DS n'y figure pas, ajoute-le à la main. L'import automatique n'existe QUE pour Steam : Epic Games et Ubisoft n'exposent aucune API de bibliothèque utilisable depuis un navigateur.` },
   ],
   autre: [
     { id:'gemme', label:'Pierre précieuse', icon:'💎', unit:'pierre', article:'une première pierre',
@@ -15680,12 +15827,12 @@ function SteamConfigForm({ onSaved, onCancel, showKey }) {
       lsSet(STEAM_ID_LS, id);
       const k = keyInput.trim();
       if (k) lsSet(STEAM_KEY_LS, k); else localStorage.removeItem(STEAM_KEY_LS);
-      localStorage.removeItem(STEAM_WL_LS); localStorage.removeItem(STEAM_STATS_LS);
+      localStorage.removeItem(STEAM_WL_LS); localStorage.removeItem(STEAM_STATS_LS); localStorage.removeItem(STEAM_LIB_LS);
     } catch {}
     setErr(''); if (onSaved) onSaved();
   };
   const forget = () => {
-    try { [STEAM_ID_LS, STEAM_KEY_LS, STEAM_WL_LS, STEAM_STATS_LS].forEach(k => localStorage.removeItem(k)); } catch {}
+    try { [STEAM_ID_LS, STEAM_KEY_LS, STEAM_WL_LS, STEAM_STATS_LS, STEAM_LIB_LS].forEach(k => localStorage.removeItem(k)); } catch {}
     setIdInput(''); setKeyInput(''); setErr(''); if (onSaved) onSaved();
   };
   return (
