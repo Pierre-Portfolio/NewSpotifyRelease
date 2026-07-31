@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.1.3';
+const APP_VERSION = '8.1.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8074,7 +8074,20 @@ function collLoad() {
 // lui passer l'objet enregistrait la chaîne « [object Object] », que `collLoad` n'arrivait
 // évidemment plus à parser → TOUTE la collection disparaissait au rechargement de l'app.
 // La sérialisation est donc obligatoire ici (8.0.1).
-function collSave(data) { return lsSet(COLLECTION_LS, JSON.stringify(data || {})); }
+// ⚠ 8.1.4 — L'ÉCRITURE EST VÉRIFIÉE PAR RELECTURE, pas seulement par le retour de `lsSet`.
+// Symptôme rapporté : « j'ajoute dans mes collections, je me reconnecte, c'est parti ». La
+// chaîne d'enregistrement est pourtant correcte (vérifié de bout en bout) — mais quand le
+// stockage local est SATURÉ, `setItem` throw, `lsSet` renvoie false… et personne ne lisait ce
+// booléen : `setData` mettait quand même l'écran à jour, la référence s'affichait comme
+// ajoutée, et elle n'existait nulle part. D'où une perte parfaitement silencieuse, visible
+// seulement au rechargement suivant. `collSave` renvoie donc `true` UNIQUEMENT si la donnée
+// est réellement relisible depuis localStorage (une écriture partielle ou tronquée compte
+// comme un échec), et les appelants doivent traiter `false` comme « rien n'a été enregistré ».
+function collSave(data) {
+  const payload = JSON.stringify(data || {});
+  if (!lsSet(COLLECTION_LS, payload)) return false;
+  try { return localStorage.getItem(COLLECTION_LS) === payload; } catch { return false; }
+}
 // État PARTAGÉ (pattern `_finance`/`_delta`) : plusieurs `CollectionCat` peuvent être montés
 // en même temps (deux catégories dépliées), chacun avec SA copie de la map chargée à son
 // montage. Sans diffusion, la sauvegarde de l'un écraserait les ajouts de l'autre.
@@ -9265,13 +9278,30 @@ const COLLECTION_SUBS = {
 // partagent le même stockage) — vide tant que la catégorie n'a pas encore de contenu.
 function CollectionCat({ cat }) {
   const [data, setData] = React.useState(collLoad);
-  const save = next => { setData(next); collPublish(next); };
+  const [saveErr, setSaveErr] = React.useState(false);   // dernière écriture refusée par le stockage
+  // ⚠ On n'affiche JAMAIS un ajout qui n'a pas été réellement enregistré : sinon la référence
+  // paraît ajoutée et disparaît à la reconnexion suivante, sans que rien ne l'ait signalé
+  // (c'est exactement le symptôme rapporté). Écriture refusée ⇒ on repart de ce qui est
+  // VRAIMENT stocké et on le dit en clair, plutôt que de laisser un ajout fantôme à l'écran.
+  const save = next => {
+    if (collPublish(next)) { setData(next); setSaveErr(false); return true; }
+    setData(collLoad());
+    setSaveErr(true);
+    return false;
+  };
   // Les autres catégories dépliées suivent la même map (sinon elles réécriraient une copie
   // périmée par-dessus l'ajout qu'on vient de faire).
   React.useEffect(() => {
     const f = d => setData(d);
     _coll.subs.add(f);
     return () => { _coll.subs.delete(f); };
+  }, []);
+  // Filet « je me reconnecte » : au retour sur l'onglet, on se resynchronise sur le disque —
+  // une écriture faite dans un autre onglet du Hub serait sinon écrasée par la copie en RAM.
+  React.useEffect(() => {
+    const sync = () => { if (!document.hidden) setData(collLoad()); };
+    document.addEventListener('visibilitychange', sync);
+    return () => document.removeEventListener('visibilitychange', sync);
   }, []);
   const subs = COLLECTION_SUBS[cat.id] || [];
   if (!subs.length) return (
@@ -9284,6 +9314,15 @@ function CollectionCat({ cat }) {
   const single = subs.length === 1 && subs[0].id === cat.id;
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {/* Le stockage a refusé d'écrire : on le dit ici, en nommant la Collection — l'alerte
+          générique de `lsSet` parle de Maps / TV Time / coffre et ne permet pas de faire le
+          lien, alors que c'est CETTE référence qui vient d'être perdue. */}
+      {saveErr && (
+        <div style={{ background:'#e0505015', border:'1px solid #e0505055', borderRadius:8, padding:'9px 11px', fontSize:11, color:'#ff8a8a', lineHeight:1.5 }}>
+          ⚠ <b>Ajout NON enregistré</b> — le stockage local du Hub est plein, la référence n'a pas pu être écrite (elle a donc été retirée de l'écran, elle n'aurait pas survécu à une reconnexion).<br />
+          Fais une sauvegarde (À propos → ↧ Exporter, ou Drive/Dropbox), puis libère de la place — purge tes écoutes ou un import Maps volumineux — et réessaie.
+        </div>
+      )}
       {subs.map(sub => single
         ? <CollectionSub key={sub.id} sub={sub} data={data} onData={save} />
         : (
