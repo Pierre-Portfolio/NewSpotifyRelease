@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '7.9.2';
+const APP_VERSION = '7.9.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8179,17 +8179,36 @@ function CollectionSub({ sub, data, onData }) {
 // dur sur des positions, et les colonnes retenues sont AFFICHÉES sous la liste : si le
 // tableur bouge, on voit immédiatement ce qui a été pris pour quoi.
 const DISPLATE_SHEET_ID  = '1VQklhZs6vdYVuYK_dliG8BGDXSijjtOfxXN5YIRfVq0';
-const DISPLATE_SHEET_URL = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/edit#gid=0`;
-// ⚠ Deux exports CSV possibles : `export?format=csv` est un dump BRUT de la feuille (aucune
-// inférence), tandis que `gviz/tq` en fait une table et peut réécrire la 1re ligne en
-// en-tête — or ici la vraie ligne d'en-tête est la **2e** (la 1re porte « Updated Weekly »,
-// « Last Updated: », « Join Discord »…). On prend donc le brut d'abord, le gviz en secours.
-const DISPLATE_CSV_URL   = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/export?format=csv&gid=0`;
-const DISPLATE_CSV_ALT   = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/gviz/tq?tqx=out:csv`;
-const DISPLATE_HTML_URL  = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/htmlview`;
+const DISPLATE_SHEET_URL = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}/edit`;
+// ⚠ 7.9.3 — LE TABLEUR A **HUIT ONGLETS** ET LE CATALOGUE N'EST PAS LE PREMIER.
+// Relevés sur les captures : « Artist Count · Sales · Stats · Raw · Sales Charts ·
+// SalesPlus · Displates · Dev ». Or `export?format=csv&gid=0` (comme `gviz/tq` sans
+// paramètre) renvoie la feuille par DÉFAUT — ici « Artist Count », dont les deux seules
+// colonnes sont « Artist » et « # Pieces ». D'où très exactement le symptôme signalé :
+// la recherche répondait (des noms d'artistes pris comme noms d'objets) **sans aucune
+// image ni aucun prix**, puisque ces colonnes n'existent tout simplement pas dans cet
+// onglet — « # Pieces » étant en plus rejeté comme prix (c'est un compteur).
+// → On demande désormais l'onglet PAR SON NOM, et on VALIDE ce qu'on a lu (cf.
+// `displateScore`) avant de l'accepter : un candidat sans colonne nom+prix est écarté
+// au profit du suivant.
+const DISPLATE_SHEET_NAME = 'Displates';
+const _dspBase = `https://docs.google.com/spreadsheets/d/${DISPLATE_SHEET_ID}`;
+const _dspTab  = encodeURIComponent(DISPLATE_SHEET_NAME);
+// Du plus ciblé au plus large. ⚠ `gviz/tq` fait une TABLE de la feuille et prend sa 1re
+// ligne pour un en-tête — or la vraie ligne d'en-tête est la **2e** (la 1re porte
+// « Updated Weekly », « Last Updated: », « Join Discord »…) : d'où `headers=0`, qui rend
+// toutes les lignes en données et laisse `displateHeaderRow` choisir la bonne.
+const DISPLATE_CSV_URLS = [
+  `${_dspBase}/gviz/tq?tqx=out:csv&headers=0&sheet=${_dspTab}`,
+  `${_dspBase}/gviz/tq?tqx=out:csv&sheet=${_dspTab}`,
+  `${_dspBase}/export?format=csv&sheet=${_dspTab}`,
+  `${_dspBase}/export?format=csv&gid=0`,
+  `${_dspBase}/gviz/tq?tqx=out:csv`,
+];
+const DISPLATE_HTML_URL  = `${_dspBase}/htmlview`;
 const DISPLATE_TTL       = 6 * 3600 * 1000;   // 6 h — un catalogue d'éditions limitées bouge peu
 const DISPLATE_MAX       = 60;                // résultats affichés par recherche
-let _displateCache = null;                    // { at, list, cols, total, imgN, rate } — survit au repli du collapse
+let _displateCache = null;                    // { at, list, cols, total, imgN, rate, src } — survit au repli du collapse
 
 // ⚠ COLONNES RÉELLES DU TABLEUR (relevées sur les captures fournies par l'utilisateur ;
 // la ligne d'en-tête est la 2e) :
@@ -8295,6 +8314,17 @@ function displateBuild(rows) {
   }
   return { list, cols, header };
 }
+// Note de confiance d'un candidat : c'est elle qui permet de dire « ce CSV n'est PAS le
+// catalogue » (onglet « Artist Count », « Sales »…) et de passer au suivant. Nom + prix
+// reconnus = on tient le bon onglet ; en dessous, on garde le meilleur en repli plutôt
+// que d'échouer, mais la note de bas de section le signale.
+const DISPLATE_SCORE_OK = 8;
+function displateScore(built) {
+  if (!built || !built.list.length) return -1;
+  const c = built.cols;
+  return (c.name != null ? 4 : 0) + (c.price != null ? 4 : 0)
+       + (c.code != null ? 1 : 0) + (c.artist != null ? 1 : 0) + (c.img != null ? 1 : 0);
+}
 
 // ⚠ LES IMAGES NE SONT PAS DANS LE CSV, ET NE PEUVENT PAS Y ÊTRE. Les vignettes du tableur
 // sont des images POSÉES DANS la cellule (ou des formules `=IMAGE(…)`) : tout export CSV les
@@ -8304,6 +8334,23 @@ function displateBuild(rows) {
 // Le tout est mis en cache avec le reste (TTL 6 h) → une seule requête supplémentaire.
 // Échec (page privée, proxy KO, structure différente) ⇒ 0 image, le reste fonctionne quand
 // même et `CollImg` retombe sur l'icône de la sous-collection.
+// La vue HTML rend TOUTES les feuilles du classeur : le menu d'onglets donne le gid de
+// chacune (`<li id="sheet-button-<gid>"><a href="#gid=<gid>">Displates</a>`) et son tableau
+// vit dans `<div id="<gid>">`. On restreint donc la recherche d'images à l'onglet du
+// catalogue — sinon on balaierait aussi les milliers de lignes de « Sales »/« Raw ».
+function displateHtmlRows(doc) {
+  try {
+    const want = displateNorm(DISPLATE_SHEET_NAME);
+    for (const a of Array.from(doc.querySelectorAll('a[href*="gid="]'))) {
+      if (displateNorm(a.textContent) !== want) continue;
+      const gid = (a.getAttribute('href') || '').split('gid=').pop().replace(/[^0-9].*$/, '');
+      const box = gid && doc.getElementById(gid);
+      const rows = box && box.querySelectorAll('tr');
+      if (rows && rows.length) return Array.from(rows);
+    }
+  } catch {}
+  return Array.from(doc.querySelectorAll('tr'));   // structure inattendue → tout le document
+}
 async function displateFetchImages(list) {
   let html = '';
   try { const r = await fetch(DISPLATE_HTML_URL, { cache: 'no-store' }); if (r.ok) html = await r.text(); } catch {}
@@ -8316,7 +8363,7 @@ async function displateFetchImages(list) {
   const byName = new Map();
   for (const it of list) { const k = displateNorm(it.name); if (k && !byName.has(k)) byName.set(k, it); }
   let n = 0;
-  for (const tr of Array.from(doc.querySelectorAll('tr'))) {
+  for (const tr of displateHtmlRows(doc)) {
     const im = tr.querySelector('img[src]');
     if (!im) continue;
     const src = im.getAttribute('src') || '';
@@ -8333,18 +8380,34 @@ async function displateFetchSheet(force) {
   // Direct d'abord (le tableur est public et docs.google.com est en connect-src) ; Google
   // n'envoie pas toujours les en-têtes CORS → repli sur les proxies du Hub, puis sur le
   // second point d'export.
-  let text = '';
-  for (const url of [DISPLATE_CSV_URL, DISPLATE_CSV_ALT]) {
+  // ⚠ On ne s'arrête PAS au premier CSV reçu : on s'arrête au premier CSV qui ressemble
+  // vraiment au catalogue (colonnes nom ET prix reconnues). Un onglet reçu par défaut
+  // — « Artist Count », « Sales »… — se lit parfaitement mais ne contient ni image ni
+  // prix : sans cette validation, il était accepté en silence.
+  let best = null, gotCsv = false, sawHtml = false;
+  for (const url of DISPLATE_CSV_URLS) {
+    let text = '';
     try { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) text = await r.text(); } catch {}
-    if (text && text.trim() && !/^\s*</.test(text)) break;
-    try { text = (await corsFetchText(url)) || ''; } catch { text = ''; }
-    if (text && text.trim() && !/^\s*</.test(text)) break;
-    text = '';
+    if (!text || !text.trim() || /^\s*</.test(text)) {
+      if (/^\s*</.test(text)) sawHtml = true;
+      try { text = (await corsFetchText(url)) || ''; } catch { text = ''; }
+    }
+    if (!text || !text.trim()) continue;
+    if (/^\s*</.test(text)) { sawHtml = true; continue; }
+    gotCsv = true;
+    let built;
+    try { built = displateBuild(actifsParseCsvRows(text)); } catch { continue; }
+    const score = displateScore(built);
+    if (score < 0) continue;
+    if (!best || score > best.score) best = { ...built, score, src: url };
+    if (score >= DISPLATE_SCORE_OK) break;      // onglet du catalogue trouvé
   }
-  if (!text || !text.trim()) throw new Error("Tableur Displate injoignable (Google n'a rien renvoyé, proxies compris).");
-  if (/^\s*</.test(text)) throw new Error('Tableur Displate inaccessible : Google a renvoyé une page HTML — il doit être partagé « en lecture pour tous ceux qui ont le lien ».');
-  const built = displateBuild(actifsParseCsvRows(text));
-  if (!built.list.length) throw new Error('Tableur lu mais aucune ligne exploitable.');
+  if (!best) {
+    if (sawHtml && !gotCsv) throw new Error('Tableur Displate inaccessible : Google a renvoyé une page HTML — il doit être partagé « en lecture pour tous ceux qui ont le lien ».');
+    if (gotCsv) throw new Error('Tableur lu mais aucune ligne exploitable.');
+    throw new Error("Tableur Displate injoignable (Google n'a rien renvoyé, proxies compris).");
+  }
+  const built = best;
   // Prix en DOLLARS dans le tableur (données eBay US) → conversion en euros, comme partout
   // ailleurs dans le Hub (`cmpUsdToEur`, taux Frankfurter mis en cache). Taux indisponible
   // ⇒ on garde le montant en dollars plutôt que d'afficher « — » : `rate === null` le dit
@@ -8360,7 +8423,7 @@ async function displateFetchSheet(force) {
     try { imgN += await displateFetchImages(built.list); } catch {}
   }
   _displateCache = { at: Date.now(), list: built.list, cols: built.cols, header: built.header,
-                     total: built.list.length, imgN, rate };
+                     total: built.list.length, imgN, rate, src: built.src, score: built.score };
   return _displateCache;
 }
 // Recherche = filtre LOCAL du catalogue (une seule requête réseau, puis tout est en mémoire).
@@ -8379,9 +8442,13 @@ function displateNote() {
   const base = "Source : le tableur « Displate Limited Edition Information » (et lui seul). Le prix affiché est celui de la colonne « Avg Price » (prix MOYEN DE REVENTE eBay), converti en euros — ce n'est pas le prix d'origine. Seules les références sont enregistrées, jamais les images.";
   if (!d) return base;
   const lbl = k => (d.cols[k] != null ? `« ${d.header[d.cols[k]] || '?'} »` : 'non trouvée');
+  const tabOk = (d.score || 0) >= DISPLATE_SCORE_OK;
   return (
     <>
-      <div>{d.total} ligne(s) lues · colonne nom {lbl('name')} · prix {lbl('price')} · image {lbl('img')} · artiste {lbl('artist')}</div>
+      <div style={{ color: tabOk ? C.dim : '#e0a050' }}>
+        {tabOk ? `onglet « ${DISPLATE_SHEET_NAME} » lu` : `⚠ onglet « ${DISPLATE_SHEET_NAME} » introuvable — feuille par défaut lue en repli (le classeur en compte 8)`}
+        {' · '}{d.total} ligne(s) · colonne nom {lbl('name')} · prix {lbl('price')} · image {lbl('img')} · artiste {lbl('artist')}
+      </div>
       <div style={{ marginTop:3 }}>
         {d.imgN} image(s) récupérée(s){d.imgN === 0 ? " — les vignettes du tableur sont des images posées DANS les cellules : aucun export CSV ne les contient, elles sont lues dans la vue HTML du tableur (qui doit rester partagée par lien)." : ''}
         {' · '}
