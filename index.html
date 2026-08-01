@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.4.7';
+const APP_VERSION = '8.4.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8340,6 +8340,75 @@ function VetPhotoImg({ fileId, size, rev, radius }) {
   return <span style={{ ...box, display:'inline-flex', alignItems:'center', justifyContent:'center', fontSize: Math.max(9, size * 0.34), color:C.dim }}>{err ? '⚠' : '⏳'}</span>;
 }
 
+// ── 8.4.8 · PHOTO EN GRAND (demande utilisateur : « si je clique sur la photo que j'ai
+// prise ça l'ouvre en grand (80 % de l'onglet) avec une croix en haut à droite ») ──
+// Overlay rendu par PORTAL sur `document.body` : un `position:fixed` posé dans l'arbre du
+// panneau serait piégé par n'importe quel ancêtre `transform` (même raison que
+// `CollectionTopButton`). Le cadre fait exactement 80 % du viewport (`80vw` × `80vh`) et
+// l'image est en `object-fit:contain` — jamais rognée, quelle que soit son orientation.
+// ⚠ `useImmersiveLock(true)` : sans lui, tourner le téléphone pendant qu'on regarde une
+// photo ferait basculer `useShortViewport`, démonterait tout l'arbre (donc l'overlay) et
+// on perdrait la photo — c'est exactement le bug corrigé en 7.6.92 pour les vidéos.
+const VET_ZOOM_STEPS = [1, 2, 3];   // ✕1 = photo entière, puis 2 crans de zoom
+function VetPhotoLightbox({ fileId, rev, onClose }) {
+  useImmersiveLock(true);
+  const [url, setUrl] = React.useState(null);
+  const [err, setErr] = React.useState(false);
+  const [z, setZ] = React.useState(0);        // index dans VET_ZOOM_STEPS
+  React.useEffect(() => {
+    let alive = true;
+    setUrl(null); setErr(false); setZ(0);
+    if (!fileId) return;
+    gdriveBlobUrl(fileId).then(u => { if (alive) setUrl(u); }).catch(() => { if (alive) setErr(true); });
+    return () => { alive = false; };
+  }, [fileId, rev]);
+  // Échap ferme + le scroll de la page est bloqué pendant l'affichage.
+  React.useEffect(() => {
+    const h = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', h); document.body.style.overflow = prev; };
+  }, [onClose]);
+  const zoom = VET_ZOOM_STEPS[z];
+  return ReactDOM.createPortal(
+    // Le fond ferme aussi (geste attendu d'une visionneuse) — d'où le stopPropagation sur le cadre.
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label="Photo du vêtement"
+      style={{ position:'fixed', inset:0, zIndex:400, background:'#000000e0', display:'flex', alignItems:'center', justifyContent:'center' }}>
+      {/* ⚠ Cadre `overflow:hidden` + zone de défilement en `position:absolute inset:0` : la
+          croix et l'indicateur de zoom sont des frères de cette zone, donc ils NE DÉFILENT
+          PAS avec la photo zoomée et restent atteignables en permanence. */}
+      <div onClick={e => e.stopPropagation()}
+        style={{ position:'relative', width:'80vw', height:'80vh', background:C.surface,
+                 border:`1px solid ${VETEMENT_COLOR}55`, borderRadius:12, overflow:'hidden' }}>
+        <div style={{ position:'absolute', inset:0, overflow:'auto', display:'flex', alignItems:'center', justifyContent:'center' }}>
+          {url ? (
+            // Un clic sur l'image fait tourner les crans de zoom ; au-delà de ✕1 la zone
+            // devient scrollable pour se promener dans la photo.
+            <img src={url} alt="" onClick={() => setZ(i => (i + 1) % VET_ZOOM_STEPS.length)}
+              title={zoom === 1 ? 'Cliquer pour zoomer' : `Zoom ×${zoom} — cliquer pour continuer`}
+              style={{ display:'block', flexShrink:0, width: zoom === 1 ? '100%' : (zoom * 100) + '%',
+                       height: zoom === 1 ? '100%' : 'auto', objectFit:'contain', cursor:'zoom-in' }} />
+          ) : (
+            <span style={{ fontSize:28, color:C.dim }}>{err ? '⚠' : '⏳'}</span>
+          )}
+        </div>
+        {/* Croix EN HAUT À DROITE (demande utilisateur) */}
+        <button onClick={onClose} aria-label="Fermer" title="Fermer (Échap)"
+          style={{ position:'absolute', top:8, right:8, width:34, height:34, borderRadius:'50%',
+                   border:`1px solid ${C.border}`, background:'#000000cc', color:'#fff',
+                   fontSize:17, lineHeight:1, cursor:'pointer', zIndex:2 }}>✕</button>
+        {url && (
+          <div style={{ position:'absolute', left:0, right:0, bottom:8, textAlign:'center', fontSize:10, color:C.dim, pointerEvents:'none' }}>
+            {zoom === 1 ? 'Touche la photo pour zoomer' : `Zoom ×${zoom}`}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 // ⚠ 8.2.0 — CHOIX « APPAREIL PHOTO » ou « GALERIE » (demande utilisateur : « quand je veux
 // prendre une photo pour vêtement il va dans ma galerie, laisse-moi le choix »).
 // Il n'existe AUCUN attribut HTML qui affiche un sélecteur « photo ou galerie » : sur mobile,
@@ -8384,6 +8453,8 @@ function VetementPanel() {
   // dans l'initialisateur du state (comme les panneaux qui lisent gdriveConnected()).
   const [prixOn, setPrixOn] = React.useState(vetPrixShown);
   const togglePrix = () => setPrixOn(v => { vetPrixSet(!v); return !v; });
+  // Photo affichée en grand (8.4.8) — fileId Drive, `null` = visionneuse fermée.
+  const [zoomFid, setZoomFid] = React.useState(null);
   // Recherche par image (IA) : état de l'appel + résultat affiché en bandeau. ⚠ La photo
   // cherchée n'est JAMAIS conservée (ni localStorage, ni Drive) — seul le résultat vit ici.
   const [aiBusy, setAiBusy] = React.useState(false);
@@ -8600,6 +8671,9 @@ function VetementPanel() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+      {/* Photo en grand — montée seulement quand une photo a été cliquée (8.4.8). */}
+      {zoomFid && <VetPhotoLightbox fileId={zoomFid} rev={photoRev} onClose={() => setZoomFid(null)} />}
+
       {/* Titre rendu ICI (`selfHeading:true` dans SECTION, et plus de heading dans MobileApp)
           pour pouvoir aligner le 💶 dessus — même gabarit que les boutons d'en-tête de
           TV Time (7.6.86) et de Collection (8.4.1) : ni fond ni bordure teintés, il ne doit
@@ -8749,8 +8823,18 @@ function VetementPanel() {
                 const fid = photos[it.id];
                 const titleNode = (
                   <span style={{ display:'flex', alignItems:'center', gap:7, minWidth:0 }}>
+                    {/* La vignette du TITRE ouvre aussi la photo en grand (8.4.8) — c'est la
+                        seule visible sans déplier la fiche. ⚠ L'en-tête de StatsCollapse EST
+                        déjà un <button> : un <button> imbriqué serait du HTML invalide →
+                        span role="button", et stopPropagation() pour que le clic n'ouvre ni
+                        ne referme le collapse au passage (même piège que le « + » de 8.3.5). */}
                     {fid
-                      ? <VetPhotoImg fileId={fid} size={22} rev={photoRev} radius={4} />
+                      ? <span role="button" tabIndex={0} title="Voir la photo en grand" aria-label="Voir la photo en grand"
+                          onClick={e => { e.stopPropagation(); setZoomFid(fid); }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setZoomFid(fid); } }}
+                          style={{ display:'inline-flex', flexShrink:0, cursor:'zoom-in' }}>
+                          <VetPhotoImg fileId={fid} size={22} rev={photoRev} radius={4} />
+                        </span>
                       : <span style={{ fontSize:14, flexShrink:0 }}>👕</span>}
                     <span style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{it.name || lbl}</span>
                     {it.marque ? <span style={{ fontSize:9.5, color:C.muted, flexShrink:0, fontWeight:700 }}>· {it.marque}</span> : null}
@@ -8781,7 +8865,15 @@ function VetementPanel() {
                     <div style={{ display:'flex', gap:12, flexWrap:'wrap' }}>
                       <div style={{ flexShrink:0 }}>
                         {fieldLabel('PHOTO')}
-                        {fid && <div style={{ marginBottom:6 }}><VetPhotoImg fileId={fid} size={110} rev={photoRev} /></div>}
+                        {/* Cliquer la photo l'ouvre en grand (8.4.8). ⚠ <span role="button">
+                            et non <button> : un bouton enveloppant une image cliquable
+                            dupliquerait la cible, et le curseur zoom-in dit déjà l'action. */}
+                        {fid && <div role="button" tabIndex={0} title="Voir la photo en grand"
+                          aria-label="Voir la photo en grand" onClick={() => setZoomFid(fid)}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setZoomFid(fid); } }}
+                          style={{ marginBottom:6, display:'inline-block', cursor:'zoom-in' }}>
+                          <VetPhotoImg fileId={fid} size={110} rev={photoRev} />
+                        </div>}
                         {/* Deux entrées distinctes = le CHOIX appareil photo / galerie (8.2.0). */}
                         <VetPhotoPick onFile={f => onPhoto(it.id, f)} busy={busyPhoto === it.id}
                           disabled={busyPhoto === it.id} hasPhoto={!!fid} />

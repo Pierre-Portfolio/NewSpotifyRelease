@@ -61,7 +61,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // perso. Voir « Scopes accordés » ci-dessous pour la détection côté client.
 ```
 
-### `APP_VERSION` (actuellement `'8.4.7'`)
+### `APP_VERSION` (actuellement `'8.4.8'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -411,6 +411,14 @@ Suivi séries/films via **TMDB v3** (clé perso `spotifyplus_tmdb_key`, pas de p
 - ⚠ **Masqué tant qu'un filtre est posé** (`!filtersOn`) : la fiche créée est **VIERGE**, elle ne matcherait pas le filtre courant et disparaîtrait aussitôt — on croirait le bouton cassé.
 - ⚠ Seuls les collapses de TYPE en ont un : au niveau d'une sous-catégorie, « ajouter un vêtement » ne dirait pas lequel. Un type à 0 exemplaire n'ayant pas de collapse, l'Inventaire reste le point d'entrée pour un type jamais utilisé.
 - ⚠ Vérifié dans Chromium : « Jean · 1 » → « Jean · 2 » et 2 fiches en base, collapse **resté fermé** au clic, + absent dès qu'un filtre est saisi, aucune erreur console.
+
+**⚠ 8.4.8 — CLIQUER UNE PHOTO L'OUVRE EN GRAND (80 % DE L'ONGLET) AVEC UNE ✕ EN HAUT À DROITE** (demande utilisateur) : `VetPhotoLightbox({fileId, rev, onClose})` (juste avant `VetPhotoPick`), state `zoomFid` dans `VetementPanel` (`null` = fermée ⇒ **rien n'est monté** tant qu'aucune photo n'est cliquée).
+- **Portal sur `document.body`** : un `position:fixed` posé dans l'arbre du panneau serait piégé par n'importe quel ancêtre `transform` (même raison que `CollectionTopButton`). Cadre **`80vw` × `80vh`** exactement, image en `object-fit:contain` — jamais rognée, quelle que soit l'orientation de la photo.
+- ⚠ **`useImmersiveLock(true)`** : sans lui, tourner le téléphone pendant qu'on regarde une photo ferait basculer `useShortViewport`, démonterait tout l'arbre (donc l'overlay) et on perdrait la photo — exactement le bug corrigé en 7.6.92 pour les vidéos.
+- ⚠ **Cadre `overflow:hidden` + zone de défilement en `position:absolute inset:0`** : la ✕ et l'indicateur de zoom sont des **frères** de cette zone, donc ils ne défilent pas avec la photo zoomée et **restent atteignables** (une ✕ posée dans le conteneur scrollable disparaîtrait dès qu'on se promène dans l'image).
+- **Zoom** : un clic sur l'image fait tourner `VET_ZOOM_STEPS` (✕1 → ✕2 → ✕3 → ✕1) en changeant la largeur ; au-delà de ✕1 la zone devient scrollable. Fermeture par la **✕**, par **Échap** et par un **clic sur le fond** (d'où le `stopPropagation` sur le cadre). Le scroll de la page est bloqué pendant l'affichage et restauré à la fermeture.
+- **DEUX photos cliquables** : la grande (110 px) de la fiche **et la vignette 22 px du TITRE** — c'est la seule visible sans déplier. ⚠ Pour cette dernière, `<span role="button">` et non `<button>` (l'en-tête de `StatsCollapse` EST déjà un `<button>`) **+ `stopPropagation()`**, sinon le clic déplierait/replierait le collapse au passage (même piège que le « + » de 8.3.5).
+- ⚠ Vérifié dans Chromium (`VetementPanel` extrait d'`index.html`, Drive stubbé, 20 assertions) : **aucune visionneuse montée à l'arrivée**, cadre mesuré **312×640 px pour un viewport de 390×800 (= 80,0 %)**, ✕ à ≤ 12 px du haut ET de la droite du cadre, image réellement chargée, clic → **zoom 310 → 620 px** avec l'indicateur « Zoom ×2 », ✕ toujours en place malgré le zoom, clic sur la vignette du titre qui **ne déplie pas la fiche**, ouverture depuis les deux photos, et fermeture par ✕ / Échap / fond. Aucune erreur console.
 
 **⚠ 8.4.7 — BOUTON 💶 « MASQUER TOUS LES PRIX », ALIGNÉ AU TITRE DU MODULE** (demande utilisateur : « ça peut surcharger l'interface ») : les prix s'affichaient à **trois endroits** (titre de 🧥 MES VÊTEMENTS, titre de chaque TYPE, titre de chaque FICHE) — un seul interrupteur les éteint tous les trois.
 - **`VetementPanel` rend DÉSORMAIS son propre titre** (**`selfHeading:true`** dans `SECTION.vetement` **+** heading retiré du bloc `tab === 'vetement'` de `MobileApp`) — ⚠ sans ces **DEUX** changements le titre s'afficherait en double. Gabarit `hbtn` de TV Time (7.6.86) / Collection (8.4.1) : ni fond ni bordure teintés, le bouton ne doit pas avoir l'air « sélectionné » ; il s'estompe (`opacity 0.5`) et passe à 🚫💶 quand les prix sont masqués.
