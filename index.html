@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.4.8';
+const APP_VERSION = '8.4.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -8409,6 +8409,95 @@ function VetPhotoLightbox({ fileId, rev, onClose }) {
   );
 }
 
+// ── 8.4.9 · GALERIE PHOTO D'UN TYPE (demande utilisateur : « une petite icône photo à côté
+// du + ; quand je clique dessus ça affiche en mode liste (3 par ligne) des photos de tous
+// les habits du collapse ») ──
+// Overlay (portal + `useImmersiveLock`, mêmes raisons que `VetPhotoLightbox`) affichant une
+// grille de `VET_GALLERY_COLS` colonnes. ⚠ Il est rendu SOUS la visionneuse (z 350 < 400) :
+// toucher une vignette ouvre la photo en grand PAR-DESSUS la galerie, et la refermer ramène
+// à la galerie au lieu de tout fermer.
+// ⚠ Les vêtements SANS photo restent affichés (placeholder 👕) : les masquer donnerait une
+// grille trompeuse où il manquerait des pièces sans qu'on sache lesquelles.
+const VET_GALLERY_COLS = 3;
+function VetGalleryModal({ label, items, photos, photoRev, onZoom, onClose }) {
+  useImmersiveLock(true);
+  React.useEffect(() => {
+    const h = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+  const withPhoto = items.filter(it => photos[it.id]).length;
+  return ReactDOM.createPortal(
+    <div onClick={onClose} role="dialog" aria-modal="true" aria-label={`Photos : ${label}`}
+      style={{ position:'fixed', inset:0, zIndex:350, background:'#000000e0', display:'flex', alignItems:'center', justifyContent:'center', padding:12 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width:'min(560px, 96vw)', maxHeight:'88vh', display:'flex', flexDirection:'column',
+                 background:C.surface, border:`1px solid ${VETEMENT_COLOR}55`, borderRadius:12, overflow:'hidden' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 12px', borderBottom:`1px solid ${C.border}` }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:12, fontWeight:800, color:VETEMENT_COLOR }}>🖼️ {label}</div>
+            <div style={{ fontSize:10, color:C.dim }}>
+              {items.length} vêtement{items.length > 1 ? 's' : ''} · {withPhoto} avec photo
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Fermer" title="Fermer (Échap)"
+            style={{ flexShrink:0, width:30, height:30, borderRadius:'50%', border:`1px solid ${C.border}`,
+                     background:'none', color:C.muted, fontSize:15, lineHeight:1, cursor:'pointer' }}>✕</button>
+        </div>
+        <div style={{ overflowY:'auto', padding:10, display:'grid', gridTemplateColumns:`repeat(${VET_GALLERY_COLS}, 1fr)`, gap:8 }}>
+          {items.map(it => {
+            const fid = photos[it.id];
+            return (
+              <div key={it.id} role={fid ? 'button' : undefined} tabIndex={fid ? 0 : undefined}
+                title={fid ? 'Voir en grand' : 'Pas encore de photo'}
+                onClick={fid ? () => onZoom(fid) : undefined}
+                onKeyDown={fid ? (e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onZoom(fid); } }) : undefined}
+                style={{ display:'flex', flexDirection:'column', gap:4, cursor: fid ? 'zoom-in' : 'default', minWidth:0 }}>
+                {/* Case CARRÉE (`aspectRatio`) : sans elle une photo portrait et une photo
+                    paysage donneraient des lignes de hauteurs différentes et la grille
+                    « 3 par ligne » perdrait son alignement. */}
+                {fid
+                  ? <div style={{ width:'100%', aspectRatio:'1', borderRadius:8, overflow:'hidden', border:`1px solid ${C.border}` }}>
+                      <VetPhotoImgFill fileId={fid} rev={photoRev} />
+                    </div>
+                  : <div style={{ width:'100%', aspectRatio:'1', borderRadius:8, border:`1px dashed ${C.border}`, background:C.surfaceHigh,
+                                  display:'flex', alignItems:'center', justifyContent:'center', fontSize:24, color:C.dim }}>👕</div>}
+                <div style={{ fontSize:9.5, color: fid ? C.text : C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                  {it.name || vetTypeLabel(it.type)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {!items.length && <div style={{ padding:'14px 12px', fontSize:11, color:C.dim }}>Aucun vêtement dans cette catégorie.</div>}
+        {!!items.length && !withPhoto && (
+          <div style={{ padding:'0 12px 12px', fontSize:10.5, color:C.dim }}>
+            Aucune photo pour l'instant — déplie une fiche et utilise 📷 / 🖼️ pour en ajouter une.
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
+}
+// Variante de VetPhotoImg qui REMPLIT son parent (la case carrée de la galerie) au lieu de
+// prendre une taille en pixels. ⚠ Deux composants plutôt qu'une prop de plus : `VetPhotoImg`
+// est utilisé partout avec `size` obligatoire, y ajouter un mode « 100 % » compliquerait
+// chacun de ses appels pour un seul usage.
+function VetPhotoImgFill({ fileId, rev }) {
+  const [url, setUrl] = React.useState(null);
+  const [err, setErr] = React.useState(false);
+  React.useEffect(() => {
+    let alive = true;
+    setUrl(null); setErr(false);
+    if (!fileId) return;
+    gdriveBlobUrl(fileId).then(u => { if (alive) setUrl(u); }).catch(() => { if (alive) setErr(true); });
+    return () => { alive = false; };
+  }, [fileId, rev]);
+  if (url) return <img src={url} alt="" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />;
+  return <span style={{ width:'100%', height:'100%', display:'inline-flex', alignItems:'center', justifyContent:'center', fontSize:18, color:C.dim }}>{err ? '⚠' : '⏳'}</span>;
+}
+
 // ⚠ 8.2.0 — CHOIX « APPAREIL PHOTO » ou « GALERIE » (demande utilisateur : « quand je veux
 // prendre une photo pour vêtement il va dans ma galerie, laisse-moi le choix »).
 // Il n'existe AUCUN attribut HTML qui affiche un sélecteur « photo ou galerie » : sur mobile,
@@ -8455,6 +8544,8 @@ function VetementPanel() {
   const togglePrix = () => setPrixOn(v => { vetPrixSet(!v); return !v; });
   // Photo affichée en grand (8.4.8) — fileId Drive, `null` = visionneuse fermée.
   const [zoomFid, setZoomFid] = React.useState(null);
+  // Galerie photo d'un TYPE (8.4.9) — clé du type, `null` = galerie fermée.
+  const [galType, setGalType] = React.useState(null);
   // Recherche par image (IA) : état de l'appel + résultat affiché en bandeau. ⚠ La photo
   // cherchée n'est JAMAIS conservée (ni localStorage, ni Drive) — seul le résultat vit ici.
   const [aiBusy, setAiBusy] = React.useState(false);
@@ -8671,7 +8762,12 @@ function VetementPanel() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-      {/* Photo en grand — montée seulement quand une photo a été cliquée (8.4.8). */}
+      {/* Galerie d'un type (8.4.9) puis photo en grand (8.4.8) — montées seulement au clic.
+          ⚠ Ordre sans importance (ce sont deux portals), mais la visionneuse a un zIndex
+          SUPÉRIEUR : elle s'ouvre PAR-DESSUS la galerie et la refermer y ramène.
+          `shown` (et non data.items) : sous filtre, la galerie montre ce qui est affiché. */}
+      {galType && <VetGalleryModal label={vetTypeLabel(galType)} items={shown.filter(it => it.type === galType)}
+        photos={photos} photoRev={photoRev} onZoom={setZoomFid} onClose={() => setGalType(null)} />}
       {zoomFid && <VetPhotoLightbox fileId={zoomFid} rev={photoRev} onClose={() => setZoomFid(null)} />}
 
       {/* Titre rendu ICI (`selfHeading:true` dans SECTION, et plus de heading dans MobileApp)
@@ -8817,6 +8913,18 @@ function VetementPanel() {
                   style={{ display:'inline-flex', alignItems:'center', justifyContent:'center', width:18, height:18, borderRadius:5,
                     border:`1px solid ${VETEMENT_COLOR}66`, background:`${VETEMENT_COLOR}18`, color:VETEMENT_COLOR,
                     fontSize:13, lineHeight:1, cursor:'pointer', flexShrink:0 }}>+</span>}
+                {/* 🖼️ Galerie du type (8.4.9), JUSTE À CÔTÉ du « + ». Même contrainte que lui :
+                    span role="button" (pas de <button> dans le <button> d'en-tête) +
+                    stopPropagation pour ne pas déplier le collapse au passage.
+                    ⚠ Rendue seulement si le type contient au moins une fiche — une galerie
+                    vide n'aurait rien à montrer. Elle reste disponible SOUS filtre (elle
+                    montre alors les vêtements filtrés), contrairement au « + ». */}
+                {!!group.length && <span role="button" tabIndex={0} aria-label={`Voir les photos : ${lbl}`} title={`Voir les photos des ${lbl.toLowerCase()} en grille`}
+                  onClick={e => { e.stopPropagation(); setGalType(t); }}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setGalType(t); } }}
+                  style={{ display:'inline-flex', alignItems:'center', justifyContent:'center', width:18, height:18, borderRadius:5,
+                    border:`1px solid ${VETEMENT_COLOR}66`, background:`${VETEMENT_COLOR}18`,
+                    fontSize:10, lineHeight:1, cursor:'pointer', flexShrink:0 }}>🖼️</span>}
               </span>
             }>
               {group.map(it => {
