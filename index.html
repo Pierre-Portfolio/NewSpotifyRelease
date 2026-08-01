@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.0';
+const APP_VERSION = '8.5.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1177,6 +1177,10 @@ function actifsParseCsvRows(text) {
 // Nombre robuste : gère « 1 234,56 € », « 1,234.56 », « 12.5% », espaces insécables…
 function actifsNum(raw) {
   if (raw == null) return null;
+  // L'API Sheets en `UNFORMATTED_VALUE` renvoie de vrais nombres JSON : on les prend tels
+  // quels plutôt que de les repasser par `String()`, qui bascule en notation scientifique
+  // au-delà de 1e21 et rendrait la valeur illisible par le parseur ci-dessous.
+  if (typeof raw === 'number') return isFinite(raw) ? raw : null;
   let s = String(raw).trim().replace(/[€$%\s]/g, '');
   if (!s || s === '-' || s === '—') return null;
   const lc = s.lastIndexOf(','), ld = s.lastIndexOf('.');
@@ -1435,9 +1439,24 @@ const CRYPTO_IDS = {
   egld:'elrond-erd-2', xtz:'tezos', tezos:'tezos', eos:'eos', neo:'neo',
   zec:'zcash', dash:'dash', xmr:'monero', monero:'monero',
   usdt:'tether', tether:'tether', usdc:'usd-coin', busd:'binance-usd', dai:'dai',
+  // Relevées une par une sur le VRAI onglet Binance du classeur : sans elles, ces colonnes
+  // étaient purement et simplement ignorées (aucune erreur, un total silencieusement bas).
+  ckb:'nervos-network', nervos:'nervos-network',
+  qnt:'quant-network', quant:'quant-network',
+  zk:'zksync', zksync:'zksync', zro:'layerzero', layerzero:'layerzero',
+  arkm:'arkham', arkham:'arkham', pyth:'pyth-network', 'pyth network':'pyth-network',
+  ankr:'ankr', om:'mantra-dao', mantra:'mantra-dao',
+  wld:'worldcoin-wld', worldcoin:'worldcoin-wld', alt:'altlayer', altlayer:'altlayer',
+  jasmy:'jasmycoin', jasmycoin:'jasmycoin', not:'notcoin', notcoin:'notcoin',
 };
 // Mots à retirer d'un en-tête avant le matching : « PEPE token » doit tomber sur « pepe ».
-const CRYPTO_NOISE_RE = /\b(tokens?|coins?|nb|nombre|qte|qty|quantite|quantity|solde|balance|unites?|montant|prix|valeur|price|value|eur|usd)\b/g;
+// ⚠ « tolen » n'est pas une faute de frappe DE CE FICHIER-CI : c'est celle de l'en-tête
+// « PYTH_Tolen » du classeur, qui n'a aucune raison d'être corrigée côté tableur.
+const CRYPTO_NOISE_RE = /\b(tokens?|tolen|coins?|nb|nombre|qte|qty|quantite|quantity|solde|balance|unites?|montant|prix|valeur|price|value|eur|usd)\b/g;
+// En-tête d'une colonne de QUANTITÉ (testé sur l'en-tête NORMALISÉ : « PEPE_Token » y est
+// devenu « pepe token », donc les `\b` fonctionnent — sur l'en-tête brut, `_` étant un
+// caractère de mot, `\btoken\b` ne matcherait jamais « PEPE_Token »).
+const CRYPTO_QTY_RE = /\b(tokens?|tolen|coins?|qte|qty|quantite|quantity|unites?|nb|nombre|solde|balance)\b/;
 
 function cryptoNorm(h) {
   return String(h || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -1459,25 +1478,35 @@ function cryptoIdFromHeader(h) {
 // Feuille « UNE LIGNE PAR MOIS » (même convention que la feuille Actif) : colonne A = le
 // mois, puis une colonne par crypto portant le NOMBRE DE TOKENS. On garde la ligne du mois
 // le PLUS RÉCENT qui porte au moins une quantité.
-// ⚠ Les colonnes dont l'en-tête dit « token » GAGNENT : un classeur porte souvent aussi
-// une colonne de VALEUR pour la même crypto, et la sommer donnerait un total absurde.
+// ⚠ Les colonnes de QUANTITÉ gagnent sur les autres : le classeur porte, pour CHAQUE crypto,
+// une colonne `<SYM>_Prix` qui est en réalité sa VALEUR EN EUROS (PEPE_Prix = 1 320,37 € pour
+// 556 442 765 PEPE_Token — ce n'est PAS un prix unitaire) ; la sommer donnerait un total absurde.
+// ⚠ Une colonne de quantité dont le symbole n'est PAS reconnu est REMONTÉE (`unknown`) au lieu
+// d'être jetée en silence : c'est le seul moyen de voir qu'un total est incomplet. Sans ça,
+// ajouter une crypto au classeur la rendait invisible partout, sans le moindre message.
 function cryptoParseRows(rows) {
   if (!rows || rows.length < 2) return null;
   const header = rows[0] || [];
-  const withToken = [], bare = [];
+  const withQty = [], bare = [], unknownQty = [];
   for (let i = 1; i < header.length; i++) {
-    const id = cryptoIdFromHeader(header[i]);
-    if (!id) continue;
-    const c = { i, id, label: String(header[i]).trim() };
-    (/token/i.test(String(header[i])) ? withToken : bare).push(c);
+    const label = String(header[i] || '').trim();
+    if (!label) continue;
+    const isQty = CRYPTO_QTY_RE.test(cryptoNorm(label));
+    const id = cryptoIdFromHeader(label);
+    if (id) (isQty ? withQty : bare).push({ i, id, label });
+    else if (isQty) unknownQty.push({ i, label });
   }
-  const cols = withToken.length ? withToken : bare;
-  if (!cols.length) return null;
+  // Dès qu'UNE colonne de quantité existe (reconnue ou non), c'est la convention de la
+  // feuille : on ne retombe sur les colonnes nues que si elle n'en porte aucune.
+  const qtyConvention = withQty.length > 0 || unknownQty.length > 0;
+  const cols    = qtyConvention ? withQty : bare;
+  const unknown = qtyConvention ? unknownQty : [];
+  if (!cols.length && !unknown.length) return null;
   let best = null;
   for (const r of rows.slice(1)) {
     const t = actifsDate(r[0]);
     if (!t || (best && t <= best.t)) continue;
-    const by = new Map();
+    const by = new Map(), unk = [];
     for (const c of cols) {
       const q = actifsNum(r[c.i]);
       if (q == null || q <= 0) continue;
@@ -1486,10 +1515,17 @@ function cryptoParseRows(rows) {
       if (prev) { prev.qty += q; prev.label += ' + ' + c.label; }
       else by.set(c.id, { id: c.id, label: c.label, qty: q });
     }
-    if (by.size) best = { t, holdings: [...by.values()] };
+    for (const c of unknown) {
+      const q = actifsNum(r[c.i]);
+      if (q != null && q > 0) unk.push({ label: c.label, qty: q });
+    }
+    // ⚠ Une ligne qui ne porte QUE des cryptos non reconnues gagne quand même : retenir un
+    // mois plus ancien afficherait un total périmé sans que rien ne le signale.
+    if (by.size || unk.length) best = { t, holdings: [...by.values()], unknown: unk };
   }
   if (!best) return null;
-  return { month: best.t, holdings: best.holdings, columns: cols.map(c => c.label + ' → ' + c.id) };
+  return { month: best.t, holdings: best.holdings, unknown: best.unknown,
+    columns: cols.map(c => c.label + ' → ' + c.id) };
 }
 
 // Lecture de la feuille nommée via l'API Sheets (scope drive.readonly déjà accordé).
@@ -1513,11 +1549,19 @@ async function cryptoSheetFetch(force) {
   const title = titles.find(t => CRYPTO_SHEET_RE.test(t));
   if (!title) throw new Error('NOSHEET');
   // ⚠ Le titre doit être quoté dans la plage A1 (un onglet peut contenir des espaces).
-  const vals = await get(`${base}/values/${encodeURIComponent(`'${title.replace(/'/g, "''")}'!A1:ZZ`)}?majorDimension=ROWS`);
+  // ⚠ `UNFORMATTED_VALUE` est OBLIGATOIRE pour les QUANTITÉS : en valeurs formatées, l'API
+  // renvoie ce que la feuille AFFICHE — séparateurs de milliers, symbole €, virgule décimale,
+  // et surtout la notation scientifique dès qu'une colonne est trop étroite. « 5,56E+08 »
+  // serait lu 5,56 par `actifsNum` : un portefeuille de 556 millions de PEPE compté pour 5.
+  // `dateTimeRenderOption=FORMATTED_STRING` garde en revanche la colonne A lisible
+  // (« 06/2026 ») — sans elle les dates arrivent en numéros de série Excel, illisibles par
+  // `actifsDate`. C'est le seul couple d'options qui donne des nombres bruts ET des dates.
+  const opts = 'majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING';
+  const vals = await get(`${base}/values/${encodeURIComponent(`'${title.replace(/'/g, "''")}'!A1:ZZ`)}?${opts}`);
   const parsed = cryptoParseRows(vals.values);
   if (!parsed) throw new Error('EMPTY');
   const data = { fetched_at: Date.now(), period: cryptoPeriodKey(), sheet: title,
-    month: parsed.month, holdings: parsed.holdings, columns: parsed.columns };
+    month: parsed.month, holdings: parsed.holdings, unknown: parsed.unknown, columns: parsed.columns };
   saveCryptoHold(data);
   return data;
 }
@@ -1561,11 +1605,20 @@ function cryptoHoldTip(d, px, err) {
     const mois = new Date(d.month).toLocaleDateString('fr-FR', { month: '2-digit', year: 'numeric' });
     L.push(`Onglet « ${d.sheet} » · mois ${mois} · relevé du ${new Date(d.fetched_at).toLocaleDateString('fr-FR')}`);
     const bp = px && px.bitcoin && px.bitcoin.usd;
+    // ⚠ 8 décimales sous 1 : les quantités vont de 0,0195 BTC à 556 millions de PEPE, et
+    // l'arrondi par défaut (3 décimales) affichait « 0 » pour un vrai solde de bitcoin.
+    const fq = q => q.toLocaleString('fr-FR', { maximumFractionDigits: Math.abs(q) < 1 ? 8 : 3 });
     for (const h of (d.holdings || [])) {
       const p = px && px[h.id] && px[h.id].usd;
-      L.push(`• ${h.label} : ${h.qty.toLocaleString('fr-FR')} → ` +
+      L.push(`• ${h.label} : ${fq(h.qty)} → ` +
         (p != null && bp ? (h.qty * p / bp).toFixed(6) + ' BTC' : 'prix indisponible'));
     }
+    // Colonnes de quantité non reconnues : NON comptées dans le total, mais nommées ici —
+    // un total incomplet doit être explicable, jamais silencieux.
+    for (const u of (d.unknown || [])) {
+      L.push(`• ${u.label} : ${fq(u.qty)} → crypto non reconnue, HORS TOTAL`);
+    }
+    if ((d.unknown || []).length) L.push('(ajoute son identifiant CoinGecko dans CRYPTO_IDS pour la compter)');
   }
   return L.join('\n');
 }
