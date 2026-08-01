@@ -61,7 +61,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // perso. Voir « Scopes accordés » ci-dessous pour la détection côté client.
 ```
 
-### `APP_VERSION` (actuellement `'8.4.6'`)
+### `APP_VERSION` (actuellement `'8.4.7'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -411,6 +411,13 @@ Suivi séries/films via **TMDB v3** (clé perso `spotifyplus_tmdb_key`, pas de p
 - ⚠ **Masqué tant qu'un filtre est posé** (`!filtersOn`) : la fiche créée est **VIERGE**, elle ne matcherait pas le filtre courant et disparaîtrait aussitôt — on croirait le bouton cassé.
 - ⚠ Seuls les collapses de TYPE en ont un : au niveau d'une sous-catégorie, « ajouter un vêtement » ne dirait pas lequel. Un type à 0 exemplaire n'ayant pas de collapse, l'Inventaire reste le point d'entrée pour un type jamais utilisé.
 - ⚠ Vérifié dans Chromium : « Jean · 1 » → « Jean · 2 » et 2 fiches en base, collapse **resté fermé** au clic, + absent dès qu'un filtre est saisi, aucune erreur console.
+
+**⚠ 8.4.7 — BOUTON 💶 « MASQUER TOUS LES PRIX », ALIGNÉ AU TITRE DU MODULE** (demande utilisateur : « ça peut surcharger l'interface ») : les prix s'affichaient à **trois endroits** (titre de 🧥 MES VÊTEMENTS, titre de chaque TYPE, titre de chaque FICHE) — un seul interrupteur les éteint tous les trois.
+- **`VetementPanel` rend DÉSORMAIS son propre titre** (**`selfHeading:true`** dans `SECTION.vetement` **+** heading retiré du bloc `tab === 'vetement'` de `MobileApp`) — ⚠ sans ces **DEUX** changements le titre s'afficherait en double. Gabarit `hbtn` de TV Time (7.6.86) / Collection (8.4.1) : ni fond ni bordure teintés, le bouton ne doit pas avoir l'air « sélectionné » ; il s'estompe (`opacity 0.5`) et passe à 🚫💶 quand les prix sont masqués.
+- **Préférence PERSISTÉE** (`VET_PRIX_LS = 'spotifyplus_vetement_prix'`, `vetPrixShown()` = **absent ⇒ affichés**, seule la valeur `'off'` masque ; `vetPrixSet` via `lsSet`), relue dans l'**initialisateur du state** (`React.useState(vetPrixShown)`) — masquer les prix est un choix durable, le retrouver à chaque ouverture est tout l'intérêt.
+- ⚠ **Masque l'AFFICHAGE, n'efface RIEN** : le champ PRIX de la fiche reste présent et éditable, les valeurs restent dans `it.prix`, dans le stockage et dans les sauvegardes. Un bouton qui *supprimerait* les prix serait une tout autre fonction (et irréversible).
+- Ajoutée à **`prefs`** de `buildBackup` (`vet_prix`) et à son `putRaw` de restore, à côté de `tvtime_filter`/`tvtime_sort`/`loop` — c'est bien une préférence d'affichage.
+- ⚠ Vérifié dans Chromium (`VetementPanel` extrait d'`index.html`, 16 assertions) : titre rendu par le panneau avec le bouton **aligné au pixel près** (écart des centres verticaux ≤ 1,5 px) et à sa droite, les 3 prix affichés puis **plus aucun « € » à l'écran** après le clic, compteurs/noms/tailles intacts, `spotifyplus_vetement_prix = 'off'` persisté, **prix toujours présents dans les fiches** (champ PRIX déplié à « 89,90 »), état conservé **après rechargement**, et réaffichage immédiat au re-clic. Aucune erreur console.
 
 **⚠ 8.4.6 — TYPE DE TISSU** (demande utilisateur) : champ **TISSU** dans la fiche (entre COULEUR et TAILLE), stocké dans `it.tissu`.
 - **`VET_TISSUS`** = `[nom, icône]` × 34, groupées par famille (naturelles végétales → animales → synthétiques → cuirs → étoffes/tricots → techniques → fourre-tout). ⚠ Même contrat que `VET_COULEURS`/`VET_ETATS`/`VET_LIEUX` : le **NOM est ce qui est persisté**, un AJOUT est sans effet sur l'existant (aucune migration), un RENOMMAGE orphelinerait les fiches. **« Mélange »** et **« Autre »** ferment les cas qui n'entrent dans aucune case — sans eux on serait tenté d'inventer une matière fausse.
