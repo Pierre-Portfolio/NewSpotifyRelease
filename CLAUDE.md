@@ -61,7 +61,7 @@ SCOPES = 'user-follow-read user-read-private user-read-currently-playing user-re
 // perso. Voir « Scopes accordés » ci-dessous pour la détection côté client.
 ```
 
-### `APP_VERSION` (actuellement `'8.4.5'`)
+### `APP_VERSION` (actuellement `'8.4.6'`)
 Constante module-level. Format `MAJ.MIN.U` = nombre de commits **du projet** (≈711, recalé par l'utilisateur en juillet 2026 : 710 commits + le commit courant) découpé : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)` (278→2.7.8, 1001→10.0.1). **⚠ Suivre le compteur PROJET (~711), pas `git rev-list --count` de ce fork**. À incrémenter **à la main à chaque commit** (pas de build tool pour l'injecter). Affichée sous « Purger les écoutes » et en badge sur la page de connexion.
 
 ### Délai de scraping
@@ -411,6 +411,15 @@ Suivi séries/films via **TMDB v3** (clé perso `spotifyplus_tmdb_key`, pas de p
 - ⚠ **Masqué tant qu'un filtre est posé** (`!filtersOn`) : la fiche créée est **VIERGE**, elle ne matcherait pas le filtre courant et disparaîtrait aussitôt — on croirait le bouton cassé.
 - ⚠ Seuls les collapses de TYPE en ont un : au niveau d'une sous-catégorie, « ajouter un vêtement » ne dirait pas lequel. Un type à 0 exemplaire n'ayant pas de collapse, l'Inventaire reste le point d'entrée pour un type jamais utilisé.
 - ⚠ Vérifié dans Chromium : « Jean · 1 » → « Jean · 2 » et 2 fiches en base, collapse **resté fermé** au clic, + absent dès qu'un filtre est saisi, aucune erreur console.
+
+**⚠ 8.4.6 — TYPE DE TISSU** (demande utilisateur) : champ **TISSU** dans la fiche (entre COULEUR et TAILLE), stocké dans `it.tissu`.
+- **`VET_TISSUS`** = `[nom, icône]` × 34, groupées par famille (naturelles végétales → animales → synthétiques → cuirs → étoffes/tricots → techniques → fourre-tout). ⚠ Même contrat que `VET_COULEURS`/`VET_ETATS`/`VET_LIEUX` : le **NOM est ce qui est persisté**, un AJOUT est sans effet sur l'existant (aucune migration), un RENOMMAGE orphelinerait les fiches. **« Mélange »** et **« Autre »** ferment les cas qui n'entrent dans aucune case — sans eux on serait tenté d'inventer une matière fausse.
+- ⚠ **`<select>` et non un champ libre**, même raison qu'en 8.3.4 : au clavier on obtiendrait « coton » / « Coton » / « 100% coton » et ni le filtre ni le moindre regroupement ne seraient possibles.
+- **6e menu de la barre de filtres** (« Tous les tissus »), branché dans `vetMatch` **et** `vetFiltersOn` ; le tissu est aussi balayé par la recherche libre (taper « denim » suffit). ⚠ Ajouter un champ de filtre impose de le déclarer aux **deux** initialisateurs de `flt` (state initial + bouton ✕), sinon le `<select>` devient non contrôlé.
+- Le tissu part aussi dans le prompt de la **recherche par image** (8.1.8) : c'est un critère visuel fort (un pull en laine ne ressemble pas à un pull en polaire).
+- ⚠ Pas de badge dans le TITRE de la fiche (contrairement à la couleur/taille/prix) : le titre porte déjà 7 éléments, une 8e mention le rendrait illisible sur mobile — le tissu se lit en dépliant, se cherche au clavier et se filtre.
+- ⚠ Rien à ajouter côté sauvegarde : la clé `vetement` de `buildBackup` porte déjà les fiches entières.
+- ⚠ Vérifié dans Chromium (`VetementPanel` extrait d'`index.html`) : 6 menus de filtre, champ TISSU dans la fiche avec les 34 matières + « — », « Jean / Denim » persisté tel quel, couleur/prix/taille de la fiche et tissu des autres vêtements intacts, filtre → « 1 vêtement sur 3 » puis « Aucun vêtement ne correspond » sur Lin, recherche libre « denim », et ✕ qui réinitialise. Aucune erreur console.
 
 **⚠ 8.3.4 — COULEUR DU VÊTEMENT** (demande utilisateur) : champ **COULEUR** dans la fiche (entre MARQUE et TAILLE), stocké dans `it.couleur`.
 - **`VET_COULEURS`** = `[nom, code CSS]` × 20 (dont **« Multicolore »** — un `linear-gradient`, d'où un `background` et non un `backgroundColor` sur la pastille — et **« Imprimé »**, qui ferment les cas n'entrant dans aucune case). ⚠ Le **NOM est ce qui est persisté** : ne jamais en renommer un (la fiche porterait une couleur inconnue) ; le code CSS ne sert QU'À la pastille et peut changer librement.
