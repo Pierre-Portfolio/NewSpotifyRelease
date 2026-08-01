@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.4.9';
+const APP_VERSION = '8.5.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1243,6 +1243,9 @@ const ACTIFS_COMPTES = [
   ['liquide','💵 Liquide','liquide'], ['tricount','🧾 Tricount','tricount'],
 ];
 // Actifs physiques / collections — [clé, libellé, en-tête normalisé]
+// ⚠ Doit couvrir EXACTEMENT le bloc sommé par la colonne « Physique » du classeur
+// (Mobilier → Vinted) : un actif oublié ici fait que la somme des barres de la section
+// « ACTIFS PHYSIQUES » ne retombe plus sur le total « dont physique » affiché plus haut.
 const ACTIFS_PHYSIQUES = [
   ['voiture','🚗 Voiture','voiture'], ['ordi','💻 Ordi','ordi'], ['metaux','🥇 Métaux','metaux'],
   ['magic','🃏 Magic','magic'], ['displate','🖼 Displate','displate'],
@@ -1250,9 +1253,35 @@ const ACTIFS_PHYSIQUES = [
   ['wankul','🎴 Wankul','wankul'], ['gaming','🎮 Gaming','gaming'],
   ['onthatass','🧦 OnThatAss','onthatass'], ['pop','🧸 Pop','pop'],
   ['yugioh','🐉 Yu-Gi-Oh','yu gi oh'], ['vinted','👕 Vinted','vinted'],
+  ['montre','⌚ Montre','montre'],
 ];
 
-// CSV → { months (desc, plus récent en 1er), totals (lignes « Total 20XX ») }
+// Colonnes de FLUX cumulables sur une année (les colonnes de STOCK — patrimoine, soldes de
+// comptes, valeurs d'actifs — n'ont évidemment aucun sens additionnées mois par mois).
+const ACTIFS_TOTAL_KEYS = ['revenu','salaire','vente','refonte','coursInfo','achat','dette','depense','economie'];
+
+// Totaux annuels RECALCULÉS depuis les mois, les lignes « Total 20XX » du classeur ne
+// servant plus que de repli pour les années dont aucun mois n'est présent dans la feuille.
+// ⚠ C'est un vrai correctif, pas une préférence : ces lignes portent une plage FIGÉE
+// (`=SUM(K8)` pour « Total 2026 ») qui ne suit pas les mois ajoutés EN HAUT de la feuille
+// — la seule chose qui bouge dans ce classeur. L'année en cours n'y comptait donc qu'un
+// seul mois (salaire 2 496 € au lieu de 15 135 € en juin 2026), et l'écart grandissait à
+// chaque mois ajouté. Vérifié : le recalcul redonne AU CENTIME les lignes correctes du
+// classeur (2022 → 2025) et corrige la seule qui était fausse (2026).
+function actifsYearTotals(months, sheetTotals) {
+  const byYear = new Map();
+  for (const m of months) {
+    const y = new Date(m.t).getFullYear();
+    let o = byYear.get(y);
+    if (!o) byYear.set(y, o = { year: y, months: 0 });
+    o.months++;
+    for (const k of ACTIFS_TOTAL_KEYS) if (m[k] != null) o[k] = (o[k] || 0) + m[k];
+  }
+  for (const t of sheetTotals) if (!byYear.has(t.year)) byYear.set(t.year, t);
+  return [...byYear.values()].sort((a, b) => b.year - a.year);
+}
+
+// CSV → { months (desc, plus récent en 1er), totals (annuels, recalculés) }
 function actifsParseCsv(text) {
   const rows = actifsParseCsvRows(text);
   if (rows.length < 2) return null;
@@ -1261,7 +1290,7 @@ function actifsParseCsv(text) {
   for (const k in ACTIFS_FIELDS) col[k] = header.indexOf(ACTIFS_FIELDS[k]);
   for (const [k,, h] of ACTIFS_COMPTES)   col[k] = header.indexOf(h);
   for (const [k,, h] of ACTIFS_PHYSIQUES) col[k] = header.indexOf(h);
-  const months = [], totals = [];
+  const months = [], sheetTotals = [];
   for (const r of rows.slice(1)) {
     const a = (r[0] || '').trim();
     const t = actifsDate(a);
@@ -1269,11 +1298,10 @@ function actifsParseCsv(text) {
     if (!t && !my) continue;
     const o = t ? { t } : { year: +my[1] };
     for (const k in col) if (col[k] >= 0) o[k] = actifsNum(r[col[k]]);
-    (t ? months : totals).push(o);
+    (t ? months : sheetTotals).push(o);
   }
   months.sort((a, b) => b.t - a.t);
-  totals.sort((a, b) => b.year - a.year);
-  return { months, totals };
+  return { months, totals: actifsYearTotals(months, sheetTotals) };
 }
 
 // Recherche Drive générique — throw 'AUTH' (401, token mort) / 'SCOPE' (403, consentement
@@ -19897,7 +19925,11 @@ function MesActifsPanel() {
             <span style={{ color:C.muted, fontWeight:700, textAlign:'right' }}>Économie</span>
             {data.totals.map(y => (
               <React.Fragment key={y.year}>
-                <span style={{ color:C.text, fontWeight:700 }}>{y.year}</span>
+                {/* « (N mois) » sur une année incomplète : sans lui, l'année en cours se lit
+                    comme une année pleine et paraît anormalement basse à côté des autres. */}
+                <span style={{ color:C.text, fontWeight:700 }}>{y.year}
+                  {y.months > 0 && y.months < 12 && <span style={{ color:C.dim, fontWeight:400 }}> ({y.months} m)</span>}
+                </span>
                 <span style={{ color:C.text, textAlign:'right' }}>{fmtEur(y.salaire, 0)}</span>
                 <span style={{ color:FIN_DOWN, textAlign:'right' }}>{fmtEur(y.depense, 0)}</span>
                 <span style={{ color: y.economie >= 0 ? FIN_UP : FIN_DOWN, textAlign:'right', fontWeight:700 }}>{fmtEurSigned(y.economie)}</span>
