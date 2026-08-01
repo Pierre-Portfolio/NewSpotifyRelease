@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.4.0';
+const APP_VERSION = '8.4.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -10294,10 +10294,286 @@ function CollectionTopButton({ anchor }) {
     document.body);
 }
 
+// ── 📷 SCANNER UNE PHOTO (8.4.1) ─────────────────────────────────────────────────
+// Bouton appareil photo aligné au titre « COLLECTION » → pop-up en 3 temps : (1) on choisit
+// DE QUELLE sous-collection il s'agit, (2) on prend/choisit une photo, (3) l'IA l'analyse en
+// sachant quelle collection c'est, et rend la LISTE des éléments trouvés — chacun s'ajoute
+// (ou pas) d'un bouton, la décision reste à l'utilisateur.
+// ⚠ Différence de fond avec `CollPhotoEstimate` (7.8.8), qui reste en place : celui-là
+// estime UN objet dans le contexte d'UNE sous-collection déjà ouverte ; celui-ci part du
+// titre du module, demande la collection, et sait ramener PLUSIEURS éléments d'une même
+// photo (une planche de cartes, une étagère de figurines…).
+// ⚠ LA PHOTO N'EST JAMAIS CONSERVÉE (même règle que 7.6.83 / 7.8.8 et « ne save pas les
+// images ») : l'aperçu est un object URL révoqué, le base64 n'est référencé que par l'appel
+// en vol, et seuls les éléments explicitement ajoutés (nom + prix) sont enregistrés.
+const COLL_SCAN_MAX = 12;         // éléments retenus au maximum dans une photo
+// Aplatit COLLECTION_CATS × COLLECTION_SUBS. ⚠ Fonction et non constante : évaluée au
+// rendu, donc insensible à l'ordre de déclaration des deux tables (une `const` ici serait
+// en TDZ si COLLECTION_SUBS venait à passer plus bas).
+function collAllSubs() {
+  const out = [];
+  for (const cat of COLLECTION_CATS) for (const s of (COLLECTION_SUBS[cat.id] || [])) out.push({ cat, sub: s });
+  return out;
+}
+const COLL_SCAN_SCHEMA = {
+  type:'object',
+  properties: {
+    elements: {
+      type:'array',
+      items: {
+        type:'object',
+        properties: {
+          nom:            { type:'string' },
+          details:        { type:'string' },
+          prix_moyen_eur: { type:['number','null'] },
+          confiance:      { type:'string' },
+        },
+        required:['nom','details','prix_moyen_eur','confiance'],
+        additionalProperties:false,
+      },
+    },
+    note: { type:'string' },
+  },
+  required:['elements','note'],
+  additionalProperties:false,
+};
+// L'expertise à endosser + les détails à relever, PAR sous-collection : ce qu'on lit sur une
+// carte Pokémon (extension, numéro) n'a rien à voir avec ce qu'on lit sur une bouteille
+// (domaine, millésime), et c'est ce qui rend la liste exploitable. Clé absente ⇒ repli.
+const COLL_SCAN_EXPERT = {
+  pokemon:   { who:'cartes Pokémon',            det:"le nom exact de la carte, son extension/série et son numéro s'ils sont lisibles" },
+  magic:     { who:'cartes Magic: The Gathering', det:"le nom exact de la carte et son édition si elle est lisible" },
+  displate:  { who:'posters métalliques Displate', det:"le titre de l'œuvre et son artiste si tu les reconnais" },
+  pop:       { who:'figurines Funko Pop',       det:'le personnage, la licence et le numéro de boîte si visible' },
+  jeuxvideo: { who:'jeux vidéo',                det:'le titre exact et la plateforme/console visible sur la boîte' },
+  gemme:     { who:'pierres précieuses, fines et ornementales', det:'la nature de la pierre, sa taille de coupe et sa couleur' },
+  montre:    { who:'montres',                   det:'la marque, le modèle et la référence si elle est lisible' },
+  vin:       { who:'vins',                      det:"le domaine, l'appellation et le millésime s'ils sont lisibles" },
+};
+function collScanPrompt(sub) {
+  const e = COLL_SCAN_EXPERT[sub.id] || { who: sub.label, det:'tout ce qui permet de l’identifier précisément' };
+  const u = sub.unit || 'objet';
+  return [
+    `Tu es un expert en ${e.who}. Voici une photo prise par un collectionneur qui range sa collection « ${sub.label} ».`,
+    `Cette photo peut contenir UN SEUL ou PLUSIEURS ${u}s.`,
+    `Identifie CHAQUE ${u} distinct et clairement identifiable, dans l'ordre de lecture (de haut en bas, puis de gauche à droite).`,
+    `Pour chacun, donne dans « nom » son nom exact, dans « details » ${e.det}, et dans « prix_moyen_eur » son PRIX MOYEN DE VENTE d'occasion EN EUROS.`,
+    `Ne liste QUE des ${u}s : ignore l'arrière-plan, les mains, les meubles, les emballages vides.`,
+    `Si un objet est trop flou, coupé ou masqué pour être identifié avec certitude, NE LE LISTE PAS.`,
+    `N'invente JAMAIS un prix : si tu n'es pas sûr, mets null dans « prix_moyen_eur » et explique-le dans « confiance ».`,
+    `Liste au maximum ${COLL_SCAN_MAX} éléments. Si tu ne reconnais aucun ${u}, renvoie une liste « elements » VIDE.`,
+    `Dans « note », rappelle en une phrase que ces prix sont indicatifs.`,
+    'Réponds UNIQUEMENT en JSON : {"elements":[{"nom":"…","details":"…","prix_moyen_eur":n|null,"confiance":"…"}],"note":"…"}',
+  ].join(' ');
+}
+// ⚠ Id DÉTERMINISTE (sous-collection + nom normalisé) et non horodaté comme
+// `collPhotoAnalyze` : rescanner le même objet incrémente alors la QUANTITÉ au lieu de créer
+// un doublon, ce qui est le comportement documenté de `collAdd`. Le préfixe `scan:` évite
+// toute collision avec un id de catalogue (une même carte trouvée par la recherche et par le
+// scan restent donc deux entrées distinctes — on ne peut pas les rapprocher sans catalogue).
+function collScanId(subId, name) {
+  const slug = String(name).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+  return 'scan:' + subId + ':' + (slug || 'sans-nom');
+}
+async function collScanAnalyze(provider, sub, img) {
+  const prompt = collScanPrompt(sub);
+  const raw = provider === 'gemini'
+    ? await geminiGenerate([{ text: prompt }, { inline_data: { mime_type: img.mimeType, data: img.data } }])
+    : await claudeGenerate({ text: prompt, images: [img], schema: COLL_SCAN_SCHEMA, maxTokens: 4000 });
+  const j = geminiExtract(raw, '{', '}');
+  if (!j || !Array.isArray(j.elements)) return null;
+  const seen = new Set(), out = [];
+  for (const el of j.elements) {
+    const name = String((el && el.nom) || '').trim();
+    if (!name) continue;                                  // une entrée sans nom est inexploitable
+    const id = collScanId(sub.id, name);
+    if (seen.has(id)) continue;                           // l'IA a listé deux fois le même objet
+    seen.add(id);
+    const n = parseFloat(String(el.prix_moyen_eur).replace(',', '.'));
+    const price = (isFinite(n) && n > 0 && n < COLL_PHOTO_MAX_PRICE) ? n : null;
+    out.push({
+      id, name: name.slice(0, 80), sub: String(el.details || '').slice(0, 70),
+      img:'', price, url:'', ai:true,
+      meta: { ai: provider, photo:true, scan:true, confiance: String((el && el.confiance) || '').slice(0, 120) },
+    });
+    if (out.length >= COLL_SCAN_MAX) break;
+  }
+  return { items: out, note: String(j.note || '').slice(0, 200) };
+}
+function CollectionScanModal({ onClose }) {
+  const [subId, setSubId] = React.useState('');
+  const [prev, setPrev]   = React.useState('');
+  const [busy, setBusy]   = React.useState(false);
+  const [res, setRes]     = React.useState(null);      // { items, note } | null
+  const [err, setErr]     = React.useState('');
+  const [added, setAdded] = React.useState({});        // id → 'ok' | 'full' | 'err'
+  const urlRef = React.useRef('');
+  const provider = cmpAiProvider();
+  const pname = provider === 'gemini' ? 'Gemini' : 'Claude';
+  const hasKey = provider === 'gemini' ? !!geminiKey() : !!claudeKey();
+  const all = collAllSubs();
+  const chosen = all.find(x => x.sub.id === subId);
+  const drop = () => { if (urlRef.current) { try { URL.revokeObjectURL(urlRef.current); } catch {} urlRef.current = ''; } setPrev(''); };
+  React.useEffect(() => drop, []);
+  React.useEffect(() => {
+    const k = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', k);
+    return () => window.removeEventListener('keydown', k);
+  }, [onClose]);
+  const onFile = async f => {
+    if (!chosen) return;
+    drop(); setRes(null); setErr(''); setAdded({});
+    try { urlRef.current = URL.createObjectURL(f); setPrev(urlRef.current); } catch {}
+    setBusy(true);
+    try {
+      const img = await frigoPhotoData(f);
+      if (!img) throw new Error("Cette image n'a pas pu être lue.");
+      const r = await collScanAnalyze(provider, chosen.sub, img);
+      if (!r) setErr("Réponse illisible de l'IA — réessaie avec une photo plus nette.");
+      setRes(r);
+    } catch (e2) {
+      const m = String((e2 && e2.message) || e2);
+      setErr(m.includes('NO_KEY') ? `Aucune clé ${pname} — renseigne-la dans le module API.` : m);
+    }
+    setBusy(false);
+  };
+  // ⚠ On repart de `collLoad()` à CHAQUE ajout (et non d'une copie prise au montage) : la
+  // pop-up cohabite avec des catégories dépliées qui écrivent elles aussi. `collPublish`
+  // prévient ensuite tous les `CollectionCat` montés, donc l'ajout s'y affiche aussitôt.
+  const addOne = it => {
+    const cur = collLoad();
+    const before = collCount(cur);
+    const next = collAdd(cur, subId, it, { photo:true, ai:provider, scan:true });
+    const exists = collList(cur, subId).some(x => x && x.id === it.id);
+    if (!exists && collCount(next) === before) { setAdded(a => ({ ...a, [it.id]:'full' })); return; }
+    setAdded(a => ({ ...a, [it.id]: collPublish(next) ? 'ok' : 'err' }));
+  };
+  const card = { background:C.surfaceHigh, borderRadius:10, padding:'9px 11px' };
+  return ReactDOM.createPortal(
+    <div onClick={onClose} style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.72)', zIndex:200,
+      display:'flex', alignItems:'flex-start', justifyContent:'center', padding:'26px 12px', overflowY:'auto' }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Scanner une photo"
+        style={{ width:'100%', maxWidth:440, background:C.surface,
+        border:`1px solid ${C.border}`, borderRadius:14, padding:14, display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <div style={{ flex:1, fontSize:12, fontWeight:800, color:COLLECTION_COLOR, letterSpacing:'0.05em' }}>📷 SCANNER UNE PHOTO</div>
+          <button onClick={onClose} aria-label="Fermer"
+            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim, fontSize:13, lineHeight:1, padding:'3px 8px', cursor:'pointer' }}>×</button>
+        </div>
+
+        {/* 1 — de QUELLE collection s'agit-il ? (l'IA en a besoin pour savoir quoi chercher) */}
+        <div style={{ ...card, display:'flex', flexDirection:'column', gap:7 }}>
+          <div style={{ fontSize:10.5, fontWeight:700, color:C.text }}>1 · De quelle collection s'agit-il ?</div>
+          {COLLECTION_CATS.map(cat => {
+            const subs = COLLECTION_SUBS[cat.id] || [];
+            if (!subs.length) return null;
+            return (
+              <div key={cat.id} style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+                <span style={{ fontSize:9, color:C.dim, minWidth:64, fontFamily:'DM Mono,monospace' }}>{cat.icon} {cat.label}</span>
+                {subs.map(s => {
+                  const on = s.id === subId;
+                  return (
+                    <button key={s.id} onClick={() => { setSubId(s.id); setRes(null); setErr(''); setAdded({}); drop(); }}
+                      style={{ background: on ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${on ? COLLECTION_COLOR : C.border}`,
+                        borderRadius:6, color: on ? COLLECTION_COLOR : C.muted, fontSize:10.5, fontWeight: on ? 800 : 600,
+                        padding:'4px 9px', cursor:'pointer', fontFamily:'inherit' }}>{s.icon} {s.label}</button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* 2 — la photo. Appareil photo ET galerie (même composant que Vêtement, 8.2.0 :
+            `accept="image/*"` seul ouvre la galerie, `capture` ouvre l'appareil photo). */}
+        <div style={{ ...card, display:'flex', flexDirection:'column', gap:7 }}>
+          <div style={{ fontSize:10.5, fontWeight:700, color: chosen ? C.text : C.dim }}>2 · Prends la photo</div>
+          {!chosen && <div style={{ fontSize:9.5, color:C.dim, fontStyle:'italic' }}>Choisis d'abord une collection ci-dessus.</div>}
+          {chosen && !hasKey && (
+            <div style={{ fontSize:9.5, color:'#ff8a8a', lineHeight:1.5 }}>
+              Aucune clé {pname} : l'analyse est impossible. Renseigne-la dans le module <b>API</b> (ou change de fournisseur dans Bon Plan → Tous produits).
+            </div>
+          )}
+          {chosen && hasKey && (
+            <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+              <VetPhotoPick onFile={onFile} disabled={busy} busy={busy} color={COLLECTION_COLOR} hasPhoto={!!prev} />
+              <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>la photo n'est jamais enregistrée</span>
+            </div>
+          )}
+          {prev && <img src={prev} alt="" style={{ width:96, height:96, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}` }} />}
+        </div>
+
+        {busy && <div style={{ fontSize:11, color:COLLECTION_COLOR }}>⏳ {pname} analyse la photo…</div>}
+        {err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
+
+        {/* 3 — la liste : à toi d'ajouter ce que tu veux, élément par élément. */}
+        {res && (
+          <div style={{ ...card, display:'flex', flexDirection:'column', gap:8 }}>
+            <div style={{ fontSize:10.5, fontWeight:700, color:C.text }}>
+              3 · {res.items.length ? `${res.items.length} élément(s) trouvé(s) — ajoute ce que tu veux` : 'Aucun élément reconnu'}
+            </div>
+            {!res.items.length && (
+              <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5, fontStyle:'italic' }}>
+                L'IA n'a reconnu aucun {(chosen && chosen.sub.unit) || 'objet'} sur cette photo. Réessaie de plus près, ou ajoute l'élément à la main dans sa collection.
+              </div>
+            )}
+            {res.items.map(it => {
+              const st = added[it.id];
+              return (
+                <div key={it.id} style={{ display:'flex', alignItems:'center', gap:9, flexWrap:'wrap' }}>
+                  <div style={{ flex:1, minWidth:130 }}>
+                    <div style={{ fontSize:11.5, fontWeight:700, color:C.text }}>✨ {it.name}</div>
+                    {it.sub && <div style={{ fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace' }}>{it.sub}</div>}
+                    <div style={{ fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace', color:COLLECTION_COLOR, marginTop:2 }}>
+                      {it.price != null ? collEur(it.price) : 'prix non estimable'}
+                    </div>
+                    {it.meta.confiance && <div style={{ fontSize:9, color:C.dim, marginTop:2 }}>confiance : {it.meta.confiance}</div>}
+                  </div>
+                  {st === 'ok'   && <span style={{ fontSize:10.5, fontWeight:700, color:'#4caf50', fontFamily:'DM Mono,monospace' }}>✓ ajouté</span>}
+                  {st === 'full' && <span style={{ fontSize:9.5, color:'#e05050' }}>collection pleine</span>}
+                  {st === 'err'  && <span style={{ fontSize:9.5, color:'#e05050' }}>non enregistré</span>}
+                  {!st && (
+                    <button onClick={() => addOne(it)}
+                      style={{ background:`${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6,
+                        color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 11px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                      + Ajouter
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {res.note && <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>{res.note}</div>}
+          </div>
+        )}
+
+        <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, fontStyle:'italic' }}>
+          Les prix sont des estimations de {pname} à partir de ta seule photo, pas des cotations : vérifie avant d'acheter ou de vendre.
+          La photo n'est ni enregistrée ni envoyée ailleurs qu'au modèle.
+        </div>
+      </div>
+    </div>, document.body);
+}
+
 function CollectionPanel() {
   const rootRef = React.useRef(null);
+  const [scan, setScan] = React.useState(false);
   return (
     <div ref={rootRef} style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {/* Titre rendu ICI (`selfHeading:true` dans SECTION, et plus de heading dans MobileApp)
+          pour pouvoir aligner le 📷 dessus — même gabarit que les boutons d'en-tête de
+          TV Time (7.6.86) : pas de fond ni de bordure teintés, il ne doit pas avoir l'air
+          « sélectionné ». ⚠ La pop-up n'est montée qu'au clic : aucune requête, aucun accès
+          à l'appareil photo tant qu'on ne l'ouvre pas. */}
+      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
+        <div style={{ flex:1, fontSize:10, fontWeight:700, color:COLLECTION_COLOR, letterSpacing:'0.07em' }}>COLLECTION</div>
+        <button onClick={() => setScan(true)}
+          title="Scanner une photo : choisis la collection, prends la photo, l'IA liste ce qu'elle reconnaît et tu ajoutes ce que tu veux"
+          aria-label="Scanner une photo pour ajouter à une collection"
+          style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim,
+            fontSize:13, lineHeight:1, padding:'3px 8px', cursor:'pointer' }}>📷</button>
+      </div>
+      {scan && <CollectionScanModal onClose={() => setScan(false)} />}
       {COLLECTION_CATS.map(c => (
         <StatsCollapse key={c.id} title={`${c.icon} ${c.label.toUpperCase()}`} color={COLLECTION_COLOR} defaultOpen={false}>
           <CollectionCat cat={c} />
@@ -28412,7 +28688,6 @@ function MobileApp() {
         )}
         {tab === 'collection' && (
           <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
-            <div style={{ fontSize:10, fontWeight:700, color:COLLECTION_COLOR, letterSpacing:'0.07em' }}>COLLECTION</div>
             <CollectionPanel />
           </div>
         )}
@@ -28563,7 +28838,7 @@ function WebApp() {
     frigo:      { heading:'FRIGO',        color:'#47a8de',     node:<FrigoPanel /> },
     games:      { heading:'JEUX',         color:GAMES_COLOR,   node:<JeuxPanel />, selfHeading:true },
     compare:    { heading:'BON PLAN',     color:COMPARE_COLOR, node:<ComparePanel /> },
-    collection: { heading:'COLLECTION',   color:COLLECTION_COLOR, node:<CollectionPanel /> },
+    collection: { heading:'COLLECTION',   color:COLLECTION_COLOR, node:<CollectionPanel />, selfHeading:true },
     emploi:     { heading:'EMPLOI',       color:EMPLOI_COLOR,  node:<EmploiPanel /> },
     tvtime:     { heading:'TV TIME',      color:TVTIME_COLOR,  node:<TvTimePanel />, selfHeading:true },
     vetement:   { heading:'VÊTEMENT',     color:'#f59a2e',     node:<VetementPanel /> },
