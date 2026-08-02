@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.2';
+const APP_VERSION = '8.5.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1566,13 +1566,75 @@ async function cryptoSheetFetch(force) {
   return data;
 }
 
-// Prix USD de toutes les cryptos détenues + BTC (dénominateur), en UNE requête.
-async function cryptoHoldPrices(ids) {
-  const list = [...new Set([...(ids || []), 'bitcoin'])].join(',');
-  const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(list)}&vs_currencies=usd`);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+// ════════════════════════════════════════════════
+// COINGECKO — accès partagé, avec RÉESSAI et DERNIERS COURS CONNUS
+// ⚠ Les cours de la section CRYPTO de Finance (lignes Bitcoin/PEPE/… ET badge « X BTC »)
+// viennent tous de CoinGecko. Jusqu'ici, UN SEUL appel raté suffisait à éteindre toute la
+// section pour la session : `catch → 'error'` → « — » partout, sans réessai, sans cache et
+// sans le moindre message expliquant pourquoi. Or l'API publique (sans clé) répond très
+// régulièrement **429** quand plusieurs pages du Hub l'interrogent en rafale — c'est un
+// échec TRANSITOIRE, qui redevient bon quelques secondes plus tard.
+// Trois garde-fous, dans cet ordre : (1) on réessaie, (2) à défaut on ressert les derniers
+// cours connus (horodatés), (3) et on dit ce qui s'est passé.
+// ════════════════════════════════════════════════
+const CG_BASE      = 'https://api.coingecko.com/api/v3';
+const CG_RETRY_MS  = [1500, 4000];        // 3 tentatives au total (immédiate + 2 réessais)
+const CG_CACHE_LS  = 'spotifyplus_cg_px'; // { "<clé>": { at, data } } — derniers cours connus
+const CG_CACHE_MAX = 8;                   // quelques jeux d'ids suffisent (light + holdings)
+
+// Erreur typée : 'RATE' (429, quota de l'API publique), 'HTTP n', 'NET' (réseau/CORS).
+async function cgFetch(path) {
+  let last = 'NET';
+  for (let i = 0; i <= CG_RETRY_MS.length; i++) {
+    if (i) await new Promise(r => setTimeout(r, CG_RETRY_MS[i - 1]));
+    try {
+      const r = await fetch(CG_BASE + path);
+      if (r.status === 429) { last = 'RATE'; continue; }         // quota : ça repasse tout seul
+      if (!r.ok) { last = 'HTTP ' + r.status; if (r.status < 500) break; continue; }
+      return await r.json();
+    } catch { last = 'NET'; }
+  }
+  throw new Error(last);
 }
+
+// Derniers cours connus, persistés : ils évitent le « — » quand l'API refuse de répondre.
+// ⚠ Cache purement re-fetchable ⇒ PAS dans buildBackup.
+function cgCacheLoad() { try { return JSON.parse(localStorage.getItem(CG_CACHE_LS)) || {}; } catch { return {}; } }
+function cgCacheGet(key) { const e = cgCacheLoad()[key]; return e && e.data ? e : null; }
+function cgCacheSet(key, data) {
+  try {
+    const all = cgCacheLoad();
+    all[key] = { at: Date.now(), data };
+    const keys = Object.keys(all).sort((a, b) => all[b].at - all[a].at).slice(0, CG_CACHE_MAX);
+    const out = {}; for (const k of keys) out[k] = all[k];
+    localStorage.setItem(CG_CACHE_LS, JSON.stringify(out));
+  } catch {}
+}
+// Renvoie { data, at, stale, err } — `stale` = cours de repli (l'appel a échoué).
+// ⚠ Ne throw QUE si l'appel échoue ET qu'aucun cours n'a jamais été mémorisé.
+async function cgPrices(key, path) {
+  try {
+    const data = await cgFetch(path);
+    cgCacheSet(key, data);
+    return { data, at: Date.now(), stale: false, err: null };
+  } catch (e) {
+    const c = cgCacheGet(key);
+    const err = (e && e.message) || 'NET';
+    if (!c) throw new Error(err);
+    return { data: c.data, at: c.at, stale: true, err };
+  }
+}
+// Les 6 cryptos de la section CRYPTO de Finance (Light + Full) — une seule requête.
+const CG_LIGHT_KEY  = 'light';
+const CG_LIGHT_PATH = '/simple/price?ids=bitcoin,ethereum,solana,bittensor,ripple,pepe&vs_currencies=usd&include_24hr_change=true';
+const CG_ERRS = {
+  RATE: "CoinGecko a bloqué la requête (quota de l'API publique dépassé) — ça se débloque tout seul en quelques minutes.",
+  NET:  'CoinGecko est injoignable (réseau ou blocage réseau local).',
+};
+function cgErrMsg(e) { return CG_ERRS[e] || (e ? `CoinGecko a répondu ${e}.` : ''); }
+
+// (Les prix USD des cryptos détenues + BTC sont demandés par `startFinanceHoldings`, qui
+// passe par `cgPrices` pour bénéficier du réessai et du repli sur les derniers cours connus.)
 
 // Σ (nb de tokens × prix $) / prix BTC $ = tout le portefeuille exprimé en BTC.
 // ⚠ Une crypto sans prix est COMPTÉE COMME MANQUANTE, jamais comme valant 0 : le total
@@ -19523,6 +19585,7 @@ function tdSpaced(fn, label) {
 const _finance = {
   eurusd: null, crypto: null, gold: null, oil: null, idx: null, stocks: {},
   silver: null, sugar: null,   // matières (Full)
+  cryptoErr: null, cryptoAt: null, cryptoStale: false,  // état des cours CoinGecko (cf. cgPrices)
   hold: null, holdPx: null, holdErr: null, startedHold: false,  // portefeuille crypto (Sheets)
   loadingLight: true,   // true tant que les valeurs Light ne sont pas toutes chargées
   loadingFull: false,   // true pendant le chargement des valeurs Full
@@ -19562,7 +19625,16 @@ async function startFinanceHoldings(force) {
       try { d = await cryptoSheetFetch(force); _finance.hold = d; _finNotify(); }
       catch (e) { _finance.holdErr = (e && e.message) || 'NET'; if (!d) { _finNotify(); return; } }
     }
-    if (d && d.holdings && d.holdings.length) _finance.holdPx = await cryptoHoldPrices(d.holdings.map(h => h.id));
+    // ⚠ Mêmes garde-fous que les lignes de la section : réessai puis derniers cours connus,
+    // sinon un unique 429 remplaçait le badge par « — BTC » jusqu'au rechargement.
+    if (d && d.holdings && d.holdings.length) {
+      const ids = d.holdings.map(h => h.id);
+      const list = [...new Set([...ids, 'bitcoin'])].join(',');
+      const r = await cgPrices('hold:' + list,
+        `/simple/price?ids=${encodeURIComponent(list)}&vs_currencies=usd`);
+      _finance.holdPx = r.data;
+      if (r.stale) _finance.holdErr = r.err;
+    }
   } catch (e) { _finance.holdErr = (e && e.message) || 'NET'; }
   _finNotify();
 }
@@ -19572,18 +19644,29 @@ async function startFinanceHoldings(force) {
 //  • piste TD (EUR/USD + actions) : espacée de 8s (limite Basic 8)
 // Crypto + or partent en parallèle immédiatement. `loadingLight` ne passe à false
 // que quand LES DEUX pistes sont finies.
+// Cours des 6 cryptos de la section CRYPTO. EXTRAIT de `startFinanceLight` pour pouvoir être
+// relancé SEUL par le bouton ↻ : relancer tout le mode Light re-déclencherait la file Twelve
+// Data (8 s par valeur) alors que seul CoinGecko a échoué.
+// ⚠ Passe par `cgPrices` : réessai sur 429/réseau, puis repli sur les derniers cours connus.
+// `crypto = 'error'` n'arrive donc plus que si l'API a échoué ET qu'aucun cours n'a JAMAIS
+// été mémorisé sur cet appareil (1re visite avec CoinGecko injoignable).
+async function startFinanceCrypto() {
+  try {
+    const r = await cgPrices(CG_LIGHT_KEY, CG_LIGHT_PATH);
+    _finance.crypto = r.data; _finance.cryptoAt = r.at;
+    _finance.cryptoStale = r.stale; _finance.cryptoErr = r.err;
+  } catch (e) {
+    _finance.crypto = 'error'; _finance.cryptoStale = false;
+    _finance.cryptoErr = (e && e.message) || 'NET';
+  }
+  _finNotify();
+}
+
 async function startFinanceLight() {
   if (_finance.startedLight) return;
   _finance.startedLight = true;
   // Non-TD immédiats : crypto + or
-  (async () => {
-    try {
-      const r = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,bittensor,ripple,pepe&vs_currencies=usd&include_24hr_change=true');
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      _finance.crypto = await r.json();
-    } catch (e) { _finance.crypto = 'error'; }
-    _finNotify();
-  })();
+  startFinanceCrypto();
   fetchGold().then(d => { _finance.gold = d; _finNotify(); });
   // VRAIS indices (NASDAQ-100 + S&P 500 + CAC 40) en UN SEUL fetch same-origin (JSON
   // généré par la GitHub Action). Immédiat, hors file TD et hors quota AV. Les 3 sont
@@ -20700,8 +20783,18 @@ function FinancePanel() {
     return () => { _finance.subs.delete(forceRender); };
   }, []);
   const { eurusd, crypto, gold, oil, idx, stocks, silver, sugar, loadingLight, loadingFull, nextLabel } = _finance;
-  const { hold, holdPx, holdErr } = _finance;
+  const { hold, holdPx, holdErr, cryptoErr, cryptoAt, cryptoStale } = _finance;
   const cg = (crypto && crypto !== 'error') ? crypto : null;
+  // Relance manuelle des SEULS cours CoinGecko (bouton ↻ de la section CRYPTO).
+  // ⚠ `startFinanceHoldings()` est rappelée SANS `force` après avoir levé son verrou
+  // « une fois par session » : `force` relancerait aussi la recherche Drive + la lecture de
+  // la feuille, alors que le portefeuille est bon et que seuls les COURS ont échoué.
+  const retryCrypto = () => {
+    _finance.cryptoErr = null; _finance.holdErr = null;
+    _finance.startedHold = false;
+    startFinanceCrypto();
+    startFinanceHoldings();
+  };
 
   // Mode Light (défaut) : seulement l'essentiel (BTC, PEPE, Or, Pétrole, S&P 500,
   // NASDAQ-100, NVIDIA, Take-Two, EUR/USD). Mode Full : tout. Mode Mes Actifs : patrimoine
@@ -20774,6 +20867,22 @@ function FinancePanel() {
       <FinanceSection title="CRYPTO" eurusd={eurusd}
         badge={(() => { const t = cryptoHoldBtc(hold && hold.holdings, holdPx);
           return <span title={cryptoHoldTip(hold, holdPx, holdErr)}>{fmtBtc(t && t.btc)} BTC</span>; })()}>
+        {/* ⚠ Un échec CoinGecko ne doit JAMAIS se traduire par des « — » muets : soit on
+            ressert les derniers cours connus en le disant, soit on explique pourquoi il n'y
+            a rien. Dans les deux cas, un ↻ relance les seuls cours (pas toute la page). */}
+        {(cryptoStale || crypto === 'error') && (
+          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap',
+            padding:'6px 8px', marginBottom:4, borderRadius:8, fontSize:10, lineHeight:1.35,
+            background:'#e0a04014', border:'1px solid #e0a04044', color:C.text }}>
+            <span style={{ flex:1, minWidth:140 }}>
+              {cryptoStale
+                ? <>Cours du <b>{new Date(cryptoAt).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })}</b> — {cgErrMsg(cryptoErr)}</>
+                : <>Cours indisponibles — {cgErrMsg(cryptoErr)}</>}
+            </span>
+            <button onClick={retryCrypto} style={{ background:'none', border:`1px solid ${C.border}`,
+              color:C.muted, borderRadius:6, padding:'2px 8px', cursor:'pointer', fontSize:10, flexShrink:0 }}>↻ Réessayer</button>
+          </div>
+        )}
         <FinanceRow icon="₿"  name="Bitcoin"  value={fmtPrice(cg && cg.bitcoin && cg.bitcoin.usd)}     pct={cg && cg.bitcoin && cg.bitcoin.usd_24h_change} chart={{ kind:'coingecko', id:'bitcoin' }} onChart={setChartSpec} />
         {full && <FinanceRow icon={<EthIcon />}  name="Ethereum" value={fmtPrice(cg && cg.ethereum && cg.ethereum.usd)}   pct={cg && cg.ethereum && cg.ethereum.usd_24h_change} chart={{ kind:'coingecko', id:'ethereum' }} onChart={setChartSpec} />}
         {full && <FinanceRow icon={<SolIcon />}  name="Solana"   value={fmtPrice(cg && cg.solana && cg.solana.usd)}       pct={cg && cg.solana && cg.solana.usd_24h_change} chart={{ kind:'coingecko', id:'solana' }} onChart={setChartSpec} />}
