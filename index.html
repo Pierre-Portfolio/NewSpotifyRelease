@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.4';
+const APP_VERSION = '8.5.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4139,6 +4139,7 @@ const GAMES = [
   { id:'2048',       label:'2048',            min:1, max:1 },
   { id:'airhockey',  label:'Air Hockey',      min:2, max:2 },
   { id:'bataille',   label:'Bataille navale', min:2, max:2 },
+  { id:'blackjack',  label:'Blackjack',       min:1, max:1 },
   { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
   { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
@@ -4231,6 +4232,7 @@ function GameHost({ game, label }) {
     case '2048':       return <Game2048 />;
     case 'airhockey':  return <GameAirHockey />;
     case 'bataille':   return <GameBataille />;
+    case 'blackjack':  return <GameBlackjack />;
     case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
     case 'doodle':     return <GameDoodle />;
@@ -7439,6 +7441,224 @@ function GameFlip7() {
       <div style={{ width:'100%', maxWidth:460, display:'flex', flexDirection:'column', gap:2, fontSize:11, color:C.muted, lineHeight:1.5 }}>
         {st.log.map((l, i) => <div key={i} style={{ opacity: 0.5 + 0.5 * (i + 1) / st.log.length }}>{l}</div>)}
       </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Cartes à jouer — helpers PARTAGÉS (Blackjack, Poker) ════════
+// ⚠ Une seule source pour les deux jeux : rangs en ordre CROISSANT (l'index EST la force
+// au poker), enseignes, et un composant de rendu commun (dos de carte inclus).
+const CARD_RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+const CARD_SUITS = ['♠','♥','♦','♣'];
+const CARD_FR = { J:'V', Q:'D', K:'R' };            // affichage français (Valet/Dame/Roi)
+const cardFace = r => CARD_FR[r] || r;
+const cardRed = s => s === '♥' || s === '♦';
+function cardShuffle(a) { const d = a.slice(); for (let i = d.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = d[i]; d[i] = d[j]; d[j] = t; } return d; }
+function cardDeck(n) { const d = []; for (let k = 0; k < (n || 1); k++) CARD_SUITS.forEach(s => CARD_RANKS.forEach(r => d.push({ r, s }))); return cardShuffle(d); }
+function PlayCard({ c, hidden, w }) {
+  const W = w || 46, H = Math.round(W * 1.45);
+  if (hidden || !c) return (
+    <div style={{ width:W, height:H, borderRadius:6, border:'1px solid #ffffff22', background:'repeating-linear-gradient(45deg,#2a3f6e,#2a3f6e 4px,#1d2c4d 4px,#1d2c4d 8px)', flexShrink:0 }} />
+  );
+  const red = cardRed(c.s);
+  return (
+    <div style={{ width:W, height:H, borderRadius:6, border:'1px solid #00000055', background:'#f7f7f2', color: red ? '#d1344b' : '#1a1a1a', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', lineHeight:1, flexShrink:0, boxShadow:'0 1px 3px rgba(0,0,0,0.4)' }}>
+      <div style={{ fontSize: W * 0.42, fontWeight:900 }}>{cardFace(c.r)}</div>
+      <div style={{ fontSize: W * 0.38 }}>{c.s}</div>
+    </div>
+  );
+}
+
+// ════════ Blackjack (solo contre le croupier) ════════
+// Sabot de BJ_DECKS jeux, blackjack payé 3:2, le croupier tire jusqu'à 17 et RESTE sur 17
+// (règle « stand on soft 17 »). Tirer / Rester / Doubler / Séparer (jusqu'à BJ_MAX_HANDS mains).
+// ⚠ Pas d'assurance ni d'abandon (volontairement — deux règles de casino qui n'apportent rien
+// en solo et alourdiraient l'écran mobile).
+const BJ_DECKS = 6;
+const BJ_START = 500;          // tapis de départ (et montant d'une recave)
+const BJ_CHIPS = [10, 25, 50, 100];
+const BJ_MAX_HANDS = 4;
+const BJ_BJ_PAY = 1.5;         // blackjack payé 3:2
+const BJ_STAND = 17;           // le croupier tire tant qu'il est en dessous
+const BJ_RESHUFFLE = 60;       // cartes restantes sous lesquelles on remélange le sabot
+const BJ_DEAL_MS = 700;        // rythme des tirages du croupier
+const bjClone = s => ({ ...s, shoe:s.shoe.slice(), dealer:s.dealer.slice(), hands:s.hands.map(h => ({ ...h, cards:h.cards.slice() })) });
+function bjVal(r) { return r === 'A' ? 11 : (r === 'K' || r === 'Q' || r === 'J' || r === '10') ? 10 : +r; }
+// Total optimal : chaque As vaut 11 puis retombe à 1 tant qu'on dépasse 21.
+function bjTotal(cards) {
+  let t = 0, a = 0;
+  cards.forEach(c => { t += bjVal(c.r); if (c.r === 'A') a++; });
+  while (t > 21 && a > 0) { t -= 10; a--; }
+  return { t, soft: a > 0 };
+}
+// ⚠ 21 obtenu APRÈS une séparation n'est PAS un blackjack (règle de casino) → payé 1:1.
+function bjIsBJ(h) { return h.cards.length === 2 && !h.split && bjTotal(h.cards).t === 21; }
+function bjTake(s) { if (s.shoe.length < BJ_RESHUFFLE) s.shoe = cardDeck(BJ_DECKS); return s.shoe.pop(); }
+function bjNew(bank) { return { shoe: cardDeck(BJ_DECKS), hands:[], hi:0, dealer:[], hole:true, phase:'bet', bank: bank === undefined ? BJ_START : bank, bet:BJ_CHIPS[1], msg:'', gain:0 }; }
+function bjDeal(s0) {
+  const s = bjClone(s0);
+  const bet = Math.min(s.bet, s.bank); if (bet <= 0) return s;
+  s.bank -= bet;
+  s.hands = [{ cards:[bjTake(s), bjTake(s)], bet, done:false, split:false, dbl:false, res:null }];
+  s.dealer = [bjTake(s), bjTake(s)];
+  s.hole = true; s.hi = 0; s.msg = ''; s.gain = 0; s.phase = 'play';
+  if (bjTotal(s.hands[0].cards).t === 21) { s.hands[0].done = true; return bjToDealer(s); }   // blackjack naturel
+  return s;
+}
+function bjNextHand(s) {
+  let i = s.hi;
+  while (i < s.hands.length && s.hands[i].done) i++;
+  if (i >= s.hands.length) return bjToDealer(s);
+  s.hi = i;
+  if (bjTotal(s.hands[i].cards).t >= 21) { s.hands[i].done = true; return bjNextHand(s); }     // 21 (ou plus) → on ne demande rien
+  return s;
+}
+function bjToDealer(s) {
+  s.hole = false; s.phase = 'dealer';
+  const live = s.hands.filter(h => bjTotal(h.cards).t <= 21);
+  // ⚠ Le croupier ne tire pas si tout a sauté ou si le joueur n'a que des blackjacks :
+  // aucune carte ne peut plus changer le résultat.
+  if (!live.length || live.every(bjIsBJ)) return bjSettle(s);
+  return s;
+}
+function bjDealerStep(s0) {
+  const s = bjClone(s0);
+  if (bjTotal(s.dealer).t < BJ_STAND) { s.dealer.push(bjTake(s)); return bjTotal(s.dealer).t < BJ_STAND ? s : bjSettle(s); }
+  return bjSettle(s);
+}
+function bjSettle(s) {
+  const d = bjTotal(s.dealer).t, dBJ = s.dealer.length === 2 && d === 21;
+  let mise = 0, retour = 0;
+  s.hands.forEach(h => {
+    mise += h.bet;
+    const p = bjTotal(h.cards).t;
+    if (p > 21) { h.res = 'bust'; return; }
+    if (bjIsBJ(h)) {
+      if (dBJ) { h.res = 'push'; retour += h.bet; }
+      else { h.res = 'bj'; retour += h.bet + Math.round(h.bet * BJ_BJ_PAY); }
+      return;
+    }
+    if (dBJ) { h.res = 'lose'; return; }
+    if (d > 21 || p > d) { h.res = 'win'; retour += h.bet * 2; }
+    else if (p === d) { h.res = 'push'; retour += h.bet; }
+    else h.res = 'lose';
+  });
+  s.bank += retour;
+  s.gain = retour - mise;
+  s.phase = 'done';
+  s.msg = s.gain > 0 ? `+${s.gain} jetons` : s.gain < 0 ? `${s.gain} jetons` : 'Égalité — mise rendue';
+  return s;
+}
+function bjHit(s0) {
+  const s = bjClone(s0); const h = s.hands[s.hi];
+  h.cards.push(bjTake(s));
+  if (bjTotal(h.cards).t >= 21) { h.done = true; return bjNextHand(s); }
+  return s;
+}
+function bjStand(s0) { const s = bjClone(s0); s.hands[s.hi].done = true; return bjNextHand(s); }
+function bjCanDouble(s) { const h = s.hands[s.hi]; return !!h && s.phase === 'play' && h.cards.length === 2 && s.bank >= h.bet; }
+function bjCanSplit(s) {
+  const h = s.hands[s.hi];
+  return !!h && s.phase === 'play' && h.cards.length === 2 && bjVal(h.cards[0].r) === bjVal(h.cards[1].r) && s.hands.length < BJ_MAX_HANDS && s.bank >= h.bet;
+}
+function bjDouble(s0) {
+  const s = bjClone(s0); if (!bjCanDouble(s)) return s;
+  const h = s.hands[s.hi];
+  s.bank -= h.bet; h.bet *= 2; h.dbl = true;
+  h.cards.push(bjTake(s)); h.done = true;      // ⚠ doubler = UNE seule carte, quoi qu'il arrive
+  return bjNextHand(s);
+}
+function bjSplit(s0) {
+  const s = bjClone(s0); if (!bjCanSplit(s)) return s;
+  const h = s.hands[s.hi];
+  const moved = h.cards.pop();
+  s.bank -= h.bet;
+  const nh = { cards:[moved], bet:h.bet, done:false, split:true, dbl:false, res:null };
+  h.split = true;
+  h.cards.push(bjTake(s)); nh.cards.push(bjTake(s));
+  s.hands.splice(s.hi + 1, 0, nh);
+  // ⚠ As séparés : une seule carte par main, on ne tire plus (règle de casino).
+  if (h.cards[0].r === 'A') { h.done = true; nh.done = true; }
+  return bjNextHand(s);
+}
+
+function GameBlackjack() {
+  const [st, setSt] = React.useState(() => bjNew());
+  const [best, setBest] = React.useState(() => gameHi('blackjack'));
+  // Le croupier tire une carte à la fois (lisibilité) : un seul minuteur, relancé à chaque état.
+  React.useEffect(() => {
+    if (st.phase !== 'dealer') return;
+    const t = setTimeout(() => setSt(s => bjDealerStep(s)), BJ_DEAL_MS);
+    return () => clearTimeout(t);
+  }, [st]);
+  // Record = plus gros tapis atteint.
+  React.useEffect(() => { setBest(b => { const nb = Math.max(b, st.bank); if (nb !== b) setGameHi('blackjack', nb); return nb; }); }, [st.bank]);
+  const cur = st.hands[st.hi];
+  const dTot = bjTotal(st.dealer).t;
+  const RES = { win:{ t:'Gagné', c:'#4caf50' }, bj:{ t:'Blackjack !', c:'#f5b81f' }, push:{ t:'Égalité', c:C.muted }, lose:{ t:'Perdu', c:'#e05050' }, bust:{ t:'Sauté', c:'#e05050' } };
+  const hand = (h, i) => {
+    const { t, soft } = bjTotal(h.cards), r = h.res ? RES[h.res] : null;
+    const active = st.phase === 'play' && i === st.hi && st.hands.length > 1;
+    return (
+      <div key={i} style={{ display:'flex', flexDirection:'column', gap:4, padding: st.hands.length > 1 ? 6 : 0, border: st.hands.length > 1 ? `1px solid ${active ? GAMES_COLOR + '88' : C.border}` : 'none', borderRadius:8 }}>
+        <div style={{ display:'flex', gap:5 }}>{h.cards.map((c, k) => <PlayCard key={k} c={c} w={st.hands.length > 2 ? 36 : 46} />)}</div>
+        <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:11.5 }}>
+          <b style={{ color: t > 21 ? '#e05050' : C.text }}>{t}{soft && t <= 21 ? ' (souple)' : ''}</b>
+          <span style={{ color:C.muted }}>mise {h.bet}{h.dbl ? ' ×2' : ''}</span>
+          {r && <span style={{ color:r.c, fontWeight:800 }}>{r.t}</span>}
+        </div>
+      </div>
+    );
+  };
+  return (
+    <GameWrap
+      hint={`Bats le croupier sans dépasser 21. Le blackjack (As + bûche) paie 3:2, le croupier tire jusqu'à ${BJ_STAND} et s'arrête. Tu peux DOUBLER ta mise (une seule carte de plus) ou SÉPARER une paire (jusqu'à ${BJ_MAX_HANDS} mains).`}
+      bar={<><span style={{ fontSize:12, color:C.muted }}>Tapis <b style={{ color:C.text }}>{st.bank}</b> jetons · record {best}</span>
+        <button onClick={() => setSt(bjNew())} style={gameBtn()}>↻ Nouvelle partie</button></>}>
+      {/* Croupier */}
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:5, width:'100%' }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em', color:C.muted }}>CROUPIER {!st.hole && st.dealer.length ? `· ${dTot}` : ''}</div>
+        <div style={{ display:'flex', gap:5, minHeight:67 }}>
+          {st.dealer.map((c, k) => <PlayCard key={k} c={c} hidden={st.hole && k === 1} />)}
+        </div>
+      </div>
+      {/* Mains du joueur */}
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6, width:'100%' }}>
+        <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em', color:GAMES_COLOR }}>TOI</div>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap', justifyContent:'center', minHeight:67 }}>{st.hands.map(hand)}</div>
+      </div>
+      {/* Mise */}
+      {st.phase === 'bet' && (st.bank > 0 ? (
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap', justifyContent:'center' }}>
+            {BJ_CHIPS.filter(v => v <= st.bank).map(v => (
+              <button key={v} onClick={() => setSt(s => ({ ...s, bet:v }))} style={gameBtn(st.bet === v ? { background:`${GAMES_COLOR}44`, color:C.text } : null)}>{v}</button>
+            ))}
+          </div>
+          <button onClick={() => setSt(s => bjDeal(s))} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>🃏 Distribuer ({Math.min(st.bet, st.bank)})</button>
+        </div>
+      ) : (
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+          <div style={{ fontSize:13, fontWeight:800, color:'#e05050' }}>💸 Tapis vide !</div>
+          <button onClick={() => setSt(bjNew())} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>↻ Recaver {BJ_START} jetons</button>
+        </div>
+      ))}
+      {/* Actions */}
+      {st.phase === 'play' && cur && (
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', justifyContent:'center' }}>
+          <button onClick={() => setSt(s => bjHit(s))} style={gameBtn({ fontSize:13, padding:'9px 16px' })}>🃏 Tirer</button>
+          <button onClick={() => setSt(s => bjStand(s))} style={gameBtn({ fontSize:13, padding:'9px 16px', background:'#4caf5018', borderColor:'#4caf5055', color:'#4caf50' })}>✋ Rester</button>
+          {bjCanDouble(st) && <button onClick={() => setSt(s => bjDouble(s))} style={gameBtn({ fontSize:13, padding:'9px 16px', background:'#f5b81f18', borderColor:'#f5b81f55', color:'#f5b81f' })}>×2 Doubler</button>}
+          {bjCanSplit(st)  && <button onClick={() => setSt(s => bjSplit(s))}  style={gameBtn({ fontSize:13, padding:'9px 16px', background:'#a85ac018', borderColor:'#a85ac055', color:'#a85ac0' })}>✂ Séparer</button>}
+        </div>
+      )}
+      {st.phase === 'dealer' && <div style={{ fontSize:12, color:C.muted }}>Le croupier joue…</div>}
+      {st.phase === 'done' && (
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+          <div style={{ fontSize:14, fontWeight:900, color: st.gain > 0 ? '#4caf50' : st.gain < 0 ? '#e05050' : C.muted }}>{st.msg}</div>
+          <button onClick={() => setSt(s => ({ ...s, phase:'bet', msg:'' }))} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>▶ Main suivante</button>
+        </div>
+      )}
     </GameWrap>
   );
 }
@@ -26930,6 +27150,7 @@ function statCardEl({ label, value, sub, icon, color }) {
 // hors-ligne, aucune requête. Ordre = ordre des jeux (GAMES). Un jeu jamais joué → « — ».
 const GAMES_HUB_STATS = [
   { id:'2048',   label:'2048',        icon:'🔢', metric:'meilleur score' },
+  { id:'blackjack', label:'Blackjack', icon:'💰', metric:'plus gros tapis' },
   { id:'crossy', label:'Crossy Road', icon:'🐔', metric:'rangées franchies' },
   { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
