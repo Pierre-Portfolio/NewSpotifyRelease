@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.5';
+const APP_VERSION = '8.5.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4153,6 +4153,7 @@ const GAMES = [
   { id:'motus',      label:'Motus',           min:1, max:1 },
   { id:'osu',        label:'Osu',             min:1, max:1 },
   { id:'piano',      label:'Piano Tiles',     min:1, max:1 },
+  { id:'poker',      label:'Poker',           min:1, max:1 },
   { id:'puissance4', label:'Puissance 4',     min:2, max:2 },
   { id:'snake',      label:'Snake',           min:1, max:1 },
   { id:'tierlist',   label:'TierList',        min:1, max:1 },
@@ -4246,6 +4247,7 @@ function GameHost({ game, label }) {
     case 'motus':      return <GameMotus />;
     case 'osu':        return <GameOsu />;
     case 'piano':      return <GamePiano />;
+    case 'poker':      return <GamePoker />;
     case 'puissance4': return <GamePuissance4 />;
     case 'snake':      return <GameSnake />;
     case 'tierlist':   return <GameTierList />;
@@ -7659,6 +7661,329 @@ function GameBlackjack() {
           <button onClick={() => setSt(s => ({ ...s, phase:'bet', msg:'' }))} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>▶ Main suivante</button>
         </div>
       )}
+    </GameWrap>
+  );
+}
+
+// ════════ Poker — Texas Hold'em (solo contre 3 IA) ════════
+// Règles complètes : bouton tournant, petite/grosse blinde, 4 tours d'enchères
+// (préflop / flop / turn / river), relance minimale, tapis, POTS SECONDAIRES et abattage.
+// Réutilise les helpers de cartes du Blackjack (`cardDeck`, `PlayCard`, `CARD_RANKS`…).
+// ⚠ Simplification ASSUMÉE : pas de carte brûlée avant chaque tour (rigoureusement invisible
+// ici, le paquet étant mélangé à chaque main).
+const PK_START = 1000;      // tapis de départ de chaque joueur
+const PK_SB = 10, PK_BB = 20;
+const PK_BOTS = ['Rick', 'Maya', 'Théo'];
+const PK_DELAY = 950;       // ms avant l'action d'une IA (lisibilité)
+const PK_SIMS = 140;        // tirages Monte-Carlo par décision d'IA
+const PK_LOG_MAX = 7;
+const PK_STREETS = { preflop:'Préflop', flop:'Flop', turn:'Turn', river:'River' };
+const PK_NAMES = ['Hauteur', 'Paire', 'Deux paires', 'Brelan', 'Quinte', 'Couleur', 'Full', 'Carré', 'Quinte flush'];
+const PK_RANK_FR = { '2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9','10':'10','J':'Valet','Q':'Dame','K':'Roi','A':'As' };
+const pkIdx = r => CARD_RANKS.indexOf(r);              // 0 = 2 … 12 = As (l'ordre EST la force)
+const pkRankName = i => PK_RANK_FR[CARD_RANKS[i]] || '?';
+const pkClone = s => ({ ...s, deck:s.deck.slice(), board:s.board.slice(), log:s.log.slice(), players:s.players.map(p => ({ ...p, cards:p.cards.slice() })) });
+// Meilleure main de 5 cartes parmi 5, 6 ou 7 → tableau comparable [catégorie, …départages].
+function pkScore(cards) {
+  const idx = cards.map(c => pkIdx(c.r));
+  const bySuit = {};
+  cards.forEach(c => { (bySuit[c.s] = bySuit[c.s] || []).push(pkIdx(c.r)); });
+  const desc = arr => Array.from(new Set(arr)).sort((a, b) => b - a);
+  // Hauteur de la meilleure suite, -1 si aucune. ⚠ L'As compte AUSSI comme 1 (roue A-2-3-4-5).
+  const straight = arr => {
+    const set = new Set(arr);
+    if (set.has(12)) set.add(-1);
+    const all = Array.from(set).sort((a, b) => b - a);
+    let run = 1;
+    for (let i = 1; i < all.length; i++) {
+      if (all[i] === all[i - 1] - 1) { run++; if (run >= 5) return all[i] + 4; }
+      else run = 1;
+    }
+    return -1;
+  };
+  const fs = Object.keys(bySuit).filter(s => bySuit[s].length >= 5)[0];
+  if (fs) {
+    const sf = straight(bySuit[fs]);
+    if (sf >= 0) return [8, sf];                                   // quinte flush
+  }
+  const cnt = {}; idx.forEach(i => { cnt[i] = (cnt[i] || 0) + 1; });
+  const grp = Object.keys(cnt).map(k => ({ v:+k, n:cnt[k] })).sort((a, b) => b.n - a.n || b.v - a.v);
+  const kick = (used, n) => desc(idx).filter(v => used.indexOf(v) < 0).slice(0, n);
+  if (grp[0].n === 4) return [7, grp[0].v].concat(kick([grp[0].v], 1));
+  if (grp[0].n === 3 && grp[1] && grp[1].n >= 2) return [6, grp[0].v, grp[1].v];
+  if (fs) return [5].concat(desc(bySuit[fs]).slice(0, 5));
+  const st = straight(idx);
+  if (st >= 0) return [4, st];
+  if (grp[0].n === 3) return [3, grp[0].v].concat(kick([grp[0].v], 2));
+  if (grp[0].n === 2 && grp[1] && grp[1].n === 2) return [2, grp[0].v, grp[1].v].concat(kick([grp[0].v, grp[1].v], 1));
+  if (grp[0].n === 2) return [1, grp[0].v].concat(kick([grp[0].v], 3));
+  return [0].concat(desc(idx).slice(0, 5));
+}
+function pkCmp(a, b) { for (let i = 0; i < Math.max(a.length, b.length); i++) { const x = a[i] || 0, y = b[i] || 0; if (x !== y) return x > y ? 1 : -1; } return 0; }
+function pkName(sc) {
+  if (!sc) return '';
+  if (sc[0] === 8) return sc[1] === 12 ? 'Quinte flush royale' : 'Quinte flush';
+  if (sc[0] === 7) return 'Carré de ' + pkRankName(sc[1]);
+  if (sc[0] === 6) return 'Full aux ' + pkRankName(sc[1]);
+  if (sc[0] === 4) return 'Quinte à ' + pkRankName(sc[1]);
+  if (sc[0] === 3) return 'Brelan de ' + pkRankName(sc[1]);
+  if (sc[0] === 2) return 'Deux paires, ' + pkRankName(sc[1]) + ' et ' + pkRankName(sc[2]);
+  if (sc[0] === 1) return 'Paire de ' + pkRankName(sc[1]);
+  if (sc[0] === 0) return 'Hauteur ' + pkRankName(sc[1]);
+  return PK_NAMES[sc[0]];
+}
+// ── Mécanique de la main ──
+const pkLive   = s => s.players.filter(p => !p.out && !p.folded);
+const pkCanAct = p => !p.out && !p.folded && !p.allin && p.chips > 0;
+const pkMaxBet = s => s.players.reduce((m, p) => Math.max(m, p.bet), 0);
+function pkLog(s, m) { s.log = s.log.concat(m).slice(-PK_LOG_MAX); }
+function pkFirstFrom(s, seat, test) { for (let k = 0; k < s.players.length; k++) { const i = (seat + k) % s.players.length; if (test(s.players[i])) return i; } return -1; }
+function pkPay(s, p, amt) {
+  const a = Math.max(0, Math.min(amt, p.chips));
+  p.chips -= a; p.bet += a; p.paid += a; s.pot += a;
+  if (p.chips === 0) p.allin = true;
+  return a;
+}
+function pkNewGame() {
+  const players = [{ id:0, name:'Toi', bot:false }].concat(PK_BOTS.map((n, i) => ({ id:i + 1, name:n, bot:true })))
+    .map(p => ({ ...p, chips:PK_START, cards:[], bet:0, paid:0, folded:false, allin:false, acted:false, out:false, score:null }));
+  return pkNewHand({ players, deck:[], board:[], pot:0, dealer:players.length - 1, street:'preflop', phase:'play', minRaise:PK_BB, cur:0, log:[], hand:0, reveal:false, winner:null });
+}
+function pkNewHand(s0) {
+  const s = pkClone(s0);
+  s.players.forEach(p => { if (p.chips <= 0) p.out = true; });
+  const live = s.players.filter(p => !p.out);
+  // ⚠ La partie s'arrête aussi dès que LE JOUEUR est éliminé : sans ça il regarderait les
+  // IA s'affronter sans pouvoir agir, avec un écran qui ne propose plus rien.
+  if (live.length < 2 || s.players[0].out) {
+    const lead = live.slice().sort((a, b) => b.chips - a.chips)[0];
+    s.phase = 'over'; s.winner = lead ? lead.id : null; s.reveal = true; return s;
+  }
+  s.hand++; s.deck = cardDeck(1); s.board = []; s.pot = 0; s.street = 'preflop'; s.phase = 'play';
+  s.minRaise = PK_BB; s.reveal = false; s.log = ['— Main ' + s.hand + ' —'];
+  s.players.forEach(p => { p.cards = []; p.bet = 0; p.paid = 0; p.folded = p.out; p.allin = false; p.acted = false; p.score = null; });
+  do { s.dealer = (s.dealer + 1) % s.players.length; } while (s.players[s.dealer].out);
+  s.players.forEach(p => { if (!p.out) p.cards = [s.deck.pop(), s.deck.pop()]; });
+  // Anneau des joueurs en lice, en partant du siège APRÈS le bouton.
+  const ring = [];
+  for (let k = 1; k <= s.players.length; k++) { const i = (s.dealer + k) % s.players.length; if (!s.players[i].out) ring.push(i); }
+  // ⚠ En tête-à-tête, c'est le BOUTON qui paie la petite blinde (règle officielle).
+  const sb = ring.length === 2 ? s.dealer : ring[0];
+  const bb = ring.length === 2 ? ring[0] : ring[1];
+  pkPay(s, s.players[sb], PK_SB); pkPay(s, s.players[bb], PK_BB);
+  pkLog(s, `${s.players[sb].name} petite blinde ${PK_SB} · ${s.players[bb].name} grosse blinde ${PK_BB}`);
+  // ⚠ Les blindes ne comptent PAS comme « a parlé » : le donneur de blinde garde son option.
+  s.cur = pkFirstFrom(s, (bb + 1) % s.players.length, pkCanAct);
+  if (s.cur < 0) return pkNextStreet(s);
+  return s;
+}
+function pkNextStreet(s) {
+  s.players.forEach(p => { p.bet = 0; p.acted = false; });
+  s.minRaise = PK_BB;
+  if (s.street === 'preflop') { s.board = [s.deck.pop(), s.deck.pop(), s.deck.pop()]; s.street = 'flop'; }
+  else if (s.street === 'flop') { s.board.push(s.deck.pop()); s.street = 'turn'; }
+  else if (s.street === 'turn') { s.board.push(s.deck.pop()); s.street = 'river'; }
+  else return pkShowdown(s);
+  pkLog(s, `${PK_STREETS[s.street]} : ${s.board.map(c => cardFace(c.r) + c.s).join(' ')}`);
+  // ⚠ Plus d'un joueur capable de miser sinon il n'y a plus rien à enchérir : on déroule
+  // les rues restantes d'affilée jusqu'à l'abattage (cas classique « tout le monde à tapis »).
+  if (s.players.filter(pkCanAct).length <= 1) return pkNextStreet(s);
+  s.cur = pkFirstFrom(s, (s.dealer + 1) % s.players.length, pkCanAct);
+  return s;
+}
+// Pot principal + pots secondaires, construits par paliers de mise engagée.
+function pkPots(players) {
+  const levels = Array.from(new Set(players.filter(p => p.paid > 0).map(p => p.paid))).sort((a, b) => a - b);
+  const pots = []; let prev = 0;
+  levels.forEach(lv => {
+    let amount = 0; const elig = [];
+    players.forEach(p => {
+      const c = Math.min(p.paid, lv) - Math.min(p.paid, prev);
+      if (c > 0) amount += c;
+      if (p.paid >= lv && !p.folded && !p.out) elig.push(p.id);
+    });
+    if (amount > 0) pots.push({ amount, elig });
+    prev = lv;
+  });
+  return pots;
+}
+function pkShowdown(s) {
+  s.players.forEach(p => { if (!p.folded && !p.out) p.score = pkScore(p.cards.concat(s.board)); });
+  const pots = pkPots(s.players);
+  pots.forEach((pot, k) => {
+    let bestIds = [], bestSc = null;
+    pot.elig.forEach(id => {
+      const sc = s.players[id].score; if (!sc) return;
+      const c = bestSc ? pkCmp(sc, bestSc) : 1;
+      if (c > 0) { bestSc = sc; bestIds = [id]; } else if (c === 0) bestIds.push(id);
+    });
+    if (!bestIds.length) return;
+    const share = Math.floor(pot.amount / bestIds.length);
+    // ⚠ Le reste de la division va au 1er gagnant (un pot ne doit jamais s'évaporer).
+    bestIds.forEach((id, i) => { s.players[id].chips += share + (i === 0 ? pot.amount - share * bestIds.length : 0); });
+    pkLog(s, `${k === 0 ? 'Pot' : 'Pot secondaire'} de ${pot.amount} → ${bestIds.map(i => s.players[i].name).join(' & ')} (${pkName(bestSc)})`);
+  });
+  s.reveal = true; s.phase = 'show';
+  return s;
+}
+function pkAwardFold(s, w) {
+  w.chips += s.pot;
+  pkLog(s, `${w.name} remporte ${s.pot} (tout le monde s'est couché)`);
+  s.reveal = false; s.phase = 'show';
+  return s;
+}
+function pkAfter(s) {
+  const live = pkLive(s);
+  if (live.length === 1) return pkAwardFold(s, live[0]);
+  const mx = pkMaxBet(s);
+  const todo = s.players.filter(p => pkCanAct(p) && (!p.acted || p.bet < mx));
+  if (!todo.length) return pkNextStreet(s);
+  s.cur = pkFirstFrom(s, (s.cur + 1) % s.players.length, p => pkCanAct(p) && (!p.acted || p.bet < mx));
+  return s;
+}
+function pkAct(s0, kind, amt) {
+  const s = pkClone(s0); const p = s.players[s.cur];
+  if (!p || !pkCanAct(p)) return s;
+  const mx = pkMaxBet(s), due = Math.min(mx - p.bet, p.chips);
+  if (kind === 'fold') { p.folded = true; pkLog(s, `${p.name} se couche`); }
+  else if (kind === 'raise') {
+    let target = Math.min(amt, p.bet + p.chips);
+    if (target <= mx) target = Math.min(p.bet + p.chips, mx + s.minRaise);   // garde-fou : une relance monte
+    pkPay(s, p, target - p.bet);
+    const inc = target - mx;
+    // ⚠ Règle officielle : un tapis INFÉRIEUR à la relance minimale ne « rouvre » PAS la
+    // parole (ceux qui ont déjà parlé n'ont plus qu'à compléter, ils ne peuvent pas re-relancer).
+    if (inc >= s.minRaise) { s.minRaise = inc; s.players.forEach(q => { if (q.id !== p.id && pkCanAct(q)) q.acted = false; }); }
+    pkLog(s, `${p.name} ${mx > 0 ? 'relance à' : 'mise'} ${target}${p.allin ? ' (tapis)' : ''}`);
+  } else {
+    pkPay(s, p, due);
+    pkLog(s, due > 0 ? `${p.name} suit ${due}${p.allin ? ' (tapis)' : ''}` : `${p.name} checke`);
+  }
+  p.acted = true;
+  return pkAfter(s);
+}
+// ── IA : équité estimée par Monte-Carlo + cote du pot ──
+// ⚠ La simulation ne connaît QUE les cartes publiques et les siennes : elle ne regarde
+// jamais la main des autres (pas de triche), elle leur tire des cartes au hasard.
+function pkEquity(hole, board, nOpp, sims) {
+  const dead = {}; hole.concat(board).forEach(c => { dead[c.r + c.s] = 1; });
+  const pool = cardDeck(1).filter(c => !dead[c.r + c.s]);
+  let win = 0;
+  for (let i = 0; i < sims; i++) {
+    const d = cardShuffle(pool); let k = 0;
+    const b = board.slice(); while (b.length < 5) b.push(d[k++]);
+    const mine = pkScore(hole.concat(b));
+    let lost = false, tie = false;
+    for (let o = 0; o < nOpp; o++) {
+      const c = pkCmp(pkScore([d[k++], d[k++]].concat(b)), mine);
+      if (c > 0) { lost = true; break; }
+      if (c === 0) tie = true;
+    }
+    if (!lost) win += tie ? 0.5 : 1;
+  }
+  return win / sims;
+}
+function pkBotAct(s) {
+  const p = s.players[s.cur];
+  const mx = pkMaxBet(s), due = Math.min(mx - p.bet, p.chips);
+  const nOpp = Math.max(1, pkLive(s).length - 1);
+  const eq = pkEquity(p.cards, s.board, nOpp, PK_SIMS);
+  const r = Math.random();
+  const size = Math.max(s.minRaise, Math.round(s.pot * 0.6 / 10) * 10);
+  if (due <= 0) {                                    // parole : checker, ou miser
+    if (eq > 0.62 && r < 0.7) return { kind:'raise', amt: mx + size };
+    if (eq < 0.28 && r < 0.12) return { kind:'raise', amt: mx + size };   // bluff occasionnel
+    return { kind:'call' };
+  }
+  const odds = due / (s.pot + due);                  // cote du pot
+  if (eq < odds - 0.02) return (eq > 0.3 && r < 0.08) ? { kind:'call' } : { kind:'fold' };
+  if (eq > 0.72 && r < 0.55 && p.chips > due) return { kind:'raise', amt: mx + size };
+  return { kind:'call' };
+}
+
+function GamePoker() {
+  const [st, setSt] = React.useState(pkNewGame);
+  const [best, setBest] = React.useState(() => gameHi('poker'));
+  // Une IA joue à la fois : un seul minuteur, relancé à chaque état et nettoyé avant.
+  React.useEffect(() => {
+    if (st.phase !== 'play') return;
+    const p = st.players[st.cur];
+    if (!p || !p.bot) return;
+    const t = setTimeout(() => setSt(s => { const a = pkBotAct(s); return pkAct(s, a.kind, a.amt); }), PK_DELAY);
+    return () => clearTimeout(t);
+  }, [st]);
+  React.useEffect(() => { setBest(b => { const nb = Math.max(b, st.players[0].chips); if (nb !== b) setGameHi('poker', nb); return nb; }); }, [st.players[0].chips]);
+  const me = st.players[0];
+  const mx = pkMaxBet(st);
+  const due = Math.max(0, Math.min(mx - me.bet, me.chips));
+  const myTurn = st.phase === 'play' && st.cur === 0 && pkCanAct(me);
+  const potRaise = Math.min(me.bet + me.chips, mx + Math.max(st.minRaise, Math.round(st.pot * 0.75 / 10) * 10));
+  const canRaise = me.chips > due && potRaise > mx;
+  return (
+    <GameWrap
+      hint={`Texas Hold'em contre 3 IA. Chacun reçoit 2 cartes, 5 cartes communes sont retournées en 3 fois (flop, turn, river) et la meilleure main de 5 cartes rafle le pot. Blindes ${PK_SB}/${PK_BB}, tapis de départ ${PK_START} jetons. Se coucher · Suivre/Checker · Relancer · Tapis.`}
+      bar={<><span style={{ fontSize:12, color:C.muted }}>Main {st.hand} · pot <b style={{ color:'#f5b81f' }}>{st.pot}</b> · record {best}</span>
+        <button onClick={() => setSt(pkNewGame())} style={gameBtn()}>↻ Nouvelle partie</button></>}>
+      {/* Tapis commun */}
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6, width:'100%', background:'#12351f', border:'1px solid #1e5c33', borderRadius:14, padding:'12px 8px' }}>
+        <div style={{ fontSize:10.5, fontWeight:700, letterSpacing:'0.08em', color:'#7fc79a' }}>{PK_STREETS[st.street].toUpperCase()} · POT {st.pot}</div>
+        <div style={{ display:'flex', gap:5 }}>
+          {[0, 1, 2, 3, 4].map(i => st.board[i]
+            ? <PlayCard key={i} c={st.board[i]} w={42} />
+            : <div key={i} style={{ width:42, height:61, borderRadius:6, border:'1px dashed #ffffff1a' }} />)}
+        </div>
+      </div>
+      {/* Joueurs */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, width:'100%', maxWidth:460 }}>
+        {st.players.map(p => {
+          const active = st.phase === 'play' && st.cur === p.id;
+          const show = !p.bot || st.reveal || p.out;
+          return (
+            <div key={p.id} style={{ background:C.surface, border:`1px solid ${active ? GAMES_COLOR + '88' : C.border}`, borderRadius:10, padding:8, display:'flex', flexDirection:'column', gap:5, opacity: p.folded || p.out ? 0.5 : 1 }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+                <span style={{ fontSize:12.5, fontWeight:800, color: p.bot ? C.text : GAMES_COLOR }}>
+                  {p.name}{st.dealer === p.id && !p.out ? <span style={{ color:'#f5b81f', marginLeft:4 }}>Ⓓ</span> : ''}
+                </span>
+                <span style={{ fontSize:12, fontWeight:800, color:C.text }}>{p.chips}</span>
+              </div>
+              <div style={{ display:'flex', gap:4, minHeight:44 }}>
+                {p.out ? <span style={{ fontSize:11, color:C.dim }}>éliminé</span>
+                  : p.cards.map((c, k) => <PlayCard key={k} c={c} hidden={!show} w={30} />)}
+              </div>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6, fontSize:10.5 }}>
+                <span style={{ color: p.folded && !p.out ? '#e05050' : p.allin ? '#f5b81f' : C.muted, fontWeight:700 }}>
+                  {p.out ? '' : p.folded ? 'couché' : p.allin ? 'à tapis' : p.bet > 0 ? 'mise ' + p.bet : (active ? '▶ à lui' : '·')}
+                </span>
+                <span style={{ color:C.muted }}>{st.reveal && p.score && !p.folded ? pkName(p.score) : ''}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {/* Actions */}
+      {myTurn && (
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', justifyContent:'center' }}>
+          <button onClick={() => setSt(s => pkAct(s, 'fold'))} style={gameBtn({ fontSize:12.5, padding:'9px 14px', background:'#e0505018', borderColor:'#e0505055', color:'#e05050' })}>✕ Se coucher</button>
+          <button onClick={() => setSt(s => pkAct(s, 'call'))} style={gameBtn({ fontSize:12.5, padding:'9px 14px', background:'#4caf5018', borderColor:'#4caf5055', color:'#4caf50' })}>{due > 0 ? `✓ Suivre ${due}` : '✓ Checker'}</button>
+          {canRaise && <button onClick={() => setSt(s => pkAct(s, 'raise', potRaise))} style={gameBtn({ fontSize:12.5, padding:'9px 14px', background:'#f5b81f18', borderColor:'#f5b81f55', color:'#f5b81f' })}>↑ Relancer {potRaise}</button>}
+          <button onClick={() => setSt(s => pkAct(s, 'raise', me.bet + me.chips))} style={gameBtn({ fontSize:12.5, padding:'9px 14px', background:'#a85ac018', borderColor:'#a85ac055', color:'#a85ac0' })}>💥 Tapis {me.bet + me.chips}</button>
+        </div>
+      )}
+      {st.phase === 'play' && !myTurn && <div style={{ fontSize:12, color:C.muted }}>{st.players[st.cur] ? st.players[st.cur].name + ' réfléchit…' : ''}</div>}
+      {st.phase === 'show' && (
+        <button onClick={() => setSt(s => pkNewHand(s))} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>▶ Main suivante</button>
+      )}
+      {st.phase === 'over' && (
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+          <div style={{ fontSize:15, fontWeight:900, color: st.winner === 0 ? '#4caf50' : '#e05050' }}>
+            {st.winner === 0 ? `🏆 Tu rafles la table avec ${me.chips} jetons !` : `😖 ${st.players[st.winner] ? st.players[st.winner].name : 'Une IA'} rafle la table — tu es éliminé`}
+          </div>
+          <button onClick={() => setSt(pkNewGame())} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>↻ Rejouer</button>
+        </div>
+      )}
+      <div style={{ width:'100%', maxWidth:460, display:'flex', flexDirection:'column', gap:2, fontSize:11, color:C.muted, lineHeight:1.5 }}>
+        {st.log.map((l, i) => <div key={i} style={{ opacity: 0.5 + 0.5 * (i + 1) / st.log.length }}>{l}</div>)}
+      </div>
     </GameWrap>
   );
 }
@@ -27158,6 +27483,7 @@ const GAMES_HUB_STATS = [
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
   { id:'guitar', label:'Guitar Hero', icon:'🎸', metric:'meilleur score' },
   { id:'piano',  label:'Piano Tiles', icon:'🎹', metric:'meilleur score' },
+  { id:'poker',  label:'Poker',       icon:'♠️', metric:'plus gros tapis' },
   { id:'snake',  label:'Snake',       icon:'🐍', metric:'meilleur score' },
 ];
 function GamesHubStatsSection() {
