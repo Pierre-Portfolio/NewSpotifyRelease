@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.3';
+const APP_VERSION = '8.5.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4143,6 +4143,7 @@ const GAMES = [
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
   { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
   { id:'flappy',     label:'Flappy Bird',     min:1, max:1 },
+  { id:'flip7',      label:'Flip 7',          min:1, max:1 },
   { id:'go',         label:'Go',              min:2, max:2 },
   { id:'guitar',     label:'Guitar Hero',     min:1, max:1 },
   { id:'inposteur',  label:'Inposteur',       min:3, max:8 },
@@ -4234,6 +4235,7 @@ function GameHost({ game, label }) {
     case 'demineur':   return <GameDemineur />;
     case 'doodle':     return <GameDoodle />;
     case 'flappy':     return <GameFlappy />;
+    case 'flip7':      return <GameFlip7 />;
     case 'go':         return <GameGo />;
     case 'guitar':     return <GameGuitarHero />;
     case 'inposteur':  return <GameInposteur />;
@@ -7169,6 +7171,273 @@ function GameBataille() {
       <div style={{ width:'100%', maxWidth:300, display:'flex', flexDirection:'column', gap:4 }}>
         <div style={{ fontSize:11, fontWeight:700, color:BN_COLORS[turn] }}>⚓ Ta flotte (Joueur {turn + 1})</div>
         {ownGrid(turn)}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Flip 7 (solo contre 3 IA — portage du jeu de cartes The Op) ════════
+// RÈGLES OFFICIELLES : on tire des cartes chiffres une par une ; un DOUBLON fait « sauter »
+// (0 point pour la manche), 7 chiffres DIFFÉRENTS = « FLIP 7 » (+15 pts et fin IMMÉDIATE de
+// la manche pour tout le monde — les autres marquent ce qu'ils ont devant eux).
+// Paquet de 94 cartes : 79 chiffres (un 0, un 1, deux 2 … douze 12 → la quantité EST la
+// valeur), 6 bonus (+2/+4/+6/+8/+10 et ×2) et 9 actions (3 Gel, 3 Retourne 3, 3 Seconde
+// Chance). Score d'une manche = (somme des chiffres × 2 si ×2) + bonus additifs + 15 si Flip 7.
+// Premier à F7_GOAL points À LA FIN d'une manche = vainqueur (la manche va toujours à son terme).
+// ⚠ CHAQUE tirage termine le tour (le donneur fait le tour de la table carte par carte) — sauf
+// les 3 tirages FORCÉS de « Retourne 3 », qui s'enchaînent.
+// ⚠ Paquet NEUF à chaque manche (le vrai jeu garde un sabot et remélange la défausse ; avec
+// 4 joueurs on ne consomme jamais 94 cartes en une manche, la différence est invisible).
+const F7_GOAL  = 200;
+const F7_BONUS = 15;   // bonus « Flip 7 »
+const F7_NEED  = 7;    // chiffres différents pour le Flip 7
+const F7_DELAY = 850;  // ms entre 2 actions automatiques (lisibilité)
+const F7_BOTS  = ['Léa', 'Sam', 'Nora'];
+const F7_LOG_MAX = 6;
+// Une carte = { k:'n', v } chiffre · { k:'m', v } bonus additif · { k:'x2' } · { k:'a', a } action.
+function f7Deck() {
+  const d = [{ k:'n', v:0 }];
+  for (let v = 1; v <= 12; v++) for (let i = 0; i < v; i++) d.push({ k:'n', v });   // quantité = valeur
+  [2, 4, 6, 8, 10].forEach(v => d.push({ k:'m', v }));
+  d.push({ k:'x2' });
+  ['freeze', 'flip3', 'second'].forEach(a => { for (let i = 0; i < 3; i++) d.push({ k:'a', a }); });
+  return d;
+}
+const F7_ACT = { freeze:{ icon:'❄️', label:'Gel' }, flip3:{ icon:'🔁', label:'Retourne 3' }, second:{ icon:'🛡️', label:'Seconde Chance' } };
+function f7Label(c) { return !c ? '' : c.k === 'n' ? String(c.v) : c.k === 'm' ? '+' + c.v : c.k === 'x2' ? '×2' : F7_ACT[c.a].icon + ' ' + F7_ACT[c.a].label; }
+function f7Color(c) { return !c ? C.muted : c.k === 'n' ? C.text : c.k === 'a' ? '#a85ac0' : '#f5b81f'; }
+function f7Shuffle(a) { const d = a.slice(); for (let i = d.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = d[i]; d[i] = d[j]; d[j] = t; } return d; }
+function f7Clone(s) { return JSON.parse(JSON.stringify(s)); }   // état = données pures (deck ≤ 94 cartes)
+function f7Log(s, msg) { s.log = s.log.concat(msg).slice(-F7_LOG_MAX); }
+// Score d'une manche. ⚠ Le ×2 ne double QUE les chiffres (les bonus additifs et le +15 s'ajoutent après).
+function f7Score(p) {
+  if (p.status === 'bust') return 0;
+  const base = p.nums.reduce((a, b) => a + b, 0) * (p.x2 ? 2 : 1);
+  return base + p.mods.reduce((a, b) => a + b, 0) + (p.nums.length >= F7_NEED ? F7_BONUS : 0);
+}
+function f7NewGame() {
+  const players = [{ id:0, name:'Toi', bot:false, total:0 }].concat(F7_BOTS.map((n, i) => ({ id:i + 1, name:n, bot:true, total:0 })));
+  return f7NewRound({ players, round:0, log:[], winner:null });
+}
+function f7NewRound(s0) {
+  const s = f7Clone(s0);
+  s.round = (s.round || 0) + 1;
+  s.deck = f7Shuffle(f7Deck()); s.discard = [];
+  s.players.forEach(p => { p.nums = []; p.mods = []; p.x2 = false; p.second = false; p.status = 'active'; p.gain = null; });
+  s.cur = (s.round - 1) % s.players.length;   // le premier à jouer tourne d'une manche à l'autre
+  s.phase = 'play'; s.pending = null; s.flip3 = null; s.queue = []; s.last = null; s.flip7 = false; s.winner = null;
+  s.log = ['— Manche ' + s.round + ' —'];
+  return s;
+}
+function f7Take(s) {
+  if (!s.deck.length) { s.deck = f7Shuffle(s.discard.length ? s.discard : f7Deck()); s.discard = []; }
+  return s.deck.pop();
+}
+// Cibles légales d'une carte action en attente.
+function f7Candidates(s, pd) {
+  if (!pd) return [];
+  if (pd.card.a === 'second') return s.players.filter(p => p.status === 'active' && !p.second && p.id !== pd.owner).map(p => p.id);
+  return s.players.filter(p => p.status === 'active').map(p => p.id);   // Gel / Retourne 3 : soi-même autorisé
+}
+function f7SetPending(s, card, owner) {
+  const pd = { card, owner };
+  if (!f7Candidates(s, pd).length) { s.discard.push(card); f7Log(s, '… aucune cible possible → carte défaussée'); return; }
+  s.pending = pd;
+}
+// Un tirage + sa résolution complète.
+function f7Flip(s, pid) {
+  const p = s.players[pid]; const c = f7Take(s);
+  s.last = { pid, card:c };
+  if (c.k === 'n') {
+    if (p.nums.indexOf(c.v) >= 0) {
+      s.discard.push(c);
+      if (p.second) { p.second = false; f7Log(s, `🛡️ ${p.name} tire un ${c.v} en double → Seconde Chance utilisée`); }
+      else { p.status = 'bust'; f7Log(s, `💥 ${p.name} SAUTE sur un ${c.v} en double — 0 point`); }
+      return;
+    }
+    p.nums.push(c.v);
+    if (p.nums.length >= F7_NEED) { p.status = 'flip7'; s.flip7 = true; f7Log(s, `🎉 FLIP 7 pour ${p.name} ! +${F7_BONUS} et fin de la manche`); }
+    else f7Log(s, `${p.name} tire un ${c.v}`);
+    return;
+  }
+  if (c.k === 'm') { p.mods.push(c.v); f7Log(s, `${p.name} tire +${c.v}`); return; }
+  if (c.k === 'x2') { p.x2 = true; f7Log(s, `${p.name} tire ×2 !`); return; }
+  // Carte action
+  if (c.a === 'second') {
+    if (!p.second) { p.second = true; f7Log(s, `🛡️ ${p.name} garde une Seconde Chance`); return; }
+    f7Log(s, `🛡️ ${p.name} en a déjà une → il doit la donner`);
+    f7SetPending(s, c, pid); return;
+  }
+  // ⚠ Gel / Retourne 3 tirés PENDANT un « Retourne 3 » : mis en attente et résolus APRÈS les
+  // 3 tirages (règle officielle — sinon on pourrait geler quelqu'un au milieu de ses flips).
+  if (s.flip3 && s.flip3.pid === pid) { s.queue.push({ card:c, owner:pid }); f7Log(s, `${p.name} tire ${f7Label(c)} — résolu après les 3 tirages`); return; }
+  f7Log(s, `${p.name} tire ${f7Label(c)}`);
+  f7SetPending(s, c, pid);
+}
+function f7Advance(s) {
+  if (s.flip7 || !s.players.some(p => p.status === 'active')) return f7EndRound(s);
+  let i = s.cur;
+  for (let k = 0; k < s.players.length; k++) { i = (i + 1) % s.players.length; if (s.players[i].status === 'active') { s.cur = i; break; } }
+  return s;
+}
+function f7Queue(s) {
+  while (s.queue.length) {
+    const pd = s.queue.shift();
+    if (s.players[pd.owner].status !== 'active') { s.discard.push(pd.card); continue; }   // le propriétaire a sauté entre-temps
+    f7SetPending(s, pd.card, pd.owner);
+    if (s.pending) return s;
+  }
+  return f7Advance(s);
+}
+function f7EndRound(s) {
+  s.players.forEach(p => { p.gain = f7Score(p); p.total += p.gain; });
+  s.pending = null; s.flip3 = null; s.queue = [];
+  const best = Math.max.apply(null, s.players.map(p => p.total));
+  if (best >= F7_GOAL) { s.phase = 'over'; s.winner = s.players.find(p => p.total === best).id; }
+  else s.phase = 'round';
+  return s;
+}
+function f7Hit(s0)  { const s = f7Clone(s0); f7Flip(s, s.cur); return (s.pending || s.flip3) ? s : f7Queue(s); }
+function f7Stay(s0) { const s = f7Clone(s0); const p = s.players[s.cur]; p.status = 'stay'; f7Log(s, `✋ ${p.name} reste avec ${f7Score(p)} pts`); return f7Advance(s); }
+function f7Target(s0, pid) {
+  const s = f7Clone(s0); const pd = s.pending; if (!pd) return s;
+  s.pending = null; s.discard.push(pd.card);
+  const t = s.players[pid], from = s.players[pd.owner], who = pid === pd.owner ? 'lui-même' : t.name;
+  if (pd.card.a === 'freeze')     { t.status = 'frozen'; f7Log(s, `❄️ ${from.name} gèle ${who} — ${f7Score(t)} pts mis de côté`); }
+  else if (pd.card.a === 'flip3') { s.flip3 = { pid, left:3 }; f7Log(s, `🔁 ${from.name} envoie Retourne 3 à ${who}`); return s; }
+  else                            { t.second = true; f7Log(s, `🛡️ ${from.name} donne sa Seconde Chance à ${t.name}`); }
+  return f7Queue(s);
+}
+function f7Force(s0) {
+  const s = f7Clone(s0); if (!s.flip3) return s;
+  const pid = s.flip3.pid;
+  if (s.players[pid].status !== 'active') { s.flip3 = null; return f7Queue(s); }
+  f7Flip(s, pid);
+  if (s.flip3) {   // f7Flip peut avoir fait sauter le joueur (statut ≠ active) sans toucher s.flip3
+    s.flip3.left -= 1;
+    if (s.flip3.left <= 0 || s.players[pid].status !== 'active') s.flip3 = null;
+  }
+  return s.flip3 ? s : f7Queue(s);
+}
+// ── IA ──
+// ⚠ Compter le paquet n'est PAS de la triche : dans Flip 7 toutes les cartes sont posées FACE
+// VISIBLE, la composition du talon est donc une information publique.
+function f7BotHit(s, p) {
+  if (!p.nums.length) return true;
+  const left = s.deck.length || 1;
+  let bad = 0; s.deck.forEach(c => { if (c.k === 'n' && p.nums.indexOf(c.v) >= 0) bad++; });
+  const risk = bad / left;
+  const pts = f7Score(p), behind = Math.max.apply(null, s.players.map(q => q.total)) - p.total;
+  let limit = 0.34;
+  if (p.second) limit += 0.25;                 // filet de sécurité → on ose plus
+  if (p.nums.length >= F7_NEED - 1) limit += 0.30;  // à 1 carte du Flip 7 (+15), ça vaut le risque
+  if (behind > 40) limit += 0.12;              // distancé → il faut prendre des risques
+  if (pts > 40) limit -= 0.10;                 // gros magot en jeu → on protège
+  return risk < limit;
+}
+function f7BotTarget(s, pd) {
+  const cand = f7Candidates(s, pd); if (!cand.length) return -1;
+  const foes = cand.filter(id => id !== pd.owner);
+  if (pd.card.a === 'second') return foes.length ? foes[0] : cand[0];
+  if (pd.card.a === 'freeze') {
+    const foe = foes.slice().sort((a, b) => f7Score(s.players[b]) - f7Score(s.players[a]))[0];
+    if (foe !== undefined && f7Score(s.players[foe]) > 12) return foe;   // couper l'herbe sous le pied du mieux placé
+    return cand.indexOf(pd.owner) >= 0 ? pd.owner : foe;                 // sinon on banque ses propres points
+  }
+  const foe = foes.slice().sort((a, b) => s.players[b].nums.length - s.players[a].nums.length)[0];
+  if (foe !== undefined && s.players[foe].nums.length >= 3) return foe;  // 3 tirages forcés = danger max
+  return cand.indexOf(pd.owner) >= 0 ? pd.owner : foe;
+}
+
+function GameFlip7() {
+  const [st, setSt] = React.useState(f7NewGame);
+  const [best, setBest] = React.useState(() => gameHi('flip7'));
+  // Pilote unique des actions automatiques (IA + les 3 tirages forcés de « Retourne 3 »).
+  // ⚠ deps [st] : le minuteur est relancé à chaque changement d'état et nettoyé avant, donc
+  // jamais deux tirages en vol simultanément.
+  React.useEffect(() => {
+    if (st.phase !== 'play') return;
+    let t = null;
+    if (st.flip3) t = setTimeout(() => setSt(s => f7Force(s)), F7_DELAY);
+    else if (st.pending) { if (st.players[st.pending.owner].bot) t = setTimeout(() => setSt(s => f7Target(s, f7BotTarget(s, s.pending))), F7_DELAY); }
+    else if (st.players[st.cur].bot) t = setTimeout(() => setSt(s => (f7BotHit(s, s.players[s.cur]) ? f7Hit(s) : f7Stay(s))), F7_DELAY);
+    return () => { if (t) clearTimeout(t); };
+  }, [st]);
+  // Record = meilleur total du joueur en fin de partie.
+  React.useEffect(() => {
+    if (st.phase !== 'over') return;
+    const mine = st.players[0].total;
+    setBest(b => { const nb = Math.max(b, mine); setGameHi('flip7', nb); return nb; });
+  }, [st.phase]);
+  const me = st.players[0];
+  const myTurn = st.phase === 'play' && !st.flip3 && !st.pending && st.cur === 0;
+  const myTarget = st.phase === 'play' && st.pending && !st.players[st.pending.owner].bot;
+  const badge = p => p.status === 'bust' ? { t:'💥 sauté', c:'#e05050' } : p.status === 'flip7' ? { t:'🎉 FLIP 7', c:'#f5b81f' }
+    : p.status === 'frozen' ? { t:'❄️ gelé', c:'#47a8de' } : p.status === 'stay' ? { t:'✋ resté', c:C.muted }
+    : (st.flip3 && st.flip3.pid === p.id) ? { t:'🔁 tirage forcé', c:'#a85ac0' } : (st.cur === p.id ? { t:'▶ à lui', c:GAMES_COLOR } : null);
+  const chip = (txt, col, key) => <span key={key} style={{ fontSize:11.5, fontWeight:800, color:col, background:`${col}1a`, border:`1px solid ${col}44`, borderRadius:6, padding:'2px 6px' }}>{txt}</span>;
+  return (
+    <GameWrap
+      hint={`Tire des cartes une par une. Un CHIFFRE EN DOUBLE te fait sauter (0 pt pour la manche) — 7 chiffres différents = FLIP 7 (+${F7_BONUS} et fin immédiate de la manche). Les bonus +2…+10 s'ajoutent, ×2 double tes chiffres. ❄️ Gel force à s'arrêter, 🔁 Retourne 3 impose 3 tirages, 🛡️ Seconde Chance annule un doublon. Premier à ${F7_GOAL} points.`}
+      bar={<><span style={{ fontSize:12, color:C.muted }}>Manche {st.round} · objectif {F7_GOAL} pts · record {best}</span>
+        <button onClick={() => setSt(f7NewGame())} style={gameBtn()}>↻ Nouvelle partie</button></>}>
+      {/* Dernière carte tirée */}
+      <div style={{ display:'flex', alignItems:'center', gap:10, minHeight:34 }}>
+        {st.last && <>
+          <span style={{ fontSize:11, color:C.muted }}>{st.players[st.last.pid].name} :</span>
+          <span style={{ fontSize:17, fontWeight:900, color:f7Color(st.last.card), background:`${f7Color(st.last.card)}18`, border:`1px solid ${f7Color(st.last.card)}55`, borderRadius:9, padding:'5px 12px' }}>{f7Label(st.last.card)}</span>
+        </>}
+      </div>
+      {/* Les 4 joueurs */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:8, width:'100%', maxWidth:460 }}>
+        {st.players.map(p => {
+          const b = badge(p), active = st.cur === p.id && st.phase === 'play';
+          return (
+            <div key={p.id} style={{ background:C.surface, border:`1px solid ${active ? GAMES_COLOR + '88' : C.border}`, borderRadius:10, padding:8, display:'flex', flexDirection:'column', gap:5, opacity: p.status === 'bust' ? 0.55 : 1 }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
+                <span style={{ fontSize:12.5, fontWeight:800, color: p.bot ? C.text : GAMES_COLOR }}>{p.name}</span>
+                <span style={{ fontSize:12, fontWeight:800, color:C.text }}>{p.total}</span>
+              </div>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:4, minHeight:22 }}>
+                {p.nums.map((v, i) => chip(v, C.text, 'n' + i))}
+                {p.mods.map((v, i) => chip('+' + v, '#f5b81f', 'm' + i))}
+                {p.x2 && chip('×2', '#f5813c', 'x2')}
+                {p.second && chip('🛡️', '#4caf50', 'sc')}
+              </div>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6, fontSize:10.5 }}>
+                <span style={{ color: b ? b.c : 'transparent', fontWeight:700 }}>{b ? b.t : '·'}</span>
+                <span style={{ color:C.muted }}>{p.gain !== null && st.phase !== 'play' ? `+${p.gain}` : (p.status === 'active' || p.status === 'stay' || p.status === 'frozen' || p.status === 'flip7' ? `${f7Score(p)} pts` : '')}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {/* Actions */}
+      {myTurn && <div style={{ display:'flex', gap:8 }}>
+        <button onClick={() => setSt(s => f7Hit(s))} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>🃏 Tirer</button>
+        <button onClick={() => setSt(s => f7Stay(s))} style={gameBtn({ fontSize:13, padding:'9px 18px', background:'#4caf5018', borderColor:'#4caf5055', color:'#4caf50' })}>✋ Rester ({f7Score(me)} pts)</button>
+      </div>}
+      {myTarget && <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+        <div style={{ fontSize:12, fontWeight:700, color:'#a85ac0' }}>{f7Label(st.pending.card)} — à qui ?</div>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', justifyContent:'center' }}>
+          {f7Candidates(st, st.pending).map(id => (
+            <button key={id} onClick={() => setSt(s => f7Target(s, id))} style={gameBtn()}>{id === 0 ? 'Moi' : st.players[id].name}</button>
+          ))}
+        </div>
+      </div>}
+      {st.phase === 'round' && <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+        <div style={{ fontSize:12.5, color:C.muted }}>Fin de la manche {st.round} — {st.players.map(p => `${p.name} +${p.gain}`).join(' · ')}</div>
+        <button onClick={() => setSt(s => f7NewRound(s))} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>▶ Manche suivante</button>
+      </div>}
+      {st.phase === 'over' && <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+        <div style={{ fontSize:15, fontWeight:900, color: st.winner === 0 ? '#4caf50' : '#e05050' }}>
+          {st.winner === 0 ? '🏆 Tu gagnes avec ' + me.total + ' points !' : `😖 ${st.players[st.winner].name} gagne avec ${st.players[st.winner].total} points (toi : ${me.total})`}
+        </div>
+        <button onClick={() => setSt(f7NewGame())} style={gameBtn({ fontSize:13, padding:'9px 18px' })}>↻ Rejouer</button>
+      </div>}
+      {/* Journal */}
+      <div style={{ width:'100%', maxWidth:460, display:'flex', flexDirection:'column', gap:2, fontSize:11, color:C.muted, lineHeight:1.5 }}>
+        {st.log.map((l, i) => <div key={i} style={{ opacity: 0.5 + 0.5 * (i + 1) / st.log.length }}>{l}</div>)}
       </div>
     </GameWrap>
   );
@@ -26664,6 +26933,7 @@ const GAMES_HUB_STATS = [
   { id:'crossy', label:'Crossy Road', icon:'🐔', metric:'rangées franchies' },
   { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
+  { id:'flip7',  label:'Flip 7',      icon:'🃏', metric:'meilleur score' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
   { id:'guitar', label:'Guitar Hero', icon:'🎸', metric:'meilleur score' },
   { id:'piano',  label:'Piano Tiles', icon:'🎹', metric:'meilleur score' },
