@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.8';
+const APP_VERSION = '8.5.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12498,6 +12498,68 @@ function histSave(list) { return lsSet(HISTOIRE_LS, JSON.stringify(list.slice(0,
 
 const histTxt = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
 
+// ── 🖼️ IMAGES DE L'ŒUVRE — Google Custom Search JSON API (searchType=image) ──────
+// ⚠ « L'API Google Images » n'existe plus en accès libre : l'ancienne Image Search API est
+// FERMÉE depuis 2011 et il n'existe AUCUN point d'entrée keyless. Le seul moyen officiel de
+// requêter des images Google depuis un navigateur est la **Custom Search JSON API**, qui
+// exige DEUX identifiants personnels : une clé API Google Cloud (API « Custom Search »
+// activée) ET l'ID d'un moteur de recherche programmable (CX) configuré en « recherche sur
+// tout le Web » + « recherche d'images ». Ils se saisissent dans le module API (ligne
+// « Google Images »), exactement comme TMDB/YouTube — donc jamais commités.
+// ⚠ AUCUNE origine à ajouter à la CSP : `www.googleapis.com` est déjà en connect-src, et les
+// vignettes sont couvertes par `img-src https:`. Quota gratuit : 100 recherches/JOUR — d'où
+// une seule requête par fiche, dont le RÉSULTAT (des URL, jamais des images) est mémorisé
+// dans la fiche : rouvrir une fiche ne recoûte rien.
+const GIMG_KEY_LS = 'spotifyplus_gcse_key';
+const GIMG_CX_LS  = 'spotifyplus_gcse_cx';
+const GIMG_MAX    = 8;
+function gimgKey() { try { return localStorage.getItem(GIMG_KEY_LS) || ''; } catch { return ''; } }
+function gimgCx()  { try { return localStorage.getItem(GIMG_CX_LS)  || ''; } catch { return ''; } }
+function gimgConfigured() { return !!(gimgKey() && gimgCx()); }
+const GIMG_ERRS = {
+  NOCONF: "Recherche d'images non configurée : ajoute la clé API Google et l'ID du moteur dans le module API (ligne « Google Images »).",
+  QUOTA:  'Quota Google Images atteint (100 recherches/jour en gratuit) — réessaie demain.',
+  KEY:    "Clé API Google ou ID de moteur refusé — vérifie-les dans le module API.",
+  OFF:    "L'API « Custom Search » n'est pas activée sur ce projet Google Cloud.",
+  NET:    'Google Images est injoignable (réseau).',
+};
+function gimgErrMsg(e) {
+  const m = String((e && e.message) || e);
+  return (m.indexOf('GIMG:') === 0 && GIMG_ERRS[m.slice(5)]) || m;
+}
+// ⚠ https OBLIGATOIRE : `safeHref` accepte aussi http:, que la CSP `img-src https:` bloquerait
+// → une vignette en http s'afficherait cassée. Mieux vaut la jeter.
+function gimgHttps(u) { const h = safeHref(String(u || '')); return (h && h.indexOf('https://') === 0) ? h : null; }
+function gimgItem(it) {
+  if (!it) return null;
+  const im = it.image || {};
+  const thumb = gimgHttps(im.thumbnailLink) || gimgHttps(it.link);
+  if (!thumb) return null;                       // sans vignette affichable, la ligne ne sert à rien
+  return { thumb, url: gimgHttps(it.link) || thumb, page: gimgHttps(im.contextLink) || '',
+           title: histTxt(it.title, 120), host: histTxt(it.displayLink, 60) };
+}
+async function gimgSearch(q, n) {
+  const key = gimgKey(), cx = gimgCx();
+  if (!key || !cx) throw new Error('GIMG:NOCONF');
+  const url = 'https://www.googleapis.com/customsearch/v1?searchType=image&safe=active&hl=fr'
+    + '&num=' + Math.max(1, Math.min(10, n || GIMG_MAX))
+    + '&key=' + encodeURIComponent(key) + '&cx=' + encodeURIComponent(cx) + '&q=' + encodeURIComponent(q);
+  let r;
+  try { r = await fetch(url); } catch { throw new Error('GIMG:NET'); }
+  let j = null; try { j = await r.json(); } catch {}
+  if (!r.ok) {
+    // ⚠ Le STATUT ne suffit pas à diagnostiquer : quota dépassé, clé invalide et API non
+    // activée arrivent tous en 400/403 — c'est `error.errors[0].reason` qui tranche.
+    const er = (j && j.error) || {};
+    const reason = String((er.errors && er.errors[0] && er.errors[0].reason) || '');
+    if (r.status === 429 || /limitExceeded/i.test(reason)) throw new Error('GIMG:QUOTA');
+    if (/accessNotConfigured/i.test(reason)) throw new Error('GIMG:OFF');
+    if (r.status === 400 || r.status === 401 || r.status === 403) throw new Error('GIMG:KEY');
+    throw new Error('Google Images : HTTP ' + r.status + (er.message ? ' — ' + er.message : ''));
+  }
+  return (Array.isArray(j && j.items) ? j.items : []).map(gimgItem).filter(Boolean).slice(0, GIMG_MAX);
+}
+
 const HISTOIRE_SCHEMA = {
   type:'object',
   properties: {
@@ -12557,6 +12619,7 @@ function histNormalize(j, ville, grounded, nPhotos) {
     // safeHref écarte les schémas dangereux ET les chaînes vides → pas de lien mort affiché.
     sources:   (Array.isArray(j.sources) ? j.sources : []).map(u => safeHref(String(u || ''))).filter(Boolean).slice(0, 8),
     photos: nPhotos || 0,          // jamais l'image elle-même : juste le NOMBRE de photos jointes
+    images: [],                    // vignettes Google Images (URL seulement), remplies après coup
     grounded: !!grounded, at: Date.now(),
   };
 }
@@ -12581,6 +12644,19 @@ async function histAnalyze(ville, images) {
 
 const histDateFr = ts => { try { return new Date(ts).toLocaleDateString('fr-FR'); } catch { return ''; } };
 
+// Une vignette Google Images : un lien vers la page d'origine. Une image morte (lien
+// expiré côté Google) DISPARAÎT au lieu de laisser un cadre cassé.
+function HistImg({ im }) {
+  const [ko, setKo] = React.useState(false);
+  if (ko) return null;
+  return (
+    <a href={im.page || im.url} target="_blank" rel="noopener noreferrer" title={im.title || im.host}
+      style={{ flexShrink:0, display:'block' }}>
+      <img src={im.thumb} alt={im.title || ''} onError={() => setKo(true)}
+        style={{ width:108, height:80, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}`, display:'block', background:C.surfaceHigh }} />
+    </a>
+  );
+}
 // Une fiche rendue en entier (résumé + lien avec la ville).
 function HistoireFiche({ f }) {
   const meta = [f.type, f.auteur, f.epoque, f.lieu].filter(Boolean);
@@ -12598,6 +12674,14 @@ function HistoireFiche({ f }) {
           📍 {f.ville}{meta.length ? ' · ' + meta.join(' · ') : ''}
         </div>
       </div>
+      {!!(f.images || []).length && (
+        <div>
+          <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:3 }}>
+            {f.images.map((im, i) => <HistImg key={i} im={im} />)}
+          </div>
+          <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:3 }}>🖼️ Google Images — un clic ouvre la page d'origine</div>
+        </div>
+      )}
       {f.resume && block("📜 RÉSUMÉ DE L'ŒUVRE", f.resume)}
       {f.lien && block(`🔗 LIEN AVEC ${String(f.ville || '').toUpperCase()}`, f.lien)}
       {!!(f.aSavoir || []).length && (
@@ -12641,7 +12725,9 @@ function HistoirePanel() {
   const [err, setErr]       = React.useState('');
   const [list, setList]     = React.useState(histLoad);
   const [res, setRes]       = React.useState(() => histLoad()[0] || null);
+  const [imgMsg, setImgMsg] = React.useState('');    // '' | 'busy' | message d'erreur
   const hasKey = !!claudeKey();
+  const imgOn  = gimgConfigured();
   // ⚠ Les aperçus sont des object URL : on les révoque au démontage, sinon le navigateur
   // garde les images en mémoire tant que la page vit.
   const photosRef = React.useRef(photos); photosRef.current = photos;
@@ -12659,6 +12745,25 @@ function HistoirePanel() {
     const p = ps[i]; if (p && p.url) { try { URL.revokeObjectURL(p.url); } catch {} }
     return ps.filter((_, k) => k !== i);
   });
+  // ⚠ On repart de `histLoad()` (le disque) et non du state : la recherche d'images est
+  // asynchrone et peut aboutir APRÈS un autre enregistrement — sinon on réécrirait une
+  // liste périmée, comme dans Collection 8.1.4.
+  const patchFiche = (id, patch) => {
+    const next = histLoad().map(f => f.id === id ? { ...f, ...patch } : f);
+    setList(next); histSave(next);
+    setRes(r => (r && r.id === id) ? { ...r, ...patch } : r);
+  };
+  // UNE requête Google Images par fiche (quota gratuit : 100/jour). Le résultat est
+  // mémorisé DANS la fiche (des URL, jamais des images) → rouvrir une fiche ne recoûte rien.
+  const loadImages = async f => {
+    if (!f || !gimgConfigured()) return;
+    setImgMsg('busy');
+    try {
+      const imgs = await gimgSearch(`${f.oeuvre} ${f.ville}`, GIMG_MAX);
+      patchFiche(f.id, { images: imgs });
+      setImgMsg(imgs.length ? '' : "Aucune image trouvée pour cette œuvre.");
+    } catch (e) { setImgMsg(gimgErrMsg(e)); }
+  };
   const run = async () => {
     const v = ville.trim();
     if (!v || busy) return;
@@ -12669,8 +12774,9 @@ function HistoirePanel() {
         setErr("Réponse illisible de l'IA — relance, avec une photo plus nette si tu en as une.");
       } else {
         const next = [f].concat(list).slice(0, HISTOIRE_MAX);
-        setRes(f); setList(next);
+        setRes(f); setList(next); setImgMsg('');
         if (!histSave(next)) setErr('Fiche affichée mais NON enregistrée (stockage local plein) : elle disparaîtra au rechargement.');
+        else loadImages(f);        // illustration de la fiche — sans clé Google, no-op silencieux
       }
     } catch (e) {
       const m = String((e && e.message) || e);
@@ -12741,8 +12847,24 @@ function HistoirePanel() {
       </div>
 
       {res && (
-        <div style={{ background:C.surface, border:`1px solid ${HISTOIRE_COLOR}44`, borderRadius:10, padding:'12px 13px' }}>
+        <div style={{ background:C.surface, border:`1px solid ${HISTOIRE_COLOR}44`, borderRadius:10, padding:'12px 13px', display:'flex', flexDirection:'column', gap:9 }}>
           <HistoireFiche f={res} />
+          <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+            {imgOn ? (
+              <button onClick={() => loadImages(res)} disabled={imgMsg === 'busy'}
+                style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6,
+                  color: imgMsg === 'busy' ? C.dim : HISTOIRE_COLOR, fontSize:10.5, fontWeight:700,
+                  padding:'4px 9px', cursor: imgMsg === 'busy' ? 'default' : 'pointer', fontFamily:'inherit' }}>
+                {imgMsg === 'busy' ? '⏳ Recherche…' : ((res.images || []).length ? '↻ Images' : '🖼️ Chercher des images')}
+              </button>
+            ) : (
+              <span style={{ fontSize:9.5, color:C.dim, lineHeight:1.55 }}>
+                🖼️ Pour illustrer les fiches avec <b style={{ color:C.muted }}>Google Images</b>, renseigne la clé API Google
+                et l'ID du moteur de recherche programmable dans le module <b style={{ color:C.muted }}>API</b> (ligne « Google Images »).
+              </span>
+            )}
+            {imgMsg && imgMsg !== 'busy' && <span style={{ fontSize:9.5, color:'#f5b81f', lineHeight:1.55 }}>⚠ {imgMsg}</span>}
+          </div>
         </div>
       )}
 
@@ -13675,6 +13797,7 @@ const API_LIST = [
   // TV / Vidéo
   { id:'tmdb',          name:'TMDB',                 host:'api.themoviedb.org',              role:'TV Time — séries & films',         cat:'TV / Vidéo',     key:true },
   { id:'googleapis',    name:'Google APIs',          host:'www.googleapis.com',              role:'YouTube (vidéos) · Drive (sauvegarde)', cat:'TV / Vidéo', key:true },
+  { id:'google_images', name:'Google Images',        host:'www.googleapis.com',              role:"Images des œuvres (module Histoire) — Custom Search JSON API", cat:'Histoire', key:true },
   { id:'googlebooks',   name:'Google Books',         host:'www.googleapis.com',              role:'TV Time — recherche de livres',    cat:'TV / Vidéo',     key:false },
   { id:'openlibrary',   name:'Open Library',         host:'openlibrary.org',                 role:'TV Time — livres (repli)',         cat:'TV / Vidéo',     key:false },
   // Météo & géolocalisation
@@ -13732,7 +13855,7 @@ const API_LIST = [
   { id:'corseu',        name:'Proxy CORS eu.org',    host:'cors.eu.org',                     role:'Proxy CORS (repli)',               cat:'Proxies CORS',   key:false },
   { id:'allorigins',    name:'Proxy CORS allorigins',host:'api.allorigins.win',              role:'Proxy CORS (repli)',               cat:'Proxies CORS',   key:false },
 ];
-const API_CATS = ['Musique', 'TV / Vidéo', 'Météo & Géo', 'Finance', 'Actu', 'Emploi', 'Bon Plan / Santé', 'Jeux (stats)', 'Sauvegarde', 'IA', 'Proxies CORS'];
+const API_CATS = ['Musique', 'TV / Vidéo', 'Météo & Géo', 'Finance', 'Actu', 'Histoire', 'Emploi', 'Bon Plan / Santé', 'Jeux (stats)', 'Sauvegarde', 'IA', 'Proxies CORS'];
 function loadApiExport() { try { return JSON.parse(localStorage.getItem(API_EXPORT_LS)) || {}; } catch { return {}; } }
 function saveApiExport(v) { lsSet(API_EXPORT_LS, JSON.stringify(v)); }
 // Une API est exportée par défaut (clé absente = cochée) ; seul `false` explicite l'exclut.
@@ -13754,6 +13877,8 @@ const API_KEY_LS = {
                 { ls: 'spotifyplus_cr_key',    ph: 'Token API Clash Royale (IP 45.79.218.79)' } ],
   steam_api:  [ { ls: 'spotifyplus_steam_id',   ph: 'SteamID64 (17 chiffres — wishlist)' },
                 { ls: 'spotifyplus_steam_key',  ph: 'Clé Web API Steam (stats)' } ],
+  google_images:[{ ls: GIMG_KEY_LS,             ph: 'Clé API Google Cloud (API « Custom Search » activée)' },
+                { ls: GIMG_CX_LS,              ph: 'ID du moteur programmable / CX (programmablesearchengine.google.com)' } ],
   pcloud:     { ls: PCLOUD_CLIENT_LS,           ph: 'Client ID pCloud (docs.pcloud.com/my_apps)' },
 };
 // ── 7.6.55 — LIGNES EN ROUGE quand la clé / le compte n'est PAS renseigné ──────────
@@ -14017,6 +14142,7 @@ function buildBackup() {
     sport: lsJson('spotifyplus_sport') || null,
     // Clés / config d'API (chaînes brutes, comme tmdb_key/yt_key) — pour ne pas les re-saisir
     gemini_key: lsRaw('spotifyplus_gemini_key'),
+    gcse_key: lsRaw(GIMG_KEY_LS), gcse_cx: lsRaw(GIMG_CX_LS),
     claude_key: lsRaw(CLAUDE_LS),
     github_token: lsRaw('spotifyplus_github_token'),
     chess_user: lsRaw('spotifyplus_chess_user'),
@@ -14057,7 +14183,7 @@ const EXPORT_SECTIONS = [
   { key:'note',     label:'Note',         icon:'🗒️', hint:'notes (cryptées incluses, telles quelles)', fields:['notes', 'notes_enc_check'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Alertes',      icon:'🔔', hint:'rappels fixes + persos (dates & heures)', fields:['rappels', 'rappels_time', 'remembers'] },
-  { key:'comptes',  label:'Comptes & clés',icon:'🔐', hint:'clés/pseudos API (Claude, Gemini, GitHub, LoL, chess, speedrun)', fields:['gemini_key','claude_key','github_token','chess_user','speedrun_user','lol'] },
+  { key:'comptes',  label:'Comptes & clés',icon:'🔐', hint:'clés/pseudos API (Claude, Gemini, Google Images, GitHub, LoL, chess, speedrun)', fields:['gemini_key','claude_key','gcse_key','gcse_cx','github_token','chess_user','speedrun_user','lol'] },
   { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique + records de jeux", fields:['stats', 'listens', 'games'] },
   { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil + préférences', fields:['modules','home_modules','prefs'] },
 ];
@@ -14396,6 +14522,8 @@ function applyBackup(data) {
   // Clés / pseudos d'API — REMPLACÉS si non vides (comme tmdb_key/yt_key)
   putRaw('spotifyplus_gemini_key', data.gemini_key);
   putRaw(CLAUDE_LS, data.claude_key);
+  putRaw(GIMG_KEY_LS, data.gcse_key);
+  putRaw(GIMG_CX_LS, data.gcse_cx);
   putRaw('spotifyplus_github_token', data.github_token);
   putRaw('spotifyplus_chess_user', data.chess_user);
   putRaw('spotifyplus_speedrun_user', data.speedrun_user);

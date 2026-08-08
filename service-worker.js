@@ -112,7 +112,11 @@
 // « 23/03 » avec un petit trait au-dessus de chaque date).
 // v153 : bump de cache — nouveau module « Collection » (4 boutons carrés Cartes /
 // Displate / Pop / Autres, sans action pour l'instant).
-const CACHE  = 'spotifyplus-v223';
+// v223 : bump de cache — nouveau module « Histoire » (ville + photos → résumé de l'œuvre
+// et lien avec la ville, via l'API Claude).
+// v224 : bump de cache — Histoire : illustration des fiches par Google Images (Custom
+// Search JSON API, clé + ID de moteur saisis dans le module API).
+const CACHE  = 'spotifyplus-v224';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',
