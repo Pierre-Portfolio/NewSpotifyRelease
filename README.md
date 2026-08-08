@@ -10,7 +10,7 @@
 ## Aperçu
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
-Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, API, Météo, Finance, Collection, Emploi, Jeux, Bon Plan, TV Time, Note, Revente, Santé, Sport, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
+Au-delà de la musique, c'est un **hub perso** regroupant plusieurs modules (activables/désactivables) : Actu, API, Météo, Finance, Collection, Emploi, Histoire, Jeux, Bon Plan, TV Time, Note, Revente, Santé, Sport, To do, Maps, Mot de passe, Alertes/Remember, Stats et jeux (League of Legends).
 
 👉 **https://pierre-portfolio.github.io/NewSpotifyRelease/** — aucune installation, tout est statique sur GitHub Pages.
 
@@ -124,6 +124,20 @@ Mode **🧮 Calculatrice** entre Full et BullRun : calculatrice de poche 100 % l
 Activable/désactivable dans le Paramétrage comme les autres modules.
 
 **🃏 Analyse Cardmarket (nouveau)** : tout en bas de Bon Plan, une section **Analyse Cardmarket**. Un clic ouvre pour l'instant une petite fenêtre **« 🚧 En cours de construction »** — la place est réservée, la fonctionnalité arrive.
+
+### Histoire
+🏛️ **Nouveau module Histoire** (entre Frigo et Jeux) : tu es devant un monument, une statue, une fresque, un tableau — et tu veux savoir ce que c'est et **ce que ça vient faire dans cette ville**.
+
+C'est en trois gestes : **tape le nom de la ville** dans la barre de recherche, **ajoute des photos de l'œuvre** (bouton **📷 appareil photo** ou **🖼️ galerie**, jusqu'à 4 — chaque vignette a une croix pour la retirer), puis appuie sur **🏛️ Raconte-moi**. Claude identifie l'œuvre à partir de tes photos (il lit les plaques et les inscriptions visibles) et te rend :
+- **📜 Un résumé de l'œuvre** — ce que c'est, ce qu'elle représente, sa création, son style, son histoire jusqu'à aujourd'hui ;
+- **🔗 Le lien avec la ville** — pourquoi elle s'y trouve, ce qu'elle doit à l'histoire de la ville, ce qu'elle y représente aujourd'hui ;
+- **💡 Quelques faits marquants**, ainsi que le type, l'auteur, l'époque et l'endroit exact quand ils sont connus.
+
+**Sans photo, ça marche aussi** : tape juste une ville et Claude te raconte son œuvre la plus emblématique.
+
+Chaque fiche est **rangée dans « 🗂️ Mes fiches »** : tu la retrouves telle quelle à ta prochaine visite, tu peux la réafficher d'un clic ou la supprimer d'une croix. Elle part aussi dans **tes sauvegardes** (Drive, Dropbox, pCloud, MEGA, export JSON), avec une section d'export **« Histoire »** dédiée.
+
+⚠️ **Tes photos ne sont jamais enregistrées** — ni sur ton téléphone, ni sur Drive, ni dans les sauvegardes : elles servent à l'analyse puis disparaissent, seul le texte de la fiche est conservé. Il faut la **clé Claude** que tu as déjà renseignée dans le module **API** (ligne « anthropic ») ; sans clé, l'app te le dit et **aucune requête n'est envoyée**. Quand la recherche web est disponible, Claude s'appuie sur des pages réelles et **affiche ses sources** ; si elle ne l'est pas, la fiche est marquée **« sans recherche web »** pour que tu saches qu'il faut vérifier les dates et les noms.
 
 ### Collection
 🗃️ **Module Collection** (entre Bon Plan et Emploi). Dès que tu as descendu un peu la page, un **bouton rond ⬆ apparaît en bas à droite** et te ramène tout en haut d'un seul appui — pratique quand plusieurs collections sont dépliées. Les cinq catégories — **🃏 Cartes**, **🖼️ Displate**, **🧸 Pop**, **🎮 Jeux vidéo** et **📦 Autre** — sont des **sections dépliables**, **toutes repliées à l'ouverture**.

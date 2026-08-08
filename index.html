@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.5.7';
+const APP_VERSION = '8.5.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12465,6 +12465,311 @@ function EmploiPanel() {
   );
 }
 
+// ══════════════════════════════════════════════════════════════════
+// HISTOIRE — 🏛️ l'histoire d'une œuvre et son LIEN avec une ville
+//
+// Une barre de recherche (le nom de la VILLE), un bouton pour joindre des PHOTOS
+// de l'œuvre, un bouton pour lancer l'analyse → un appel DIRECT à l'API Claude
+// (`claudeGenerate`, clé perso `spotifyplus_claude_key` déjà utilisée par Revente /
+// Bon Plan / Santé — rien de nouveau à saisir, aucune origine à ajouter à la CSP,
+// api.anthropic.com y est déjà) qui renvoie :
+//   • un RÉSUMÉ de l'œuvre (ce que c'est, sa création, son histoire) ;
+//   • le LIEN entre cette œuvre et la ville tapée.
+//
+// ⚠ La recherche web côté Anthropic (`web_search_20250305`) est demandée pour ancrer la
+// réponse sur des pages réelles ; si l'outil est refusé, un 2e appel part SANS outil et
+// la fiche est marquée « non ancrée » (même repli que Bon Plan → Tous produits).
+// ⚠ LES PHOTOS NE SONT JAMAIS CONSERVÉES (ni localStorage, ni Drive, ni backup) : elles
+// sont réduites en mémoire par `frigoPhotoData`, envoyées au modèle, puis oubliées —
+// seule la FICHE TEXTE est enregistrée. Même règle que Santé (7.6.83) et Collection.
+// ══════════════════════════════════════════════════════════════════
+const HISTOIRE_COLOR   = '#41b0d8';   // bleu-cyan (entre Frigo et Jeux dans l'arc-en-ciel)
+const HISTOIRE_LS      = 'spotifyplus_histoire';
+const HISTOIRE_MAX     = 60;          // fiches conservées (les plus récentes en tête)
+const HISTOIRE_PHOTOS  = 4;           // photos jointes au maximum
+const HISTOIRE_SEARCHES = 5;          // recherches web autorisées côté Anthropic
+
+function histLoad() {
+  try { const a = JSON.parse(localStorage.getItem(HISTOIRE_LS)); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+// Renvoie le booléen de `lsSet` : une fiche qui n'a PAS pu être écrite doit être signalée,
+// sinon elle s'affiche comme enregistrée et disparaît au rechargement (cf. Collection 8.1.4).
+function histSave(list) { return lsSet(HISTOIRE_LS, JSON.stringify(list.slice(0, HISTOIRE_MAX))); }
+
+const histTxt = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
+
+const HISTOIRE_SCHEMA = {
+  type:'object',
+  properties: {
+    oeuvre:     { type:'string' },
+    type:       { type:'string' },
+    auteur:     { type:'string' },
+    epoque:     { type:'string' },
+    lieu:       { type:'string' },
+    resume:     { type:'string' },
+    lien_ville: { type:'string' },
+    a_savoir:   { type:'array', items:{ type:'string' } },
+    confiance:  { type:'string' },
+    sources:    { type:'array', items:{ type:'string' } },
+  },
+  required:['oeuvre','type','auteur','epoque','lieu','resume','lien_ville','a_savoir','confiance','sources'],
+  additionalProperties:false,
+};
+
+function histPrompt(ville, nPhotos) {
+  const L = [];
+  L.push("Tu es historien de l'art et guide-conférencier, spécialiste du patrimoine local. Tu réponds en français.");
+  if (nPhotos) {
+    L.push(`On te joint ${nPhotos} photo${nPhotos > 1 ? 's' : ''} d'une œuvre (monument, statue, fresque, tableau, vitrail, fontaine, édifice remarquable…) en rapport avec la ville de « ${ville} ».`);
+    L.push("Identifie l'œuvre à partir des photos : lis les inscriptions, plaques et signatures visibles, et appuie-toi sur le style, les matériaux et l'environnement.");
+  } else {
+    L.push(`AUCUNE photo n'est jointe : choisis alors l'œuvre la plus emblématique de la ville de « ${ville} » (monument, statue, fresque, tableau conservé sur place, édifice remarquable) et traite-la.`);
+  }
+  L.push('Rédige ensuite :');
+  L.push("• « resume » : un résumé de l'œuvre en 4 à 8 phrases — ce que c'est, ce qu'elle représente, sa création, son style, son histoire jusqu'à aujourd'hui.");
+  L.push(`• « lien_ville » : en 3 à 6 phrases, le LIEN PRÉCIS entre cette œuvre et ${ville} — pourquoi elle s'y trouve, ce qu'elle doit à l'histoire de la ville, ce qu'elle y représente aujourd'hui.`);
+  L.push("• « type », « auteur », « epoque », « lieu » (où l'œuvre se trouve dans la ville) : chaîne VIDE si tu ne sais pas.");
+  L.push('• « a_savoir » : 2 à 4 faits marquants, une phrase chacun.');
+  L.push("N'INVENTE RIEN : pas de faux auteur, pas de fausse date, pas d'URL fabriquée. Si l'identification est incertaine, dis-le franchement dans « confiance » et reste prudent dans le reste.");
+  L.push('« sources » : les URL réellement consultées (liste VIDE si tu n\'as rien consulté).');
+  L.push('Réponds UNIQUEMENT en JSON : {"oeuvre":"…","type":"…","auteur":"…","epoque":"…","lieu":"…","resume":"…","lien_ville":"…","a_savoir":["…"],"confiance":"…","sources":["…"]}');
+  return L.join('\n');
+}
+
+// Une fiche sans nom d'œuvre, ou sans résumé NI lien, est inexploitable → `null` (l'UI le dit
+// au lieu d'enregistrer une fiche vide).
+function histNormalize(j, ville, grounded, nPhotos) {
+  if (!j || typeof j !== 'object') return null;
+  const oeuvre = histTxt(j.oeuvre, 120);
+  const resume = histTxt(j.resume, 3000);
+  const lien   = histTxt(j.lien_ville, 2500);
+  if (!oeuvre || (!resume && !lien)) return null;
+  return {
+    id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    ville, oeuvre,
+    type:   histTxt(j.type, 60),
+    auteur: histTxt(j.auteur, 120),
+    epoque: histTxt(j.epoque, 60),
+    lieu:   histTxt(j.lieu, 140),
+    resume, lien,
+    aSavoir:   (Array.isArray(j.a_savoir) ? j.a_savoir : []).map(x => histTxt(x, 300)).filter(Boolean).slice(0, 5),
+    confiance: histTxt(j.confiance, 250),
+    // safeHref écarte les schémas dangereux ET les chaînes vides → pas de lien mort affiché.
+    sources:   (Array.isArray(j.sources) ? j.sources : []).map(u => safeHref(String(u || ''))).filter(Boolean).slice(0, 8),
+    photos: nPhotos || 0,          // jamais l'image elle-même : juste le NOMBRE de photos jointes
+    grounded: !!grounded, at: Date.now(),
+  };
+}
+// `images` = [{ mimeType, data }] produits par frigoPhotoData (jamais stockés).
+async function histAnalyze(ville, images) {
+  const prompt = histPrompt(ville, images.length);
+  let txt, grounded = true;
+  try {
+    txt = await claudeGenerate({ text: prompt, images, maxTokens: 8000,
+      tools: [{ type:'web_search_20250305', name:'web_search', max_uses: HISTOIRE_SEARCHES }] });
+  } catch (e) {
+    // Pas de clé → inutile de retenter. Sinon : 2e essai SANS outil (le format de sortie
+    // imposé est alors possible, `schema` et `tools` étant incompatibles).
+    if (String((e && e.message) || '').includes('NO_KEY')) throw e;
+    grounded = false;
+    txt = await claudeGenerate({ text: prompt, images, schema: HISTOIRE_SCHEMA, maxTokens: 4000 });
+  }
+  const j = geminiExtract(txt, '{', '}');
+  if (!j) return null;
+  return histNormalize(j, ville, grounded, images.length);
+}
+
+const histDateFr = ts => { try { return new Date(ts).toLocaleDateString('fr-FR'); } catch { return ''; } };
+
+// Une fiche rendue en entier (résumé + lien avec la ville).
+function HistoireFiche({ f }) {
+  const meta = [f.type, f.auteur, f.epoque, f.lieu].filter(Boolean);
+  const block = (title, body) => (
+    <div style={{ background:C.surfaceHigh, borderRadius:10, padding:'10px 12px' }}>
+      <div style={{ fontSize:10, fontWeight:800, color:HISTOIRE_COLOR, letterSpacing:'0.06em', marginBottom:5 }}>{title}</div>
+      <div style={{ fontSize:12.5, color:C.text, lineHeight:1.65, whiteSpace:'pre-wrap' }}>{body}</div>
+    </div>
+  );
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:9 }}>
+      <div>
+        <div style={{ fontSize:15, fontWeight:800, color:C.text, lineHeight:1.3 }}>🏛️ {f.oeuvre}</div>
+        <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:3 }}>
+          📍 {f.ville}{meta.length ? ' · ' + meta.join(' · ') : ''}
+        </div>
+      </div>
+      {f.resume && block("📜 RÉSUMÉ DE L'ŒUVRE", f.resume)}
+      {f.lien && block(`🔗 LIEN AVEC ${String(f.ville || '').toUpperCase()}`, f.lien)}
+      {!!(f.aSavoir || []).length && (
+        <div style={{ background:C.surfaceHigh, borderRadius:10, padding:'10px 12px' }}>
+          <div style={{ fontSize:10, fontWeight:800, color:HISTOIRE_COLOR, letterSpacing:'0.06em', marginBottom:5 }}>💡 À SAVOIR</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+            {f.aSavoir.map((a, i) => (
+              <div key={i} style={{ fontSize:11.5, color:C.text, lineHeight:1.55, display:'flex', gap:6 }}>
+                <span style={{ color:HISTOIRE_COLOR, flexShrink:0 }}>•</span><span>{a}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {f.confiance && <div style={{ fontSize:10, color:C.muted, fontStyle:'italic', lineHeight:1.55 }}>🎯 {f.confiance}</div>}
+      {!!(f.sources || []).length && (
+        <div style={{ display:'flex', gap:5, flexWrap:'wrap', alignItems:'center' }}>
+          <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>SOURCES</span>
+          {f.sources.map((u, i) => {
+            let host = u; try { host = new URL(u).hostname.replace(/^www\./, ''); } catch {}
+            return (
+              <a key={i} href={u} target="_blank" rel="noopener noreferrer"
+                style={{ fontSize:9, color:HISTOIRE_COLOR, border:`1px solid ${HISTOIRE_COLOR}44`, borderRadius:5,
+                  padding:'2px 6px', textDecoration:'none', fontFamily:'DM Mono,monospace' }}>{host} ↗</a>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.55 }}>
+        Fiche rédigée par Claude le {histDateFr(f.at)}{f.photos ? ` à partir de ${f.photos} photo(s)` : ' sans photo'}
+        {f.grounded ? ', avec recherche web.' : " — SANS recherche web (connaissances du modèle seules) : vérifie les dates et les noms."}
+      </div>
+    </div>
+  );
+}
+
+function HistoirePanel() {
+  const [ville, setVille]   = React.useState('');
+  const [photos, setPhotos] = React.useState([]);      // [{ url, img }] — jamais persisté
+  const [busy, setBusy]     = React.useState(false);
+  const [err, setErr]       = React.useState('');
+  const [list, setList]     = React.useState(histLoad);
+  const [res, setRes]       = React.useState(() => histLoad()[0] || null);
+  const hasKey = !!claudeKey();
+  // ⚠ Les aperçus sont des object URL : on les révoque au démontage, sinon le navigateur
+  // garde les images en mémoire tant que la page vit.
+  const photosRef = React.useRef(photos); photosRef.current = photos;
+  React.useEffect(() => () => photosRef.current.forEach(p => { try { URL.revokeObjectURL(p.url); } catch {} }), []);
+
+  const addPhoto = async f => {
+    if (busy || photos.length >= HISTOIRE_PHOTOS) return;
+    setErr('');
+    const img = await frigoPhotoData(f);
+    if (!img) { setErr("Cette image n'a pas pu être lue — essaie une autre photo."); return; }
+    let url = ''; try { url = URL.createObjectURL(f); } catch {}
+    setPhotos(ps => ps.concat([{ url, img }]).slice(0, HISTOIRE_PHOTOS));
+  };
+  const dropPhoto = i => setPhotos(ps => {
+    const p = ps[i]; if (p && p.url) { try { URL.revokeObjectURL(p.url); } catch {} }
+    return ps.filter((_, k) => k !== i);
+  });
+  const run = async () => {
+    const v = ville.trim();
+    if (!v || busy) return;
+    setBusy(true); setErr('');
+    try {
+      const f = await histAnalyze(v, photos.map(p => p.img));
+      if (!f) {
+        setErr("Réponse illisible de l'IA — relance, avec une photo plus nette si tu en as une.");
+      } else {
+        const next = [f].concat(list).slice(0, HISTOIRE_MAX);
+        setRes(f); setList(next);
+        if (!histSave(next)) setErr('Fiche affichée mais NON enregistrée (stockage local plein) : elle disparaîtra au rechargement.');
+      }
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      setErr(m.includes('NO_KEY')
+        ? "Aucune clé Claude enregistrée — ajoute-la dans le module API (ligne « anthropic »)."
+        : m);
+    }
+    setBusy(false);
+  };
+  const removeFiche = id => {
+    const next = list.filter(f => f.id !== id);
+    setList(next); histSave(next);
+    setRes(r => (r && r.id === id) ? null : r);
+  };
+  const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${ville.trim() ? HISTOIRE_COLOR + '88' : C.border}`,
+    borderRadius:6, padding:'8px 10px', fontSize:13, color:C.text, outline:'none', fontFamily:'inherit' };
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'11px 13px', display:'flex', flexDirection:'column', gap:9 }}>
+        <div style={{ fontSize:11, color:C.muted, lineHeight:1.6 }}>
+          Tape le nom d'une <b style={{ color:C.text }}>ville</b>, ajoute si tu veux des <b style={{ color:C.text }}>photos</b> de
+          l'œuvre que tu as devant toi, et Claude te rend son <b style={{ color:C.text }}>résumé</b> ainsi que son <b style={{ color:C.text }}>lien avec la ville</b>.
+          Sans photo, il prend l'œuvre la plus emblématique de la ville.
+        </div>
+
+        {/* Barre de recherche : la VILLE + le bouton d'analyse */}
+        <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+          <input value={ville} onChange={e => setVille(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') run(); }}
+            placeholder="Nom de la ville (ex. Rouen)" style={inputStyle} />
+          <button onClick={run} disabled={busy || !ville.trim()}
+            style={{ background: (busy || !ville.trim()) ? 'none' : `${HISTOIRE_COLOR}22`,
+              border:`1px solid ${(busy || !ville.trim()) ? C.border : HISTOIRE_COLOR + '88'}`, borderRadius:6,
+              color: (busy || !ville.trim()) ? C.dim : HISTOIRE_COLOR, fontSize:12, fontWeight:700,
+              padding:'8px 13px', cursor: (busy || !ville.trim()) ? 'default' : 'pointer', flexShrink:0, fontFamily:'inherit' }}>
+            {busy ? '⏳' : "🏛️ Raconte-moi"}
+          </button>
+        </div>
+
+        {/* Bouton d'ajout de photos (appareil photo OU galerie) + vignettes */}
+        <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+          {photos.length < HISTOIRE_PHOTOS
+            ? <VetPhotoPick onFile={addPhoto} disabled={busy} color={HISTOIRE_COLOR} hasPhoto={!!photos.length} />
+            : <span style={{ fontSize:10, color:C.muted }}>{HISTOIRE_PHOTOS} photos maximum.</span>}
+          <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>les photos ne sont jamais enregistrées</span>
+        </div>
+        {!!photos.length && (
+          <div style={{ display:'flex', gap:7, flexWrap:'wrap' }}>
+            {photos.map((p, i) => (
+              <div key={i} style={{ position:'relative' }}>
+                <img src={p.url} alt="" style={{ width:74, height:74, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}`, display:'block' }} />
+                <button onClick={() => dropPhoto(i)} aria-label="Retirer cette photo" title="Retirer cette photo"
+                  style={{ position:'absolute', top:-6, right:-6, width:20, height:20, borderRadius:'50%', background:C.surfaceHigh,
+                    border:`1px solid ${C.border}`, color:'#e05050', fontSize:11, lineHeight:1, cursor:'pointer', padding:0 }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!hasKey && (
+          <div style={{ fontSize:10, color:'#f5b81f', lineHeight:1.55, background:'#f5b81f14', border:'1px solid #f5b81f55', borderRadius:8, padding:'7px 9px' }}>
+            ⚠ Aucune clé Claude enregistrée : l'analyse est impossible. Ajoute-la dans le module <b>API</b> (ligne « anthropic »).
+          </div>
+        )}
+        {busy && <div style={{ fontSize:11, color:HISTOIRE_COLOR }}>⏳ Claude cherche l'histoire de cette œuvre…</div>}
+        {err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.55 }}>⚠ {err}</div>}
+      </div>
+
+      {res && (
+        <div style={{ background:C.surface, border:`1px solid ${HISTOIRE_COLOR}44`, borderRadius:10, padding:'12px 13px' }}>
+          <HistoireFiche f={res} />
+        </div>
+      )}
+
+      <StatsCollapse title={`🗂️ MES FICHES · ${list.length}`} color={HISTOIRE_COLOR} defaultOpen={false}>
+        {!list.length && <div style={{ fontSize:11, color:C.dim, fontStyle:'italic' }}>Aucune fiche pour l'instant — lance une première recherche ci-dessus.</div>}
+        {list.map(f => (
+          <div key={f.id} style={{ display:'flex', alignItems:'center', gap:8, borderBottom:`1px solid ${C.border}`, paddingBottom:7 }}>
+            <button onClick={() => setRes(f)} title="Réafficher cette fiche"
+              style={{ flex:1, minWidth:0, background:'none', border:'none', textAlign:'left', cursor:'pointer', padding:0, fontFamily:'inherit' }}>
+              <div style={{ fontSize:12, fontWeight:700, color: (res && res.id === f.id) ? HISTOIRE_COLOR : C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{f.oeuvre}</div>
+              <div style={{ fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace' }}>📍 {f.ville} · {histDateFr(f.at)}</div>
+            </button>
+            <button onClick={() => removeFiche(f.id)} aria-label="Supprimer cette fiche" title="Supprimer cette fiche"
+              style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:12, lineHeight:1, padding:'3px 8px', cursor:'pointer', flexShrink:0 }}>×</button>
+          </div>
+        ))}
+      </StatsCollapse>
+
+      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.55 }}>
+        Les fiches sont rédigées par {CLAUDE_MODEL} depuis ton navigateur, avec ta clé. Elles restent sur cet appareil
+        (et dans tes sauvegardes) ; les photos, elles, ne sont ni enregistrées ni envoyées ailleurs qu'au modèle.
+      </div>
+    </div>
+  );
+}
+
+
 function Home({ isMobile }) {
   const [connecting, setConnecting] = React.useState(false);
   // Outils accessibles SANS connexion (tout est local) : 🗒️ Notes + 🧮 Calculatrice + 🎮 Jeux — panneau superposé
@@ -13588,6 +13893,7 @@ const TOGGLE_MODULES = [
   { id:'emploi',     label:'Emploi',      icon:'💼', color:EMPLOI_COLOR, desktop:'emploi',   mobile:'emploi' },
   { id:'finance',    label:'Finance',     icon:'📈', color:'#4ea3f5', desktop:'finance',    mobile:'finance' },
   { id:'frigo',      label:'Frigo',       icon:'🧊', color:'#47a8de', desktop:'frigo',      mobile:'frigo' },
+  { id:'histoire',   label:'Histoire',    icon:'🏛️', color:HISTOIRE_COLOR, desktop:'histoire', mobile:'histoire' },
   { id:'games',      label:'Jeux',        icon:'🎮', color:GAMES_COLOR, desktop:'games',     mobile:'games' },
   { id:'maps',       label:'Maps',        icon:'🗺️', color:'#2fc1c1', desktop:'maps',       mobile:'maps' },
   { id:'meteo',      label:'Météo',       icon:'🌤', color:'#35c5a8', desktop:'meteo',      mobile:'meteo' },
@@ -13702,6 +14008,9 @@ function buildBackup() {
     // Collection : références possédées par sous-collection (cartes, Displate, Pop…).
     // ⚠ AUCUNE image n'y est stockée, seulement l'ADRESSE de la vignette distante.
     collection: lsJson(COLLECTION_LS) || null,
+    // Histoire : fiches d'œuvres rédigées par l'IA (⚠ JAMAIS les photos, qui ne sont
+    // de toute façon pas conservées — seul le texte de la fiche vit ici)
+    histoire: (() => { const a = lsJson(HISTOIRE_LS); return Array.isArray(a) ? a : null; })(),
     // Emploi : salaire + secteur choisi
     emploi: lsJson('spotifyplus_emploi') || null,
     // Sport : exercices cochés par partie du corps
@@ -13742,6 +14051,7 @@ const EXPORT_SECTIONS = [
   { key:'vetement', label:'Vêtement',     icon:'👕', hint:'inventaire + fiches + marques (photos sur Drive)', fields:['vetement'] },
   { key:'revente',  label:'Revente',      icon:'🏷️', hint:'articles + annonces rédigées (photos sur Drive)', fields:['revente'] },
   { key:'collection', label:'Collection',  icon:'🗃️', hint:'cartes, Displate, Pop, jeux… (références, pas les images)', fields:['collection'] },
+  { key:'histoire', label:'Histoire',     icon:'🏛️', hint:"fiches d'œuvres (résumé + lien avec la ville)", fields:['histoire'] },
   { key:'emploi',   label:'Emploi',       icon:'💼', hint:'salaire + secteur',           fields:['emploi'] },
   { key:'sport',    label:'Sport',        icon:'🏋️', hint:'exercices cochés',           fields:['sport'] },
   { key:'note',     label:'Note',         icon:'🗒️', hint:'notes (cryptées incluses, telles quelles)', fields:['notes', 'notes_enc_check'] },
@@ -14056,6 +14366,17 @@ function applyBackup(data) {
       const seen = new Set(cur.map(a => a && a.id));
       data.revente.annonces.forEach(a => { if (a && a.id && !seen.has(a.id)) { cur.push(a); seen.add(a.id); } });
       put(REVENTE_LS, { annonces: cur, provider: (local && local.provider) || data.revente.provider || 'claude' });
+    } catch {}
+  }
+  // Histoire — fiches FUSIONNÉES par id (le local gagne sur un id déjà présent, les fiches
+  // absentes sont ajoutées), les plus récentes en tête.
+  if (Array.isArray(data.histoire)) {
+    try {
+      const cur = histLoad();
+      const seen = new Set(cur.map(f => f && f.id));
+      data.histoire.forEach(f => { if (f && f.id && f.oeuvre && !seen.has(f.id)) { cur.push(f); seen.add(f.id); } });
+      cur.sort((a, b) => (b.at || 0) - (a.at || 0));
+      put(HISTOIRE_LS, cur.slice(0, HISTOIRE_MAX));
     } catch {}
   }
   // Vêtement — inventaire + fiches + marques. Les PHOTOS ne sont pas dans l'export : elles
@@ -30378,7 +30699,7 @@ function MobileApp() {
   // 3e élément = couleur du libellé. ORDRE ALPHABÉTIQUE voulu par l'utilisateur
   // (Actu → À propos) + ARC-EN-CIEL violet → indigo → bleu-indigo → bleu → cyan →
   // cyan-vert → vert-cyan → vert → jaune → ambre → orange → rouge (À propos).
-  const allOverflowTabs = [['actu','Actu',ACTU_COLOR],['rappel','Alertes','#6f7bf5'],['api','API',API_COLOR],['compare','Bon Plan',COMPARE_COLOR],['collection','Collection',COLLECTION_COLOR],['emploi','Emploi',EMPLOI_COLOR],['finance','Finance',FINANCE_CYAN],['frigo','Frigo','#47a8de'],['games','Jeux',GAMES_COLOR],['maps','Maps',MAPS_COLOR],['meteo','Météo',METEO_BLUE],['mdp','Mot de Passe',MDP_AMBER],['musique','Musique',MUSIQUE_COLOR],['note','Note',NOTE_COLOR],['revente','Revente',REVENTE_COLOR],['food','Santé',FOOD_COLOR],['sport','Sport',SPORT_COLOR],['todo','To Do',TODO_GREEN],['tvtime','TV Time',TVTIME_COLOR],['vetement','Vêtement','#f59a2e'],['statspanel','Stats','#f5813c'],['stats','À propos','#e05050']];
+  const allOverflowTabs = [['actu','Actu',ACTU_COLOR],['rappel','Alertes','#6f7bf5'],['api','API',API_COLOR],['compare','Bon Plan',COMPARE_COLOR],['collection','Collection',COLLECTION_COLOR],['emploi','Emploi',EMPLOI_COLOR],['finance','Finance',FINANCE_CYAN],['frigo','Frigo','#47a8de'],['histoire','Histoire',HISTOIRE_COLOR],['games','Jeux',GAMES_COLOR],['maps','Maps',MAPS_COLOR],['meteo','Météo',METEO_BLUE],['mdp','Mot de Passe',MDP_AMBER],['musique','Musique',MUSIQUE_COLOR],['note','Note',NOTE_COLOR],['revente','Revente',REVENTE_COLOR],['food','Santé',FOOD_COLOR],['sport','Sport',SPORT_COLOR],['todo','To Do',TODO_GREEN],['tvtime','TV Time',TVTIME_COLOR],['vetement','Vêtement','#f59a2e'],['statspanel','Stats','#f5813c'],['stats','À propos','#e05050']];
   // Modules désactivés dans le Paramétrage (À propos) → onglets masqués (clé mobile)
   const disabledMobile = React.useMemo(() => {
     const set = new Set();
@@ -30494,6 +30815,12 @@ function MobileApp() {
           <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
             <div style={{ fontSize:10, fontWeight:700, color:'#47a8de', letterSpacing:'0.07em' }}>FRIGO</div>
             <FrigoPanel />
+          </div>
+        )}
+        {tab === 'histoire' && (
+          <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:10 }}>
+            <div style={{ fontSize:10, fontWeight:700, color:HISTOIRE_COLOR, letterSpacing:'0.07em' }}>HISTOIRE</div>
+            <HistoirePanel />
           </div>
         )}
         {tab === 'games' && (
@@ -30633,6 +30960,7 @@ function WebApp() {
     ['emploi',     'Emploi'],
     ['finance',    'Finance'],
     ['frigo',      'Frigo'],
+    ['histoire',   'Histoire'],
     ['games',      'Jeux'],
     ['maps',       'Maps'],
     ['meteo',      'Météo'],
@@ -30657,6 +30985,7 @@ function WebApp() {
     meteo:      { heading:'MÉTÉO',        color:METEO_BLUE,    node:<MeteoPanel />, selfHeading:true },
     finance:    { heading:'FINANCE',      color:FINANCE_CYAN,  node:<FinancePanel />, selfHeading:true },
     frigo:      { heading:'FRIGO',        color:'#47a8de',     node:<FrigoPanel /> },
+    histoire:   { heading:'HISTOIRE',     color:HISTOIRE_COLOR, node:<HistoirePanel /> },
     games:      { heading:'JEUX',         color:GAMES_COLOR,   node:<JeuxPanel />, selfHeading:true },
     compare:    { heading:'BON PLAN',     color:COMPARE_COLOR, node:<ComparePanel /> },
     collection: { heading:'COLLECTION',   color:COLLECTION_COLOR, node:<CollectionPanel />, selfHeading:true },
