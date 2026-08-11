@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.6.9';
+const APP_VERSION = '8.7.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5976,9 +5976,10 @@ function lmgWedge(v1, v2, r) {
   const a = lmgPt(v1, r), b = lmgPt(v2, r);
   return `M ${LMG_CX} ${LMG_CY} L ${a[0].toFixed(2)} ${a[1].toFixed(2)} A ${r} ${r} 0 0 1 ${b[0].toFixed(2)} ${b[1].toFixed(2)} Z`;
 }
-// Roue. `target` null = bande de score cachée · `value` null = aiguille cachée ·
-// `onChange` absent = cadran en lecture seule.
-function LmgWheel({ value, target, onChange }) {
+// Roue. `target` null = bande de score cachée · `value` null = aiguille cachée · `marks` =
+// PLUSIEURS aiguilles `{ v, color, label }` (révélation collective) · `onChange` absent =
+// cadran en lecture seule.
+function LmgWheel({ value, marks, target, onChange }) {
   const box = React.useRef(null);
   const drag = React.useRef(false);
   const set = e => {
@@ -5994,7 +5995,8 @@ function LmgWheel({ value, target, onChange }) {
   const down = e => { if (!onChange) return; drag.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} set(e); };
   const move = e => { if (drag.current) set(e); };
   const up = () => { drag.current = false; };
-  const needle = value == null ? null : lmgPt(value, LMG_R * 0.86);
+  // Une seule aiguille rouge (phase de placement) OU toutes celles de la manche (révélation).
+  const pins = (marks && marks.length) ? marks : (value == null ? [] : [{ v: value, color:'#ff2d55' }]);
   return (
     <div ref={box} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
       style={{ width:'100%', maxWidth:320, aspectRatio:'1', touchAction:'none', cursor: onChange ? 'pointer' : 'default', userSelect:'none' }}>
@@ -6020,7 +6022,18 @@ function LmgWheel({ value, target, onChange }) {
           });
         })}
         <line x1={LMG_CX - LMG_R} y1={LMG_CY} x2={LMG_CX + LMG_R} y2={LMG_CY} stroke="#0f4a92" strokeWidth="3" />
-        {needle && <line x1={LMG_CX} y1={LMG_CY} x2={needle[0]} y2={needle[1]} stroke="#ff2d55" strokeWidth="11" strokeLinecap="round" />}
+        {pins.map((m, k) => {
+          const pt = lmgPt(m.v, LMG_R * 0.86);
+          return (
+            <g key={k}>
+              <line x1={LMG_CX} y1={LMG_CY} x2={pt[0]} y2={pt[1]} stroke={m.color} strokeWidth={m.label ? 7 : 11} strokeLinecap="round" />
+              {/* Pastille à l'initiale du joueur : sans elle, plusieurs aiguilles de couleurs
+                  proches seraient impossibles à attribuer d'un coup d'œil. */}
+              {m.label && <circle cx={pt[0]} cy={pt[1]} r="15" fill={m.color} stroke="#00000066" strokeWidth="2" />}
+              {m.label && <text x={pt[0]} y={pt[1]} fill="#101014" fontSize="14" fontWeight="900" textAnchor="middle" dominantBaseline="middle">{m.label}</text>}
+            </g>
+          );
+        })}
         <circle cx={LMG_CX} cy={LMG_CY} r="28" fill="#ff2d55" stroke="#ffffff55" strokeWidth="2" />
       </svg>
     </div>
@@ -6033,7 +6046,11 @@ function GameLetMeGuess() {
   const [names, setNames] = React.useState(() => Array(LMG_MAX_P).fill(''));
   const [game, setGame]   = React.useState(null);      // { players, scores, order:[idx…], i, pair, target }
   const [guess, setGuess] = React.useState(0.5);
-  const [gain, setGain]   = React.useState(0);
+  // ⚠ 8.7.0 — CHACUN donne SA réponse (demande utilisateur) : les devineurs passent l'appareil
+  // à tour de rôle, et la roue n'est révélée qu'À LA FIN, avec TOUTES les aiguilles d'un coup.
+  const [answers, setAnswers] = React.useState([]);    // [{ p:index du joueur, v:position }]
+  const [gi, setGi]       = React.useState(0);         // devineur en cours
+  const [result, setResult] = React.useState(null);    // { pts:[{p,v,s}], avg } de la manche
   // Flèches ← → pour affiner l'aiguille au clavier (le doigt/la souris restent le moyen principal).
   React.useEffect(() => {
     if (phase !== 'guess') return;
@@ -6051,19 +6068,30 @@ function GameLetMeGuess() {
     const order = [];
     for (let t = 0; t < turns; t++) players.forEach((_, i) => order.push(i));
     setGame({ players, scores: players.map(() => 0), order, i:0, ...lmgRound() });
-    setGuess(0.5); setGain(0); setPhase('pass');
+    setGuess(0.5); setAnswers([]); setGi(0); setResult(null); setPhase('pass');
   };
-  const validate = () => {
-    const pts = lmgScore(guess, game.target);
-    setGain(pts);
-    setGame(g => ({ ...g, scores: g.scores.map((s, k) => k === g.order[g.i] ? s + pts : s) }));
+  // Chaque devineur valide SA position ; quand le dernier a répondu, on calcule et on révèle.
+  const submitGuess = () => {
+    const na = answers.concat([{ p: guessers[gi], v: guess }]);
+    setAnswers(na);
+    if (gi + 1 < guessers.length) { setGi(gi + 1); setGuess(0.5); setPhase('gpass'); return; }
+    const pts = na.map(a => ({ ...a, s: lmgScore(a.v, game.target) }));
+    // ⚠ Le MENEUR marque la MOYENNE de ses devineurs (arrondie) : c'est la qualité de son
+    // indice qu'on mesure, et un indice compris par tout le monde vaut mieux qu'un coup de
+    // chance isolé. Chaque devineur marque, lui, ses propres points.
+    const avg = Math.round(pts.reduce((s, a) => s + a.s, 0) / (pts.length || 1));
+    setResult({ pts, avg });
+    setGame(g => ({ ...g, scores: g.scores.map((s, k) => {
+      const mine = pts.find(a => a.p === k);
+      return s + (mine ? mine.s : 0) + (k === g.order[g.i] ? avg : 0);
+    }) }));
     setPhase('reveal');
   };
   const next = () => {
     const ni = game.i + 1;
     if (ni >= game.order.length) { setPhase('over'); return; }
     setGame(g => ({ ...g, i:ni, ...lmgRound() }));
-    setGuess(0.5); setPhase('pass');
+    setGuess(0.5); setAnswers([]); setGi(0); setResult(null); setPhase('pass');
   };
   const card = partyCard(LMG_COLOR);
   const big = extra => gameBtn({ padding:'11px 20px', fontSize:13, ...(extra || {}) });
@@ -6092,6 +6120,9 @@ function GameLetMeGuess() {
   );
 
   const meneur = game.players[game.order[game.i]];
+  // Tous les joueurs SAUF le meneur, dans l'ordre : ils répondent chacun leur tour.
+  const guessers = game.players.map((_, i) => i).filter(i => i !== game.order[game.i]);
+  const initial = n => ((n || '').trim().charAt(0) || '?').toUpperCase();
   const bar = (
     <>
       <span style={{ fontSize:12, color:C.muted }}>Manche <b style={{ color:C.text }}>{game.i + 1}/{game.order.length}</b> · Total <b style={{ color:LMG_COLOR }}>{game.scores.reduce((s, v) => s + v, 0)}</b></span>
@@ -6118,36 +6149,75 @@ function GameLetMeGuess() {
         {/* Aiguille VOLONTAIREMENT absente : le meneur n'a pas à voir où en est le curseur. */}
         <LmgWheel value={null} target={game.target} />
         {scale(game.pair)}
-        <button onClick={() => setPhase('guess')} style={big()}>🙈 J'ai donné mon indice — cacher</button>
+        <button onClick={() => { setGi(0); setGuess(0.5); setPhase('gpass'); }} style={big()}>🙈 J'ai donné mon indice — cacher</button>
       </div>
     </GameWrap>
   );
 
-  if (phase === 'guess') return (
-    <GameWrap bar={bar} hint="Tout le monde SAUF le meneur : discutez, puis faites glisser l'aiguille (ou flèches ← →) là où vous pensez que la cible se cache.">
-      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:10, width:'100%' }}>
-        <div style={{ fontSize:12.5, fontWeight:800, color:C.text }}>Indice de {meneur} — à vous de placer l'aiguille</div>
-        <LmgWheel value={guess} target={null} onChange={setGuess} />
-        {scale(game.pair)}
-        <div style={{ display:'flex', gap:6 }}>
-          <button onClick={() => setGuess(v => Math.max(0, v - 0.01))} aria-label="Décaler à gauche" style={gameBtn()}>◀</button>
-          <button onClick={validate} style={big()}>✅ Valider la position</button>
-          <button onClick={() => setGuess(v => Math.min(1, v + 0.01))} aria-label="Décaler à droite" style={gameBtn()}>▶</button>
+  // ── Chacun son tour : passage de l'appareil au devineur suivant ──
+  if (phase === 'gpass') {
+    const who = game.players[guessers[gi]];
+    return (
+      <GameWrap bar={bar}>
+        <div style={card}>
+          <PartyAvatar name={who} idx={guessers[gi]} />
+          <div style={{ fontSize:11, color:C.muted, marginBottom:-6 }}>Passe l'appareil à</div>
+          <div style={{ fontSize:20, fontWeight:900, color:C.text }}>{who}</div>
+          <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>Place TA propre aiguille d'après l'indice de <b style={{ color:LMG_COLOR }}>{meneur}</b>.<br/>Les réponses de chacun ne seront dévoilées <b style={{ color:C.text }}>qu'à la fin</b>.</div>
+          <div style={{ fontSize:10.5, color:C.dim }}>Devineur {gi + 1}/{guessers.length}</div>
+          <button onClick={() => setPhase('guess')} style={big()}>👁 À moi de jouer</button>
         </div>
-      </div>
-    </GameWrap>
-  );
+      </GameWrap>
+    );
+  }
 
+  if (phase === 'guess') {
+    const who = game.players[guessers[gi]];
+    return (
+      <GameWrap bar={bar} hint="Fais glisser l'aiguille (ou flèches ← →) là où TU penses que la cible se cache, puis valide. Personne ne voit encore les réponses des autres.">
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:10, width:'100%' }}>
+          <div style={{ fontSize:12.5, fontWeight:800, color:C.text }}>{who} — indice de {meneur} ({gi + 1}/{guessers.length})</div>
+          <LmgWheel value={guess} target={null} onChange={setGuess} />
+          {scale(game.pair)}
+          <div style={{ display:'flex', gap:6 }}>
+            <button onClick={() => setGuess(v => Math.max(0, v - 0.01))} aria-label="Décaler à gauche" style={gameBtn()}>◀</button>
+            <button onClick={submitGuess} style={big()}>{gi + 1 < guessers.length ? '✅ Valider — joueur suivant' : '✅ Valider et révéler'}</button>
+            <button onClick={() => setGuess(v => Math.min(1, v + 0.01))} aria-label="Décaler à droite" style={gameBtn()}>▶</button>
+          </div>
+        </div>
+      </GameWrap>
+    );
+  }
+
+  // ── Révélation COLLECTIVE : la cible + TOUTES les aiguilles, chacune à l'initiale et à la
+  // couleur de son joueur (demande utilisateur), puis le détail des points sous la roue.
   if (phase === 'reveal') {
     const last = game.i + 1 >= game.order.length;
+    const pts = (result && result.pts) || [];
+    const best = pts.reduce((m, a) => Math.max(m, a.s), 0);
     return (
       <GameWrap bar={bar}>
         <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:10, width:'100%' }}>
-          <div style={{ fontSize:16, fontWeight:900, color: gain ? '#4caf50' : '#e05050' }}>
-            {gain ? `+${gain} point${gain > 1 ? 's' : ''} pour ${meneur} !` : `Raté — 0 point pour ${meneur}`}
+          <div style={{ fontSize:14, fontWeight:900, color: best ? '#4caf50' : '#e05050' }}>
+            {best ? `Le meilleur a mis ${best} point${best > 1 ? 's' : ''} !` : 'Personne n\'a touché la cible…'}
           </div>
-          <LmgWheel value={guess} target={game.target} />
+          <LmgWheel marks={pts.map(a => ({ v: a.v, color: UCD_COLORS[a.p % UCD_COLORS.length], label: initial(game.players[a.p]) }))} target={game.target} />
           {scale(game.pair)}
+          <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', gap:5 }}>
+            {pts.map(a => (
+              <div key={a.p} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'6px 10px', borderRadius:8, background:C.surface, border:`1px solid ${a.s ? '#4caf5055' : C.border}` }}>
+                <span style={{ display:'flex', alignItems:'center', gap:8, minWidth:0 }}>
+                  <span style={{ width:16, height:16, borderRadius:'50%', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:900, color:'#101014', background:UCD_COLORS[a.p % UCD_COLORS.length] }}>{initial(game.players[a.p])}</span>
+                  <span style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{game.players[a.p]}</span>
+                </span>
+                <span style={{ fontSize:12, fontWeight:900, color: a.s ? '#4caf50' : C.dim, flexShrink:0 }}>+{a.s}</span>
+              </div>
+            ))}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'6px 10px', borderRadius:8, background:`${LMG_COLOR}14`, border:`1px solid ${LMG_COLOR}55` }}>
+              <span style={{ fontSize:12, fontWeight:700, color:C.text }}>🎯 {meneur} <span style={{ color:C.muted, fontWeight:400 }}>· moyenne de ses devineurs</span></span>
+              <span style={{ fontSize:12, fontWeight:900, color:LMG_COLOR, flexShrink:0 }}>+{result ? result.avg : 0}</span>
+            </div>
+          </div>
           <button onClick={next} style={big()}>{last ? '🏁 Voir le classement' : '➡️ Joueur suivant'}</button>
         </div>
       </GameWrap>
@@ -6414,8 +6484,9 @@ const FCOL_PTS = [5, 3, 2, 1];   // distance 0 · 1 · 2 · 3 → points (au-del
 const fcolScore = (a, b) => FCOL_PTS[fcolDist(a, b)] || 0;
 const fcolPick = () => ({ c: Math.floor(Math.random() * FCOL_COLS), r: Math.floor(Math.random() * FCOL_ROWS) });
 // Grille de couleurs. `mark` = case entourée en blanc (la cible montrée au meneur), `sel` = la
-// proposition en cours, `onPick` absent = grille en lecture seule.
-function FcolGrid({ sel, mark, onPick }) {
+// proposition en cours, `picks` = les réponses de TOUS les joueurs à la révélation
+// (`{ c, r, color, label }`), `onPick` absent = grille en lecture seule.
+function FcolGrid({ sel, mark, picks, onPick }) {
   const cells = [];
   for (let r = 0; r < FCOL_ROWS; r++) for (let c = 0; c < FCOL_COLS; c++) cells.push({ c, r });
   return (
@@ -6423,13 +6494,24 @@ function FcolGrid({ sel, mark, onPick }) {
       {cells.map(k => {
         const isSel = sel && sel.c === k.c && sel.r === k.r;
         const isMark = mark && mark.c === k.c && mark.r === k.r;
+        // ⚠ Plusieurs joueurs peuvent viser LA MÊME case : on affiche l'initiale du premier
+        // et « +n » pour les suivants, sinon une réponse en cacherait une autre.
+        const here = (picks || []).filter(pk => pk.c === k.c && pk.r === k.r);
         return (
           <button key={k.c + '-' + k.r} onClick={onPick ? () => onPick(k) : undefined} disabled={!onPick}
             aria-label={`Couleur colonne ${k.c + 1} ligne ${k.r + 1}`}
             style={{ aspectRatio:'1', minWidth:0, padding:0, borderRadius:3, cursor: onPick ? 'pointer' : 'default',
+              display:'flex', alignItems:'center', justifyContent:'center', overflow:'hidden', lineHeight:1,
               background: fcolCss(k.c, k.r),
               border: isMark ? '2px solid #ffffff' : isSel ? '2px solid #101014' : 'none',
-              boxShadow: isMark || isSel ? '0 0 0 2px #000000aa' : 'none', transform: isMark || isSel ? 'scale(1.18)' : 'none', zIndex: isMark || isSel ? 2 : 1 }} />
+              boxShadow: isMark || isSel || here.length ? '0 0 0 2px #000000aa' : 'none',
+              transform: isMark || isSel || here.length ? 'scale(1.18)' : 'none', zIndex: isMark || isSel || here.length ? 2 : 1 }}>
+            {here.length > 0 && (
+              <span style={{ fontSize:8, fontWeight:900, color:'#101014', background:here[0].color, borderRadius:3, padding:'1px 2px', border:'1px solid #00000066' }}>
+                {here[0].label}{here.length > 1 ? '+' + (here.length - 1) : ''}
+              </span>
+            )}
+          </button>
         );
       })}
     </div>
@@ -6442,25 +6524,39 @@ function GameFindColor() {
   const [names, setNames] = React.useState(() => Array(8).fill(''));
   const [game, setGame] = React.useState(null);        // { players, scores, order, i, target }
   const [sel, setSel]   = React.useState(null);
-  const [gain, setGain] = React.useState(0);
+  // ⚠ 8.7.0 — CHACUN donne SA réponse (demande utilisateur) : les devineurs passent l'appareil
+  // à tour de rôle, et la grille n'est révélée qu'À LA FIN, avec TOUTES les réponses d'un coup.
+  const [answers, setAnswers] = React.useState([]);    // [{ p:index du joueur, k:{c,r} }]
+  const [gi, setGi] = React.useState(0);               // devineur en cours
+  const [result, setResult] = React.useState(null);    // { pts:[{p,k,s}], avg } de la manche
   const start = () => {
     const players = names.slice(0, count).map((n, i) => n.trim() || `Joueur ${i + 1}`);
     const order = [];
     for (let t = 0; t < turns; t++) players.forEach((_, i) => order.push(i));
     setGame({ players, scores: players.map(() => 0), order, i:0, target: fcolPick() });
-    setSel(null); setGain(0); setPhase('pass');
+    setSel(null); setAnswers([]); setGi(0); setResult(null); setPhase('pass');
   };
-  const validate = () => {
-    const pts = fcolScore(sel, game.target);
-    setGain(pts);
-    setGame(g => ({ ...g, scores: g.scores.map((s, k) => k === g.order[g.i] ? s + pts : s) }));
+  // Chaque devineur valide SA case ; quand le dernier a répondu, on calcule et on révèle.
+  const submitGuess = () => {
+    const na = answers.concat([{ p: guessers[gi], k: sel }]);
+    setAnswers(na);
+    if (gi + 1 < guessers.length) { setGi(gi + 1); setSel(null); setPhase('gpass'); return; }
+    const pts = na.map(a => ({ ...a, s: fcolScore(a.k, game.target) }));
+    // ⚠ Le MENEUR marque la MOYENNE de ses devineurs (arrondie) : c'est la qualité de sa
+    // description qu'on mesure. Chaque devineur marque, lui, ses propres points.
+    const avg = Math.round(pts.reduce((s, a) => s + a.s, 0) / (pts.length || 1));
+    setResult({ pts, avg });
+    setGame(g => ({ ...g, scores: g.scores.map((s, k) => {
+      const mine = pts.find(a => a.p === k);
+      return s + (mine ? mine.s : 0) + (k === g.order[g.i] ? avg : 0);
+    }) }));
     setPhase('reveal');
   };
   const next = () => {
     const ni = game.i + 1;
     if (ni >= game.order.length) { setPhase('over'); return; }
     setGame(g => ({ ...g, i:ni, target: fcolPick() }));
-    setSel(null); setPhase('pass');
+    setSel(null); setAnswers([]); setGi(0); setResult(null); setPhase('pass');
   };
   const card = partyCard(FCOL_COLOR);
   const big = extra => gameBtn({ padding:'11px 20px', fontSize:13, ...(extra || {}) });
@@ -6482,6 +6578,9 @@ function GameFindColor() {
   );
 
   const meneur = game.players[game.order[game.i]];
+  // Tous les joueurs SAUF le meneur, dans l'ordre : ils répondent chacun leur tour.
+  const guessers = game.players.map((_, i) => i).filter(i => i !== game.order[game.i]);
+  const initial = n => ((n || '').trim().charAt(0) || '?').toUpperCase();
   const bar = (
     <>
       <span style={{ fontSize:12, color:C.muted }}>Manche <b style={{ color:C.text }}>{game.i + 1}/{game.order.length}</b> · Total <b style={{ color:FCOL_COLOR }}>{game.scores.reduce((s, v) => s + v, 0)}</b></span>
@@ -6507,39 +6606,81 @@ function GameFindColor() {
         <div style={{ fontSize:12.5, fontWeight:800, color:FCOL_COLOR }}>🎨 {meneur} — couleur secrète</div>
         {swatch(game.target, 96)}
         <FcolGrid mark={game.target} />
-        <button onClick={() => setPhase('guess')} style={big()}>🙈 J'ai décrit ma couleur — cacher</button>
+        <button onClick={() => { setGi(0); setSel(null); setPhase('gpass'); }} style={big()}>🙈 J'ai décrit ma couleur — cacher</button>
       </div>
     </GameWrap>
   );
 
-  if (phase === 'guess') return (
-    <GameWrap bar={bar} hint="Tout le monde SAUF le meneur : touchez la case qui vous semble la plus proche de la couleur décrite.">
-      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:12, width:'100%' }}>
-        <div style={{ fontSize:12.5, fontWeight:800, color:C.text }}>Couleur décrite par {meneur}</div>
-        <FcolGrid sel={sel} onPick={setSel} />
-        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-          {sel ? swatch(sel, 40) : <span style={{ fontSize:11.5, color:C.muted }}>Aucune case choisie</span>}
-          <button onClick={validate} disabled={!sel} style={big({ opacity: sel ? 1 : 0.4, cursor: sel ? 'pointer' : 'default' })}>✅ Valider la couleur</button>
+  // ── Chacun son tour : passage de l'appareil au devineur suivant ──
+  if (phase === 'gpass') {
+    const who = game.players[guessers[gi]];
+    return (
+      <GameWrap bar={bar}>
+        <div style={card}>
+          <PartyAvatar name={who} idx={guessers[gi]} />
+          <div style={{ fontSize:11, color:C.muted, marginBottom:-6 }}>Passe l'appareil à</div>
+          <div style={{ fontSize:20, fontWeight:900, color:C.text }}>{who}</div>
+          <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>Choisis TA propre case d'après la description de <b style={{ color:FCOL_COLOR }}>{meneur}</b>.<br/>Les réponses de chacun ne seront dévoilées <b style={{ color:C.text }}>qu'à la fin</b>.</div>
+          <div style={{ fontSize:10.5, color:C.dim }}>Devineur {gi + 1}/{guessers.length}</div>
+          <button onClick={() => setPhase('guess')} style={big()}>👁 À moi de jouer</button>
         </div>
-      </div>
-    </GameWrap>
-  );
+      </GameWrap>
+    );
+  }
 
+  if (phase === 'guess') {
+    const who = game.players[guessers[gi]];
+    return (
+      <GameWrap bar={bar} hint="Touche la case qui te semble la plus proche de la couleur décrite, puis valide. Personne ne voit encore les réponses des autres.">
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:12, width:'100%' }}>
+          <div style={{ fontSize:12.5, fontWeight:800, color:C.text }}>{who} — couleur décrite par {meneur} ({gi + 1}/{guessers.length})</div>
+          <FcolGrid sel={sel} onPick={setSel} />
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            {sel ? swatch(sel, 40) : <span style={{ fontSize:11.5, color:C.muted }}>Aucune case choisie</span>}
+            <button onClick={submitGuess} disabled={!sel} style={big({ opacity: sel ? 1 : 0.4, cursor: sel ? 'pointer' : 'default' })}>{gi + 1 < guessers.length ? '✅ Valider — joueur suivant' : '✅ Valider et révéler'}</button>
+          </div>
+        </div>
+      </GameWrap>
+    );
+  }
+
+  // ── Révélation COLLECTIVE : la vraie couleur + la case de CHAQUE joueur sur la grille ──
   if (phase === 'reveal') {
     const last = game.i + 1 >= game.order.length;
-    const d = fcolDist(sel, game.target);
+    const pts = (result && result.pts) || [];
+    const best = pts.reduce((m, a) => Math.max(m, a.s), 0);
     return (
       <GameWrap bar={bar}>
         <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:12, width:'100%' }}>
-          <div style={{ fontSize:16, fontWeight:900, color: gain ? '#4caf50' : '#e05050' }}>
-            {gain ? `+${gain} point${gain > 1 ? 's' : ''} pour ${meneur} !` : `Raté — 0 point pour ${meneur}`}
+          <div style={{ fontSize:14, fontWeight:900, color: best ? '#4caf50' : '#e05050' }}>
+            {best ? `Le meilleur a mis ${best} point${best > 1 ? 's' : ''} !` : 'Personne n\'a trouvé la couleur…'}
           </div>
-          <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-            <div style={{ textAlign:'center' }}><div style={{ fontSize:9, letterSpacing:'0.16em', color:C.muted, marginBottom:5 }}>CHOISIE</div>{swatch(sel, 64)}</div>
-            <div style={{ fontSize:11, fontWeight:800, color:C.dim }}>{d === 0 ? 'PILE !' : `${d} case${d > 1 ? 's' : ''}`}</div>
-            <div style={{ textAlign:'center' }}><div style={{ fontSize:9, letterSpacing:'0.16em', color:C.muted, marginBottom:5 }}>CIBLE</div>{swatch(game.target, 64)}</div>
+          {/* La VRAIE couleur en grand, puis la grille avec la cible cerclée de blanc et la
+              case de CHAQUE joueur marquée de son initiale (demande utilisateur). */}
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ textAlign:'center' }}><div style={{ fontSize:9, letterSpacing:'0.16em', color:C.muted, marginBottom:5 }}>LA VRAIE COULEUR</div>{swatch(game.target, 72)}</div>
           </div>
-          <FcolGrid sel={sel} mark={game.target} />
+          <FcolGrid mark={game.target} picks={pts.map(a => ({ ...a.k, color: UCD_COLORS[a.p % UCD_COLORS.length], label: initial(game.players[a.p]) }))} />
+          <div style={{ width:'100%', maxWidth:340, display:'flex', flexDirection:'column', gap:5 }}>
+            {pts.map(a => {
+              const d = fcolDist(a.k, game.target);
+              return (
+                <div key={a.p} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'6px 10px', borderRadius:8, background:C.surface, border:`1px solid ${a.s ? '#4caf5055' : C.border}` }}>
+                  <span style={{ display:'flex', alignItems:'center', gap:8, minWidth:0 }}>
+                    <span style={{ width:16, height:16, borderRadius:'50%', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:900, color:'#101014', background:UCD_COLORS[a.p % UCD_COLORS.length] }}>{initial(game.players[a.p])}</span>
+                    <span style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{game.players[a.p]}</span>
+                    <span style={{ width:14, height:14, borderRadius:3, flexShrink:0, background:fcolCss(a.k.c, a.k.r), border:'1px solid #ffffff33' }} />
+                    <span style={{ fontSize:10.5, color:C.dim, flexShrink:0 }}>{d === 0 ? 'PILE !' : `${d} case${d > 1 ? 's' : ''}`}</span>
+                  </span>
+                  <span style={{ fontSize:12, fontWeight:900, color: a.s ? '#4caf50' : C.dim, flexShrink:0 }}>+{a.s}</span>
+                </div>
+              );
+            })}
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'6px 10px', borderRadius:8, background:`${FCOL_COLOR}14`, border:`1px solid ${FCOL_COLOR}55` }}>
+              <span style={{ fontSize:12, fontWeight:700, color:C.text }}>🎨 {meneur} <span style={{ color:C.muted, fontWeight:400 }}>· moyenne de ses devineurs</span></span>
+              <span style={{ fontSize:12, fontWeight:900, color:FCOL_COLOR, flexShrink:0 }}>+{result ? result.avg : 0}</span>
+            </div>
+          </div>
           <button onClick={next} style={big()}>{last ? '🏁 Voir le classement' : '➡️ Joueur suivant'}</button>
         </div>
       </GameWrap>
