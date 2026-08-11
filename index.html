@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.7.3';
+const APP_VERSION = '8.7.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -24232,9 +24232,22 @@ function ytIgnoredEffective(item) {
 }
 // Total qui COMPTE dans la progression = épisodes/vidéos moins les ignorés effectifs.
 function tvCountedTotal(item) { return Math.max(0, (item.totalEps || 0) - tvIgnoredEffective(item).size); }
+// ⚠ 8.7.4 — VIDÉOS COCHÉES QUI NE SONT PLUS DANS LA LISTE (cause du « 500/375 ») : en levant
+// le plafond de 500 on charge tout l'historique d'une chaîne, on coche des vidéos anciennes,
+// puis en remettant le plafond `ytBuildItem` ne garde que les 500 plus récentes — les ids
+// cochés hors liste survivent dans `watchedIds`. Ils ont BIEN été vus : ils comptent donc au
+// numérateur ET au dénominateur. Les jeter afficherait « 375/375 » en oubliant 125 visionnages.
+// ⚠ Zéro quand la liste est vide (chaîne pas encore chargée), sinon TOUT serait « orphelin ».
+function ytOrphanSeen(item) {
+  const vids = (item && item.videos) || [];
+  if (!vids.length) return 0;
+  const inList = new Set(vids.map(v => v.id));
+  const ign = ytIgnoredEffective(item);
+  return ((item && item.watchedIds) || []).filter(id => !inList.has(id) && !ign.has(id)).length;
+}
 function ytCountedTotal(item) {
   const total = (item && item.totalEps) || ((item && item.videos) || []).length;
-  return Math.max(0, total - ytIgnoredEffective(item).size);
+  return Math.max(0, total - ytIgnoredEffective(item).size) + ytOrphanSeen(item);
 }
 // ⚠ 8.7.2 — DÉCOMPTE SÉPARÉ des vidéos longues et des Shorts d'une chaîne (demande
 // utilisateur : « X/Y vidéos & A/Z shorts vues »). Les durées ne vivent que dans `videos`
@@ -24251,6 +24264,12 @@ function ytSplitCount(item) {
     b.total++;
     if (seen.has(v.id)) b.seen++;
   }
+  // Vidéos vues sorties de la liste (cf. ytOrphanSeen) : comptées des DEUX côtés.
+  // ⚠ Leur durée est inconnue, donc leur famille aussi. La chaîne tranche : `shortsOnly` ⇒
+  // ce ne peut être que des Shorts ; sinon le build EXCLUT les Shorts (sauf `keepShorts`),
+  // donc ce sont des vidéos longues — et en mode mixte on les y met faute de mieux.
+  const orph = ytOrphanSeen(item);
+  if (orph) { const b = (item && item.shortsOnly) ? out.short : out.vid; b.seen += orph; b.total += orph; }
   return out;
 }
 // Libellé « X/Y vidéos & A/Z shorts vues » — une seule des deux parties si la chaîne n'a que
@@ -24316,7 +24335,7 @@ function tvStatusFR(s) {
 const TV_UNLOCK_MS = 24 * 3600 * 1000;
 function tvDateLocked(iso) {
   if (!iso) return false;
-  let d = String(iso);
+  let d = String(iso).slice(0, 10);   // tolère un horodatage complet (dates de vidéos YouTube)
   if (/^\d{4}$/.test(d)) d += '-01-01';
   else if (/^\d{4}-\d{2}$/.test(d)) d += '-01';
   const t = new Date(d + 'T00:00:00');
@@ -24334,6 +24353,54 @@ function tvEpLocked(date, item, n, e) {
   if (n !== ne.s) return n > ne.s;
   if (e !== ne.e) return e > ne.e;
   return tvDateLocked(ne.date);
+}
+// ⚠ 8.7.4 — DÉCOCHE tout ce qui est marqué « vu » alors que ce n'est PAS ENCORE SORTI
+// (demande utilisateur) : le verrou de 8.7.1 empêche d'en cocher de nouveaux, mais les
+// épisodes déjà cochés avant — typiquement par « cocher toute la saison » — restaient verts.
+// Renvoie la liste MODIFIÉE, ou `null` si rien à réparer (aucune écriture inutile).
+// ⚠ Idempotent et sans risque : un épisode non diffusé n'est plus cochable, donc rien de
+// légitime ne peut être retiré, et une 2e passe ne change plus rien.
+// ⚠ La date exacte n'est connue que pour les saisons déjà dépliées (cache `TVTIME_EPS_LS`) ;
+// ailleurs on retombe sur la barrière `nextEp`, qui suffit à couvrir les épisodes à venir.
+function tvUncheckUnaired(items) {
+  let store = {};
+  try { store = JSON.parse(localStorage.getItem(TVTIME_EPS_LS)) || {}; } catch {}
+  let changed = false;
+  const out = (items || []).map(it => {
+    if (!it) return it;
+    if (it.type === 'tv') {
+      const set = tvWatchedSet(it);
+      if (!set.length) return it;
+      const kept = set.filter(k => {
+        const m = /^S(\d+)E(\d+)$/.exec(k);
+        if (!m) return true;
+        const n = +m[1], e = +m[2];
+        const hit = store[it.id + ':' + n];
+        const ep = hit && hit.eps && hit.eps.find(x => x.e === e);
+        return !tvEpLocked(ep ? ep.date : null, it, n, e);
+      });
+      if (kept.length === set.length) return it;
+      changed = true;
+      const next = { ...it, watchedSet: kept, watchedEps: kept.length };
+      // Une série « Vu » qui perd des épisodes n'est plus « tout vu » (sauf abandon assumé).
+      if (next.status === 'done' && !next.dropped) { next.status = 'watching'; next.doneAt = undefined; }
+      return next;
+    }
+    if (it.type === 'youtube') {
+      const seen = it.watchedIds || [];
+      if (!seen.length) return it;
+      const future = new Set(((it.videos) || []).filter(v => tvDateLocked(v.date)).map(v => v.id));
+      if (!future.size) return it;
+      const kept = seen.filter(id => !future.has(id));
+      if (kept.length === seen.length) return it;
+      changed = true;
+      const next = { ...it, watchedIds: kept };
+      if (next.status === 'done' && !next.dropped) { next.status = 'watching'; next.doneAt = undefined; }
+      return next;
+    }
+    return it;
+  });
+  return changed ? out : null;
 }
 // Numéros d'épisodes NON SORTIS d'une saison (pour ne pas les cocher en masse).
 function tvLockedEps(item, n, eps, list) {
@@ -25630,6 +25697,15 @@ function TvTimePanel() {
     });
     setItems(next); saveTvItems(next);
   };
+
+  // ⚠ 8.7.4 — Réparation au montage : décoche ce qui est marqué « vu » alors que ce n'est pas
+  // encore sorti (état laissé par « cocher toute la saison » avant le verrou de 8.7.1).
+  // 100 % local, aucune requête. Écrit directement (comme `applyFresh`) et NON via `update()` :
+  // ce n'est pas une action de l'utilisateur, elle n'a rien à faire dans « ↩ Retour arrière ».
+  React.useEffect(() => {
+    const fixed = tvUncheckUnaired(loadTvItems());
+    if (fixed) { setItems(fixed); saveTvItems(fixed); }
+  }, []);
 
   // Refresh auto des prochaines sorties au montage (TTL 24h — 0 requête si cache frais)
   React.useEffect(() => {
