@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.6.7';
+const APP_VERSION = '8.6.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -27889,6 +27889,11 @@ function WeightStatsSection() {
 const NOTE_COLOR = '#6fd345';   // vert de l'arc-en-ciel (entre Musique et Nourriture)
 const NOTE_LS_KEY = 'spotifyplus_notes';
 const NOTE_ENC_CHECK_KEY = 'spotifyplus_notes_enc_check';   // vérificateur du mot de passe global
+// Sauvegarde AUTOMATIQUE de l'éditeur : délai d'inactivité avant écriture. ⚠ Assez long pour
+// ne pas lancer un PBKDF2 600k (note cryptée) à chaque touche, assez court pour qu'une
+// fermeture d'onglet juste après la frappe ne perde rien.
+const NOTE_AUTOSAVE_MS = 700;
+const NOTE_DEC_CACHE_MAX = 400;   // borne du cache de déchiffrement (clé « id:updatedAt »)
 function loadNotes() { try { return JSON.parse(localStorage.getItem(NOTE_LS_KEY)) || []; } catch { return []; } }
 function saveNotes(n) { lsSet(NOTE_LS_KEY, JSON.stringify(n)); }
 function isNoteEnc(n) { return !!(n && n.locked && isVaultBlob(n.enc)); }
@@ -27907,6 +27912,7 @@ function NotePanel() {
   const [text, setText]     = React.useState('');
   const [busy, setBusy]     = React.useState(false);
   const [err, setErr]       = React.useState('');
+  const [savedAt, setSavedAt] = React.useState(0);   // horodatage de la dernière sauvegarde AUTOMATIQUE
 
   // Porte d'accès à l'espace crypté
   const [gate, setGate]     = React.useState(null);      // null | 'setup' | 'unlock'
@@ -27926,18 +27932,28 @@ function NotePanel() {
   const [msg, setMsg]             = React.useState('');
 
   const commit = list => { setNotes(list); saveNotes(list); };
-  const closeEditor = () => { setEditId(null); setTitle(''); setText(''); setErr(''); setBusy(false); };
+  const closeEditor = () => { setEditId(null); setTitle(''); setText(''); setErr(''); setBusy(false); setSavedAt(0); };
 
   // Déchiffre toutes les notes cryptées à l'entrée dans l'espace crypté (titre + texte).
+  // ⚠ MÉMOÏSÉ PAR « id:updatedAt » (`decCache`) : chaque déchiffrement coûte un PBKDF2 600k, et
+  // depuis la sauvegarde automatique la liste `notes` change à chaque frappe — tout re-déchiffrer
+  // à chaque écriture figerait l'interface. La sauvegarde auto sème elle-même le cache avec le
+  // texte en clair qu'elle vient de chiffrer, donc écrire une note ne coûte AUCUN déchiffrement.
+  const decCache = React.useRef({});
   React.useEffect(() => {
     if (mode !== 'enc' || !gpw) { setDec({}); return; }
     let cancelled = false;
     (async () => {
       const out = {};
+      if (Object.keys(decCache.current).length > NOTE_DEC_CACHE_MAX) decCache.current = {};   // borne mémoire
       for (const n of notes) {
         if (!isNoteEnc(n)) continue;
-        try { const d = await mdpDecrypt(gpw, n.enc); out[n.id] = { title: (d && d.title) || n.title || 'Sans titre', text: (d && d.text) || '' }; }
-        catch { out[n.id] = null; }   // ancien mdp individuel → déverrouillage per-note requis
+        const k = n.id + ':' + (n.updatedAt || 0);
+        if (!(k in decCache.current)) {
+          try { const d = await mdpDecrypt(gpw, n.enc); decCache.current[k] = { title: (d && d.title) || n.title || 'Sans titre', text: (d && d.text) || '' }; }
+          catch { decCache.current[k] = null; }   // ancien mdp individuel → déverrouillage per-note requis
+        }
+        out[n.id] = decCache.current[k];
       }
       if (!cancelled) setDec(out);
     })();
@@ -27955,6 +27971,57 @@ function NotePanel() {
     const enc = await mdpEncrypt(pw, { title: title.trim() || 'Sans titre', text });
     writeNote({ locked: true, enc }, Date.now());   // note cryptée : AUCUN titre en clair
   };
+
+  // ── Sauvegarde AUTOMATIQUE de l'éditeur (demande utilisateur : ne rien perdre si on oublie
+  // de cliquer « Enregistrer ») — espace normal ET espace crypté.
+  // ⚠ Écriture par MISE À JOUR FONCTIONNELLE et non `commit(notes.map(…))` : chiffrer est
+  // ASYNCHRONE (PBKDF2 600k), la liste capturée à la frappe peut donc être périmée quand
+  // l'écriture aboutit — on écraserait alors une note écrite entre-temps.
+  const autoWrite = (id, entry, now) => setNotes(prev => {
+    const next = prev.some(n => n.id === id)
+      ? prev.map(n => n.id === id ? { id, updatedAt: now, ...entry } : n)
+      : [{ id, updatedAt: now, ...entry }, ...prev];
+    saveNotes(next);
+    return next;
+  });
+  const autoSnap = React.useRef(null);   // dernier contenu réellement écrit ('titre\0texte')
+  const autoId   = React.useRef(null);   // id attribué à une note EN COURS DE CRÉATION
+  const editRef  = React.useRef(editId); editRef.current = editId;
+  React.useEffect(() => {
+    if (editId === null) { autoSnap.current = null; autoId.current = null; return; }
+    const snap = title + '\u0000' + text;   // séparateur impossible à saisir au clavier
+    // ⚠ 1er passage = OUVERTURE de l'éditeur : on mémorise l'état chargé sans rien écrire,
+    // sinon ouvrir une note pour la relire suffirait à changer sa date de modification.
+    if (autoSnap.current === null) { autoSnap.current = snap; return; }
+    if (autoSnap.current === snap) return;
+    if (editId === 'new' && !title.trim() && !text.trim()) return;   // note vide : on ne crée rien
+    // ⚠ On repart de `mode` et NON de `isEnc`, déclaré PLUS BAS dans le composant : le lire ici
+    // (corps comme tableau de deps, évalués au rendu) lèverait une ReferenceError de TDZ.
+    const crypt = mode === 'enc';
+    if (crypt && !gpw) return;                                        // session cryptée expirée
+    const timer = setTimeout(async () => {
+      const now = Date.now();
+      // ⚠ L'id d'une note en création est mémorisé dans une REF : deux sauvegardes qui se
+      // chevauchent (le chiffrement dure plusieurs centaines de ms) créeraient sinon DEUX notes.
+      const id = editId === 'new' ? (autoId.current || (autoId.current = newNoteId(now))) : editId;
+      const t = title.trim() || 'Sans titre';
+      try {
+        if (crypt) {
+          autoWrite(id, { locked:true, enc: await mdpEncrypt(gpw, { title:t, text }) }, now);
+          decCache.current[id + ':' + now] = { title:t, text };   // évite de re-déchiffrer ce qu'on vient d'écrire
+        } else {
+          autoWrite(id, { locked:false, title:t, text }, now);
+        }
+      } catch { return; }   // échec de chiffrement : nouvelle tentative à la frappe suivante
+      // ⚠ L'éditeur a pu être fermé (Annuler, suppression, bascule public⇄privé) PENDANT le
+      // chiffrement : sans cette garde, la note ressusciterait dans l'espace qu'elle a quitté.
+      if (editRef.current === null) return;
+      autoSnap.current = snap;
+      if (editId === 'new') setEditId(id);
+      setSavedAt(now);
+    }, NOTE_AUTOSAVE_MS);
+    return () => clearTimeout(timer);
+  }, [editId, title, text, mode, gpw]);
 
   // ── Porte : entrer dans l'espace crypté ──
   const openGate = () => { if (mode !== 'normal') return; setMsg(''); setGErr(''); setGPw(''); setGPw2(''); setGate(loadNoteEncCheck() ? 'unlock' : 'setup'); };
@@ -28126,6 +28193,11 @@ function NotePanel() {
           <textarea value={text} placeholder="Ta note…" onChange={e => setText(e.target.value)} rows={8}
             style={{ ...inputSt, resize:'vertical', minHeight:110, lineHeight:1.5 }} />
           {isEnc && <div style={{ fontSize:9, color:'#e0a050', lineHeight:1.4 }}>🔒 Note chiffrée avec le mot de passe global (titre inclus).</div>}
+          {/* Sauvegarde automatique : l'utilisateur doit VOIR que rien ne se perd s'il oublie
+              d'enregistrer — sinon il continue de croire que le bouton est obligatoire. */}
+          <div style={{ fontSize:9, color: savedAt ? NOTE_COLOR : C.dim, lineHeight:1.4 }}>
+            {savedAt ? `💾 Enregistré automatiquement à ${fmtDate(savedAt).split(' ').pop()}` : '💾 Sauvegarde automatique dès que tu écris.'}
+          </div>
           {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
           <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
             <button onClick={saveNote} disabled={busy} style={{ ...btnSt(true), flex:1, fontWeight:700, opacity: busy ? 0.6 : 1 }}>{busy ? '…' : '✓ Enregistrer'}</button>
@@ -28135,7 +28207,9 @@ function NotePanel() {
               style={{ ...btnSt(false), color: isEnc ? NOTE_COLOR : '#e0a050', borderColor: (isEnc ? NOTE_COLOR : '#e0a050') + '66', fontWeight:700, opacity: busy ? 0.6 : 1 }}>
               {isEnc ? '🗒️ Passer public' : '🔒 Passer privé'}
             </button>
-            <button onClick={closeEditor} style={btnSt(false)}>Annuler</button>
+            {/* ⚠ « Annuler » MENTIRAIT depuis la sauvegarde automatique : ce bouton ne défait
+                plus rien, il referme simplement l'éditeur. */}
+            <button onClick={closeEditor} style={btnSt(false)}>Fermer</button>
           </div>
         </div>
       )}
