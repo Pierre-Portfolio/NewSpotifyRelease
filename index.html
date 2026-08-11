@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.6.0';
+const APP_VERSION = '8.6.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -23980,11 +23980,20 @@ const YT_EMBED_ORIGIN   = 'https://www.youtube-nocookie.com';  // cible des post
 const YT_END_NEXT_MS    = 5000; // inactivité après la FIN d'une vidéo avant de passer à la suivante
 const YT_JSAPI_HELLO_MS = 600;  // cadence du handshake `listening` (le player n'est pas prêt tout de suite)
 const YT_JSAPI_HELLO_N  = 15;   // nb de handshakes (~9 s) avant d'abandonner
+const YT_COUNT_ON       = '#e05050'; // bord du compteur SÉLECTIONNÉ dans la barre du lecteur
+// Une entrée de file est un Short si sa durée est sous YT_MIN_MINUTES. ⚠ `dur` est en
+// MINUTES ARRONDIES dans TV Time et une durée INCONNUE vaut 0 : elle compte donc comme un
+// Short — même convention que ytShortsQueue et le tag `shortsOnly` d'ytBuildItem.
+const ytIsShortEntry = e => !!e && (e.dur || 0) < YT_MIN_MINUTES;
 function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds, autoNext }) {
   const boxRef = React.useRef(null);
   const frameRef = React.useRef(null);
   // 💬 Feuille de commentaires (7.9.9), ouverte par le bouton en HAUT À DROITE.
   const [showComments, setShowComments] = React.useState(false);
+  // Compteur de la barre : 'queue' = position dans TOUTE la file (26/27, mode par défaut,
+  // bord rouge) · 'short' = position parmi les SHORTS encore à regarder. Cliquer la
+  // pastille non sélectionnée bascule de mode (demande utilisateur).
+  const [countMode, setCountMode] = React.useState('queue');
   const v = queue[index] || null;
   const vid = v ? v.id : null;
   // ⚠ 7.6.92 — Le lecteur est monté ⇒ layout responsive GELÉ (cf. useImmersiveLock).
@@ -24127,6 +24136,20 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // domineraient la barre et la ligne ne « s'alignerait » visuellement plus du tout.
   const ochip = extra => ({ fontSize:7, fontWeight:700, color:'#fff', fontFamily:'DM Mono,monospace',
     background:'rgba(0,0,0,0.6)', borderRadius:10, padding:'3px 6px', flexShrink:0, ...extra });
+  // Pastille-BOUTON du compteur : la sélectionnée porte le bord ROUGE, l'autre est estompée.
+  const ocount = on => ochip({ pointerEvents:'auto', cursor:'pointer', border:`1px solid ${on ? YT_COUNT_ON : '#ffffff33'}`,
+    opacity: on ? 1 : 0.6, fontWeight: on ? 800 : 700 });
+  // ⚠ « Encore à regarder » est FIGÉ à la construction de la file (`unseen`, posé par
+  // ytQueueEntry) : lancer une vidéo la marque vue, un calcul en direct ferait donc fondre
+  // le total pendant qu'on regarde (« 3/12 » puis « 3/11 »…), ce qui n'est pas un compteur.
+  // Une file sans ce champ (playlist « Hub Pierre ») compte tous ses Shorts.
+  const shortsUnseen = queue.filter(e => ytIsShortEntry(e) && e.unseen !== false);
+  const shortsAll    = queue.filter(ytIsShortEntry);
+  // Short déjà vu qu'on rejoue → il n'est pas dans la liste « à regarder » : on retombe sur
+  // TOUS les Shorts de la file plutôt que d'afficher un compteur faux (ou rien du tout).
+  const shortList    = shortsUnseen.some(e => e.id === v.id) ? shortsUnseen : shortsAll;
+  const shortIdx     = ytIsShortEntry(v) ? shortList.findIndex(e => e.id === v.id) : -1;
+  const shortMode    = shortIdx >= 0 && countMode === 'short';
   return (
     <div ref={boxRef} style={{ position:'fixed', inset:0, zIndex:400, background:'#000' }}>
       {/* `enablejsapi=1` + `origin=` = ce qui autorise le dialogue postMessage avec l'embed
@@ -24165,9 +24188,19 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             </button>
           );
         })()}
+        {/* Compteurs : « 26/27 » = position dans toute la file (sélectionné par défaut,
+            bord rouge) et, QUAND LA VIDÉO EN COURS EST UN SHORT, « X/Y » = le Short X des Y
+            qu'il reste à regarder. Un clic sur l'autre pastille bascule la sélection. */}
         {queue.length > 1 && (
-          <div style={ochip()}>
+          <div onClick={() => setCountMode('queue')} title="Position dans toute la file"
+            style={ocount(!shortMode)}>
             {index + 1}/{queue.length}
+          </div>
+        )}
+        {shortIdx >= 0 && (
+          <div onClick={() => setCountMode('short')} title={`🩳 Short ${shortIdx + 1} sur les ${shortList.length} à regarder dans cette file`}
+            style={ocount(shortMode)}>
+            🩳 {shortIdx + 1}/{shortList.length}
           </div>
         )}
         {/* Compte à rebours d'auto-avance (7.9.8) : relancer ou mettre en pause l'annule. */}
@@ -24627,7 +24660,12 @@ function TvTimePanel() {
     if (!queue || !queue.length) return;
     setPlayer({ queue, i: Math.max(0, Math.min(i, queue.length - 1)), auto: !!opts.auto });
   };
-  const ytQueueEntry = (it, v) => ({ id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: it.id, channel: it.title });
+  // `unseen` = la vidéo était ENCORE À REGARDER au moment où la file a été construite.
+  // ⚠ Figé volontairement : lancer une vidéo la marque vue, un « à regarder » recalculé en
+  // direct ferait fondre le total du compteur 🩳 du lecteur pendant qu'on regarde.
+  // `seen` (Set) optionnel : évite un `includes` par vidéo quand l'appelant en a déjà un.
+  const ytQueueEntry = (it, v, seen) => ({ id: v.id, title: v.title, date: v.date, dur: v.dur, itemId: it.id, channel: it.title,
+    unseen: !(seen ? seen.has(v.id) : (it.watchedIds || []).includes(v.id)) });
 
   // ── 📺 Playlist « Hub Pierre » — vidéos en attente (7.6.84) ─────────────────────────
   // `wlPop` = { state:'loading'|'ok'|'err', videos, err, playlistId } | null (fermée).
@@ -24754,7 +24792,7 @@ function TvTimePanel() {
       const seen = new Set(it.watchedIds || []);
       for (const v of (it.videos || [])) {
         if (seen.has(v.id) || (v.dur || 0) >= YT_MIN_MINUTES) continue;
-        out.push(ytQueueEntry(it, v));
+        out.push(ytQueueEntry(it, v, seen));
       }
     }
     return out;
@@ -25518,7 +25556,11 @@ function TvTimePanel() {
         onShortsOnly={v => setShortsOnly(detailItem, v)}
         onIgnore={() => ignoreUnwatched(detailItem)}
         onUnignoreVideo={v => unignoreVideo(detailItem, v)}
-        onPlay={(vids, i) => openPlayer(vids.map(v => ytQueueEntry(detailItem, v)), i)}
+        onPlay={(vids, i) => {
+          // Set construit UNE fois : la fiche d'une chaîne peut porter des centaines de vidéos.
+          const seen = new Set(detailItem.watchedIds || []);
+          openPlayer(vids.map(v => ytQueueEntry(detailItem, v, seen)), i);
+        }}
         wlAdded={wlAdded} wlBusyId={wlBusyId} onWatchLater={queueOneVideo}
         onRemoveVideo={ytIsUnsaved(detailItem) ? removeUnsavedVideo : undefined} />}
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
