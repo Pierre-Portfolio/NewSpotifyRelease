@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.7.0';
+const APP_VERSION = '8.7.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -24118,6 +24118,12 @@ async function tmdbFetchItem(type, id) {
     nextEp: d.next_episode_to_air
       ? { date: d.next_episode_to_air.air_date || '', s: d.next_episode_to_air.season_number, e: d.next_episode_to_air.episode_number, name: d.next_episode_to_air.name || '' }
       : null,
+    // Dernier épisode DÉJÀ DIFFUSÉ : sert à repasser EN COURS une série marquée « Vu » dont un
+    // épisode est sorti depuis (⚠ `totalEps` ne bouge pas dans ce cas, TMDB listant déjà les
+    // épisodes à venir — sans ce champ la série resterait « Vu » pour toujours).
+    lastEp: d.last_episode_to_air
+      ? { date: d.last_episode_to_air.air_date || '', s: d.last_episode_to_air.season_number, e: d.last_episode_to_air.episode_number }
+      : null,
     refreshedAt: Date.now(),
     watchedEps: 0,
     watchedSet: [],   // épisodes vus (cochage individuel) — voir tvWatchedSet
@@ -24275,6 +24281,37 @@ function tvStatusFR(s) {
 }
 
 // Jours avant une date ISO 'YYYY-MM-DD' (minuit local) — 0 = aujourd'hui, négatif = passée
+// ⚠ 8.7.1 — UN ÉPISODE PAS ENCORE DIFFUSÉ NE PEUT PAS ÊTRE « VU » : sa coche est verrouillée
+// jusqu'à `TV_UNLOCK_MS` (24 h) avant sa sortie.
+const TV_UNLOCK_MS = 24 * 3600 * 1000;
+function tvDateLocked(iso) {
+  if (!iso) return false;
+  let d = String(iso);
+  if (/^\d{4}$/.test(d)) d += '-01-01';
+  else if (/^\d{4}-\d{2}$/.test(d)) d += '-01';
+  const t = new Date(d + 'T00:00:00');
+  return !isNaN(t) && (t.getTime() - Date.now()) > TV_UNLOCK_MS;
+}
+// Deux sources, dans cet ordre : la DATE de l'épisode (précise, connue quand la saison est
+// dépliée) puis, à défaut, le prochain épisode à diffuser de TMDB (`nextEp`) — tout ce qui est
+// APRÈS lui n'est pas sorti, et lui-même s'ouvre 24 h avant sa date.
+// ⚠ Sans date NI `nextEp` on ne verrouille RIEN : une série ancienne dont TMDB ne donne aucune
+// date deviendrait sinon incochable à vie.
+function tvEpLocked(date, item, n, e) {
+  if (date) return tvDateLocked(date);
+  const ne = item && item.nextEp;
+  if (!ne || !ne.s) return false;
+  if (n !== ne.s) return n > ne.s;
+  if (e !== ne.e) return e > ne.e;
+  return tvDateLocked(ne.date);
+}
+// Numéros d'épisodes NON SORTIS d'une saison (pour ne pas les cocher en masse).
+function tvLockedEps(item, n, eps, list) {
+  const out = [];
+  if (list && list.length) { for (const ep of list) if (tvEpLocked(ep.date, item, n, ep.e)) out.push(ep.e); return out; }
+  for (let e = 1; e <= eps; e++) if (tvEpLocked(null, item, n, e)) out.push(e);
+  return out;
+}
 function tvDaysUntil(iso) {
   if (!iso) return null;
   // Tolère les dates PARTIELLES de TMDB (film annoncé "2027" ou "2027-06") : on complète
@@ -24322,7 +24359,7 @@ async function tvRefreshShows(items, force) {
     if (i > 0) await sleep(120);   // throttle : évite un burst si beaucoup de titres à backfill
     const f = await tmdbFetchItem(it.type, it.id);
     if (!f) continue;   // échec → refreshedAt inchangé : nouvel essai au prochain montage du panneau
-    if (it.type === 'tv') out.set('tv' + it.id, { seasons: f.seasons, specialEps: f.specialEps, totalEps: f.totalEps, epRuntime: f.epRuntime, tvStatus: f.tvStatus, nextEp: f.nextEp, poster: f.poster || it.poster, refreshedAt: Date.now() });
+    if (it.type === 'tv') out.set('tv' + it.id, { seasons: f.seasons, specialEps: f.specialEps, totalEps: f.totalEps, epRuntime: f.epRuntime, tvStatus: f.tvStatus, nextEp: f.nextEp, lastEp: f.lastEp, poster: f.poster || it.poster, refreshedAt: Date.now() });
     else out.set('movie' + it.id, { releaseDate: f.releaseDate, runtime: f.runtime || it.runtime, year: f.year || it.year, poster: f.poster || it.poster, refreshedAt: Date.now() });
   }
   return out;
@@ -24451,11 +24488,13 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
     </div>
   );
   // Coche circulaire (grise = incomplet, verte pleine = complet)
-  const Check = ({ done, onClick, title }) => (
-    <button onClick={onClick} title={title}
-      style={{ width:24, height:24, borderRadius:'50%', flexShrink:0, cursor:'pointer',
+  // `locked` = épisode pas encore diffusé : coche grisée et inerte (8.7.1).
+  const Check = ({ done, onClick, title, locked }) => (
+    <button onClick={locked ? undefined : onClick} title={title} disabled={!!locked}
+      style={{ width:24, height:24, borderRadius:'50%', flexShrink:0, cursor: locked ? 'not-allowed' : 'pointer',
         background: done ? '#4caf50' : 'none', border:`1px solid ${done ? '#4caf50' : C.border}`,
-        color: done ? '#fff' : C.dim, fontSize:12, lineHeight:1, padding:0, fontWeight:800 }}>✓</button>
+        color: done ? '#fff' : C.dim, fontSize:12, lineHeight:1, padding:0, fontWeight:800,
+        opacity: locked ? 0.35 : 1 }}>{locked ? '🔒' : '✓'}</button>
   );
   const STATUSES = [['towatch', '📌 À voir', '#f5b81f'], ['watching', '▶ En cours', TVTIME_COLOR], ['done', '✓ Vu', '#4caf50']];
   return (
@@ -24572,7 +24611,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
                     {s.watched}/{sIgn ? sEps : s.eps}{s.special ? ' · non comptés' : ''}
                     {sIgn > 0 && <span style={{ color:TV_IGNORED_COLOR }}> · 🙈{sIgn}</span>}
                   </div>
-                  <Check done={done} onClick={e => { e.stopPropagation(); s.special ? onSetSpecials(done ? [] : allSpNums) : onSeasonToggle(s); }}
+                  <Check done={done} onClick={e => { e.stopPropagation(); s.special ? onSetSpecials(done ? [] : allSpNums) : onSeasonToggle(s, tvLockedEps(item, s.n, s.eps, epsMap[s.n])); }}
                     title={s.special
                       ? (done ? 'Décocher tous les épisodes spéciaux' : 'Marquer tous les épisodes spéciaux vus')
                       : (done ? `Décocher toute la saison ${s.n}` : `Cocher toute la saison ${s.n}`)} />
@@ -24592,6 +24631,10 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
                             // Cocher ✓ le remet naturellement dans le suivi (vu ⇒ plus ignoré) ;
                             // le badge 🙈 le remet en « à voir » sans le marquer vu.
                             const ign = !seen && !s.special && iset.has(`S${s.n}E${ep.e}`);
+                            // ⚠ Épisode PAS ENCORE SORTI (8.7.1) : coche verrouillée jusqu'à 24 h
+                            // avant sa diffusion. Un épisode DÉJÀ coché reste décochable (`!seen`),
+                            // sinon on ne pourrait pas réparer une saison cochée avant ce garde-fou.
+                            const lock = !seen && !s.special && tvEpLocked(ep.date, item, s.n, ep.e);
                             return (
                               <div key={ep.e} style={{ display:'flex', alignItems:'center', gap:10, background: s.special ? '#0a0a0a' : '#111', borderRadius:8, padding:6, minHeight:52, opacity: ign ? 0.55 : 1 }}>
                                 {ep.still
@@ -24618,13 +24661,15 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
                                     style={{ width:24, height:24, borderRadius:'50%', flexShrink:0, cursor:'pointer', background:'none',
                                       border:`1px solid ${TV_IGNORED_COLOR}88`, color:TV_IGNORED_COLOR, fontSize:11, lineHeight:1, padding:0 }}>🙈</button>
                                 )}
-                                <Check done={seen}
+                                <Check done={seen} locked={lock}
                                   onClick={() => s.special
                                     ? onSetSpecials(seen ? spSeen.filter(n => n !== ep.e) : [...spSeen, ep.e])
                                     : onToggleEp(s.n, ep.e, seen)}
-                                  title={s.special
-                                    ? (seen ? `Décocher le spécial E${ep.e}` : `Cocher le spécial E${ep.e}`)
-                                    : (seen ? `Décocher S${s.n}E${ep.e}` : `Cocher S${s.n}E${ep.e}`)} />
+                                  title={lock
+                                    ? `S${s.n}E${ep.e} n'est pas encore diffusé — la coche s'ouvrira 24 h avant sa sortie`
+                                    : s.special
+                                      ? (seen ? `Décocher le spécial E${ep.e}` : `Cocher le spécial E${ep.e}`)
+                                      : (seen ? `Décocher S${s.n}E${ep.e}` : `Cocher S${s.n}E${ep.e}`)} />
                               </div>
                             );
                           })}
@@ -25541,6 +25586,16 @@ function TvTimePanel() {
           && (f.totalEps || 0) > (it.ackEps != null ? it.ackEps : (it.totalEps || 0))) {
         merged.status = 'watching'; merged.doneAt = undefined;
       }
+      // ⚠ 8.7.1 — Série « Vu » dont le DERNIER ÉPISODE DIFFUSÉ n'est ni coché ni ignoré : un
+      // épisode est sorti depuis, elle repasse EN COURS. Test distinct du précédent : quand un
+      // épisode ANNONCÉ finit par sortir, `totalEps` ne change pas (TMDB le listait déjà), donc
+      // la comparaison à `ackEps` ne détecte rien.
+      if (it.type === 'tv' && merged.status === 'done' && !it.dropped && f.lastEp && f.lastEp.s) {
+        const k = `S${f.lastEp.s}E${f.lastEp.e}`;
+        if (!new Set(tvWatchedSet(it)).has(k) && !tvIgnoredSet(it).includes(k)) {
+          merged.status = 'watching'; merged.doneAt = undefined;
+        }
+      }
       return merged;
     });
     setItems(next); saveTvItems(next);
@@ -26155,9 +26210,16 @@ function TvTimePanel() {
     setWatchedSet(item, [...set]);
   };
   // Coche/décoche TOUTE une saison (tous ses épisodes) — cochage indépendant des autres saisons
-  const toggleSeasonEps = (item, n, eps, check) => {
+  // ⚠ `locked` = épisodes PAS ENCORE SORTIS : cocher la saison ne doit pas les cocher (c'est
+  // par là qu'ils se retrouvaient « vus » en masse). Le DÉcochage, lui, les retire tous —
+  // c'est ce qui permet de réparer une série cochée avant ce garde-fou.
+  const toggleSeasonEps = (item, n, eps, check, locked) => {
     const set = new Set(tvWatchedSet(item));
-    for (let e = 1; e <= eps; e++) { const k = `S${n}E${e}`; check ? set.add(k) : set.delete(k); }
+    const skip = new Set(locked || tvLockedEps(item, n, eps, null));
+    for (let e = 1; e <= eps; e++) {
+      const k = `S${n}E${e}`;
+      if (check) { if (!skip.has(e)) set.add(k); } else set.delete(k);
+    }
     setWatchedSet(item, [...set]);
   };
   // Coche/décoche UN épisode isolé
@@ -26795,7 +26857,7 @@ function TvTimePanel() {
       {detailItem && detailItem.type !== 'youtube' && <TvDetailModal item={detailItem}
         onClose={() => setDetail(null)}
         onBump={d => bump(detailItem, d)}
-        onSeasonToggle={s => toggleSeasonEps(detailItem, s.n, s.eps, s.watched < s.eps)}
+        onSeasonToggle={(s, locked) => toggleSeasonEps(detailItem, s.n, s.eps, s.watched < s.eps, locked)}
         onToggleEp={(n, e, seen) => toggleEp(detailItem, n, e, seen)}
         onUnignoreEp={(n, e) => unignoreEp(detailItem, n, e)}
         onSetSpecials={arr => setSpecials(detailItem, arr)}
@@ -26809,7 +26871,7 @@ function TvTimePanel() {
         return <TvDetailModal item={preview}
           onClose={() => setPreview(null)}
           onBump={d => { const set = new Set(tvWatchedSet(preview)); if (d > 0) { const nx = tvNextToWatch(preview); if (nx) set.add(nx); } else { const last = tvLastWatched(preview); if (last) set.delete(last); } commitSet([...set]); }}
-          onSeasonToggle={s => { const set = new Set(tvWatchedSet(preview)); for (let e = 1; e <= s.eps; e++) { const k = `S${s.n}E${e}`; (s.watched < s.eps) ? set.add(k) : set.delete(k); } commitSet([...set]); }}
+          onSeasonToggle={(s, locked) => { const set = new Set(tvWatchedSet(preview)); const skip = new Set(locked || []); for (let e = 1; e <= s.eps; e++) { const k = `S${s.n}E${e}`; if (s.watched < s.eps) { if (!skip.has(e)) set.add(k); } else set.delete(k); } commitSet([...set]); }}
           onToggleEp={(n, e, seen) => { const set = new Set(tvWatchedSet(preview)); const k = `S${n}E${e}`; seen ? set.delete(k) : set.add(k); commitSet([...set]); }}
           onSetSpecials={arr => commitPreview({ specialsSeen: [...new Set(arr)].filter(n => Number.isFinite(n) && n >= 0).sort((a, b) => a - b) })}
           onManga={v => commitPreview({ manga: !!v })}
