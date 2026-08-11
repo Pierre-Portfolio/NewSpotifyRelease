@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.8.3';
+const APP_VERSION = '8.8.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28589,7 +28589,7 @@ function NotePanel() {
   const [msg, setMsg]             = React.useState('');
 
   const commit = list => { setNotes(list); saveNotes(list); };
-  const closeEditor = () => { setEditId(null); setTitle(''); setText(''); setErr(''); setBusy(false); setSavedAt(0); };
+  const closeEditor = () => { editSeq.current++; beforeRef.current = null; setEditId(null); setTitle(''); setText(''); setErr(''); setBusy(false); setSavedAt(0); };
 
   // Déchiffre toutes les notes cryptées à l'entrée dans l'espace crypté (titre + texte).
   // ⚠ MÉMOÏSÉ PAR « id:updatedAt » (`decCache`) : chaque déchiffrement coûte un PBKDF2 600k, et
@@ -28644,6 +28644,15 @@ function NotePanel() {
   const autoSnap = React.useRef(null);   // dernier contenu réellement écrit ('titre\0texte')
   const autoId   = React.useRef(null);   // id attribué à une note EN COURS DE CRÉATION
   const editRef  = React.useRef(editId); editRef.current = editId;
+  // ⚠ 8.8.4 — « ↩ Annuler » : l'ENTRÉE STOCKÉE telle qu'elle était à l'ouverture de
+  // l'éditeur (objet complet, `updatedAt` et blob chiffré compris). La restaurer revient
+  // donc à un aller-retour EXACT — aucun re-chiffrement, aucune date de modification qui
+  // bouge. `null` quand on crée une note (il n'y a rien à restaurer, il faut la supprimer).
+  const beforeRef = React.useRef(null);
+  // Jeton d'ouverture : incrémenté à CHAQUE ouverture/fermeture d'éditeur. Une sauvegarde
+  // automatique dont le chiffrement se termine APRÈS une annulation porte un jeton périmé
+  // et n'écrit rien — sans lui, elle réécrirait par-dessus ce qu'on vient de restaurer.
+  const editSeq  = React.useRef(0);
   React.useEffect(() => {
     if (editId === null) { autoSnap.current = null; autoId.current = null; return; }
     const snap = title + '\u0000' + text;   // séparateur impossible à saisir au clavier
@@ -28658,21 +28667,22 @@ function NotePanel() {
     if (crypt && !gpw) return;                                        // session cryptée expirée
     const timer = setTimeout(async () => {
       const now = Date.now();
+      const seq = editSeq.current;
       // ⚠ L'id d'une note en création est mémorisé dans une REF : deux sauvegardes qui se
       // chevauchent (le chiffrement dure plusieurs centaines de ms) créeraient sinon DEUX notes.
       const id = editId === 'new' ? (autoId.current || (autoId.current = newNoteId(now))) : editId;
       const t = title.trim() || 'Sans titre';
+      let entry;
       try {
-        if (crypt) {
-          autoWrite(id, { locked:true, enc: await mdpEncrypt(gpw, { title:t, text }) }, now);
-          decCache.current[id + ':' + now] = { title:t, text };   // évite de re-déchiffrer ce qu'on vient d'écrire
-        } else {
-          autoWrite(id, { locked:false, title:t, text }, now);
-        }
+        entry = crypt ? { locked:true, enc: await mdpEncrypt(gpw, { title:t, text }) } : { locked:false, title:t, text };
       } catch { return; }   // échec de chiffrement : nouvelle tentative à la frappe suivante
-      // ⚠ L'éditeur a pu être fermé (Annuler, suppression, bascule public⇄privé) PENDANT le
-      // chiffrement : sans cette garde, la note ressusciterait dans l'espace qu'elle a quitté.
-      if (editRef.current === null) return;
+      // ⚠ 8.8.4 — LA GARDE EST DÉSORMAIS *AVANT* L'ÉCRITURE : l'éditeur a pu être fermé,
+      // annulé ou basculé public⇄privé PENDANT le chiffrement. Elle ne protégeait jusqu'ici
+      // que `setEditId`/`setSavedAt`, `autoWrite` ayant déjà écrit — la note ressuscitait
+      // donc bel et bien dans l'espace qu'elle venait de quitter.
+      if (editRef.current === null || editSeq.current !== seq) return;
+      autoWrite(id, entry, now);
+      if (crypt) decCache.current[id + ':' + now] = { title:t, text };   // évite de re-déchiffrer ce qu'on vient d'écrire
       autoSnap.current = snap;
       if (editId === 'new') setEditId(id);
       setSavedAt(now);
@@ -28716,20 +28726,36 @@ function NotePanel() {
   const leaveEnc = () => { setMode('normal'); setGpw(''); setDec({}); closeEditor(); setAskId(null); setAskPw(''); setErr(''); setMsg(''); };
 
   // ── Ouvrir / éditer ──
-  const openNew = () => { closeEditor(); setMsg(''); setEditId('new'); };
+  const openNew = () => { closeEditor(); setMsg(''); setEditId('new'); beforeRef.current = null; };
   const openNote = async n => {
     setErr(''); setMsg('');
-    if (mode === 'normal') { setEditId(n.id); setTitle(n.title || ''); setText(n.text || ''); return; }
+    if (mode === 'normal') { beforeRef.current = n; setEditId(n.id); setTitle(n.title || ''); setText(n.text || ''); return; }
     const d = dec[n.id];
-    if (d) { setEditId(n.id); setTitle(d.title || ''); setText(d.text || ''); return; }
+    if (d) { beforeRef.current = n; setEditId(n.id); setTitle(d.title || ''); setText(d.text || ''); return; }
     if (d === null) { setAskId(n.id); setAskPw(''); }   // legacy : mot de passe individuel
   };
   const unlockLegacy = async n => {
     if (!askPw || busy) return;
     setBusy(true); setErr('');
-    try { const d = await mdpDecrypt(askPw, n.enc); setEditId(n.id); setTitle(n.title || ''); setText((d && d.text) || ''); setAskId(null); setAskPw(''); }
+    try { const d = await mdpDecrypt(askPw, n.enc); beforeRef.current = n; setEditId(n.id); setTitle(n.title || ''); setText((d && d.text) || ''); setAskId(null); setAskPw(''); }
     catch { setErr('Mot de passe incorrect.'); }
     setBusy(false);
+  };
+
+  // ── ↩ Annuler (8.8.4, demande utilisateur) : remet la note EXACTEMENT dans l'état où
+  // elle était avant l'ouverture de l'éditeur — la sauvegarde automatique (8.6.8) a en
+  // effet déjà écrit chaque frappe, il n'y a donc plus de « ne pas enregistrer », seulement
+  // un retour en arrière.
+  // ⚠ Une note CRÉÉE pendant cette session d'édition (`beforeRef` vide) n'a pas d'état
+  // antérieur : annuler la SUPPRIME, sinon on laisserait derrière soi une note fantôme.
+  const cancelEdit = () => {
+    const before = beforeRef.current;
+    const id = editId === 'new' ? autoId.current : editId;
+    editSeq.current++;   // invalide toute sauvegarde automatique encore en vol
+    if (before) commit(notes.map(n => n.id === before.id ? before : n));
+    else if (id) commit(notes.filter(n => n.id !== id));
+    closeEditor();
+    setMsg(before ? '↩ Modifications annulées.' : '↩ Nouvelle note abandonnée.');
   };
 
   const saveNote = async () => {
@@ -28864,8 +28890,12 @@ function NotePanel() {
               style={{ ...btnSt(false), color: isEnc ? NOTE_COLOR : '#e0a050', borderColor: (isEnc ? NOTE_COLOR : '#e0a050') + '66', fontWeight:700, opacity: busy ? 0.6 : 1 }}>
               {isEnc ? '🗒️ Passer public' : '🔒 Passer privé'}
             </button>
-            {/* ⚠ « Annuler » MENTIRAIT depuis la sauvegarde automatique : ce bouton ne défait
-                plus rien, il referme simplement l'éditeur. */}
+            {/* ↩ Annuler (8.8.4) : REMET la note dans l'état d'avant l'ouverture de
+                l'éditeur (la sauvegarde automatique a déjà tout écrit), ou supprime la note
+                si elle vient d'être créée. « Fermer » à côté, lui, garde les modifications. */}
+            <button onClick={cancelEdit} disabled={busy}
+              title={editId === 'new' ? 'Abandonner cette nouvelle note' : 'Remettre la note comme elle était avant que tu l\'ouvres'}
+              style={{ ...btnSt(false), color:'#e0a050', borderColor:'#e0a05066', opacity: busy ? 0.6 : 1 }}>↩ Annuler</button>
             <button onClick={closeEditor} style={btnSt(false)}>Fermer</button>
           </div>
         </div>

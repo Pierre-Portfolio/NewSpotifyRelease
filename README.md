@@ -278,6 +278,8 @@ Coffre d'identifiants **chiffré par un mot de passe maître** (AES-GCM 256 + PB
 
 **📍 Nouveau — « Actu Régional »** : un sous-collapse de plus dans **Actu → 📰 Actualité**, juste **entre Actu Mondial et Wikipédia**, qui rassemble tout ce qui parle de **Massy, Orsay et Montigny-le-Bretonneux**. Une recherche par commune, fusionnée et dédoublonnée (un même article sortant sur deux communes voisines n'apparaît qu'une fois). ⚠️ Les articles sur le **musée d'Orsay** sont volontairement écartés : ils noieraient la commune de l'Essonne sous des expositions parisiennes. Comme les autres sections, elle est pré-remplie toutes les 2 h côté serveur et retombe sur une recherche directe si besoin.
 
+**↩️ Nouveau — « Annuler » dans l'éditeur de notes** : comme tout est enregistré automatiquement pendant que tu écris, un bouton **↩ Annuler** remet la note **exactement dans l'état où elle était avant que tu l'ouvres** — même titre, même texte, même date de modification, et elle ne remonte pas en tête de liste. Si tu venais de créer la note, Annuler l'abandonne purement et simplement. Le bouton **Fermer**, lui, garde tes modifications comme avant.
+
 ### Alertes (Remember)
 **❌ Nouveau — supprimer une alerte perso depuis « 📅 Dates à venir »** : chaque alerte que tu as créée toi-même affiche maintenant une **petite croix rouge à droite** dans cette vue ; un clic la supprime (et retire au passage la tâche « 🔔 … » qu'elle avait ajoutée dans le To do). Les rubriques toutes faites (Administratif, Finance, Véhicule…) n'en ont pas : elles ne se suppriment pas, on efface simplement leur date.
 
