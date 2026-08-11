@@ -243,6 +243,13 @@ Export : `EXPORT_SECTIONS` (boutons dans « ↧ EXPORTER » d'À propos) → `do
 - ⚠ Vérifié dans le navigateur (`MusiquePanel` + le vrai `StatsCollapse` extraits d'`index.html`, enfants remplacés par des sondes) : les 6 collapses dans l'ordre voulu, **tous repliés à l'arrivée**, ouverture de ⚙ SCRAPPING → les 5 panneaux montés, ouverture de ⏳ EN ATTENTE → `FeedList` monté.
 
 
+**⚠ 8.7.2 — LES LIGNES YOUTUBE DISSOCIENT VIDÉOS ET SHORTS** (demande utilisateur) : « 12/40 vidéos vues » devient **« X/Y vidéos & A/Z shorts vues »**, et **une seule des deux parties** s'affiche si la chaîne n'a que ça.
+- Helpers module-level (à côté de `ytCountedTotal`) : **`ytSplitCount(item)`** → `{ vid:{seen,total}, short:{seen,total}, ign }` et **`ytProgressLabel(item)`** (le libellé). Utilisés par `progLabel` (section EN COURS / EN PAUSE / À VOIR) **et** par la ligne des **VUS**.
+- ⚠ Le tri se fait sur **`dur`**, qui n'existe que dans `videos` : le total est donc celui des vidéos **CHARGÉES** et non `totalEps` (qui peut être plafonné à 500). `ytIsShortEntry` (le prédicat partagé du lecteur) est réutilisé — durée **inconnue = 0 = Short**, même convention que `ytShortsQueue`.
+- ⚠ **Repli sur l'ancien libellé global tant qu'aucune vidéo n'est chargée** (chaîne fraîchement ajoutée), sinon la ligne afficherait « 0/0 ».
+- ⚠ Les **🙈 ignorées** restent hors décompte des deux côtés et sont rappelées par « · 🙈 N » (règle 7.8.0 inchangée) ; une vidéo ignorée PUIS cochée revient dans le décompte.
+- ⚠ Vérifié : **7 assertions en Node** sur les helpers extraits d'`index.html` (chaîne mixte, 100 % vidéos, 100 % shorts, durée inconnue, ignorées, ignorée-puis-vue, chaîne vide) **et 5 dans Chromium** sur `TvTimePanel` monté en isolation (onglet ▶️ YT : « 2/4 vidéos & 1/3 shorts vues », « 1/2 vidéos vues » seul, « 0/3 shorts vues » seul). Aucune erreur console.
+
 **⚠ 8.7.1 — UN ÉPISODE PAS ENCORE SORTI NE PEUT PLUS ÊTRE COCHÉ + UNE SÉRIE « VU » REPASSE EN COURS QUAND UN ÉPISODE SORT** (demande utilisateur, capture à l'appui : E44 à E49 « sort le 15/08/2026 » cochés en vert) :
 - **Helpers module-level** (juste avant `tvDaysUntil`) : `TV_UNLOCK_MS` (24 h) · `tvDateLocked(iso)` (gère les dates PARTIELLES de TMDB, `2027` → `2027-01-01`) · **`tvEpLocked(date, item, n, e)`** · `tvLockedEps(item, n, eps, list)`.
 - ⚠ **DEUX sources, dans cet ordre** : la **date de l'épisode** (précise, connue seulement quand la saison est dépliée — le cache `spotifyplus_tvtime_eps` la porte) puis, à défaut, **`nextEp`** (prochain épisode à diffuser de TMDB) : tout ce qui est APRÈS lui n'est pas sorti, et lui-même s'ouvre 24 h avant sa date. Sans l'un des deux, cocher la saison entière ne saurait pas quoi exclure (les épisodes ne sont pas chargés tant qu'on n'a pas déplié).
