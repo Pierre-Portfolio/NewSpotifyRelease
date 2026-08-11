@@ -885,6 +885,12 @@ Records dans `spotifyplus_game_hi_<id>` (`gameHi`/`setGameHi`). Helpers partagé
 
 **Finance — en-tête** : `FinancePanel` rend LUI-MÊME son titre « FINANCE » + les 4 boutons de mode (Light/Full/Calculatrice/Mes Actifs, **sans icône 🧮**) sur la même ligne (gabarit Météo/Alertes) — `selfHeading:true` dans `SECTION.finance` (desktop) et plus de heading dédié dans `MobileApp`.
 
+**⚠ 8.7.8 — CROIX ROUGE DE SUPPRESSION DANS « 📅 DATES À VENIR »** (demande utilisateur) : la vue « Dates à venir » listait les échéances sans aucune action — il fallait revenir aux rubriques pour supprimer une alerte perso. Chaque ligne issue d'une alerte PERSO porte désormais un **×** rouge à droite du badge de jours restants.
+- ⚠ **`customId` ajouté aux entrées `customs` d'`allDated`** : c'est ce champ qui distingue une alerte perso d'une rubrique fixe ou d'un item `RAPPEL_EXTRA` — une rubrique fixe **n'est pas supprimable** (on efface sa date dans son champ), elle ne porte donc pas de croix.
+- ⚠ **Le MÊME `removeCustom(id)` que la liste « 🔔 Mes rappels »** : la tâche To do liée part donc aussi (règle 8.7.3), sans avoir à dupliquer quoi que ce soit. **Pas de confirmation**, comme l'autre croix — l'alerte se recrée en deux champs.
+- ⚠ La croix n'apparaît pas dans le **calendrier 🗓** : celui-ci consomme `allDated` en lecture seule, on n'y touche pas.
+- ⚠ Vérifié dans Chromium sur la page complète (2 alertes perso + 1 rubrique fixe datée + une tâche To do liée) : **2 croix exactement** (aucune sur la rubrique fixe), couleur `rgb(224,80,80)`, clic → l'alerte A disparaît de la liste ET du stockage, **la B est intacte**, la tâche To do liée est supprimée et l'autre tâche conservée. Aucune erreur console.
+
 **⚠ 8.7.3 — SUPPRIMER UNE ALERTE PERSO SUPPRIME AUSSI SA TÂCHE To do** (demande utilisateur) : une alerte **en retard** a forcément été recopiée dans « Aujourd'hui » par `syncRemembersToTodos` (≤ 3 j) — la tâche « 🔔 … » restait ensuite orpheline. Nouveau module-level **`removeRememberTodo(key)`** (juste avant `syncRemembersToTodos`), appelé par `removeCustom(id)` avec `'custom.' + id`.
 - ⚠ **On cible `rememberKey`** (posé sur la tâche à sa création) **et JAMAIS le texte** : deux tâches peuvent porter le même libellé, et l'utilisateur a pu en écrire une à la main.
 - Le marqueur d'ajout (`REMEMBER_TODO_ADDED_KEY`) est **effacé au passage**, sinon la clé resterait dans le suivi à vie.
