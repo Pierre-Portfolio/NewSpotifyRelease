@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.7.4';
+const APP_VERSION = '8.7.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1759,7 +1759,21 @@ async function apiPut(url, body, _retried = false) {
     return { error: 'rate_limited', rate_limited: true, blockedUntil: _rlUntil };
   }
   if (res.status === 204) return { ok: true };
-  if (res.status === 403) return { error: 'forbidden' };
+  // ⚠ On GARDE le corps du 403 : Spotify y met la vraie raison
+  // ({"error":{"status":403,"message":"Player command failed: Restriction violated","reason":"UNKNOWN"}}).
+  // Sans ça, toutes les causes possibles (permission manquante, appareil qui refuse la
+  // commande, compte Free) se ressemblaient — une seule ligne rouge en console, rien à l'écran.
+  // Les appelants existants testent `error === 'forbidden'`, ils sont donc inchangés.
+  if (res.status === 403) {
+    const body = await res.json().catch(() => null);
+    const e    = body && typeof body.error === 'object' ? body.error : null;
+    return {
+      error  : 'forbidden',
+      status : 403,
+      message: (e?.message || (typeof body?.error === 'string' ? body.error : '') || '').trim(),
+      reason : e?.reason || '',
+    };
+  }
   if (res.status === 404) return { error: 'no_active_device' };
   // 2xx avec un corps vide/non-JSON (fréquent sur PUT /me/library) = SUCCÈS, pas une erreur.
   // Sans ce guard, res.json() throw → { error:'unknown' } faisait échouer faussement un like.
@@ -14813,13 +14827,68 @@ function _effUri(pollUri) {
   return pollUri || null;
 }
 
+// ── Refus de lecture : cibler un appareil, puis EXPLIQUER ─────────────────────
+// PUT /me/player/play sans `device_id` ne marche que s'il existe un appareil ACTIF au sens
+// de Spotify. Un Spotify ouvert mais en pause depuis un moment ne l'est plus, et une lecture
+// pilotée par une enceinte / une TV / la voiture refuse carrément la commande → 403
+// « Player command failed: Restriction violated ». Cibler explicitement un appareil règle
+// ces deux cas, qui étaient jusqu'ici indiscernables d'un problème de compte.
+async function spotifyDevices() {
+  // ⚠ apiGet THROW sur 429 (rate limit) : sans ce try, une fenêtre 429 casserait playTrack,
+  // donc l'auto-avance en fin de titre.
+  try {
+    const d = await apiGet('https://api.spotify.com/v1/me/player/devices');
+    return Array.isArray(d?.devices) ? d.devices : null; // null = refus / erreur, [] = aucun appareil
+  } catch { return null; }
+}
+async function spotifyPickDevice() {
+  const list = await spotifyDevices();
+  if (!Array.isArray(list) || !list.length) return null;
+  // ⚠ `is_restricted` = appareil qui n'accepte AUCUNE commande de l'API Web : le cibler
+  // renverrait exactement le même 403. On préfère l'appareil actif, sinon n'importe quel autre.
+  const usable = list.filter(d => d?.id && !d.is_restricted);
+  return usable.find(d => d.is_active) || usable[0] || null;
+}
+const PLAY_403_REASONS = {
+  PREMIUM_REQUIRED: 'Cette commande est réservée aux comptes Spotify Premium.',
+  UNKNOWN         : 'L\'appareil visé refuse la commande (lecture pilotée par une enceinte, une TV ou une autre application).',
+};
+function playForbiddenMsg(res) {
+  const msg = res?.message || '';
+  // « Insufficient client scope » : le jeton a été émis sans user-modify-playback-state.
+  // Un refresh n'ajoute JAMAIS un scope — seule une reconnexion complète le fait.
+  if (/scope/i.test(msg) || spotifyHasScope('user-modify-playback-state') === false)
+    return 'Spotify a refusé la commande : la permission « contrôler la lecture » manque à ta session.\n\nDéconnecte-toi puis reconnecte-toi pour l\'accorder.';
+  const why = PLAY_403_REASONS[res?.reason] || '';
+  return 'Spotify a refusé de lancer le titre (403).'
+    + (why ? '\n' + why : '')
+    + (msg ? '\n\nMessage de Spotify : ' + msg : '')
+    + '\n\nOuvre Spotify sur l\'appareil voulu, lance un titre à la main, puis réessaie ici.';
+}
+const NO_DEVICE_MSG = 'Aucun appareil Spotify utilisable.\n\nOuvre Spotify (téléphone, ordinateur ou lecteur web), lance n\'importe quel titre, puis réessaie ici.';
+// L'auto-avance et la navigation appellent playTrack SANS geste de l'utilisateur : sans ce
+// throttle, un appareil devenu injoignable ouvrirait une alerte à chaque fin de titre.
+let _playAlertAt = 0;
+function _playAlert(msg) {
+  if (Date.now() - _playAlertAt < 30000) return;
+  _playAlertAt = Date.now();
+  alert(msg);
+}
+
 async function playTrack(spotifyUri) {
   if (!spotifyUri) return;
   _navUri = spotifyUri;
   _navAt  = Date.now();
-  const result = await apiPut('https://api.spotify.com/v1/me/player/play', { uris: [spotifyUri] });
-  if (result?.error === 'no_active_device') alert('Aucun appareil Spotify actif. Ouvre Spotify d\'abord.');
-  // Popup « compte Spotify Free ? » (403 forbidden) retirée à la demande de l'utilisateur.
+  const url    = 'https://api.spotify.com/v1/me/player/play';
+  const body   = { uris: [spotifyUri] };
+  let   result = await apiPut(url, body);
+  if (result?.error === 'no_active_device' || result?.error === 'forbidden') {
+    const dev = await spotifyPickDevice();
+    if (dev) result = await apiPut(`${url}?device_id=${encodeURIComponent(dev.id)}`, body);
+    else { _playAlert(NO_DEVICE_MSG); return; }
+  }
+  if (result?.error === 'no_active_device') _playAlert(NO_DEVICE_MSG);
+  else if (result?.error === 'forbidden')   _playAlert(playForbiddenMsg(result));
 }
 
 // React.memo + props explicites (pas de useStore) : seuls les items dont les props changent

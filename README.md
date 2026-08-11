@@ -39,6 +39,10 @@ Les titres de la playlist Spotify « Découvertes de la semaine » arrivent dans
 - Swipe gauche = retirer, swipe droite = précédent (mobile) ; bannières de date (mobile)
 - **Player** : poll 5 s (suspendu onglet caché), prev/play-pause/next, clic next → démarre à 25 %, bouton loop, barre draggable, **player mobile 50vh**, **mode compact** en split-screen
 
+**▶️ « Je clique sur un titre et il ne se lance pas » (corrigé)** : le bouton lecture échouait **sans le moindre message** — une erreur rouge dans la console du navigateur, et rien à l'écran. Deux corrections :
+- **Le Hub désigne maintenant explicitement l'appareil** sur lequel jouer. Spotify n'accepte la commande « lance ce titre » que s'il a un appareil *actif* sous la main : un Spotify ouvert mais en pause depuis un moment ne compte plus, et une lecture pilotée par une **enceinte, une TV ou la voiture** refuse carrément la commande. Le Hub va donc chercher la liste de tes appareils et relance la commande sur celui qui sait l'exécuter — les cas les plus courants se règlent tout seuls.
+- **Quand ça échoue quand même, tu sais pourquoi** : le message de Spotify est affiché **mot pour mot**, avec ce qu'il faut faire (ouvrir Spotify sur l'appareil voulu et y lancer un titre à la main, ou — s'il manque la permission « contrôler la lecture » — se déconnecter puis se reconnecter, une permission ne pouvant pas être ajoutée à une session déjà ouverte). Un seul message par tranche de 30 secondes : l'auto-avance ne peut plus t'inonder d'alertes en fin de chaque titre.
+
 **🔤 Accueil : Musique se range par ordre alphabétique (corrigé)** : la tuile **Musique** était épinglée en première position de l'accueil quelle que soit sa lettre. Elle suit désormais le **même ordre alphabétique que toutes les autres** (entre « Mot de passe » et « Note »), sur mobile comme sur ordinateur.
 
 ### Musique
