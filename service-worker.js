@@ -116,7 +116,7 @@
 // et lien avec la ville, via l'API Claude).
 // v224 : bump de cache — Histoire : illustration des fiches par Google Images (Custom
 // Search JSON API, clé + ID de moteur saisis dans le module API).
-const CACHE  = 'spotifyplus-v238';
+const CACHE  = 'spotifyplus-v239';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js',

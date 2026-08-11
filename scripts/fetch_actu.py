@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -314,6 +315,50 @@ def fetch_monde():
     ])
 
 
+REGIONAL_TOWNS = ["Massy", "Orsay", "Montigny-le-Bretonneux"]
+REGIONAL_MAX = 12
+# ⚠ « Orsay » ramène massivement le MUSÉE d'Orsay (Paris 7e), sans rapport avec la commune
+# de l'Essonne : ces titres sont écartés, sinon la section serait noyée sous des expositions.
+REGIONAL_NO = re.compile(r"(mus[ée]e|gare|quai)\s+d[’']?orsay", re.I)
+
+
+def _reg_norm(s):
+    s = unicodedata.normalize("NFD", str(s or "").lower())
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+def is_regional(a):
+    """L'item parle-t-il VRAIMENT d'une des 3 communes ? (miroir d'actuIsRegional côté
+    client). Google News classe par PERTINENCE, pas par exactitude : sans ce filtre on
+    récupère des articles hors sujet."""
+    raw = str((a or {}).get("title") or "") + " " + str((a or {}).get("source") or "")
+    if REGIONAL_NO.search(raw):
+        return False
+    t = _reg_norm(raw)
+    return any(_reg_norm(v) in t for v in REGIONAL_TOWNS) or "montigny le bretonneux" in t
+
+
+def fetch_regional():
+    """Actu Régional — Massy, Orsay, Montigny-le-Bretonneux (8.8.3).
+
+    ⚠ UNE recherche par commune, puis FUSION : fetch_gnews s'arrête au premier flux qui rend
+    des items (c'est une cascade de replis), il ne les additionne pas — passer les 3 requêtes
+    d'un bloc ne ramènerait que la première commune.
+    """
+    out, seen = [], set()
+    for q in ['"Massy" Essonne', '"Orsay" Essonne', '"Montigny-le-Bretonneux"']:
+        for a in fetch_gnews([gn_search(q)]):
+            if not is_regional(a):
+                continue
+            k = _reg_norm(a.get("title"))[:80]
+            if k in seen:            # un même article sort sur 2 communes voisines
+                continue
+            seen.add(k)
+            out.append(a)
+        time.sleep(1)
+    return recent_first(out, 365)[:REGIONAL_MAX]
+
+
 def fetch_bourse():
     """Bourse & crypto — recherche financière (repli : topic BUSINESS)."""
     return fetch_gnews([
@@ -506,6 +551,7 @@ def main():
         "hn":       fetch_hn,
         "leaks":    fetch_leaks,
         "monde":    fetch_monde,
+        "regional": fetch_regional,
         "linkedin": fetch_linkedin,
         "bourse":   fetch_bourse,
         "cyber":    fetch_cyber,
@@ -544,7 +590,7 @@ def main():
     links_old = existing.get("links") or {}
     links_new = {}
     budget = [IMG_BUDGET]
-    for key in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite"):
+    for key in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite"):
         if isinstance(out.get(key), list):
             enrich_images(out[key], old_cache, new_cache, budget, links_old, links_new)
     # LinkedIn : on veut atterrir sur linkedin.com, pas sur la redirection Google News.
@@ -556,8 +602,8 @@ def main():
               f"{direct} liens directs linkedin.com")
     out["images"] = new_cache
     out["links"] = links_new
-    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite"))
-    withimg = sum(1 for k in ("presse", "monde", "linkedin", "bourse", "cyber", "jeux", "insolite")
+    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite"))
+    withimg = sum(1 for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite")
                   for a in (out.get(k) or []) if a.get("image"))
     print(f"images: {withimg}/{total} articles illustrés ({IMG_BUDGET - budget[0]} décodages ce run)")
 

@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.8.2';
+const APP_VERSION = '8.8.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18840,6 +18840,40 @@ function actuFetchCyber() {
 function actuFetchInsolite() {
   return actuFetchGNews([actuGNSearch('insolite')]);
 }
+// ── Actu Régional (8.8.3, demande utilisateur) : tout ce qui parle de Massy, Orsay et
+// Montigny-le-Bretonneux. ⚠ UNE recherche par commune, puis FUSION — `actuFetchGNews`
+// s'arrête au premier flux qui rend des items (cascade de replis), il ne les additionne
+// pas : passer les 3 requêtes d'un bloc ne ramènerait donc QUE la première commune.
+const ACTU_REGIONAL_TOWNS = ['Massy', 'Orsay', 'Montigny-le-Bretonneux'];
+const ACTU_REGIONAL_MAX = 12;
+// ⚠ « Orsay » ramène massivement le MUSÉE d'Orsay (Paris 7e), qui n'a rien à voir avec la
+// commune de l'Essonne : ces titres sont écartés explicitement, sinon la section serait
+// noyée sous des expositions parisiennes.
+const ACTU_REGIONAL_NO = /(mus[ée]e|gare|quai)\s+d[’']?orsay/i;
+const actuRegionalNorm = s => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+// L'item parle-t-il VRAIMENT d'une des 3 communes ? (Google News classe par pertinence,
+// pas par exactitude : sans ce filtre, on récupère des articles hors sujet.)
+function actuIsRegional(a) {
+  const raw = ((a && a.title) || '') + ' ' + ((a && a.source) || '');
+  if (ACTU_REGIONAL_NO.test(raw)) return false;
+  const t = actuRegionalNorm(raw);
+  return ACTU_REGIONAL_TOWNS.some(v => t.includes(actuRegionalNorm(v)) ||
+    (v === 'Montigny-le-Bretonneux' && t.includes('montigny le bretonneux')));
+}
+async function actuFetchRegional() {
+  const out = [], seen = new Set();
+  for (const q of ['"Massy" Essonne', '"Orsay" Essonne', '"Montigny-le-Bretonneux"']) {
+    const items = await actuFetchGNews([actuGNSearch(q)], ACTU_REGIONAL_MAX);
+    for (const a of items) {
+      if (!actuIsRegional(a)) continue;
+      const k = actuRegionalNorm(a.title).slice(0, 80);
+      if (seen.has(k)) continue;          // un même article sort sur 2 communes voisines
+      seen.add(k);
+      out.push(a);
+    }
+  }
+  return actuRecentFirst(out, 365).slice(0, ACTU_REGIONAL_MAX);
+}
 // Actualité LinkedIn (7.6.56) — ⚠ IMPOSSIBLE de lire le fil « Actus » de SON compte, et
 // impossible d'interroger LinkedIn DIRECTEMENT : LinkedIn n'a AUCUNE API publique de
 // lecture. Son API (« LinkedIn Marketing / Share on LinkedIn ») est réservée aux
@@ -18982,19 +19016,20 @@ async function actuFetchAll() {
   const stat = await actuFetchStatic();
   const has = a => Array.isArray(a) && a.length;
   const statOr = (key, fn) => has(stat && stat[key]) ? Promise.resolve(stat[key]) : fn();
-  const [hn, presse, trends, leaks, monde, linkedin, bourse, cyber, jeux, insolite] = await Promise.all([
+  const [hn, presse, trends, leaks, monde, regional, linkedin, bourse, cyber, jeux, insolite] = await Promise.all([
     actuFetchHN().then(r => has(r) ? r : ((stat && stat.hn) || [])),
     statOr('presse', actuFetchPresse),
     statOr('trends', actuFetchTrends),
     (stat && stat.leaks && has(stat.leaks.items)) ? Promise.resolve(stat.leaks) : actuFetchLeaks(),
     statOr('monde', actuFetchMonde),
+    statOr('regional', actuFetchRegional),
     statOr('linkedin', actuFetchLinkedin),
     statOr('bourse', actuFetchBourse),
     statOr('cyber', actuFetchCyber),
     statOr('jeux', actuFetchJeuxNews),
     statOr('insolite', actuFetchInsolite),
   ]);
-  const data = { fetched_at: Date.now(), hn, presse, trends, leaks, monde, linkedin, bourse, cyber, jeux, insolite };
+  const data = { fetched_at: Date.now(), hn, presse, trends, leaks, monde, regional, linkedin, bourse, cyber, jeux, insolite };
   saveActu(data);
   return data;
 }
@@ -20184,6 +20219,26 @@ function ActuPanel() {
             {(d.monde && d.monde.length)
               ? d.monde.map((a, i) => acard('mo' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)))
               : empty('Indisponible (proxy CORS injoignable).')}
+          </StatsCollapse>
+
+          {/* 1.1a Actu Régional (8.8.3) — ENTRE Actu Mondial et Wikipédia (demande
+              utilisateur, hors alphabet) : Massy, Orsay, Montigny-le-Bretonneux. ⚠ Le
+              filtre `actuIsRegional` est REFAIT ICI et pas seulement dans le fetcher : la
+              source par défaut est `data/actu.json`, qui peut venir d'un run d'Action
+              antérieur (donc contenir des articles hors sujet ou le musée d'Orsay). */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>📍 ACTU RÉGIONAL <span style={{ color:C.dim, fontWeight:400 }}>· {ACTU_REGIONAL_TOWNS.join(' · ')}</span></span>}>
+            {(() => {
+              const src = Array.isArray(d.regional) ? d.regional : [];
+              const rg = src.filter(actuIsRegional);
+              if (rg.length) return rg.map((a, i) => acard('rg' + i, a.link, a.title, a.source, actuAgo(a.date), null, a.image, actuFav(a)));
+              return empty(src.length
+                ? 'Aucune actualité sur ces communes pour le moment.'
+                : 'Indisponible (proxy CORS injoignable).');
+            })()}
+            <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
+              Une recherche Google News par commune, fusionnée et dédoublonnée. Les articles sur le <b>musée d'Orsay</b> sont écartés : ils n'ont rien à voir avec la commune de l'Essonne.
+            </div>
           </StatsCollapse>
 
           {/* 1.1b Wikipédia — dernières nouveautés (7.6.74). Placé ENTRE Actu Mondial
