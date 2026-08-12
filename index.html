@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.8.7';
+const APP_VERSION = '8.8.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29320,13 +29320,46 @@ function mdpBumpActivity() {
 // (sinon le mot de passe y reste indéfiniment — presse-papiers parfois synchronisé
 // cross-device par l'OS). L'écriture peut échouer si l'onglet n'a plus le focus → best-effort.
 let _mdpClipTimer = null;
-function mdpCopyPassword(pw) {
-  try { navigator.clipboard.writeText(pw).catch(() => {}); } catch {}
-  if (_mdpClipTimer) clearTimeout(_mdpClipTimer);
-  _mdpClipTimer = setTimeout(() => {
+// ⚠ 8.8.8 — la purge ne vaut QUE pour un mot de passe (`purge`). Copier l'IDENTIFIANT
+// annule la purge en attente : elle visait le mot de passe, qui vient justement d'être
+// écrasé dans le presse-papiers — la laisser courir effacerait l'identifiant que
+// l'utilisateur vient de copier, sans plus rien protéger.
+// ⚠ Renvoie une PROMESSE (le bouton en tire son accusé ✓ / ✕) : `navigator.clipboard`
+// exige un contexte sécurisé et peut être refusé, il ne faut pas afficher « copié » alors.
+function mdpCopyText(txt, purge) {
+  if (_mdpClipTimer) { clearTimeout(_mdpClipTimer); _mdpClipTimer = null; }
+  let pr;
+  try { pr = navigator.clipboard.writeText(txt); } catch (e) { pr = Promise.reject(e); }
+  if (!pr || typeof pr.then !== 'function') pr = Promise.reject(new Error('clipboard'));
+  if (purge) _mdpClipTimer = setTimeout(() => {
     _mdpClipTimer = null;
     try { navigator.clipboard.writeText('').catch(() => {}); } catch {}
   }, 10 * 60 * 1000);
+  return pr;
+}
+function mdpCopyPassword(pw) { return mdpCopyText(pw, true).catch(() => {}); }
+
+// 📋 Bouton de copie d'un champ du coffre (8.8.8) — accusé ✓ (copié) / ✕ (refusé) 1,5 s.
+// ⚠ `stopPropagation` : la ligne d'une entrée porte des poignées de glissement et le
+// bouton vit dans un `StatsCollapse`, on ne laisse remonter aucun clic.
+function MdpCopyBtn({ value, purge, what }) {
+  const [st, setSt] = React.useState(0);   // 0 repos · 1 copié · -1 refusé
+  const tRef = React.useRef(null);
+  React.useEffect(() => () => { if (tRef.current) clearTimeout(tRef.current); }, []);
+  const flash = v => {
+    setSt(v);
+    if (tRef.current) clearTimeout(tRef.current);
+    tRef.current = setTimeout(() => setSt(0), 1500);
+  };
+  return (
+    <button onClick={ev => { ev.stopPropagation(); mdpCopyText(value, purge).then(() => flash(1), () => flash(-1)); }}
+      aria-label={'Copier ' + what}
+      title={st === -1 ? 'Copie refusée par le navigateur' : 'Copier ' + what + (purge ? ' (presse-papiers purgé après 10 min)' : '')}
+      style={{ background:'none', border:'none', color: st === 1 ? '#4caf50' : (st === -1 ? '#e05050' : C.muted),
+        fontSize:11, lineHeight:1, cursor:'pointer', padding:'0 2px', flexShrink:0 }}>
+      {st === 1 ? '✓' : (st === -1 ? '✕' : '📋')}
+    </button>
+  );
 }
 
 function GestionMdpPanel() {
@@ -29787,14 +29820,36 @@ function GestionMdpPanel() {
                 <button onClick={() => startEdit(e)} title="Modifier" style={{ background:'none', border:'none', fontSize:12, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
                 <button onClick={() => remove(e.id)} title="Supprimer" style={{ background:'none', border:'none', color:'#e05050', fontSize:15, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
               </div>
-              {e.mdp && shown[e.id] && (
-                <code style={{ fontSize:11, color:MDP_AMBER, fontFamily:'DM Mono,monospace', wordBreak:'break-all' }}>{e.mdp}</code>
+              {/* ⚠ 8.8.8 — IDENTIFIANT ET MOT DE PASSE ÉTIQUETÉS « user » / « mdp », avec
+                  chacun SON bouton de copie à droite (demande utilisateur : « sinon on sait
+                  pas quoi et quoi »). Avant, le mot de passe et l'identifiant s'affichaient
+                  en deux lignes nues, impossibles à distinguer l'une de l'autre, et le seul
+                  bouton 📋 (celui du titre) copiait toujours le mot de passe.
+                  ⚠ L'identifiant est désormais affiché MÊME quand il sert de titre de repli
+                  (entrées sans `titre`) : avec l'étiquette il ne peut plus être pris pour
+                  autre chose, et la ligne « user » manquerait sinon sur ces entrées-là. */}
+              {shown[e.id] && (e.identifiant || e.mdp) && (
+                <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+                  {e.identifiant && (
+                    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                      <span style={{ fontSize:9.5, color:C.dim, fontWeight:700, flexShrink:0, width:26 }}>user</span>
+                      <code style={{ flex:1, minWidth:0, fontSize:11, color:C.text, fontFamily:'DM Mono,monospace', wordBreak:'break-all' }}>{e.identifiant}</code>
+                      <MdpCopyBtn value={e.identifiant} what="l'identifiant" />
+                    </div>
+                  )}
+                  {e.mdp && (
+                    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                      <span style={{ fontSize:9.5, color:C.dim, fontWeight:700, flexShrink:0, width:26 }}>mdp</span>
+                      <code style={{ flex:1, minWidth:0, fontSize:11, color:MDP_AMBER, fontFamily:'DM Mono,monospace', wordBreak:'break-all' }}>{e.mdp}</code>
+                      <MdpCopyBtn value={e.mdp} purge what="le mot de passe" />
+                    </div>
+                  )}
+                </div>
               )}
               {/* ⚠ Le DÉTAIL (identifiant, URL, commentaire, tags) suit le 👁 : « n'afficher
                   que le titre » ne doit pas rendre le lien et le login inatteignables sans
                   passer par le formulaire d'édition — le même geste qui dévoile le mot de
                   passe dévoile la fiche. */}
-              {shown[e.id] && e.titre && e.identifiant && <div style={{ fontSize:10, color:C.muted, wordBreak:'break-word' }}>{e.identifiant}</div>}
               {shown[e.id] && e.url && (safeHref(e.url)
                 ? <a href={safeHref(e.url)} target="_blank" rel="noreferrer" style={{ fontSize:10, color:'#5aa9ff', wordBreak:'break-all', textDecoration:'none' }}>↗ {e.url}</a>
                 : <span title="Lien non affiché (schéma non autorisé)" style={{ fontSize:10, color:C.muted, wordBreak:'break-all' }}>↗ {e.url}</span>)}
