@@ -73,7 +73,7 @@
 // v90 : bump de cache — Cartographie : nouvelle carte « Aurores boréales » (spaceweatherlive.com).
 // v91 : bump de cache — TV Time YouTube : clic sur la miniature d'une vidéo → ouvre la vidéo (nouvel onglet) + marque vue automatiquement.
 // v92 : bump de cache — Cartographie : cartes réparées (refusaient l'iframe) → Aurores (image NOAA SWPC), Catastrophes naturelles (VolcanoDiscovery), Carte INSEE (mode iframe statistiques-locales), Qualité de l'eau (infoeau.fr).
-// v98 : bump de cache — 2 nouvelles destinations de sauvegarde : pCloud (OAuth) et MEGA (email+mdp, megajs vendorisé et précaché).
+// v98 : bump de cache — nouvelle destination de sauvegarde : pCloud (OAuth).
 // v99 : bump de cache — connexion Google Drive/YouTube réparée : Google a coupé le flux
 // OAuth implicite par redirection (« Erreur 400 : invalid_request ») → passage à Google
 // Identity Services (popup, script accounts.google.com/gsi/client chargé lazy).
@@ -116,11 +116,12 @@
 // et lien avec la ville, via l'API Claude).
 // v224 : bump de cache — Histoire : illustration des fiches par Google Images (Custom
 // Search JSON API, clé + ID de moteur saisis dans le module API).
-const CACHE  = 'spotifyplus-v250';
+// v251 : bump de cache — MEGA retiré du projet (destination de sauvegarde supprimée,
+// vendor/megajs.js supprimé du dépôt et du précache).
+const CACHE  = 'spotifyplus-v251';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
-                './vendor/motus-words.js', './vendor/motus-dico.js',
-                './vendor/megajs.js'];
+                './vendor/motus-words.js', './vendor/motus-dico.js'];
 
 self.addEventListener('install', e => {
   self.skipWaiting();
