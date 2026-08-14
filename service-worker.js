@@ -120,7 +120,8 @@
 // vendor/megajs.js supprimé du dépôt et du précache).
 // v252 : bump de cache — Vêtement : « Short » renommé « Short classique » + nouveau type
 // « Short de sport » (sous-catégorie Bas).
-const CACHE  = 'spotifyplus-v252';
+// v253 : bump de cache — Vêtement : nouveau type « Bracelet » (sous-catégorie Accessoires).
+const CACHE  = 'spotifyplus-v253';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
