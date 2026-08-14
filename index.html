@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.9.2';
+const APP_VERSION = '8.9.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -15270,6 +15270,143 @@ function saveApiExport(v) { lsSet(API_EXPORT_LS, JSON.stringify(v)); }
 // Une API est exportée par défaut (clé absente = cochée) ; seul `false` explicite l'exclut.
 function apiExported(map, id) { return !map || map[id] !== false; }
 
+// ══════════════════════════════════════════════════════════════════
+// ⚠ 8.9.3 — COMPTEUR D'APPELS PAR API (« combien de fois j'ai appelé cette API,
+// depuis toujours »). Affiché dans Stats → 🔌 API, et suivi par l'export/import
+// et les 4 destinations cloud (clé `api_calls` de buildBackup).
+//
+// ⚠ POURQUOI UN WRAPPER DE `window.fetch` ET NON UN COMPTEUR POSÉ À CHAQUE APPEL :
+// l'app compte ~93 sites d'appel `fetch(...)` répartis dans TOUS les modules, dont
+// une bonne partie passe déjà par des helpers génériques (apiGet, corsFetchText,
+// gbifGet, steamGetJson, opggGet, cgFetch, collGetJson…). Les instrumenter un par un
+// serait non seulement pénible mais FAUX dès la première ligne oubliée — et le
+// serait de nouveau à chaque module ajouté. UN SEUL point d'entrée garantit qu'aucun
+// appel n'échappe au compteur, aujourd'hui comme demain.
+// ⚠ Le wrapper NE CHANGE RIEN au comportement : il renvoie la promesse d'origine
+// telle quelle et tout le comptage est en try/catch — une URL exotique ne doit
+// jamais faire échouer un fetch. `orig` est LIÉ à window (sans quoi l'appel lèverait
+// « Illegal invocation »).
+// ⚠ UN APPEL = UNE REQUÊTE PARTIE, réussie ou non : un retry compte donc pour 2.
+// C'est volontaire — c'est exactement ce que coûte le quota d'une API.
+// ⚠ CE QUE LE COMPTEUR NE VOIT PAS, volontairement : les requêtes du SERVICE WORKER
+// (autre contexte JS), les <img>/<iframe>/<script> (ce ne sont pas des fetch : les
+// tuiles OSM, Data Dragon et les cartes en iframe resteront donc à 0) et les appels
+// faits depuis un AUTRE appareil tant qu'on n'y a pas importé sa sauvegarde.
+// ⚠ UN APPEL PASSÉ PAR UN PROXY CORS EST COMPTÉ SUR LE PROXY (c'est l'hôte
+// réellement contacté) : les compteurs des proxies sont donc élevés, et ceux des
+// sources qui ne répondent qu'à travers eux (Steam, Google News…) plus bas que la
+// réalité. Dit dans la note de la section Stats plutôt que deviné.
+// ══════════════════════════════════════════════════════════════════
+const API_CALLS_LS   = 'spotifyplus_api_calls';   // { since:<ms>, calls:{ "<id>":{ n, first, last } } }
+const API_CALLS_SAVE_MS = 1500;                   // écriture différée (un fetch n'écrit jamais le localStorage)
+let _apiCalls = null;        // état EN MÉMOIRE = source de vérité (buildBackup et Stats le lisent)
+let _apiCallsTimer = null;
+// Charge (et assainit) l'état une seule fois. Tolère l'ancienne forme « id → nombre ».
+function apiCallsState() {
+  if (_apiCalls) return _apiCalls;
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(API_CALLS_LS)); } catch {}
+  const src = (raw && raw.calls && typeof raw.calls === 'object') ? raw.calls : {};
+  const calls = {};
+  for (const id of Object.keys(src)) {
+    const e = src[id];
+    const n = Math.max(0, Math.round(+((e && typeof e === 'object') ? e.n : e) || 0));
+    if (!n) continue;
+    calls[id] = { n, first: +(e && e.first) || 0, last: +(e && e.last) || 0 };
+  }
+  _apiCalls = { since: +(raw && raw.since) || Date.now(), calls };
+  return _apiCalls;
+}
+function apiCallsFlush() {
+  if (_apiCallsTimer) { clearTimeout(_apiCallsTimer); _apiCallsTimer = null; }
+  if (_apiCalls) lsSet(API_CALLS_LS, JSON.stringify(_apiCalls));
+}
+function apiCallsSchedule() { if (!_apiCallsTimer) _apiCallsTimer = setTimeout(() => { _apiCallsTimer = null; apiCallsFlush(); }, API_CALLS_SAVE_MS); }
+// ⚠ `pagehide` en plus de `visibilitychange` : sur iOS `beforeunload` ne se déclenche
+// pas, et une salve d'appels suivie d'une fermeture perdrait sinon jusqu'à 1,5 s de comptage.
+try {
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') apiCallsFlush(); });
+  window.addEventListener('pagehide', () => apiCallsFlush());
+} catch {}
+
+// Hôte → id d'API_LIST. ⚠ PREMIER ARRIVÉ, PREMIER SERVI : `www.googleapis.com` porte
+// TROIS entrées (YouTube/Drive, Custom Search, Books) → l'hôte seul retombe sur
+// `googleapis` et ce sont les règles de CHEMIN ci-dessous qui départagent les deux autres.
+const API_HOST_ID = (() => { const m = {}; for (const a of API_LIST) if (!m[a.host]) m[a.host] = a.id; return m; })();
+const API_PATH_ID = {
+  'www.googleapis.com': [[/^\/customsearch\b/, 'google_images'], [/^\/books\b/, 'googlebooks']],
+};
+// Hôtes DYNAMIQUES = les jokers de la CSP (régions pCloud, serveurs de fichiers MEGA),
+// qui ne peuvent pas figurer tels quels dans API_LIST.
+const API_HOST_SUFFIX = [['.pcloud.com', 'pcloud'], ['.mega.co.nz', 'mega'], ['.mega.nz', 'mega']];
+function apiIdFromUrl(url) {
+  let u; try { u = new URL(url, location.href); } catch { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;   // data:/blob: — rien à compter
+  const h = u.hostname.toLowerCase();
+  if (h === location.hostname) return null;                            // l'app elle-même (data/actu.json, vendor/…)
+  const rules = API_PATH_ID[h];
+  if (rules) for (const r of rules) if (r[0].test(u.pathname)) return r[1];
+  if (API_HOST_ID[h]) return API_HOST_ID[h];
+  const alt = h.indexOf('www.') === 0 ? h.slice(4) : 'www.' + h;       // stooq.com ⇄ www.stooq.com
+  if (API_HOST_ID[alt]) return API_HOST_ID[alt];
+  for (const s of API_HOST_SUFFIX) if (h.endsWith(s[0])) return s[1];
+  return null;
+}
+function apiCountHit(id, when) {
+  if (!id) return;
+  const st = apiCallsState();
+  const e = st.calls[id] || (st.calls[id] = { n:0, first:0, last:0 });
+  e.n++; e.last = when; if (!e.first) e.first = when;
+  apiCallsSchedule();
+}
+(function installApiCounter() {
+  if (typeof window === 'undefined' || typeof window.fetch !== 'function' || window.__apiCallsHooked) return;
+  window.__apiCallsHooked = true;
+  const orig = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      const url = (typeof input === 'string') ? input
+                : (input && typeof input.url === 'string')  ? input.url    // objet Request
+                : (input && typeof input.href === 'string') ? input.href   // objet URL
+                : '';
+      if (url) apiCountHit(apiIdFromUrl(url), Date.now());
+    } catch {}
+    return orig(input, init);
+  };
+})();
+// Copie profonde pour buildBackup — lue EN MÉMOIRE (et non dans le localStorage) : l'écriture
+// est différée de 1,5 s, un export déclenché juste après une salve d'appels raterait la fin.
+function apiCallsExport() {
+  const st = apiCallsState();
+  const calls = {};
+  for (const id of Object.keys(st.calls)) { const e = st.calls[id]; calls[id] = { n:e.n, first:e.first, last:e.last }; }
+  return { since: st.since, calls };
+}
+// ⚠ FUSION AU **MAX** PAR API, JAMAIS UNE SOMME (même règle que `games.hi` et les cumuls
+// d'artistes) : une sauvegarde contient DÉJÀ l'historique local, additionner doublerait
+// les appels à chaque ré-import. `first` prend le MIN (la plus ancienne trace connue),
+// `last` le MAX, et `since` le MIN — l'ancienneté ne doit jamais régresser.
+function apiCallsImport(inc) {
+  if (!inc || typeof inc !== 'object') return 0;
+  const st = apiCallsState();
+  const src = (inc.calls && typeof inc.calls === 'object') ? inc.calls : {};
+  const since = +inc.since || 0;
+  if (since > 0 && (!st.since || since < st.since)) st.since = since;
+  let merged = 0;
+  for (const id of Object.keys(src)) {
+    const e = src[id]; if (!e) continue;
+    const n = Math.max(0, Math.round(+((typeof e === 'object') ? e.n : e) || 0));
+    const first = +(e.first) || 0, last = +(e.last) || 0;
+    const cur = st.calls[id];
+    if (!cur) { if (n) { st.calls[id] = { n, first, last }; merged++; } continue; }
+    if (n > cur.n) { cur.n = n; merged++; }
+    if (first && (!cur.first || first < cur.first)) cur.first = first;
+    if (last > cur.last) cur.last = last;
+  }
+  apiCallsFlush();
+  return merged;
+}
+
 // APIs dont la CLÉ/token est saisi(e) par l'utilisateur et stocké(e) en localStorage → éditable
 // directement sous la ligne (les autres sont soit en OAuth : Spotify/Dropbox/Drive, soit des clés
 // gratuites en dur : Twelve Data/Alpha Vantage — pas cohérent à éditer ici). Pour `googleapis`,
@@ -15525,6 +15662,10 @@ function buildBackup() {
     home_modules: lsJson(HOME_MODULES_LS_KEY) || {},
     // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
     listens: lsJson(LISTEN_LOG_KEY) || [],
+    // API : nombre d'appels par API depuis toujours (compteur du wrapper de fetch, cf. plus
+    // haut). ⚠ Ce n'est PAS un cache re-fetchable — c'est un HISTORIQUE, impossible à
+    // reconstituer une fois perdu : il est donc bien sauvegardé. Fusion au MAX au restore.
+    api_calls: apiCallsExport(),
     // Frigo : contenu par compartiment + dates de péremption (saisi à la main, non re-fetchable)
     frigo: lsJson('spotifyplus_frigo') || null,
     // Vêtement : inventaire + fiches, SANS les photos (data URLs trop lourdes, exclues comme TierList)
@@ -15593,6 +15734,7 @@ const EXPORT_SECTIONS = [
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Alertes',      icon:'🔔', hint:'rappels fixes + persos (dates & heures)', fields:['rappels', 'rappels_time', 'remembers'] },
   { key:'comptes',  label:'Comptes & clés',icon:'🔐', hint:'clés/pseudos API (Claude, Gemini, Google Images, GitHub, LoL, chess, speedrun)', fields:['gemini_key','claude_key','gcse_key','gcse_cx','github_token','chess_user','speedrun_user','lol'] },
+  { key:'api',      label:'API',          icon:'🔌', hint:"nombre d'appels par API (depuis toujours)", fields:['api_calls'] },
   { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique + records de jeux", fields:['stats', 'listens', 'games'] },
   { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil + préférences', fields:['modules','home_modules','prefs'] },
 ];
@@ -15953,6 +16095,9 @@ function applyBackup(data) {
     putRaw('spotifyplus_game_gh_level', data.games.gh_level);
     putRaw('spotifyplus_game_osu_level', data.games.osu_level);
   }
+  // API — compteurs d'appels FUSIONNÉS au MAX par API (cf. apiCallsImport : additionner
+  // doublerait l'historique déjà présent dans la sauvegarde à chaque ré-import)
+  if (data.api_calls && typeof data.api_calls === 'object') { try { apiCallsImport(data.api_calls); } catch {} }
   // Préférences d'affichage — remplacées si présentes
   if (data.prefs && typeof data.prefs === 'object') {
     putRaw('spotifyplus_tvtime_filter', data.prefs.tvtime_filter);
@@ -18407,6 +18552,10 @@ function StatsPanel() {
       </StatsCollapse>
       <StatsCollapse title="🐙 GITHUB" color={DEPENDABOT_COLOR}>
         <GithubStatsSection />
+      </StatsCollapse>
+      {/* API — nombre d'appels par API depuis toujours (100 % local, aucune requête) */}
+      <StatsCollapse title="🔌 API" color={API_COLOR}>
+        <ApiCallsStatsSection />
       </StatsCollapse>
     </div>
   );
@@ -30577,6 +30726,103 @@ function GamesHubStatsSection() {
         <b style={{ color:C.text }}>{GAMES.length}</b> mini-jeux disponibles · <b style={{ color:GAMES_COLOR }}>{played}</b> avec un record établi
       </div>
       {cards.map(statCardEl)}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ⚠ 8.9.3 — SECTION « 🔌 API » de StatsPanel : le nombre d'appels par API depuis
+// toujours. 100 % local, ZÉRO requête — tout vient du compteur `apiCallsState()`
+// alimenté par le wrapper de `window.fetch` (cf. bloc MODULE API).
+// Trois sous-collapses : 🤖 IA (les API d'IA, demandées explicitement — affichées MÊME
+// à 0, savoir qu'on n'a jamais appelé Claude est une information), ⭐ PRINCIPALES (les
+// API qui portent le cœur du Hub) et 📋 TOUTES (une ligne fine par API, classées par
+// nombre d'appels décroissant).
+// ⚠ `API_STATS_PIN` liste des ids d'API_LIST : un id qui n'y existe plus est simplement
+// ignoré (`filter(Boolean)`), il ne fait pas planter la section.
+// ══════════════════════════════════════════════════════════════════
+const API_STATS_PIN = ['spotify_api', 'tmdb', 'googleapis', 'coingecko', 'openmeteo', 'steam_api', 'github', 'openfoodfacts', 'cheapshark', 'wikipedia'];
+const API_CAT_ICON = {
+  'Musique':'🎵', 'TV / Vidéo':'🎬', 'Météo & Géo':'🌤', 'Finance':'📈', 'Actu':'📰', 'Histoire':'🏛️',
+  'Emploi':'💼', 'Bon Plan / Santé':'🛒', 'Jeux (stats)':'🎮', 'Sauvegarde':'☁️', 'IA':'🤖', 'Proxies CORS':'🔀',
+};
+const API_STATS_AI_COLOR = '#b07fe8';   // les API d'IA se distinguent du bleu-indigo du module
+function apiStatsDate(ms) { try { return ms ? new Date(ms).toLocaleDateString('fr-FR') : ''; } catch { return ''; } }
+function ApiCallsStatsSection() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
+  // ⚠ Lecture DIRECTE de l'état en mémoire (pas de useMemo) : StatsCollapse ne monte ses
+  // enfants qu'à l'ouverture, la valeur est donc déjà fraîche à l'affichage, et le bouton ↻
+  // suffit à rafraîchir pendant qu'on regarde.
+  const st = apiCallsState();
+  const nOf = id => (st.calls[id] && st.calls[id].n) || 0;
+  const total = API_LIST.reduce((s, a) => s + nOf(a.id), 0);
+  const used  = API_LIST.filter(a => nOf(a.id) > 0).length;
+  const max   = API_LIST.reduce((m, a) => Math.max(m, nOf(a.id)), 0);
+
+  const card = a => {
+    const e = st.calls[a.id];
+    const n = (e && e.n) || 0;
+    const ai = a.cat === 'IA';
+    return statCardEl({
+      label: a.name.toUpperCase(),
+      value: n > 0 ? fmtN(n) : '—',
+      sub:   n > 0 ? `appel(s) · depuis le ${apiStatsDate(e.first) || '?'}` : 'jamais appelée',
+      icon:  API_CAT_ICON[a.cat] || '🔌',
+      color: n > 0 ? (ai ? API_STATS_AI_COLOR : API_COLOR) : C.muted,
+    });
+  };
+  // Ligne fine (et non une carte) pour « TOUTES » : 60 grosses cartes seraient illisibles.
+  // ⚠ La barre est proportionnelle au PLUS GROS compteur, pas au total : avec ~60 API,
+  // rapportée au total chaque barre serait un trait invisible.
+  const row = a => {
+    const n = nOf(a.id);
+    return (
+      <div key={a.id} style={{ display:'flex', alignItems:'center', gap:8, opacity: n > 0 ? 1 : 0.45 }}>
+        <span style={{ width:16, textAlign:'center', fontSize:11, flexShrink:0 }}>{API_CAT_ICON[a.cat] || '🔌'}</span>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:11, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{a.name}</div>
+          <div style={{ height:3, borderRadius:2, background:C.border, marginTop:3, overflow:'hidden' }}>
+            <div style={{ height:'100%', width: max > 0 ? `${Math.max(n > 0 ? 2 : 0, (n / max) * 100)}%` : '0%', background: a.cat === 'IA' ? API_STATS_AI_COLOR : API_COLOR }} />
+          </div>
+        </div>
+        <span style={{ fontSize:11, fontWeight:700, fontFamily:'DM Mono,monospace', color: n > 0 ? C.text : C.muted, whiteSpace:'nowrap', flexShrink:0 }}>{n > 0 ? fmtN(n) : '—'}</span>
+      </div>
+    );
+  };
+
+  const ai     = API_LIST.filter(a => a.cat === 'IA');
+  const pinned = API_STATS_PIN.map(id => API_LIST.find(a => a.id === id)).filter(Boolean);
+  // Tri sur une COPIE (`slice`) — trier API_LIST en place changerait l'ordre du module API.
+  const all    = API_LIST.slice().sort((a, b) => (nOf(b.id) - nOf(a.id)) || a.name.localeCompare(b.name, 'fr', { sensitivity:'base' }));
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <div style={{ flex:1, minWidth:0, fontSize:11, color:C.muted, lineHeight:1.5 }}>
+          <b style={{ color:API_COLOR }}>{used}</b> API appelée(s) sur <b style={{ color:C.text }}>{API_LIST.length}</b> · compteur ouvert le <b style={{ color:C.text }}>{apiStatsDate(st.since) || '?'}</b>
+        </div>
+        <button onClick={bump} title="Rafraîchir les compteurs" style={{ flexShrink:0, background:'none', border:`1px solid ${C.border}`, color:C.dim, borderRadius:8, padding:'4px 9px', fontSize:11, cursor:'pointer' }}>↻</button>
+      </div>
+      {statCardEl({ label:"APPELS AU TOTAL", value: fmtN(total), sub:'requêtes réseau depuis toujours', icon:'🔌', color: API_COLOR })}
+      <StatsCollapse title="🤖 INTELLIGENCE ARTIFICIELLE" color={API_STATS_AI_COLOR}>
+        {ai.map(card)}
+      </StatsCollapse>
+      <StatsCollapse title="⭐ PRINCIPALES" color={API_COLOR}>
+        {pinned.map(card)}
+      </StatsCollapse>
+      <StatsCollapse title="📋 TOUTES LES API" color={API_COLOR}>
+        <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:9 }}>
+          {all.map(row)}
+        </div>
+      </StatsCollapse>
+      <div style={{ fontSize:10, color:C.muted, lineHeight:1.6 }}>
+        Un appel = une requête <b>partie</b>, réussie ou non (un retry compte donc pour 2 — c'est ce que coûte le quota).
+        Ne sont pas comptés : les images et les cartes en iframe (ce ne sont pas des requêtes <i>fetch</i> — tuiles OpenStreetMap
+        et Data Dragon restent à 0) et le cache hors ligne. Un appel passé par un <b>proxy CORS</b> est compté sur le proxy,
+        c'est-à-dire l'hôte réellement contacté. Les compteurs voyagent dans les sauvegardes (section d'export « 🔌 API »)
+        et sont fusionnés au plus élevé — jamais additionnés — à la restauration.
+      </div>
     </div>
   );
 }
