@@ -24368,23 +24368,35 @@ function ytUnsavedReconcile(items) {
   return out;
 }
 
-async function ytCheckNewVideos() {
+// Chaînes YouTube réellement interrogeables par le check de nouveautés.
+// ⚠ `force` (8.9.1, bouton ↻ manuel) lève le SEUL garde-fou de fraîcheur — les deux autres
+// exclusions restent absolues : la pseudo-chaîne « Hub Pierre » n'a aucun id YouTube à
+// interroger, et une chaîne `dropped` ne doit jamais repartir en requête.
+function ytStaleChannels(items, force) {
+  const now = Date.now();
+  return (items || []).filter(it => it.type === 'youtube' && !it.local && !it.dropped
+    && (force || now - (it.refreshedAt || 0) >= YT_NEW_CHECK_TTL));
+}
+// ⚠ Renvoie TOUJOURS un booléen (« quelque chose a changé ») : les appelants historiques
+// font `if (ch) …`, un objet serait toujours truthy. Le détail passe par `opts.onNew`.
+async function ytCheckNewVideos(opts) {
+  const force = !!(opts && opts.force), onStep = opts && opts.onStep, onNew = opts && opts.onNew;
   if (!ytKey()) return false;
   const cur = loadTvItems();
-  const yts = cur.filter(x => x.type === 'youtube');
-  if (!yts.length) return false;
-  const now = Date.now();
+  const targets = ytStaleChannels(cur, force);
+  if (!targets.length) return false;
   const patches = new Map();   // id → { built, hasNew }
-  for (const it of yts) {
-    if (it.local) continue;     // pseudo-chaîne locale (« Hub Pierre » (pseudo-chaîne)) : aucun id YouTube à interroger
-    if (it.dropped) continue;   // « ne plus suivre » → jamais de recherche de nouveautés
-    if (now - (it.refreshedAt || 0) < YT_NEW_CHECK_TTL) continue;   // encore frais → skip (quota)
+  for (let i = 0; i < targets.length; i++) {
+    const it = targets[i];
+    if (onStep) onStep(i, targets.length, it);
     const built = await ytBuildItem(it.id, { unlimited: it.unlimited, keepShorts: it.keepShorts, shortsOnly: it.shortsOnly });   // préserve plafond retiré + tags Shorts
     // shortsOnly : built.videos ne contient QUE des Shorts → la détection de nouveauté
     // (et donc la notif « En cours ») ne se déclenche que pour un Short qui sort.
     if (!built || built.error) continue;
     const oldIds = new Set((it.videos || []).map(v => v.id));
-    const hasNew = (built.videos || []).some(v => !oldIds.has(v.id));
+    const fresh = (built.videos || []).filter(v => !oldIds.has(v.id));
+    const hasNew = fresh.length > 0;
+    if (hasNew && onNew) onNew(it, fresh);
     patches.set(it.id, { built, hasNew });
   }
   if (!patches.size) return false;
@@ -24750,10 +24762,8 @@ function tvDaysUntil(iso) {
 //   plus aucune requête.
 // SÉQUENTIEL, 1 requête /tv|movie/{id} par titre. Retourne une Map "<type><id>" → champs
 // frais (jamais watchedEps/status : les compteurs perso ne sont pas touchés).
-async function tvRefreshShows(items, force) {
-  const out = new Map();
-  if (!tmdbKey()) return out;
-  const stale = items.filter(it => {
+function tvStaleShows(items, force) {
+  return (items || []).filter(it => {
     if (it.type === 'youtube') return false;   // YouTube : actualisé via ytCheckNewVideos / bouton ↻
     if (it.type === 'book') return false;      // 📚 Livres : aucune métadonnée TMDB à rafraîchir
     if (it.type === 'tv') {
@@ -24770,8 +24780,14 @@ async function tvRefreshShows(items, force) {
     const upcoming = !it.releaseDate || tvDaysUntil(it.releaseDate) >= 0;
     return upcoming && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
   });
+}
+async function tvRefreshShows(items, force, onStep) {
+  const out = new Map();
+  if (!tmdbKey()) return out;
+  const stale = tvStaleShows(items, force);
   for (let i = 0; i < stale.length; i++) {
     const it = stale[i];
+    if (onStep) onStep(i, stale.length, it);
     if (i > 0) await sleep(120);   // throttle : évite un burst si beaucoup de titres à backfill
     const f = await tmdbFetchItem(it.type, it.id);
     if (!f) continue;   // échec → refreshedAt inchangé : nouvel essai au prochain montage du panneau
@@ -24779,6 +24795,71 @@ async function tvRefreshShows(items, force) {
     else out.set('movie' + it.id, { releaseDate: f.releaseDate, runtime: f.runtime || it.runtime, year: f.year || it.year, poster: f.poster || it.poster, refreshedAt: Date.now() });
   }
   return out;
+}
+
+// ── ↻ Rafraîchissement MANUEL global de TV Time (8.9.1) ─────────────────────────────────
+// Demande utilisateur : « un bouton refresh à côté de 🩳 qui vérifie, pour chaque youtubeur,
+// s'il n'y a pas de nouveau short ou de nouvelle vidéo, puis pour chaque série en cours s'il
+// n'y a pas de nouvelle saison — avec un délai entre deux refresh pour éviter le spam, et une
+// barre de progression sous la barre des boutons ».
+// ⚠ Rien n'est réécrit ici : on FORCE les deux mécanismes qui existaient déjà (`ytCheckNewVideos`
+// pour YouTube, `tvRefreshShows` pour TMDB), lesquels ne partaient jusque-là qu'au montage et
+// seulement si leur TTL était dépassé (6 h / 24 h) — donc invisibles et inactionnables.
+const TV_SYNC_AT_LS      = 'spotifyplus_tvtime_sync_at';
+const TV_SYNC_COOLDOWN_MS = 10 * 60000;   // 10 min entre deux ↻ manuels (quota YouTube + TMDB)
+function tvSyncLastAt() { try { return parseInt(localStorage.getItem(TV_SYNC_AT_LS) || '0') || 0; } catch { return 0; } }
+function tvSyncSetAt(t) { try { localStorage.setItem(TV_SYNC_AT_LS, String(t)); } catch {} }
+// Nombre d'unités de travail du prochain ↻ — sert à afficher la progression AVANT la 1re
+// requête (sinon la barre resterait à 0/0 pendant tout le premier fetch, qui est le plus long).
+function tvSyncPlan(items) {
+  return { yt: ytKey() ? ytStaleChannels(items, true).length : 0,
+           tv: tmdbKey() ? tvStaleShows(items, true).length : 0 };
+}
+// ⚠ ORDRE IMPOSÉ : YouTube d'abord (il ÉCRIT lui-même via saveTvItems), TMDB ensuite (il
+// RENVOIE une Map que l'appelant applique). Dans l'autre sens, l'écriture YouTube écraserait
+// les champs frais TMDB qui n'auraient pas encore été appliqués.
+async function tvSyncAll(onProgress) {
+  const items = loadTvItems();
+  const plan = tvSyncPlan(items);
+  const total = plan.yt + plan.tv;
+  let done = 0;
+  const tick = label => { if (onProgress) onProgress({ done, total, label }); };
+  tick(total ? 'Préparation…' : 'Rien à actualiser');
+  const ytNew = [];
+  await ytCheckNewVideos({
+    force: true,
+    onStep: (i, n, it) => { done = i; tick(`▶️ ${it.title || 'Chaîne'} (${i + 1}/${n})`); },
+    onNew: (it, fresh) => ytNew.push({ title: it.title, n: fresh.length }),
+  });
+  done = plan.yt;
+  const before = new Map(items.filter(it => it.type === 'tv').map(it => [it.id, it]));
+  const fresh = await tvRefreshShows(loadTvItems(), true,
+    (i, n, it) => { done = plan.yt + i; tick(`🎬 ${it.title || 'Titre'} (${i + 1}/${n})`); });
+  done = total; tick('Terminé');
+  // Nouvelle SAISON / nouvel épisode : on compare ce que TMDB vient de renvoyer à l'état
+  // d'AVANT le refresh. ⚠ `applyFresh` (côté panneau) n'écrit pas encore : c'est ici, et
+  // seulement ici, qu'on dispose des deux versions.
+  const tvNew = [];
+  fresh.forEach((f, k) => {
+    if (!k.startsWith('tv')) return;
+    const old = before.get(parseInt(k.slice(2), 10));
+    if (!old) return;
+    const seasons = (f.seasons || []).length, wasSeasons = (old.seasons || []).length;
+    const eps = f.totalEps || 0, wasEps = old.totalEps || 0;
+    if (seasons > wasSeasons || eps > wasEps)
+      tvNew.push({ title: old.title, seasons: seasons - wasSeasons, eps: eps - wasEps });
+  });
+  return { fresh, ytNew, tvNew, ytCount: plan.yt, tvCount: plan.tv };
+}
+// Libellé du bilan affiché sous la barre de progression.
+function tvSyncSummary(r) {
+  if (!r) return '';
+  if (!r.ytCount && !r.tvCount) return 'Rien à actualiser (aucune chaîne ni série suivie).';
+  const parts = [];
+  if (r.ytNew.length) parts.push(r.ytNew.map(x => `▶️ ${x.title} : ${x.n} nouvelle(s) vidéo(s)`).join(' · '));
+  if (r.tvNew.length) parts.push(r.tvNew.map(x => `🎬 ${x.title} : ${x.seasons > 0 ? `${x.seasons} nouvelle(s) saison(s)` : `${x.eps} nouvel(s) épisode(s)`}`).join(' · '));
+  if (!parts.length) return `Rien de neuf — ${r.ytCount} chaîne(s) et ${r.tvCount} titre(s) vérifiés.`;
+  return parts.join(' · ');
 }
 
 // Stats TV Time (collapse « Stats Film » d'À propos) — 100% depuis le cache localStorage,
@@ -26163,6 +26244,32 @@ function TvTimePanel() {
     setRefreshing(false);
   };
 
+  // ── ↻ Rafraîchissement MANUEL global (8.9.1) ────────────────────────────────────────
+  // `sync` = { done, total, label } pendant l'opération, `null` au repos → c'est LUI qui
+  // rend la barre de progression sous la barre des boutons.
+  const [sync, setSync] = React.useState(null);
+  const [syncMsg, setSyncMsg] = React.useState('');
+  const [syncAt, setSyncAt] = React.useState(tvSyncLastAt);
+  // ⚠ Délai relu depuis le localStorage à l'init : sans lui, recharger la page (ou changer
+  // d'onglet et revenir) remettrait le compteur à zéro et le « délai anti-spam » demandé ne
+  // vaudrait que pour la session en cours.
+  const syncLeft = Math.max(0, TV_SYNC_COOLDOWN_MS - (Date.now() - syncAt));
+  useSharedTick(!!sync || syncLeft > 0);   // décompte du délai + rafraîchit l'infobulle
+  const syncAll = async () => {
+    if (sync || syncLeft > 0) return;
+    setSyncMsg('');
+    setSync({ done: 0, total: 0, label: 'Préparation…' });
+    let r = null;
+    try { r = await tvSyncAll(p => setSync(p)); }
+    catch { setSyncMsg('Actualisation interrompue (réseau ou quota API).'); }
+    // ⚠ Le délai est posé MÊME en cas d'échec : sinon un quota épuisé se traduirait par un
+    // bouton toujours actif, donc par du matraquage sur une API qui refuse déjà de répondre.
+    const now = Date.now(); setSyncAt(now); tvSyncSetAt(now);
+    if (r) { applyFresh(r.fresh); setSyncMsg(tvSyncSummary(r)); }
+    setItems(loadTvItems());   // la moitié YouTube a écrit directement
+    setSync(null);
+  };
+
   const saveKey = () => {
     const k = keyInput.trim();
     if (!k) return;
@@ -26989,12 +27096,41 @@ function TvTimePanel() {
             </button>
           );
         })()}
+        {/* ↻ Rafraîchissement global (8.9.1) — JUSTE À DROITE du 🩳 (position demandée) :
+            vérifie chaîne par chaîne s'il y a de nouveaux Shorts / vidéos, puis série par
+            série s'il y a une nouvelle saison. Délai anti-spam de TV_SYNC_COOLDOWN_MS
+            persisté (survit au rechargement), progression rendue SOUS la barre. */}
+        <button onClick={syncAll} disabled={!!sync || syncLeft > 0}
+          title={sync ? 'Actualisation en cours…'
+            : syncLeft > 0 ? `Déjà actualisé récemment — nouvelle actualisation possible dans ${fmtRemaining(syncLeft)}`
+            : 'Chercher les nouveaux Shorts / vidéos de chaque chaîne YouTube, puis les nouvelles saisons des séries suivies'}
+          style={hbtn(!!sync || syncLeft > 0)}>{sync ? '⏳' : '↻'}</button>
         <button onClick={toggleBooks}
           title={booksOn ? 'Masquer la section Livres' : 'Suivre aussi mes LIVRES (recherche Google Books / Open Library)'}
           style={hbtn()}>
           📚{booksOn && nbBooks > 0 && <span style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace' }}> {nbBooks}</span>}
         </button>
       </div>
+      {/* Barre de progression du ↻, SOUS la barre des boutons (emplacement demandé).
+          ⚠ `total` peut valoir 0 (aucune chaîne ni série à vérifier) → largeur forcée à
+          100 % plutôt qu'une division par zéro. */}
+      {sync && (
+        <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+          <div style={{ height:4, borderRadius:2, background:C.border, overflow:'hidden' }}>
+            <div style={{ height:'100%', borderRadius:2, background:TVTIME_COLOR,
+              width: (sync.total ? Math.round((sync.done / sync.total) * 100) : 100) + '%',
+              transition:'width 0.25s linear' }} />
+          </div>
+          <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+            {sync.total ? `${sync.done}/${sync.total} · ` : ''}{sync.label}
+          </div>
+        </div>
+      )}
+      {!sync && syncMsg && (
+        <div style={{ fontSize:9, color:C.dim, lineHeight:1.5 }}>
+          {syncMsg}{syncLeft > 0 ? ` · prochaine actualisation dans ${fmtRemaining(syncLeft)}` : ''}
+        </div>
+      )}
     <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
       {/* Clé API TMDB */}
       {!hasKey && (
