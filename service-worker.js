@@ -121,7 +121,9 @@
 // v252 : bump de cache — Vêtement : « Short » renommé « Short classique » + nouveau type
 // « Short de sport » (sous-catégorie Bas).
 // v253 : bump de cache — Vêtement : nouveau type « Bracelet » (sous-catégorie Accessoires).
-const CACHE  = 'spotifyplus-v253';
+// v254 : bump de cache — la vue compacte « contrôles Spotify » (viewport court) ne
+// s'applique plus que dans le module Musique.
+const CACHE  = 'spotifyplus-v254';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

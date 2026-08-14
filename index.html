@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.9.7';
+const APP_VERSION = '8.9.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3871,6 +3871,33 @@ function useIsMobile(bp = 820) {
 function useShortViewport(maxH = 500) {
   const get = () => typeof window !== 'undefined' && window.innerHeight < maxH;
   return _useResponsive(get, [maxH]);
+}
+
+// ── 8.9.8 — L'ONGLET ACTIF, PARTAGÉ AVEC `Shell` ─────────────────────────────────
+// ⚠ Le basculement vers `CompactPlayer` (viewport court → contrôles Spotify seuls) ne
+// vaut plus QUE dans le module Musique (demande utilisateur) : ailleurs, tourner le
+// téléphone ou l'ouvrir en split-screen ne doit plus remplacer la page par Spotify.
+// `Shell` a donc besoin de l'onglet courant, qui vit dans le state de `MobileApp` —
+// d'où ce publieur module-level (même patron que `_immersive`/`_finance`) plutôt qu'une
+// lecture de localStorage, qui ne se rafraîchirait pas au changement d'onglet.
+// ⚠ `MOBILE_LOCK_TABS` est un Set : c'est la SEULE liste à toucher si un autre onglet
+// devait un jour hériter du mode compact.
+const MOBILE_LOCK_TABS = new Set(['musique']);
+const _activeTab = { id: 'home', subs: new Set() };
+function setActiveTabShared(id) {
+  if (_activeTab.id === id) return;
+  _activeTab.id = id;
+  _activeTab.subs.forEach(fn => { try { fn(id); } catch {} });
+}
+function useActiveTab() {
+  const [v, setV] = React.useState(_activeTab.id);
+  React.useEffect(() => {
+    const h = id => setV(id);
+    _activeTab.subs.add(h);
+    setV(_activeTab.id);   // l'onglet a pu être posé avant ce montage
+    return () => { _activeTab.subs.delete(h); };
+  }, []);
+  return v;
 }
 
 // Horloge partagée 1s : UN SEUL setInterval global pour tous les countdowns (quota 24h,
@@ -33121,9 +33148,25 @@ function MobileApp() {
                   scrapping:'musique', ecouter:'musique' })[t] || t;
       }
     } catch {}
-    return 'home';
+    // ⚠ Repli sur l'onglet PARTAGÉ et non sur 'home' : au retour du mode compact
+    // (viewport court dans Musique) `MobileApp` est remonté à neuf — sans ça on
+    // retomberait sur l'accueil au lieu de retrouver la Musique. Au chargement de la
+    // page, `_activeTab.id` vaut 'home' : comportement d'origine inchangé.
+    return _activeTab.id || 'home';
   });
-  React.useEffect(() => { try { localStorage.setItem('spotifyplus_active_tab', tab); } catch {} }, [tab]);
+  // ⚠ `setActiveTabShared` DOIT partir d'ici et non du `onClick` des onglets : le tab
+  // change aussi tout seul (onglet désactivé dans le Paramétrage → retour à l'accueil,
+  // retour d'OAuth, clic sur le profil). C'est lui qui autorise `Shell` à basculer sur
+  // CompactPlayer — un onglet périmé y afficherait Spotify en dehors de la Musique.
+  React.useEffect(() => {
+    try { localStorage.setItem('spotifyplus_active_tab', tab); } catch {}
+    setActiveTabShared(tab);
+  }, [tab]);
+  // ⚠ SURTOUT PAS de remise à 'home' au DÉMONTAGE : passer en mode compact démonte
+  // justement `MobileApp` → l'onglet repasserait à 'home', `compact` retomberait à faux,
+  // `MobileApp` se remonterait… et le mode compact serait impossible à atteindre (constaté).
+  // C'est aussi ce qui permet de RETROUVER l'onglet Musique en revenant du mode compact
+  // (l'état partagé survit au démontage, le state local non).
   const [menuOpen, setMenuOpen] = React.useState(false);
   // ⚠ 7.7.6 — La barre du haut n'a PLUS d'onglet principal : « Scrapping » et « En Attente »
   // sont devenus des collapses du module Musique (demande utilisateur). Le tableau reste
@@ -33523,6 +33566,7 @@ function Shell() {
   const { authState, otherTab } = useStore();
   const isMobile      = useIsMobile();
   const shortViewport = useShortViewport();
+  const activeTab     = useActiveTab();
 
   if (authState === 'loading') {
     return (
@@ -33531,10 +33575,17 @@ function Shell() {
       </div>
     );
   }
-  // Viewport très court sur mobile (fenêtre du bas en split-screen) → vue compacte : uniquement les contrôles
+  // Viewport très court sur mobile (fenêtre du bas en split-screen, téléphone en paysage)
+  // → vue compacte : uniquement les contrôles Spotify. ⚠ 8.9.8 — UNIQUEMENT DANS LE MODULE
+  // MUSIQUE (demande utilisateur) : partout ailleurs ce basculement DÉMONTAIT la page en
+  // cours pour afficher Spotify (c'est ce que 7.6.92 et 8.9.1 rattrapaient au cas par cas
+  // avec `useImmersiveLock` — lecteur YouTube, cartes, module Jeux). La règle est désormais
+  // portée par `Shell` : plus besoin d'un verrou par module pour les nouveaux écrans.
+  // ⚠ Les `useImmersiveLock` existants sont CONSERVÉS : ils gèlent aussi `useIsMobile`.
+  const compact = shortViewport && MOBILE_LOCK_TABS.has(activeTab);
   const content = authState === 'login'
     ? <Home isMobile={isMobile} />
-    : (isMobile ? (shortViewport ? <CompactPlayer /> : <MobileApp />) : <WebApp />);
+    : (isMobile ? (compact ? <CompactPlayer /> : <MobileApp />) : <WebApp />);
   return (
     <>
       {otherTab && (
