@@ -123,7 +123,9 @@
 // v253 : bump de cache — Vêtement : nouveau type « Bracelet » (sous-catégorie Accessoires).
 // v254 : bump de cache — la vue compacte « contrôles Spotify » (viewport court) ne
 // s'applique plus que dans le module Musique.
-const CACHE  = 'spotifyplus-v254';
+// v255 : bump de cache — Vêtement : flèches ‹ › dans la visionneuse photo (changer de
+// vêtement dans la même catégorie, avec retour au début aux extrémités).
+const CACHE  = 'spotifyplus-v255';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];

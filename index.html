@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.9.8';
+const APP_VERSION = '8.9.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -10747,11 +10747,28 @@ function VetPhotoImg({ fileId, size, rev, radius }) {
 // photo ferait basculer `useShortViewport`, démonterait tout l'arbre (donc l'overlay) et
 // on perdrait la photo — c'est exactement le bug corrigé en 7.6.92 pour les vidéos.
 const VET_ZOOM_STEPS = [1, 2, 3];   // ✕1 = photo entière, puis 2 crans de zoom
-function VetPhotoLightbox({ fileId, rev, onClose }) {
+// ── 8.9.9 · NAVIGATION ← → ENTRE LES VÊTEMENTS D'UNE MÊME CATÉGORIE ──────────────
+// (demande utilisateur : « un bouton flèche droite flèche gauche à gauche quand je clique
+// sur l'image du vêtement pour changer de vêtement, et si je vais trop à droite ou à
+// gauche ça revient au début de la même catégorie »)
+// ⚠ La visionneuse ne reçoit plus un `fileId` seul mais la LISTE de la catégorie + l'index :
+// sans la liste, elle n'aurait aucun moyen de savoir ce qui vient avant/après — et la
+// « catégorie » n'est connue que de l'appelant (le collapse de TYPE, ou la galerie).
+// ⚠ Bornes CIRCULAIRES (`(i + n) % n` avec un `+ n` pour le pas négatif) : dépasser d'un
+// côté revient à l'autre bout de la MÊME catégorie, jamais dans une autre.
+const vetZoomStep = (i, d, n) => n > 0 ? ((i + d) % n + n) % n : 0;
+function VetPhotoLightbox({ list, index, rev, onIndex, onClose }) {
   useImmersiveLock(true);
   const [url, setUrl] = React.useState(null);
   const [err, setErr] = React.useState(false);
   const [z, setZ] = React.useState(0);        // index dans VET_ZOOM_STEPS
+  const items  = Array.isArray(list) ? list : [];
+  const cur    = items[index] || null;
+  const fileId = cur && cur.fileId;
+  // ⚠ Ref : l'écouteur clavier est posé une fois, il figerait sinon un `index` périmé.
+  const goRef  = React.useRef(null);
+  const go = d => { if (items.length > 1) onIndex(vetZoomStep(index, d, items.length)); };
+  goRef.current = go;
   React.useEffect(() => {
     let alive = true;
     setUrl(null); setErr(false); setZ(0);
@@ -10759,15 +10776,21 @@ function VetPhotoLightbox({ fileId, rev, onClose }) {
     gdriveBlobUrl(fileId).then(u => { if (alive) setUrl(u); }).catch(() => { if (alive) setErr(true); });
     return () => { alive = false; };
   }, [fileId, rev]);
-  // Échap ferme + le scroll de la page est bloqué pendant l'affichage.
+  // Échap ferme, ← → changent de vêtement + le scroll de la page est bloqué.
   React.useEffect(() => {
-    const h = e => { if (e.key === 'Escape') onClose(); };
+    const h = e => {
+      if (e.key === 'Escape') return onClose();
+      if (e.key === 'ArrowLeft')  { e.preventDefault(); goRef.current(-1); }
+      if (e.key === 'ArrowRight') { e.preventDefault(); goRef.current(+1); }
+    };
     window.addEventListener('keydown', h);
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => { window.removeEventListener('keydown', h); document.body.style.overflow = prev; };
   }, [onClose]);
   const zoom = VET_ZOOM_STEPS[z];
+  const navBtn = { width:34, height:34, borderRadius:'50%', border:`1px solid ${C.border}`,
+                   background:'#000000cc', color:'#fff', fontSize:15, lineHeight:1, cursor:'pointer' };
   return ReactDOM.createPortal(
     // Le fond ferme aussi (geste attendu d'une visionneuse) — d'où le stopPropagation sur le cadre.
     <div onClick={onClose} role="dialog" aria-modal="true" aria-label="Photo du vêtement"
@@ -10798,6 +10821,19 @@ function VetPhotoLightbox({ fileId, rev, onClose }) {
         {url && (
           <div style={{ position:'absolute', left:0, right:0, bottom:8, textAlign:'center', fontSize:10, color:C.dim, pointerEvents:'none' }}>
             {zoom === 1 ? 'Touche la photo pour zoomer' : `Zoom ×${zoom}`}
+          </div>
+        )}
+        {/* Flèches À GAUCHE (position demandée) — comme la croix, ce sont des frères de la
+            zone de défilement : elles restent atteignables même photo zoomée.
+            ⚠ Rendues seulement à partir de 2 vêtements photographiés dans la catégorie :
+            à un seul, elles ne feraient que recharger la même image. */}
+        {items.length > 1 && (
+          <div style={{ position:'absolute', left:8, bottom:8, display:'flex', alignItems:'center', gap:6, zIndex:2 }}>
+            <button onClick={() => go(-1)} aria-label="Vêtement précédent" title="Vêtement précédent (←)" style={navBtn}>‹</button>
+            <button onClick={() => go(+1)} aria-label="Vêtement suivant"   title="Vêtement suivant (→)"   style={navBtn}>›</button>
+            <span style={{ fontSize:10, color:C.dim, whiteSpace:'nowrap', maxWidth:'42vw', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {(index + 1) + '/' + items.length}{cur && cur.name ? ' · ' + cur.name : ''}
+            </span>
           </div>
         )}
       </div>
@@ -10940,7 +10976,20 @@ function VetementPanel() {
   const [prixOn, setPrixOn] = React.useState(vetPrixShown);
   const togglePrix = () => setPrixOn(v => { vetPrixSet(!v); return !v; });
   // Photo affichée en grand (8.4.8) — fileId Drive, `null` = visionneuse fermée.
-  const [zoomFid, setZoomFid] = React.useState(null);
+  // Visionneuse photo : `{ list:[{fileId,name}], i }` — la LISTE est celle de la catégorie
+  // affichée (8.9.9), pas seulement la photo cliquée, pour pouvoir passer au vêtement
+  // suivant/précédent. `vetZoomList` ne garde que les fiches QUI ONT une photo : une
+  // visionneuse vide n'aurait rien à montrer, et les flèches sauteraient dans le vide.
+  const [zoom, setZoom] = React.useState(null);
+  const vetZoomList = (arr, lbl) => (arr || [])
+    .filter(x => photos[x.id])
+    .map(x => ({ fileId: photos[x.id], name: x.name || lbl || '' }));
+  const openZoom = (arr, lbl, fid) => {
+    const list = vetZoomList(arr, lbl);
+    const i    = list.findIndex(x => x.fileId === fid);
+    // Photo introuvable dans la liste (cas improbable) → on ouvre au moins CELLE-LÀ.
+    setZoom(i >= 0 ? { list, i } : { list: [{ fileId: fid, name: lbl || '' }], i: 0 });
+  };
   // Galerie photo d'un TYPE (8.4.9) — clé du type, `null` = galerie fermée.
   const [galType, setGalType] = React.useState(null);
   // Recherche par image (IA) : état de l'appel + résultat affiché en bandeau. ⚠ La photo
@@ -11162,8 +11211,10 @@ function VetementPanel() {
           SUPÉRIEUR : elle s'ouvre PAR-DESSUS la galerie et la refermer y ramène.
           `shown` (et non data.items) : sous filtre, la galerie montre ce qui est affiché. */}
       {galType && <VetGalleryModal label={vetTypeLabel(galType)} items={shown.filter(it => it.type === galType)}
-        photos={photos} photoRev={photoRev} onZoom={setZoomFid} onClose={() => setGalType(null)} />}
-      {zoomFid && <VetPhotoLightbox fileId={zoomFid} rev={photoRev} onClose={() => setZoomFid(null)} />}
+        photos={photos} photoRev={photoRev} onClose={() => setGalType(null)}
+        onZoom={fid => openZoom(shown.filter(it => it.type === galType), vetTypeLabel(galType), fid)} />}
+      {zoom && <VetPhotoLightbox list={zoom.list} index={zoom.i} rev={photoRev}
+        onIndex={i => setZoom(z => z && ({ ...z, i }))} onClose={() => setZoom(null)} />}
 
       {/* Titre rendu ICI (`selfHeading:true` dans SECTION, et plus de heading dans MobileApp)
           pour pouvoir aligner le 💶 dessus — même gabarit que les boutons d'en-tête de
@@ -11333,8 +11384,8 @@ function VetementPanel() {
                         ne referme le collapse au passage (même piège que le « + » de 8.3.5). */}
                     {fid
                       ? <span role="button" tabIndex={0} title="Voir la photo en grand" aria-label="Voir la photo en grand"
-                          onClick={e => { e.stopPropagation(); setZoomFid(fid); }}
-                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setZoomFid(fid); } }}
+                          onClick={e => { e.stopPropagation(); openZoom(group, lbl, fid); }}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); openZoom(group, lbl, fid); } }}
                           style={{ display:'inline-flex', flexShrink:0, cursor:'zoom-in' }}>
                           <VetPhotoImg fileId={fid} size={22} rev={photoRev} radius={4} />
                         </span>
@@ -11372,8 +11423,8 @@ function VetementPanel() {
                             et non <button> : un bouton enveloppant une image cliquable
                             dupliquerait la cible, et le curseur zoom-in dit déjà l'action. */}
                         {fid && <div role="button" tabIndex={0} title="Voir la photo en grand"
-                          aria-label="Voir la photo en grand" onClick={() => setZoomFid(fid)}
-                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setZoomFid(fid); } }}
+                          aria-label="Voir la photo en grand" onClick={() => openZoom(group, lbl, fid)}
+                          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openZoom(group, lbl, fid); } }}
                           style={{ marginBottom:6, display:'inline-block', cursor:'zoom-in' }}>
                           <VetPhotoImg fileId={fid} size={110} rev={photoRev} />
                         </div>}
