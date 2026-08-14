@@ -118,7 +118,9 @@
 // Search JSON API, clé + ID de moteur saisis dans le module API).
 // v251 : bump de cache — MEGA retiré du projet (destination de sauvegarde supprimée,
 // vendor/megajs.js supprimé du dépôt et du précache).
-const CACHE  = 'spotifyplus-v251';
+// v252 : bump de cache — Vêtement : « Short » renommé « Short classique » + nouveau type
+// « Short de sport » (sous-catégorie Bas).
+const CACHE  = 'spotifyplus-v252';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
