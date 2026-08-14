@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.9.1';
+const APP_VERSION = '8.9.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2814,10 +2814,13 @@ function StoreProvider({ children }) {
         // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
         try { notifyDueReminders(); } catch {}
 
-        // TV Time / YouTube : au login, vérifie les nouvelles vidéos des chaînes/playlists
-        // suivies (TTL 6h par item). Une série « vue » avec une nouvelle vidéo repasse en cours.
+        // TV Time : SYNCHRO QUOTIDIENNE dès la connexion (8.9.2) — nouvelles vidéos/Shorts de
+        // chaque chaîne YouTube puis nouvelles saisons des séries suivies, 1× par jour civil.
         // Fire-and-forget (ne bloque pas l'init) — écrit directement en localStorage.
-        try { ytCheckNewVideos(); } catch {}
+        // ⚠ Remplace l'appel `ytCheckNewVideos()` seul : `tvSyncDaily` le contient (et couvre en
+        // plus les séries). Interrompue, elle repart au prochain passage DANS LA MÊME JOURNÉE et
+        // saute ce qui a déjà été actualisé depuis minuit.
+        try { tvSyncDaily(); } catch {}
 
         // Init local DB
         await initDB();
@@ -24372,15 +24375,32 @@ function ytUnsavedReconcile(items) {
 // ⚠ `force` (8.9.1, bouton ↻ manuel) lève le SEUL garde-fou de fraîcheur — les deux autres
 // exclusions restent absolues : la pseudo-chaîne « Hub Pierre » n'a aucun id YouTube à
 // interroger, et une chaîne `dropped` ne doit jamais repartir en requête.
+// Un item est-il « encore frais » pour le mode de rafraîchissement demandé ?
+// ⚠ 3 modes, et le 3e est ce qui rend la synchro quotidienne REPRENABLE :
+//   force === true   → rien n'est frais, tout est refait (bouton ↻ manuel)
+//   force === false  → TTL habituel (montage du panneau, login)
+//   force = NOMBRE   → frais si l'item a été actualisé APRÈS cet instant (minuit pour la
+//                      synchro du jour) → un item déjà traité ce matin est sauté ce soir.
+// C'est `refreshedAt`, écrit AVEC l'item, qui sert de marque-page : seul un travail
+// réellement ENREGISTRÉ compte comme fait, donc une synchro coupée en route reprend
+// exactement là où elle s'était arrêtée, sans bookkeeping séparé à tenir à jour.
+function tvRefreshFresh(it, force, ttl) {
+  const at = (it && it.refreshedAt) || 0;
+  if (force === true) return false;
+  if (typeof force === 'number') return at >= force;
+  return Date.now() - at < ttl;
+}
 function ytStaleChannels(items, force) {
-  const now = Date.now();
   return (items || []).filter(it => it.type === 'youtube' && !it.local && !it.dropped
-    && (force || now - (it.refreshedAt || 0) >= YT_NEW_CHECK_TTL));
+    && !tvRefreshFresh(it, force, YT_NEW_CHECK_TTL));
 }
 // ⚠ Renvoie TOUJOURS un booléen (« quelque chose a changé ») : les appelants historiques
 // font `if (ch) …`, un objet serait toujours truthy. Le détail passe par `opts.onNew`.
 async function ytCheckNewVideos(opts) {
-  const force = !!(opts && opts.force), onStep = opts && opts.onStep, onNew = opts && opts.onNew;
+  // ⚠ PAS de `!!` sur `force` : depuis 8.9.2 il peut être un HORODATAGE (synchro quotidienne),
+  // qu'une coercition booléenne transformerait en `true` — donc en « tout refaire », ce qui
+  // supprimerait silencieusement la reprise et re-scannerait toutes les chaînes chaque fois.
+  const force = opts ? opts.force : false, onStep = opts && opts.onStep, onNew = opts && opts.onNew;
   if (!ytKey()) return false;
   const cur = loadTvItems();
   const targets = ytStaleChannels(cur, force);
@@ -24415,7 +24435,13 @@ async function ytCheckNewVideos(opts) {
   });
   // Une chaîne actualisée peut faire apparaître une vidéo déjà regardée via la playlist
   // → la pseudo-chaîne la lui rend (7.6.88).
-  if (changed) saveTvItems(ytUnsavedReconcile(next));
+  // ⚠ 8.9.2 — puis `ytAutoDone` : un rafraîchissement peut RETIRER des vidéos (plafond de 500,
+  // vidéo supprimée côté YouTube) ou la pseudo-chaîne peut rendre les dernières manquantes →
+  // il ne reste alors plus rien à voir, la chaîne doit passer en « Vu » toute seule.
+  if (changed) {
+    const rec = ytUnsavedReconcile(next);
+    saveTvItems(ytAutoDone(rec) || rec);
+  }
   return changed;
 }
 
@@ -24772,13 +24798,13 @@ function tvStaleShows(items, force) {
       // réactiver (applyFresh). Une série « tout vu » ou « plus suivie » (dropped) n'est jamais refetch.
       if (it.status === 'done' && (it.dropped || (it.watchedEps || 0) >= (it.totalEps || 0))) return false;
       return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
-        && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
+        && !tvRefreshFresh(it, force, TV_REFRESH_TTL);
     }
     if (it.status === 'done') return false;
     // Films : suit uniquement la date des films PAS ENCORE VUS
     if (it.releaseDate === undefined) return true;                     // backfill (ajouté avant la feature)
     const upcoming = !it.releaseDate || tvDaysUntil(it.releaseDate) >= 0;
-    return upcoming && (force || Date.now() - (it.refreshedAt || 0) > TV_REFRESH_TTL);
+    return upcoming && !tvRefreshFresh(it, force, TV_REFRESH_TTL);
   });
 }
 async function tvRefreshShows(items, force, onStep) {
@@ -24811,29 +24837,30 @@ function tvSyncLastAt() { try { return parseInt(localStorage.getItem(TV_SYNC_AT_
 function tvSyncSetAt(t) { try { localStorage.setItem(TV_SYNC_AT_LS, String(t)); } catch {} }
 // Nombre d'unités de travail du prochain ↻ — sert à afficher la progression AVANT la 1re
 // requête (sinon la barre resterait à 0/0 pendant tout le premier fetch, qui est le plus long).
-function tvSyncPlan(items) {
-  return { yt: ytKey() ? ytStaleChannels(items, true).length : 0,
-           tv: tmdbKey() ? tvStaleShows(items, true).length : 0 };
+function tvSyncPlan(items, force) {
+  return { yt: ytKey() ? ytStaleChannels(items, force).length : 0,
+           tv: tmdbKey() ? tvStaleShows(items, force).length : 0 };
 }
 // ⚠ ORDRE IMPOSÉ : YouTube d'abord (il ÉCRIT lui-même via saveTvItems), TMDB ensuite (il
 // RENVOIE une Map que l'appelant applique). Dans l'autre sens, l'écriture YouTube écraserait
 // les champs frais TMDB qui n'auraient pas encore été appliqués.
-async function tvSyncAll(onProgress) {
+async function tvSyncAll(onProgress, force) {
+  if (force === undefined) force = true;   // ↻ manuel : on refait tout
   const items = loadTvItems();
-  const plan = tvSyncPlan(items);
+  const plan = tvSyncPlan(items, force);
   const total = plan.yt + plan.tv;
   let done = 0;
   const tick = label => { if (onProgress) onProgress({ done, total, label }); };
   tick(total ? 'Préparation…' : 'Rien à actualiser');
   const ytNew = [];
   await ytCheckNewVideos({
-    force: true,
+    force,
     onStep: (i, n, it) => { done = i; tick(`▶️ ${it.title || 'Chaîne'} (${i + 1}/${n})`); },
     onNew: (it, fresh) => ytNew.push({ title: it.title, n: fresh.length }),
   });
   done = plan.yt;
   const before = new Map(items.filter(it => it.type === 'tv').map(it => [it.id, it]));
-  const fresh = await tvRefreshShows(loadTvItems(), true,
+  const fresh = await tvRefreshShows(loadTvItems(), force,
     (i, n, it) => { done = plan.yt + i; tick(`🎬 ${it.title || 'Titre'} (${i + 1}/${n})`); });
   done = total; tick('Terminé');
   // Nouvelle SAISON / nouvel épisode : on compare ce que TMDB vient de renvoyer à l'état
@@ -24851,6 +24878,122 @@ async function tvSyncAll(onProgress) {
   });
   return { fresh, ytNew, tvNew, ytCount: plan.yt, tvCount: plan.tv };
 }
+// Applique sur l'état PERSISTÉ les champs frais renvoyés par `tvRefreshShows`. Renvoie le
+// nouveau tableau (ou `null` s'il n'y avait rien à appliquer) — extrait de `TvTimePanel` en
+// 8.9.2 pour que la synchro quotidienne, qui tourne depuis `bootLocal`, puisse l'utiliser.
+function tvApplyFresh(m) {
+  if (!m || m.size === 0) return null;
+  const cur = loadTvItems();
+  // Refresh (métadonnées auto) : PAS empilé dans l'annulation (ce n'est pas une action user)
+  const next = cur.map(it => {
+    const f = m.get(it.type + it.id);
+    if (!f) return it;
+    const merged = { ...it, ...f };
+    // Série « validée sans voir les épisodes manquants » (done, non abandonnée, pas tout vu) :
+    // un nouvel épisode diffusé au-delà de ce qui était acté (`ackEps`) la repasse EN COURS.
+    if (it.type === 'tv' && it.status === 'done' && !it.dropped
+        && (it.watchedEps || 0) < (it.totalEps || 0)
+        && (f.totalEps || 0) > (it.ackEps != null ? it.ackEps : (it.totalEps || 0))) {
+      merged.status = 'watching'; merged.doneAt = undefined;
+    }
+    // ⚠ 8.7.1 — Série « Vu » dont le DERNIER ÉPISODE DIFFUSÉ n'est ni coché ni ignoré : un
+    // épisode est sorti depuis, elle repasse EN COURS. Test distinct du précédent : quand un
+    // épisode ANNONCÉ finit par sortir, `totalEps` ne change pas (TMDB le listait déjà), donc
+    // la comparaison à `ackEps` ne détecte rien.
+    if (it.type === 'tv' && merged.status === 'done' && !it.dropped && f.lastEp && f.lastEp.s) {
+      const k = `S${f.lastEp.s}E${f.lastEp.e}`;
+      if (!new Set(tvWatchedSet(it)).has(k) && !tvIgnoredSet(it).includes(k)) {
+        merged.status = 'watching'; merged.doneAt = undefined;
+      }
+    }
+    return merged;
+  });
+  saveTvItems(next);
+  return next;
+}
+
+// ── Synchro QUOTIDIENNE au login + état partagé (8.9.2) ─────────────────────────────────
+// Demande utilisateur : « lance le refresh des shorts/vidéos et des séries 1 fois par jour dès
+// la connexion, et elle reprend si elle n'était pas finie et que je reviens dans la journée
+// (1 refresh par jour après 00 h) ».
+// ⚠ État PARTAGÉ module-level (pattern `_finance`/`_delta`) et non un state de `TvTimePanel` :
+// la synchro démarre depuis `bootLocal`, donc AVANT que le panneau existe, et doit survivre à
+// son démontage. `TvTimePanel` s'y abonne pour afficher la même barre de progression.
+const _tvSync = { state: null, running: false, subs: new Set() };
+function tvSyncPublish(p) { _tvSync.state = p; _tvSync.subs.forEach(fn => { try { fn(p); } catch {} }); }
+function tvSyncBusy() { return _tvSync.running; }
+// Clé de JOUR LOCALE (jamais `toISOString()`, qui est en UTC : la journée basculerait à ~02 h
+// en France au lieu de minuit — le « après 00 h » demandé ne serait pas respecté).
+function tvDayKey(d) {
+  const x = d || new Date();
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+}
+function tvStartOfToday() { const x = new Date(); return new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(); }
+const TV_SYNC_DAY_LS = 'spotifyplus_tvtime_sync_day';   // jour de la dernière synchro TERMINÉE
+function tvSyncDay()      { try { return localStorage.getItem(TV_SYNC_DAY_LS) || ''; } catch { return ''; } }
+function tvSyncSetDay(k)  { try { localStorage.setItem(TV_SYNC_DAY_LS, k); } catch {} }
+function tvSyncDailyDue() { return tvSyncDay() !== tvDayKey(); }
+
+// Exécution partagée : publie la progression, applique les champs TMDB et repasse en « Vu »
+// les chaînes dont tout est vu. Renvoie le bilan, ou `null` si une synchro tournait déjà /
+// si elle a échoué (⚠ c'est ce `null` qui empêche de marquer la journée comme faite).
+async function tvSyncRun(force) {
+  if (_tvSync.running) return null;
+  _tvSync.running = true;
+  let r = null;
+  try {
+    r = await tvSyncAll(tvSyncPublish, force);
+    tvApplyFresh(r.fresh);
+    const fixed = ytAutoDone(loadTvItems());
+    if (fixed) saveTvItems(fixed);
+  } catch { r = null; }
+  // Délai anti-spam du ↻ manuel : posé en cas d'ÉCHEC (quota épuisé = surtout pas de
+  // matraquage) et dès qu'il y a eu du travail — y compris pour la synchro automatique, qui
+  // vient précisément de le faire.
+  // ⚠ Mais PAS quand il n'y avait rien à faire : la synchro quotidienne se termine en
+  // quelques millisecondes si tout a déjà été actualisé aujourd'hui, et griser le bouton
+  // 10 min après une exécution qui n'a émis AUCUNE requête donnerait un ↻ presque toujours
+  // désactivé à la première ouverture de la journée, sans raison.
+  if (!r || (r.ytCount + r.tvCount) > 0) tvSyncSetAt(Date.now());
+  _tvSync.running = false;
+  tvSyncPublish(null);
+  return r;
+}
+// 1×/jour, dès la connexion. ⚠ Le jour n'est marqué QUE si la synchro est allée au bout :
+// interrompue (onglet fermé, réseau coupé), elle repartira au prochain passage dans la
+// journée — et `force = minuit` fait sauter tout ce qui a DÉJÀ été actualisé aujourd'hui,
+// donc elle reprend où elle en était au lieu de tout refaire.
+async function tvSyncDaily() {
+  if (!tvSyncDailyDue() || _tvSync.running) return null;
+  const r = await tvSyncRun(tvStartOfToday());
+  if (r) tvSyncSetDay(tvDayKey());
+  return r;
+}
+
+// ⚠ 8.9.2 — PASSAGE AUTOMATIQUE D'UNE CHAÎNE YOUTUBE EN « VU » (demande utilisateur : « si
+// j'ai vu toutes les vidéos que je devais voir — vidéo et short — qui n'ont pas été masquées,
+// mets-la automatiquement dans Vu »). La bascule EXISTAIT déjà, mais uniquement dans
+// `ytSetWatched`/`ytMarkVideoSeen`, c'est-à-dire au moment où l'utilisateur coche : une chaîne
+// dont le compte tombe à zéro AUTREMENT (rafraîchissement qui retire des vidéos, 🙈 masquage,
+// reprise de vidéos par la pseudo-chaîne « Hub Pierre ») restait en « En cours » pour toujours.
+// ⚠ Même critère EXACT que `ytSetWatched` (`watchedIds.length >= ytCountedTotal`, donc hors
+// vidéos 🙈 masquées et orphelines comprises) : les deux ne peuvent pas se contredire.
+// ⚠ Sens UNIQUE (→ « Vu ») : remettre une chaîne « en cours » est déjà le rôle de
+// `ytCheckNewVideos` quand une nouvelle vidéo sort — deux règles opposées se battraient.
+// ⚠ `tot > 0` : une chaîne dont les vidéos ne sont pas encore chargées ne doit pas passer
+// en « Vu » alors qu'on n'a rien vu du tout. Renvoie `null` s'il n'y a rien à corriger.
+function ytAutoDone(items) {
+  let changed = false;
+  const next = (items || []).map(it => {
+    if (it.type !== 'youtube' || it.status === 'done') return it;
+    const tot = ytCountedTotal(it);
+    if (tot <= 0 || ((it.watchedIds || []).length < tot)) return it;
+    changed = true;
+    return { ...it, status: 'done', doneAt: Date.now() };
+  });
+  return changed ? next : null;
+}
+
 // Libellé du bilan affiché sous la barre de progression.
 function tvSyncSummary(r) {
   if (!r) return '';
@@ -26181,48 +26324,29 @@ function TvTimePanel() {
   };
   // Applique les champs frais du refresh SUR le dernier état persisté (une action utilisateur
   // pendant le refresh — ép. +1, ajout… — passe par update() qui sauvegarde : rien n'est perdu)
-  const applyFresh = m => {
-    if (!m || m.size === 0) return;
-    const cur = loadTvItems();
-    // Refresh (métadonnées auto) : PAS empilé dans l'annulation (ce n'est pas une action user)
-    const next = cur.map(it => {
-      const f = m.get(it.type + it.id);
-      if (!f) return it;
-      const merged = { ...it, ...f };
-      // Série « validée sans voir les épisodes manquants » (done, non abandonnée, pas tout vu) :
-      // un nouvel épisode diffusé au-delà de ce qui était acté (`ackEps`) la repasse EN COURS.
-      if (it.type === 'tv' && it.status === 'done' && !it.dropped
-          && (it.watchedEps || 0) < (it.totalEps || 0)
-          && (f.totalEps || 0) > (it.ackEps != null ? it.ackEps : (it.totalEps || 0))) {
-        merged.status = 'watching'; merged.doneAt = undefined;
-      }
-      // ⚠ 8.7.1 — Série « Vu » dont le DERNIER ÉPISODE DIFFUSÉ n'est ni coché ni ignoré : un
-      // épisode est sorti depuis, elle repasse EN COURS. Test distinct du précédent : quand un
-      // épisode ANNONCÉ finit par sortir, `totalEps` ne change pas (TMDB le listait déjà), donc
-      // la comparaison à `ackEps` ne détecte rien.
-      if (it.type === 'tv' && merged.status === 'done' && !it.dropped && f.lastEp && f.lastEp.s) {
-        const k = `S${f.lastEp.s}E${f.lastEp.e}`;
-        if (!new Set(tvWatchedSet(it)).has(k) && !tvIgnoredSet(it).includes(k)) {
-          merged.status = 'watching'; merged.doneAt = undefined;
-        }
-      }
-      return merged;
-    });
-    setItems(next); saveTvItems(next);
-  };
+  // ⚠ 8.9.2 — Le corps est module-level (`tvApplyFresh`) : la synchro quotidienne tourne AUSSI
+  // depuis `bootLocal`, donc hors de tout composant monté.
+  const applyFresh = m => { const next = tvApplyFresh(m); if (next) setItems(next); };
 
   // ⚠ 8.7.4 — Réparation au montage : décoche ce qui est marqué « vu » alors que ce n'est pas
   // encore sorti (état laissé par « cocher toute la saison » avant le verrou de 8.7.1).
   // 100 % local, aucune requête. Écrit directement (comme `applyFresh`) et NON via `update()` :
   // ce n'est pas une action de l'utilisateur, elle n'a rien à faire dans « ↩ Retour arrière ».
+  // ⚠ 8.9.2 — `ytAutoDone` enchaîne APRÈS `tvUncheckUnaired` : celui-ci peut DÉCOCHER une
+  // vidéo programmée, donc rendre à la chaîne quelque chose à voir. Dans l'autre ordre, on
+  // la passerait en « Vu » juste avant de lui rajouter du non-vu.
   React.useEffect(() => {
     const fixed = tvUncheckUnaired(loadTvItems());
     if (fixed) { setItems(fixed); saveTvItems(fixed); }
+    const done = ytAutoDone(loadTvItems());
+    if (done) { setItems(done); saveTvItems(done); }
   }, []);
 
   // Refresh auto des prochaines sorties au montage (TTL 24h — 0 requête si cache frais)
+  // ⚠ `tvSyncBusy()` : la synchro quotidienne lancée au login peut encore tourner — sans cette
+  // garde, deux boucles écriraient la même liste en même temps et la dernière écraserait l'autre.
   React.useEffect(() => {
-    if (!hasKey) return;
+    if (!hasKey || tvSyncBusy()) return;
     let cancelled = false;
     (async () => { const m = await tvRefreshShows(loadTvItems(), false); if (!cancelled) applyFresh(m); })();
     return () => { cancelled = true; };
@@ -26232,6 +26356,7 @@ function TvTimePanel() {
   // ici pour refléter dans un onglet TV Time déjà ouvert). Repasse en cours les séries « vues »
   // qui ont une nouvelle vidéo, puis recharge l'état local si quelque chose a changé.
   React.useEffect(() => {
+    if (tvSyncBusy()) return;
     let cancelled = false;
     (async () => { const ch = await ytCheckNewVideos(); if (ch && !cancelled) setItems(loadTvItems()); })();
     return () => { cancelled = true; };
@@ -26247,27 +26372,36 @@ function TvTimePanel() {
   // ── ↻ Rafraîchissement MANUEL global (8.9.1) ────────────────────────────────────────
   // `sync` = { done, total, label } pendant l'opération, `null` au repos → c'est LUI qui
   // rend la barre de progression sous la barre des boutons.
-  const [sync, setSync] = React.useState(null);
+  // ⚠ 8.9.2 — L'état vient de `_tvSync` (module-level) et non plus d'un state local : la
+  // synchro QUOTIDIENNE démarre depuis `bootLocal`, donc avant même que ce panneau existe.
+  // On s'y abonne au montage → la barre affiche aussi la synchro automatique, et le ↻ manuel
+  // est désactivé pendant qu'elle tourne.
+  const [sync, setSync] = React.useState(() => _tvSync.state);
   const [syncMsg, setSyncMsg] = React.useState('');
   const [syncAt, setSyncAt] = React.useState(tvSyncLastAt);
+  React.useEffect(() => {
+    const h = p => {
+      setSync(p);
+      // Fin de synchro (p === null) : la liste et le délai anti-spam viennent de changer sous
+      // nos pieds (la synchro auto écrit directement) → on relit les deux.
+      if (!p) { setItems(loadTvItems()); setSyncAt(tvSyncLastAt()); }
+    };
+    _tvSync.subs.add(h);
+    setSync(_tvSync.state);   // rattrape une synchro déjà en cours au montage
+    return () => { _tvSync.subs.delete(h); };
+  }, []);
   // ⚠ Délai relu depuis le localStorage à l'init : sans lui, recharger la page (ou changer
   // d'onglet et revenir) remettrait le compteur à zéro et le « délai anti-spam » demandé ne
   // vaudrait que pour la session en cours.
   const syncLeft = Math.max(0, TV_SYNC_COOLDOWN_MS - (Date.now() - syncAt));
   useSharedTick(!!sync || syncLeft > 0);   // décompte du délai + rafraîchit l'infobulle
   const syncAll = async () => {
-    if (sync || syncLeft > 0) return;
+    if (sync || syncLeft > 0 || tvSyncBusy()) return;
     setSyncMsg('');
-    setSync({ done: 0, total: 0, label: 'Préparation…' });
-    let r = null;
-    try { r = await tvSyncAll(p => setSync(p)); }
-    catch { setSyncMsg('Actualisation interrompue (réseau ou quota API).'); }
-    // ⚠ Le délai est posé MÊME en cas d'échec : sinon un quota épuisé se traduirait par un
-    // bouton toujours actif, donc par du matraquage sur une API qui refuse déjà de répondre.
-    const now = Date.now(); setSyncAt(now); tvSyncSetAt(now);
-    if (r) { applyFresh(r.fresh); setSyncMsg(tvSyncSummary(r)); }
-    setItems(loadTvItems());   // la moitié YouTube a écrit directement
-    setSync(null);
+    const r = await tvSyncRun(true);   // publie la progression + applique TMDB + « Vu » auto
+    setSyncAt(tvSyncLastAt());
+    setSyncMsg(r ? tvSyncSummary(r) : 'Actualisation interrompue (réseau ou quota API).');
+    setItems(loadTvItems());
   };
 
   const saveKey = () => {
