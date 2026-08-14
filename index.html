@@ -25610,6 +25610,13 @@ const YT_SWIPE_BOTTOM  = 68;   // bande basse laissée aux contrôles YouTube
 const YT_WHEEL_MIN     = 8;    // pixels normalisés en dessous desquels le cran est ignoré
 const YT_WHEEL_GAP_MS  = 450;  // délai de garde entre deux changements de vidéo à la molette
 const YT_CLICK_SLOP    = 6;    // px : au-delà, le geste souris est un glissé, pas un clic (8.7.7)
+// ⚠ 8.9.1 — DOUBLE TAP AU DOIGT = pause / reprise (demande utilisateur). Le clic gauche de
+// 8.7.7 est volontairement réservé à la SOURIS : au doigt, chaque fin de glissé passe par le
+// même `pointerup`, donc un SIMPLE tap mettrait la vidéo en pause à la moindre imprécision.
+// Le double tap lève l'ambiguïté — un seul tap ne fait toujours RIEN.
+const YT_TAP_SLOP      = 16;   // px de jitter tolérés à l'intérieur d'UN tap (le doigt bouge plus que la souris)
+const YT_DTAP_MS       = 320;  // délai max entre les 2 taps
+const YT_DTAP_SLOP     = 44;   // px max entre les 2 taps (sinon ce sont deux taps distincts)
 const YT_EMBED_ORIGIN   = 'https://www.youtube-nocookie.com';  // cible des postMessage (jamais '*')
 const YT_END_NEXT_MS    = 5000; // inactivité après la FIN d'une vidéo avant de passer à la suivante
 const YT_JSAPI_HELLO_MS = 600;  // cadence du handshake `listening` (le player n'est pas prêt tout de suite)
@@ -25775,6 +25782,8 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     setPaused(next);   // état optimiste, recalé par le prochain `infoDelivery`
   };
   const swipeRef = React.useRef(null);
+  // Dernier tap tactile retenu pour la détection du double tap (8.9.1).
+  const tapRef = React.useRef(null);
   const onSwipeDown = e => {
     swipeRef.current = { x:e.clientX, y:e.clientY, t:Date.now(), id:e.pointerId };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
@@ -25788,14 +25797,32 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     if (Date.now() - s.t <= YT_SWIPE_MAX_MS) {
       // Un axe doit franchement dominer l'autre (facteur 1.4), sinon c'est un geste en
       // diagonale : on ne devine pas l'intention, on ne fait rien.
-      if (ax >= YT_SWIPE_MIN && ax >= ay * 1.4) { go(dx > 0 ? -1 : +1); return; }       // gauche = suivante
-      if (ay >= YT_SWIPE_MIN && ay >= ax * 1.4) { go(dy > 0 ? -1 : +1); return; }       // haut = suivante (8.0.0)
+      // ⚠ Un swipe ANNULE le tap en attente : sans ça, un tap, un swipe puis un tap
+      // formeraient un « double tap » à cheval sur deux vidéos différentes.
+      if (ax >= YT_SWIPE_MIN && ax >= ay * 1.4) { tapRef.current = null; go(dx > 0 ? -1 : +1); return; }   // gauche = suivante
+      if (ay >= YT_SWIPE_MIN && ay >= ax * 1.4) { tapRef.current = null; go(dy > 0 ? -1 : +1); return; }   // haut = suivante (8.0.0)
     }
     // ⚠ 8.7.7 — CLIC GAUCHE DE LA SOURIS = pause / reprise (demande utilisateur). Restreint
     // au pointeur SOURIS et au bouton gauche : au doigt, un appui sert déjà de fin de
     // glissé et la moindre imprécision mettrait la vidéo en pause sans qu'on l'ait demandé.
     // Le seuil `YT_CLICK_SLOP` distingue un vrai clic d'un glissé trop court pour naviguer.
-    if (e.pointerType === 'mouse' && e.button === 0 && ax < YT_CLICK_SLOP && ay < YT_CLICK_SLOP) togglePause();
+    if (e.pointerType === 'mouse' && e.button === 0 && ax < YT_CLICK_SLOP && ay < YT_CLICK_SLOP) { togglePause(); return; }
+    // ⚠ 8.9.1 — DOUBLE TAP AU DOIGT = pause / reprise (demande utilisateur). On arrive ici
+    // seulement quand le geste n'était PAS un swipe : c'est donc un tap posé (`YT_TAP_SLOP`
+    // tolère le jitter du doigt). Le 1er tap ne fait rien d'autre que se mémoriser ; c'est le
+    // 2e, assez rapproché dans le temps ET dans l'espace, qui bascule la lecture.
+    // ⚠ `tapRef` est REMIS À ZÉRO après la bascule, sinon un 3e tap rapide compterait comme
+    // un nouveau double tap avec le 2e et rebasculerait aussitôt.
+    if (e.pointerType === 'mouse') return;
+    if (ax >= YT_TAP_SLOP || ay >= YT_TAP_SLOP) { tapRef.current = null; return; }
+    const prev = tapRef.current, now = Date.now();
+    if (prev && now - prev.t <= YT_DTAP_MS &&
+        Math.abs(e.clientX - prev.x) < YT_DTAP_SLOP && Math.abs(e.clientY - prev.y) < YT_DTAP_SLOP) {
+      tapRef.current = null;
+      togglePause();
+      return;
+    }
+    tapRef.current = { x:e.clientX, y:e.clientY, t:now };
   };
   // ⚠ 8.7.6 — MOLETTE : elle vit sur la MÊME couche de capture que le swipe (l'iframe est
   // cross-origin, elle avalerait l'événement). Pas de `preventDefault` : React attache les
@@ -25894,7 +25921,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             reste dans `title` ET dans `aria-label` (bouton à icône seule = sans texte
             accessible sinon), comme les marqueurs de Vêtement en 8.1.9. */}
         <button onClick={togglePause} aria-label={paused ? 'Reprendre la vidéo' : 'Mettre la vidéo en pause'}
-          title={paused ? 'Reprendre la lecture (ou clic gauche sur la vidéo)' : 'Mettre en pause (ou clic gauche sur la vidéo)'}
+          title={paused ? 'Reprendre la lecture (ou clic gauche / double tap sur la vidéo)' : 'Mettre en pause (ou clic gauche / double tap sur la vidéo)'}
           style={{ ...obtn(YT_COLOR, false), ...(paused ? { background:YT_COLOR + 'dd', border:`1px solid ${YT_COLOR}` } : null) }}>
           {paused ? '▶' : '⏸'}
         </button>
@@ -25964,7 +25991,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         </div>
         {queue.length > 1 && !showComments && (
           <div style={{ fontSize:9, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:3 }}>
-            👉 glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante
+            👉 glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante · double tap = pause
           </div>
         )}
       </div>
