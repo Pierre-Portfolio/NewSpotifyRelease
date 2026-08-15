@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '8.9.9';
+const APP_VERSION = '9.0.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -24308,6 +24308,28 @@ function ytStaleChannels(items, force) {
 }
 // ⚠ Renvoie TOUJOURS un booléen (« quelque chose a changé ») : les appelants historiques
 // font `if (ch) …`, un objet serait toujours truthy. Le détail passe par `opts.onNew`.
+// ⚠ 9.0.0 — CHAMPS UTILISATEUR À REPORTER SUR UN ITEM YOUTUBE RECONSTRUIT (cause du bug
+// « ignorer les non vus sur les Shorts ne tient pas jusqu'au lendemain »). `ytBuildItem`
+// repart de l'API YouTube : il ne connaît QUE le catalogue et ne porte donc aucun champ
+// personnel. Les CINQ chemins qui rebâtissent une chaîne (`ytCheckNewVideos`, le ↻
+// `ytRefreshItem`, `setKeepShorts`, `setShortsOnly`, `ytLoadAll`) recopiaient cette liste
+// À LA MAIN — et `ignoredIds` (les vidéos mises de côté par 🙈, 7.8.0) n'y figurait NULLE
+// PART : le 🙈 tenait jusqu'au prochain rafraîchissement, c'est-à-dire jusqu'au lendemain,
+// la synchro quotidienne de 8.9.2 rebâtissant les chaînes dès la 1re connexion du jour.
+// D'où UNE seule liste partagée : un champ ajouté ici est préservé par les cinq chemins.
+// ⚠ `refreshedAt` n'y est PAS : c'est justement la valeur FRAÎCHE de `built` qu'il faut
+// garder (elle pilote le TTL et la reprise de la synchro quotidienne).
+function ytKeepFields(x, built) {
+  return {
+    watchedIds: x.watchedIds || [],
+    ignoredIds: ytIgnoredIds(x),
+    status: x.status, doneAt: x.doneAt,
+    manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt,
+    unlimited: x.unlimited || (built && built.unlimited),
+    keepShorts: x.keepShorts, shortsOnly: x.shortsOnly,
+  };
+}
+
 async function ytCheckNewVideos(opts) {
   // ⚠ PAS de `!!` sur `force` : depuis 8.9.2 il peut être un HORODATAGE (synchro quotidienne),
   // qu'une coercition booléenne transformerait en `true` — donc en « tout refaire », ce qui
@@ -24338,8 +24360,7 @@ async function ytCheckNewVideos(opts) {
   const next = latest.map(x => {
     if (x.type !== 'youtube' || !patches.has(x.id)) return x;
     const { built, hasNew } = patches.get(x.id);
-    const merged = { ...built, watchedIds: x.watchedIds || [], status: x.status,
-      doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly };
+    const merged = { ...built, ...ytKeepFields(x, built) };
     // Nouvelle vidéo sur une série déjà « vue » → on la remet en cours
     if (hasNew && x.status === 'done') { merged.status = 'watching'; merged.doneAt = undefined; }
     changed = true;
@@ -24495,9 +24516,17 @@ function tvIgnoredEffective(item) {
   const seen = new Set(tvWatchedSet(item));
   return new Set(tvIgnoredSet(item).filter(k => !seen.has(k)));
 }
+// ⚠ 9.0.0 — RESTREINT AUX VIDÉOS ENCORE DANS LA LISTE : `ignoredIds` survit désormais aux
+// rafraîchissements (cf. `ytKeepFields`), donc il peut contenir l'id d'une vidéo sortie du
+// catalogue (plafond de 500 remis, vidéo supprimée côté YouTube). Sans ce filtre, `totalEps`
+// perdrait 1 ET `ign.size` en retirerait 1 de plus → le dénominateur baisserait de DEUX.
+// ⚠ Aucune restriction tant que `videos` est vide (chaîne pas encore chargée), sinon TOUS les
+// ignorés disparaîtraient d'un coup — même garde que `ytOrphanSeen`.
 function ytIgnoredEffective(item) {
   const seen = new Set((item && item.watchedIds) || []);
-  return new Set(ytIgnoredIds(item).filter(id => !seen.has(id)));
+  const vids = (item && item.videos) || [];
+  const inList = vids.length ? new Set(vids.map(v => v.id)) : null;
+  return new Set(ytIgnoredIds(item).filter(id => !seen.has(id) && (!inList || inList.has(id))));
 }
 // Total qui COMPTE dans la progression = épisodes/vidéos moins les ignorés effectifs.
 function tvCountedTotal(item) { return Math.max(0, (item.totalEps || 0) - tvIgnoredEffective(item).size); }
@@ -26387,7 +26416,7 @@ function TvTimePanel() {
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de l\'actualisation.')); return; }
     update(ytUnsavedReconcile(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x)));
+      ? { ...built, ...ytKeepFields(x, built) } : x)));
   };
   // Tag « garder les Shorts (< 3 min) » d'une chaîne/playlist YouTube. Re-fetch complet car les
   // Shorts filtrés ne sont pas stockés : ON = les réintègre, OFF = les retire. Préserve vues/statut.
@@ -26400,7 +26429,7 @@ function TvTimePanel() {
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, keepShorts: v, shortsOnly: false, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
+      ? { ...built, ...ytKeepFields(x, built), keepShorts: v, shortsOnly: false } : x));
     setYtMsg(`${v ? 'Shorts réintégrés' : 'Shorts retirés'} : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Tag « garder UNIQUEMENT les Shorts » : n'affiche que les Shorts (< 3 min), et la notif
@@ -26413,7 +26442,7 @@ function TvTimePanel() {
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec.')); return; }
     update(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, shortsOnly: v, keepShorts: v ? false : x.keepShorts, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || built.unlimited } : x));
+      ? { ...built, ...ytKeepFields(x, built), shortsOnly: v, keepShorts: v ? false : x.keepShorts } : x));
     setYtMsg(`${v ? 'Uniquement les Shorts' : 'Filtre Shorts retiré'} : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Retire le plafond de 500 vidéos pour CETTE chaîne : re-fetch complet (peut être long / coûteux en quota)
@@ -26426,7 +26455,7 @@ function TvTimePanel() {
     setYtRefreshingId(null);
     if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
     update(ytUnsavedReconcile(items.map(x => (x.type === 'youtube' && x.id === item.id)
-      ? { ...built, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x)));
+      ? { ...built, ...ytKeepFields(x, built) } : x)));
     setYtMsg(`Toutes les vidéos récupérées : ${built.title} (${built.totalEps} vidéos)`);
   };
   // Reverrouille une chaîne dont le plafond avait été retiré : ne conserve que les vidéos
@@ -26756,8 +26785,14 @@ function TvTimePanel() {
     const out = [];
     for (const it of chans) {
       const seen = new Set(it.watchedIds || []);
+      // ⚠ 9.0.0 — LES 🙈 MISES DE CÔTÉ SONT EXCLUES DE LA FILE (2e moitié du « ignorer les non
+      // vus sur les Shorts ne fonctionne pas ») : depuis 7.8.0 une vidéo ignorée est « hors
+      // progression », la re-proposer au lancement du bouton 🩳 revenait à ne pas l'ignorer
+      // du tout. Même source de vérité que les barres de progression (`ytIgnoredEffective`),
+      // donc cocher la vidéo après coup la fait revenir dans la file, comme dans le décompte.
+      const ign = ytIgnoredEffective(it);
       for (const v of (it.videos || [])) {
-        if (seen.has(v.id) || (v.dur || 0) >= YT_MIN_MINUTES) continue;
+        if (seen.has(v.id) || ign.has(v.id) || (v.dur || 0) >= YT_MIN_MINUTES) continue;
         out.push(ytQueueEntry(it, v, seen));
       }
     }
@@ -26774,7 +26809,11 @@ function TvTimePanel() {
       if (it.type !== 'youtube' || it.id !== itemId) return it;
       const clean = [...new Set([...(it.watchedIds || []), videoId])];
       const nx = { ...it, watchedIds: clean };
-      const tot = it.totalEps || (it.videos || []).length;
+      // ⚠ 9.0.0 — SEUIL = `ytCountedTotal` (comme `ytSetWatched` et `ytAutoDone`) et non le
+      // total BRUT : avec des vidéos 🙈 mises de côté, le total brut n'est jamais atteint et
+      // la chaîne restait « En cours » pour toujours — le commentaire ci-dessus promettait
+      // pourtant « la même bascule que ytSetWatched ».
+      const tot = ytCountedTotal(nx);
       if (tot > 0 && clean.length >= tot && it.status !== 'done') { nx.status = 'done'; nx.doneAt = Date.now(); }
       return nx;
     });
