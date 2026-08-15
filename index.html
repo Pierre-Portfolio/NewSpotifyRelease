@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '9.0.2';
+const APP_VERSION = '9.0.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3810,12 +3810,28 @@ function StoreProvider({ children }) {
   // ⚠ `offline` : en mode dégradé aucun appel Spotify n'aboutit, une passe ne ferait qu'échouer.
   // ⚠ `otherTab` : deux onglets qui scrapent en parallèle doubleraient la consommation du quota
   // et s'écraseraient mutuellement la base (chaque `saveDB()` exporte TOUT).
+  // ── FINANCE : relevé de prix quotidien automatique (9.0.3) ────────────────────
+  // « Comme si je cliquais sur Finance » : `startFinanceLight()` (idempotent) fait arriver
+  // les prix, donc `_finNotify` → `finHistSnapshot()` pose le point du jour dans l'historique
+  // local — exactement ce qui est enregistré quand l'utilisateur ouvre le module lui-même.
+  // ⚠ Marquer la journée AVANT de savoir si des prix sont arrivés créerait le trou qu'on veut
+  // éviter → `finAutoGotData()` d'abord (cf. le bloc FINANCE pour le détail).
+  // ⚠ Rappelée par l'intervalle : si le module Finance a déjà démarré son chargement, le
+  // verrou `startedLight` fait sortir `startFinanceLight` immédiatement alors que les valeurs
+  // ne sont pas encore là — la journée sera marquée au passage suivant.
+  const financeAutoTry = React.useCallback(async () => {
+    if (!finAutoDue()) return;
+    try { await startFinanceLight(); } catch {}
+    if (finAutoGotData()) finAutoSetDay(tvDayKey());
+  }, []);
+
   React.useEffect(() => {
     if (authState !== 'connected' || !dbReady || offline || otherTab) return;
-    const t = setTimeout(musicAutoTry, MUSIC_AUTO_DELAY_MS);
-    const iv = setInterval(musicAutoTry, MUSIC_AUTO_CHECK_MS);
+    const run = () => { musicAutoTry(); financeAutoTry(); };
+    const t = setTimeout(run, MUSIC_AUTO_DELAY_MS);
+    const iv = setInterval(run, MUSIC_AUTO_CHECK_MS);
     return () => { clearTimeout(t); clearInterval(iv); };
-  }, [authState, dbReady, offline, otherTab, musicAutoTry]);
+  }, [authState, dbReady, offline, otherTab, musicAutoTry, financeAutoTry]);
 
   // Restaure une sauvegarde (applyBackup) puis rafraîchit les états dérivés de la DB.
   // Les panneaux To do / Remember relisent le localStorage à leur montage (reload/onglet).
@@ -3882,7 +3898,7 @@ function StoreProvider({ children }) {
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
-    dbReady, purgeListened, resetQuota, musicAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
+    dbReady, purgeListened, resetQuota, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
@@ -15662,7 +15678,7 @@ function buildBackup() {
              vet_prix: lsRaw(VET_PRIX_LS),
              // ⚠ La PRÉFÉRENCE de scrapping auto voyage ; PAS `MUSIC_AUTO_DAY_LS` (le jour de
              // la dernière passe), qui est propre à cet appareil et se recalcule tout seul.
-             music_auto: lsRaw(MUSIC_AUTO_LS) },
+             music_auto: lsRaw(MUSIC_AUTO_LS), finance_auto: lsRaw(FIN_AUTO_LS) },
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -16076,6 +16092,7 @@ function applyBackup(data) {
     putRaw('spotifyplus_loop', data.prefs.loop);
     putRaw(VET_PRIX_LS, data.prefs.vet_prix);
     putRaw(MUSIC_AUTO_LS, data.prefs.music_auto);
+    putRaw(FIN_AUTO_LS, data.prefs.finance_auto);
   }
   return { artistsRestored, statsRestored, musicRestored };
 }
@@ -18451,7 +18468,7 @@ function StatsPanel() {
 
 // À PROPOS — export / restauration / Dropbox / réinit quota / purge / version.
 function VosEcoutesPanel() {
-  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, logout } = useStore();
+  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, logout } = useStore();
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
   // Ouverture d'À propos sans Google connecté → renouvellement silencieux du jeton DRIVE
@@ -18479,16 +18496,28 @@ function VosEcoutesPanel() {
   const onResetQuota = () => {
     if (confirm('Réinitialiser le quota 24h ?\nLe compteur repart à 0/100 et tu pourras relancer une synchro immédiatement.')) resetQuota();
   };
-  // Scrapping musique automatique (9.0.2) — lu au montage, écrit au clic.
+  // Automatismes quotidiens : scrapping musique (9.0.2) et relevé Finance (9.0.3).
+  // Lus au montage, écrits au clic. ⚠ Activer déclenche TOUT DE SUITE la tentative au lieu
+  // d'attendre la re-vérification périodique (10 min).
   const [autoMusic, setAutoMusic] = React.useState(musicAutoOn);
+  const [autoFin,   setAutoFin]   = React.useState(finAutoOn);
   const toggleAutoMusic = () => {
     const on = !autoMusic;
-    musicAutoSet(on);
-    setAutoMusic(on);
-    // Activation → on ne fait pas attendre la re-tentative périodique (10 min) : si le quota
-    // est disponible, la passe part tout de suite.
+    musicAutoSet(on); setAutoMusic(on);
     if (on) { try { musicAutoTry(); } catch {} }
   };
+  const toggleAutoFin = () => {
+    const on = !autoFin;
+    finAutoSet(on); setAutoFin(on);
+    if (on) { try { financeAutoTry(); } catch {} }
+  };
+  // Gabarit commun des deux interrupteurs (même famille visuelle que les boutons voisins)
+  const autoSwitch = (on, onClick, label, hint, title, color) => (
+    <button onClick={onClick} role="switch" aria-checked={on} title={title}
+      style={{ background: on ? color + '12' : '#ffffff08', border:`1px solid ${on ? color + '40' : C.border}`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color: on ? color : C.dim, fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
+      {on ? '☑' : '☐'} {label} <span style={{ fontWeight:400, opacity:0.7 }}>({on ? hint : 'désactivé'})</span>
+    </button>
+  );
   const exportBtn = { background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
@@ -18544,14 +18573,17 @@ function VosEcoutesPanel() {
         style={{ background:'#c792ea12', border:'1px solid #c792ea40', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#c792ea', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
         🔄 Réinitialiser le quota 24h <span style={{ fontWeight:400, opacity:0.7 }}>({dailyScrapings}/100{quotaActive ? ' · bloqué' : ''})</span>
       </button>
-      {/* Scrapping musique automatique — ENTRE la réinit du quota et la purge (9.0.2) */}
-      <button onClick={toggleAutoMusic} role="switch" aria-checked={autoMusic}
-        title={autoMusic
+      {/* Automatismes quotidiens — ENTRE la réinit du quota et la purge (9.0.2 / 9.0.3) */}
+      {autoSwitch(autoMusic, toggleAutoMusic, 'Scrapping musique automatique', '1×/jour, jusqu\'au quota',
+        autoMusic
           ? 'Activé : dès la connexion, le scrapping part tout seul et va jusqu\'au quota de 100 artistes, même si tu es sur un autre module. Une passe par jour.'
-          : 'Désactivé : le scrapping ne démarre que si tu cliques sur « Lancer » dans Musique → ⚙ Scrapping.'}
-        style={{ background: autoMusic ? '#4ec9b012' : '#ffffff08', border:`1px solid ${autoMusic ? '#4ec9b040' : C.border}`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color: autoMusic ? '#4ec9b0' : C.dim, fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
-        {autoMusic ? '☑' : '☐'} Scrapping musique automatique <span style={{ fontWeight:400, opacity:0.7 }}>({autoMusic ? '1×/jour, jusqu\'au quota' : 'désactivé'})</span>
-      </button>
+          : 'Désactivé : le scrapping ne démarre que si tu cliques sur « Lancer » dans Musique → ⚙ Scrapping.',
+        '#4ec9b0')}
+      {autoSwitch(autoFin, toggleAutoFin, 'Relevé Finance automatique', '1×/jour, prix enregistrés',
+        autoFin
+          ? 'Activé : une fois par jour à la connexion, les prix sont relevés comme si tu ouvrais le module Finance — le point du jour est enregistré dans ton historique local (et donc dans tes sauvegardes).'
+          : 'Désactivé : l\'historique local n\'est complété que les jours où tu ouvres toi-même le module Finance.',
+        FINANCE_CYAN)}
       <button onClick={purgeListened} disabled={!dbReady || ls.remaining === undefined}
         style={{ background:'#f5813c12', border:'1px solid #f5813c40', borderRadius:10, padding:'10px 14px', cursor: dbReady ? 'pointer' : 'default', color:'#f5813c', fontSize:11, fontWeight:700, letterSpacing:'0.04em', opacity: dbReady ? 1 : 0.4, textAlign:'left' }}>
         🗑 Purger les écoutes
@@ -22777,6 +22809,40 @@ async function startFinanceLight() {
   })();
   await Promise.all([alphaTrack, tdTrack]);
   _finance.loadingLight = false; _finance.nextLabel = null; _finNotify();
+}
+
+// ── RAFRAÎCHISSEMENT QUOTIDIEN AUTOMATIQUE DE FINANCE (9.0.3) ───────────────────
+// Demande utilisateur : « pareil que le scrapping musique : 1× par jour à la connexion, ça
+// fait comme si je cliquais dessus, et ça sauvegarde les informations qui sont sauvegardées
+// quand c'est moi qui clique ».
+// ⚠ CE QUI EST RÉELLEMENT SAUVEGARDÉ, c'est `finHistSnapshot()` : l'app se constitue son
+// PROPRE historique de prix (`spotifyplus_finance_history`, clé `finance` de buildBackup) en
+// échantillonnant les valeurs affichées, **1 point par jour et par série**. Il est alimenté
+// par `_finNotify`, donc UNIQUEMENT quand des prix arrivent — c'est-à-dire, jusqu'ici,
+// seulement les jours où on ouvrait le module Finance. Un jour sans ouverture = un TROU
+// définitif dans les courbes. C'est ce trou que ce déclencheur comble.
+// ⚠ On appelle `startFinanceLight` et **PAS** `startFinanceFull` : le snapshot n'enregistre
+// QUE les valeurs du mode Light (c'est documenté dans `finHistSnapshot`) — charger le Full
+// coûterait du quota Alpha Vantage / Twelve Data sans rien ajouter à l'historique.
+// ⚠ `startFinanceHoldings` (badge « portefeuille en BTC ») est volontairement EXCLU : son
+// cache n'est pas sauvegardé (re-fetchable), sa cadence est mensuelle (le 5) et il exige un
+// jeton Google Drive obtenu par un geste de l'utilisateur.
+const FIN_AUTO_LS     = 'spotifyplus_finance_autosync';      // 'off' = désactivé (absent = activé)
+const FIN_AUTO_DAY_LS = 'spotifyplus_finance_autosync_day';  // jour du dernier relevé RÉUSSI
+function finAutoOn()      { try { return localStorage.getItem(FIN_AUTO_LS) !== 'off'; } catch (e) { return true; } }
+function finAutoSet(on)   { return lsSet(FIN_AUTO_LS, on ? 'on' : 'off'); }
+function finAutoDay()     { try { return localStorage.getItem(FIN_AUTO_DAY_LS) || ''; } catch (e) { return ''; } }
+function finAutoSetDay(k) { try { localStorage.setItem(FIN_AUTO_DAY_LS, k); } catch (e) {} }
+// Clé de jour LOCALE partagée avec TV Time et le scrapping musique (`tvDayKey`).
+function finAutoDue()     { return finAutoOn() && finAutoDay() !== tvDayKey(); }
+// Au moins une valeur Light est-elle arrivée ? ⚠ C'est la condition pour marquer la journée :
+// une passe partie hors ligne n'enregistrerait AUCUN point, la marquer « faite » créerait
+// précisément le trou qu'on cherche à éviter — on préfère retenter à la prochaine connexion.
+function finAutoGotData() {
+  const f = _finance;
+  if (!f) return false;
+  return !!((f.crypto && f.crypto !== 'error') || f.idx || f.gold || f.oil || f.eurusd != null
+            || (f.stocks && (f.stocks.nvda || f.stocks.ttwo)));
 }
 
 // Valeurs FULL — chargées à la demande au 1er passage en mode Full. Même découpage :
