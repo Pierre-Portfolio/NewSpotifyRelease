@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '9.0.1';
+const APP_VERSION = '9.0.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1772,6 +1772,40 @@ function ensureQuotaWindow() {
   saveQuota(QUOTA_MAX, until, q.last);
   return until;
 }
+
+// ── SCRAPPING MUSIQUE AUTOMATIQUE (9.0.2) ───────────────────────────────────────
+// Demande utilisateur : « comme TV Time qui check 1×/jour, même concept sur le scrapping
+// musique : s'il reste de la marge parce que je ne suis pas arrivé à la limite, ça se
+// lance tout seul jusqu'à la limite, et ça même si je suis sur une autre page ».
+// ⚠ Rien n'est réécrit du moteur de scrapping : `startSync` VIT DÉJÀ dans le store (donc il
+// continue de tourner quel que soit l'onglet affiché) et s'arrête DÉJÀ tout seul au quota
+// (`endSync('daily_limit')`) — il ne manquait QUE le déclencheur automatique.
+const MUSIC_AUTO_LS       = 'spotifyplus_music_autosync';      // 'off' = désactivé (absent = activé)
+const MUSIC_AUTO_DAY_LS   = 'spotifyplus_music_autosync_day';  // jour de la dernière passe TERMINÉE
+const MUSIC_AUTO_DELAY_MS = 4000;                              // laisse l'UI se monter avant de démarrer
+const MUSIC_AUTO_CHECK_MS = 10 * 60 * 1000;                    // re-tentative pendant la session (100 % local)
+// ⚠ Absent = ACTIVÉ, seule la valeur 'off' désactive — même convention que `moduleEnabled`,
+// `moduleOnHome`, `apiExported` et `vetPrixShown`.
+function musicAutoOn()     { try { return localStorage.getItem(MUSIC_AUTO_LS) !== 'off'; } catch { return true; } }
+function musicAutoSet(on)  { return lsSet(MUSIC_AUTO_LS, on ? 'on' : 'off'); }
+// ⚠ Clé de jour LOCALE partagée avec TV Time (`tvDayKey`, déclaration de fonction donc
+// hoistée) : jamais `toISOString()`, qui est en UTC — la journée basculerait vers 02 h en
+// France au lieu de minuit.
+function musicAutoDay()    { try { return localStorage.getItem(MUSIC_AUTO_DAY_LS) || ''; } catch { return ''; } }
+function musicAutoSetDay(k){ try { localStorage.setItem(MUSIC_AUTO_DAY_LS, k); } catch {} }
+// Une passe automatique est-elle légitime MAINTENANT ? 100 % local, AUCUNE requête : c'est ce
+// qui permet de re-tester toutes les 10 min sans rien coûter.
+// ⚠ Le jour n'est marqué que par une passe qui va au BOUT (`endSync('completed')`) : arrêtée
+// au quota, elle reste « due » et repartira dès que la fenêtre glissante de 24 h aura expiré,
+// exactement comme la reprise de `tvSyncDaily`.
+function musicAutoDue() {
+  if (!musicAutoOn()) return false;
+  if (musicAutoDay() === tvDayKey()) return false;   // passe complète déjà faite aujourd'hui
+  if (Date.now() < _rlUntil) return false;           // fenêtre rate-limit 429 persistée
+  if (loadQuota().count >= QUOTA_MAX) return false;  // quota 24 h consommé
+  return true;
+}
+
 // Notification cross-plateforme : sur mobile (Android Chrome), `new Notification()`
 // lève "Illegal constructor" quand un service worker est actif → il faut passer par
 // ServiceWorkerRegistration.showNotification(). On tente le SW d'abord, fallback constructeur.
@@ -2877,6 +2911,10 @@ function StoreProvider({ children }) {
   // FILTRES ACTIFS, mais la closure du tick (deps [authState]) figerait un reloadFeed
   // périmé → ref toujours pointée sur la dernière version (assignée à sa définition).
   const reloadFeedRef = React.useRef(() => {});
+  // startSyncRef : même patron pour le scrapping automatique (9.0.2). `startSync` est défini
+  // BIEN PLUS BAS dans le corps du composant — le lire depuis un effet/callback déclaré ici
+  // tomberait en TDZ (règle « Babel hoisting » du projet) ; la ref est assignée à sa définition.
+  const startSyncRef = React.useRef(null);
   React.useEffect(() => {
     if (authState !== 'connected') return;
     let stop = false;
@@ -3311,6 +3349,13 @@ function StoreProvider({ children }) {
     if (reason === 'completed') {
       localStorage.removeItem('spotifyplus_sync_progress');
       setResumableSession(null);
+      // Passe allée au BOUT (tous les artistes suivis balayés) → plus rien à scraper
+      // aujourd'hui : le scrapping automatique ne repartira qu'à la prochaine journée civile.
+      // ⚠ Marqué aussi pour une passe MANUELLE : elle vient de faire exactement le travail
+      // que la passe automatique aurait fait, la relancer ne ramènerait rien.
+      // ⚠ À l'inverse, `daily_limit` et `error` ne marquent RIEN : le quota se libère par
+      // fenêtre glissante de 24 h, donc la suite du scan peut repartir dans la même journée.
+      try { musicAutoSetDay(tvDayKey()); } catch {}
     } else {
       // Restaure le bouton "↩ Reprendre" immédiatement, sans attendre un reload
       try {
@@ -3731,6 +3776,46 @@ function StoreProvider({ children }) {
       await endSync('error');
     }
   };
+  startSyncRef.current = startSync;
+
+  // ── SCRAPPING MUSIQUE AUTOMATIQUE (9.0.2) ─────────────────────────────────────
+  // Tente une passe si les conditions locales sont réunies (cf. `musicAutoDue`). Ne coûte
+  // AUCUNE requête tant qu'elle ne démarre pas.
+  // ⚠ REPREND une session interrompue au lieu de tout re-scanner : sans ça, chaque
+  // relance automatique repartirait du 1er artiste et brûlerait le quota à re-balayer ce
+  // qui a déjà été fait. La progression est lue DIRECTEMENT en localStorage et non dans
+  // `resumableSession` : au démarrage, le state vient tout juste d'être posé par `bootLocal`
+  // et n'est pas encore visible dans cette closure.
+  const musicAutoTry = React.useCallback(() => {
+    if (!musicAutoDue()) return;
+    if (syncStateRef.current !== 'idle') return;   // une synchro (manuelle ou auto) tourne déjà
+    let opts = {};
+    try {
+      const p = JSON.parse(localStorage.getItem('spotifyplus_sync_progress') || 'null');
+      if (p?.artists_scanned > 0) {
+        opts = { skipCount: p.artists_scanned, resumeUrl: p.page_url || null, resumeOffset: p.page_offset || 0 };
+      }
+    } catch {}
+    log(opts.skipCount
+      ? `🤖 Scrapping automatique : reprise à l'artiste ${opts.skipCount} (quota disponible).`
+      : '🤖 Scrapping automatique : quota disponible → lancement jusqu\'à la limite.', 'info');
+    startSyncRef.current?.(opts);
+  }, [log]);
+
+  // Déclencheur : une tentative peu après la connexion, puis une re-tentative périodique
+  // pendant toute la session.
+  // ⚠ La re-tentative n'est pas un luxe : une passe arrêtée au quota laisse la journée « due »,
+  // et la fenêtre glissante de 24 h peut expirer alors que l'app est RESTÉE OUVERTE — sans elle
+  // il faudrait recharger la page pour que le scrapping reprenne.
+  // ⚠ `offline` : en mode dégradé aucun appel Spotify n'aboutit, une passe ne ferait qu'échouer.
+  // ⚠ `otherTab` : deux onglets qui scrapent en parallèle doubleraient la consommation du quota
+  // et s'écraseraient mutuellement la base (chaque `saveDB()` exporte TOUT).
+  React.useEffect(() => {
+    if (authState !== 'connected' || !dbReady || offline || otherTab) return;
+    const t = setTimeout(musicAutoTry, MUSIC_AUTO_DELAY_MS);
+    const iv = setInterval(musicAutoTry, MUSIC_AUTO_CHECK_MS);
+    return () => { clearTimeout(t); clearInterval(iv); };
+  }, [authState, dbReady, offline, otherTab, musicAutoTry]);
 
   // Restaure une sauvegarde (applyBackup) puis rafraîchit les états dérivés de la DB.
   // Les panneaux To do / Remember relisent le localStorage à leur montage (reload/onglet).
@@ -3797,7 +3882,7 @@ function StoreProvider({ children }) {
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
-    dbReady, purgeListened, resetQuota, removeFromFeed, setTrackLiked, restoreBackup,
+    dbReady, purgeListened, resetQuota, musicAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
@@ -15574,7 +15659,10 @@ function buildBackup() {
     })(),
     // Préférences d'affichage diverses
     prefs: { tvtime_filter: lsRaw('spotifyplus_tvtime_filter'), tvtime_sort: lsRaw('spotifyplus_tvtime_sort'), loop: lsRaw('spotifyplus_loop'),
-             vet_prix: lsRaw(VET_PRIX_LS) },
+             vet_prix: lsRaw(VET_PRIX_LS),
+             // ⚠ La PRÉFÉRENCE de scrapping auto voyage ; PAS `MUSIC_AUTO_DAY_LS` (le jour de
+             // la dernière passe), qui est propre à cet appareil et se recalcule tout seul.
+             music_auto: lsRaw(MUSIC_AUTO_LS) },
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -15987,6 +16075,7 @@ function applyBackup(data) {
     putRaw('spotifyplus_tvtime_sort', data.prefs.tvtime_sort);
     putRaw('spotifyplus_loop', data.prefs.loop);
     putRaw(VET_PRIX_LS, data.prefs.vet_prix);
+    putRaw(MUSIC_AUTO_LS, data.prefs.music_auto);
   }
   return { artistsRestored, statsRestored, musicRestored };
 }
@@ -18362,7 +18451,7 @@ function StatsPanel() {
 
 // À PROPOS — export / restauration / Dropbox / réinit quota / purge / version.
 function VosEcoutesPanel() {
-  const { listenStats: ls, purgeListened, resetQuota, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, logout } = useStore();
+  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, logout } = useStore();
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
   // Ouverture d'À propos sans Google connecté → renouvellement silencieux du jeton DRIVE
@@ -18389,6 +18478,16 @@ function VosEcoutesPanel() {
   };
   const onResetQuota = () => {
     if (confirm('Réinitialiser le quota 24h ?\nLe compteur repart à 0/100 et tu pourras relancer une synchro immédiatement.')) resetQuota();
+  };
+  // Scrapping musique automatique (9.0.2) — lu au montage, écrit au clic.
+  const [autoMusic, setAutoMusic] = React.useState(musicAutoOn);
+  const toggleAutoMusic = () => {
+    const on = !autoMusic;
+    musicAutoSet(on);
+    setAutoMusic(on);
+    // Activation → on ne fait pas attendre la re-tentative périodique (10 min) : si le quota
+    // est disponible, la passe part tout de suite.
+    if (on) { try { musicAutoTry(); } catch {} }
   };
   const exportBtn = { background:'#4ea3f512', border:'1px solid #4ea3f540', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#4ea3f5', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
   return (
@@ -18444,6 +18543,14 @@ function VosEcoutesPanel() {
       <button onClick={onResetQuota}
         style={{ background:'#c792ea12', border:'1px solid #c792ea40', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#c792ea', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
         🔄 Réinitialiser le quota 24h <span style={{ fontWeight:400, opacity:0.7 }}>({dailyScrapings}/100{quotaActive ? ' · bloqué' : ''})</span>
+      </button>
+      {/* Scrapping musique automatique — ENTRE la réinit du quota et la purge (9.0.2) */}
+      <button onClick={toggleAutoMusic} role="switch" aria-checked={autoMusic}
+        title={autoMusic
+          ? 'Activé : dès la connexion, le scrapping part tout seul et va jusqu\'au quota de 100 artistes, même si tu es sur un autre module. Une passe par jour.'
+          : 'Désactivé : le scrapping ne démarre que si tu cliques sur « Lancer » dans Musique → ⚙ Scrapping.'}
+        style={{ background: autoMusic ? '#4ec9b012' : '#ffffff08', border:`1px solid ${autoMusic ? '#4ec9b040' : C.border}`, borderRadius:10, padding:'10px 14px', cursor:'pointer', color: autoMusic ? '#4ec9b0' : C.dim, fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' }}>
+        {autoMusic ? '☑' : '☐'} Scrapping musique automatique <span style={{ fontWeight:400, opacity:0.7 }}>({autoMusic ? '1×/jour, jusqu\'au quota' : 'désactivé'})</span>
       </button>
       <button onClick={purgeListened} disabled={!dbReady || ls.remaining === undefined}
         style={{ background:'#f5813c12', border:'1px solid #f5813c40', borderRadius:10, padding:'10px 14px', cursor: dbReady ? 'pointer' : 'default', color:'#f5813c', fontSize:11, fontWeight:700, letterSpacing:'0.04em', opacity: dbReady ? 1 : 0.4, textAlign:'left' }}>
