@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '9.1.1';
+const APP_VERSION = '9.1.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -26215,6 +26215,17 @@ const YT_CLICK_SLOP    = 6;    // px : au-delà, le geste souris est un glissé,
 const YT_TAP_SLOP      = 16;   // px de jitter tolérés à l'intérieur d'UN tap (le doigt bouge plus que la souris)
 const YT_DTAP_MS       = 320;  // délai max entre les 2 taps
 const YT_DTAP_SLOP     = 44;   // px max entre les 2 taps (sinon ce sont deux taps distincts)
+// ⚠ 9.1.2 — DOUBLE TAP À DROITE = +5 s, À GAUCHE = −5 s (demande utilisateur, convention
+// YouTube). La bascule pause/reprise de 8.9.1 n'est PAS perdue : elle vit désormais dans la
+// BANDE CENTRALE (les `YT_DTAP_EDGE` premiers/derniers pour-cent de la largeur avancent ou
+// reculent, le reste met en pause), et le bouton ⏸ de la barre comme le clic gauche souris
+// restent inchangés. ⚠ L'embed n'a AUCUNE commande « avancer de N secondes » : `seekTo`
+// veut une position ABSOLUE → il faut connaître la position courante, d'où `timeRef`,
+// alimenté par les `infoDelivery` que le lecteur envoie déjà (7.9.8).
+const YT_SEEK_STEP     = 5;    // secondes gagnées/perdues par double tap
+const YT_DTAP_EDGE     = 0.35; // fraction de la largeur formant la zone gauche (et la zone droite)
+const YT_SEEK_FLASH_MS = 800;  // durée du badge « ⏩ +5 s » / « ⏪ −5 s »
+const YT_TIME_MAX_DRIFT= 2;    // s : extrapolation max entre 2 rapports de position du lecteur
 const YT_EMBED_ORIGIN   = 'https://www.youtube-nocookie.com';  // cible des postMessage (jamais '*')
 const YT_END_NEXT_MS    = 5000; // inactivité après la FIN d'une vidéo avant de passer à la suivante
 const YT_JSAPI_HELLO_MS = 600;  // cadence du handshake `listening` (le player n'est pas prêt tout de suite)
@@ -26297,6 +26308,13 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // justement rendu manuel.
   const [endWait, setEndWait] = React.useState(0);   // secondes restantes (0 = désarmé)
   const endTimerRef = React.useRef(null);
+  // ⏩ 9.1.2 — Dernière position connue du lecteur, alimentée par `infoDelivery` : c'est la
+  // SEULE source possible pour un saut relatif (`seekTo` ne prend qu'une position absolue).
+  // `at` = l'instant du rapport, pour extrapoler le temps écoulé depuis (la vidéo continue
+  // de tourner entre deux messages) ; `at:0` = position inconnue → on ne saute pas.
+  const timeRef = React.useRef({ t:0, d:0, at:0 });
+  const [seekFlash, setSeekFlash] = React.useState(0);   // secondes du dernier saut (0 = rien)
+  const seekTimerRef = React.useRef(null);
   // ⚠ 8.7.7 — L'ÉCOUTE `infoDelivery` N'EST PLUS RÉSERVÉE À `autoNext` : elle sert
   // désormais AUSSI à savoir si la vidéo est en pause (bouton ⏸ / clic gauche). Sans elle,
   // une pause faite depuis les contrôles YouTube laisserait le bouton afficher « Mettre en
@@ -26306,6 +26324,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   React.useEffect(() => {
     setEndWait(0);
     setPaused(false);   // nouvelle vidéo = autoplay
+    // ⚠ La position doit repartir à INCONNUE : sans ça, un double tap juste après un ⏭
+    // sauterait à la position de la vidéo PRÉCÉDENTE (9.1.2).
+    timeRef.current = { t:0, d:0, at:0 };
+    setSeekFlash(0);
     if (!vid) return;
     // ⚠ Commentaires ouverts = l'utilisateur EST en train de faire quelque chose : aucune
     // auto-avance, sinon la vidéo changerait sous ses yeux pendant qu'il lit (7.9.9).
@@ -26343,6 +26365,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       // 2 = en pause (état officiel du lecteur YouTube) → le bouton reste juste même si la
       // pause vient des contrôles YouTube ou d'un autoplay refusé par le navigateur.
       if (typeof info.playerState === 'number') setPaused(info.playerState === 2);
+      // Position courante (9.1.2) : mémorisée à CHAQUE rapport, c'est elle qui rend le saut
+      // relatif du double tap possible. `duration` n'est pas toujours renvoyée avec.
+      if (typeof info.currentTime === 'number')
+        timeRef.current = { t:info.currentTime, d:(typeof info.duration === 'number' && info.duration > 0) ? info.duration : timeRef.current.d, at:Date.now() };
       if (info.playerState === 0) { if (armable) arm(); }
       else if (typeof info.playerState === 'number') clear();
       // Filet : certains embeds ne renvoient pas l'état 0 mais continuent d'annoncer la
@@ -26355,6 +26381,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     return () => {
       window.removeEventListener('message', onMsg);
       if (helloTimer) clearInterval(helloTimer);
+      if (seekTimerRef.current) { clearTimeout(seekTimerRef.current); seekTimerRef.current = null; }
       clear();
     };
   }, [vid, index, queue.length, autoNext, showComments]);
@@ -26369,15 +26396,36 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // C'est ce que 7.9.8 utilise déjà dans l'autre sens pour écouter la fin de la vidéo, donc
   // rien de nouveau côté CSP (`youtube-nocookie.com` est déjà en `frame-src`, et
   // postMessage n'est pas soumis à `connect-src`). `enablejsapi=1` est déjà dans l'URL.
-  const ytCommand = func => {
+  const ytCommand = (func, args) => {
     const f = frameRef.current, w = f && f.contentWindow;
     if (!w) return;
-    try { w.postMessage(JSON.stringify({ event:'command', func, args:[] }), YT_EMBED_ORIGIN); } catch {}
+    try { w.postMessage(JSON.stringify({ event:'command', func, args:args || [] }), YT_EMBED_ORIGIN); } catch {}
   };
   const togglePause = () => {
     const next = !paused;
     ytCommand(next ? 'pauseVideo' : 'playVideo');
     setPaused(next);   // état optimiste, recalé par le prochain `infoDelivery`
+  };
+  // ⏩ 9.1.2 — SAUT RELATIF (double tap droite / gauche). ⚠ `seekTo` attend une position
+  // ABSOLUE : on part de la dernière position rapportée par le lecteur, à laquelle on ajoute
+  // le temps écoulé depuis ce rapport quand la vidéo tourne (les `infoDelivery` arrivent au
+  // mieux toutes les ~250 ms — sans cette correction, un « +5 s » en vaudrait 4,5). La
+  // dérive est bornée : si le lecteur s'est tu, mieux vaut sauter un peu court que
+  // n'importe où. Position jamais reçue (embed bloqué, lecture pas commencée) ⇒ on ne fait
+  // RIEN plutôt que de sauter à l'aveugle.
+  const seekBy = sec => {
+    const st = timeRef.current;
+    if (!st || !st.at) return;
+    const drift = paused ? 0 : Math.min((Date.now() - st.at) / 1000, YT_TIME_MAX_DRIFT);
+    // On garde 0,5 s de marge avant la fin : viser la durée exacte terminerait la vidéo,
+    // ce qui armerait l'auto-avance de 7.9.8 alors qu'on voulait juste avancer.
+    const max = st.d > 0 ? Math.max(0, st.d - 0.5) : Infinity;
+    const target = Math.max(0, Math.min(max, st.t + drift + sec));
+    ytCommand('seekTo', [target, true]);
+    timeRef.current = { t:target, d:st.d, at:Date.now() };   // optimiste, recalé au prochain rapport
+    setSeekFlash(sec);
+    if (seekTimerRef.current) clearTimeout(seekTimerRef.current);
+    seekTimerRef.current = setTimeout(() => { seekTimerRef.current = null; setSeekFlash(0); }, YT_SEEK_FLASH_MS);
   };
   const swipeRef = React.useRef(null);
   // Dernier tap tactile retenu pour la détection du double tap (8.9.1).
@@ -26405,19 +26453,27 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     // glissé et la moindre imprécision mettrait la vidéo en pause sans qu'on l'ait demandé.
     // Le seuil `YT_CLICK_SLOP` distingue un vrai clic d'un glissé trop court pour naviguer.
     if (e.pointerType === 'mouse' && e.button === 0 && ax < YT_CLICK_SLOP && ay < YT_CLICK_SLOP) { togglePause(); return; }
-    // ⚠ 8.9.1 — DOUBLE TAP AU DOIGT = pause / reprise (demande utilisateur). On arrive ici
-    // seulement quand le geste n'était PAS un swipe : c'est donc un tap posé (`YT_TAP_SLOP`
-    // tolère le jitter du doigt). Le 1er tap ne fait rien d'autre que se mémoriser ; c'est le
-    // 2e, assez rapproché dans le temps ET dans l'espace, qui bascule la lecture.
-    // ⚠ `tapRef` est REMIS À ZÉRO après la bascule, sinon un 3e tap rapide compterait comme
-    // un nouveau double tap avec le 2e et rebasculerait aussitôt.
+    // ⚠ 8.9.1 — DOUBLE TAP AU DOIGT (demande utilisateur). On arrive ici seulement quand le
+    // geste n'était PAS un swipe : c'est donc un tap posé (`YT_TAP_SLOP` tolère le jitter du
+    // doigt). Le 1er tap ne fait rien d'autre que se mémoriser ; c'est le 2e, assez rapproché
+    // dans le temps ET dans l'espace, qui déclenche.
+    // ⚠ `tapRef` est REMIS À ZÉRO après l'action, sinon un 3e tap rapide compterait comme
+    // un nouveau double tap avec le 2e et rejouerait aussitôt.
+    // ⚠ 9.1.2 — C'EST L'ENDROIT DU TAP QUI DÉCIDE : moitié droite (au-delà des
+    // `1 - YT_DTAP_EDGE` de la largeur) = +5 s, moitié gauche = −5 s, bande CENTRALE =
+    // pause/reprise (le comportement de 8.9.1, conservé). La zone est mesurée sur la couche
+    // de capture elle-même, pas sur la fenêtre : elle ne couvre pas toute la hauteur.
     if (e.pointerType === 'mouse') return;
     if (ax >= YT_TAP_SLOP || ay >= YT_TAP_SLOP) { tapRef.current = null; return; }
     const prev = tapRef.current, now = Date.now();
     if (prev && now - prev.t <= YT_DTAP_MS &&
         Math.abs(e.clientX - prev.x) < YT_DTAP_SLOP && Math.abs(e.clientY - prev.y) < YT_DTAP_SLOP) {
       tapRef.current = null;
-      togglePause();
+      const box = e.currentTarget && e.currentTarget.getBoundingClientRect ? e.currentTarget.getBoundingClientRect() : null;
+      const frac = box && box.width > 0 ? (e.clientX - box.left) / box.width : 0.5;
+      if (frac <= YT_DTAP_EDGE) seekBy(-YT_SEEK_STEP);
+      else if (frac >= 1 - YT_DTAP_EDGE) seekBy(+YT_SEEK_STEP);
+      else togglePause();
       return;
     }
     tapRef.current = { x:e.clientX, y:e.clientY, t:now };
@@ -26519,7 +26575,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             reste dans `title` ET dans `aria-label` (bouton à icône seule = sans texte
             accessible sinon), comme les marqueurs de Vêtement en 8.1.9. */}
         <button onClick={togglePause} aria-label={paused ? 'Reprendre la vidéo' : 'Mettre la vidéo en pause'}
-          title={paused ? 'Reprendre la lecture (ou clic gauche / double tap sur la vidéo)' : 'Mettre en pause (ou clic gauche / double tap sur la vidéo)'}
+          title={paused ? 'Reprendre la lecture (ou clic gauche / double tap au CENTRE de la vidéo)' : 'Mettre en pause (ou clic gauche / double tap au CENTRE de la vidéo)'}
           style={{ ...obtn(YT_COLOR, false), ...(paused ? { background:YT_COLOR + 'dd', border:`1px solid ${YT_COLOR}` } : null) }}>
           {paused ? '▶' : '⏸'}
         </button>
@@ -26559,6 +26615,13 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             ⏱ suivante dans {endWait} s
           </div>
         )}
+        {/* ⏩ Accusé du saut de 5 s (9.1.2) : sans lui, un double tap dans le vide (position
+            encore inconnue) et un saut réussi seraient indiscernables. */}
+        {seekFlash !== 0 && (
+          <div title={`Saut de ${seekFlash > 0 ? '+' : ''}${seekFlash} s dans la vidéo`} style={ochip({ background:YT_COLOR + 'cc' })}>
+            {seekFlash > 0 ? `⏩ +${seekFlash} s` : `⏪ ${seekFlash} s`}
+          </div>
+        )}
         {/* 💬 Commentaires (7.9.9) — rendu EN DERNIER + `marginLeft:'auto'` : il reste collé
             EN HAUT À DROITE quoi qu'affichent les autres éléments de la barre (position
             demandée). ⚠ 8.0.0 : il partage `obtn`, donc la MÊME hauteur et le MÊME alignement
@@ -26589,7 +26652,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         </div>
         {queue.length > 1 && !showComments && (
           <div style={{ fontSize:9, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:3 }}>
-            👉 glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante · double tap = pause
+            👉 glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante · double tap : à droite = +{YT_SEEK_STEP} s, à gauche = −{YT_SEEK_STEP} s, au centre = pause
           </div>
         )}
       </div>
