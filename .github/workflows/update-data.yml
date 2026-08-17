@@ -1,0 +1,53 @@
+name: Update data
+
+# Rafraîchit les deux JSON pré-fetchés côté serveur — data/actu.json (module Actu) et
+# data/indices.json (module Finance) — puis les commit ENSEMBLE via
+# scripts/commit_data.sh, qui amende le commit du jour : 1 seul commit par jour au lieu
+# des ~20 que produisaient les deux workflows séparés.
+#
+# La cadence de rafraîchissement, elle, ne baisse pas : l'app considère actu.json
+# périmé au-delà de 24 h et retombe alors sur les proxies CORS clients (peu fiables).
+
+on:
+  schedule:
+    # Toutes les 2 h, tous les jours (l'actu ne s'arrête pas le week-end).
+    # Minute décalée (23) pour éviter les pics de charge des crons GitHub à H:00.
+    - cron: '23 */2 * * *'
+  workflow_dispatch: {}   # déclenchement manuel (utile juste après le déploiement)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # > 1 : amender le commit de tête exige que son parent existe localement.
+          fetch-depth: 5
+
+      # continue-on-error : une source HS ne doit pas empêcher de committer l'autre
+      # fichier (les deux scripts conservent déjà leurs valeurs précédentes).
+      - name: Fetch actu sources
+        continue-on-error: true
+        run: python3 scripts/fetch_actu.py
+
+      - name: Fetch market indices
+        continue-on-error: true
+        run: |
+          # Séance seulement : 06–22 UTC du lundi au vendredi (ouverture du CAC ~07:00
+          # UTC → clôture US ~20:00–21:00 UTC). Hors de cette fenêtre, les cours ne
+          # bougent plus et on épargne les proxies.
+          if [[ $(date -u +%u) -le 5 && 10#$(date -u +%H) -ge 6 && 10#$(date -u +%H) -le 22 ]]; then
+            python3 scripts/fetch_indices.py
+          else
+            echo "Hors séance — indices non rafraîchis."
+          fi
+
+      - name: Commit (1 seul commit de données par jour)
+        run: bash scripts/commit_data.sh

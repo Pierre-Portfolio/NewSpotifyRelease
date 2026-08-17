@@ -120,8 +120,8 @@ NewSpotifyRelease/
   vendor/             → sql-wasm.js/.wasm, leaflet.js/.css, motus-*.js (auto-hébergés)
   icon-192.png, icon-512.png
   data/               → actu.json, indices.json (générés par GitHub Actions)
-  scripts/            → fetch_actu.py, fetch_indices.py
-  .github/workflows/  → update-actu.yml, update-indices.yml
+  scripts/            → fetch_actu.py, fetch_indices.py, commit_data.sh
+  .github/workflows/  → update-data.yml (cron 2 h, 1 seul commit de données par jour)
   CLAUDE.md           → Doc technique
 ```
 

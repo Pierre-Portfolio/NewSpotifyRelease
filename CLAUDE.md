@@ -29,8 +29,9 @@ C'est un **hub perso multi-modules**. Ordre unique (desktop + mobile, onglets/me
 | `vendor/sql-wasm.js` / `.wasm` | sql.js 1.10.2 auto-hébergé |
 | `vendor/leaflet.js` / `.css` | Leaflet 1.9.4, chargé **lazy** (`loadLeaflet()`) |
 | `vendor/motus-words.js` / `motus-dico.js` | Données du jeu Motus (~1,1 Mo), **lazy** (`loadMotusData()`), IIFE → `window.MOTUS_WORDS` / `MOTUS_DICO` |
-| `data/actu.json` | Sources Actu pré-fetchées par GitHub Action (`update-actu.yml`, cron 2 h) via `scripts/fetch_actu.py`. Lu same-origin ; > 24 h → repli fetchers client (proxies CORS) |
-| `data/indices.json` | Indices boursiers via `scripts/fetch_indices.py` (Stooq→Yahoo) + `update-indices.yml` |
+| `data/actu.json` | Sources Actu pré-fetchées par `update-data.yml` (cron 2 h) via `scripts/fetch_actu.py`. Lu same-origin ; > 24 h → repli fetchers client (proxies CORS) |
+| `data/indices.json` | Indices boursiers via `scripts/fetch_indices.py` (Stooq→Yahoo), **même workflow**, séance seulement (06–22 UTC, lun–ven) |
+| `scripts/commit_data.sh` | Commit des deux JSON. Chacun réécrit son `updated_at` ⇒ **un run = un diff** : le commit du jour est **amendé + force-push** tant qu'il est en tête ⇒ **1 seul commit/jour** (jamais d'amende par-dessus un commit humain ; `--force-with-lease` + reprise sur le nouveau sommet). ⚠ Côté local, `git pull` sur `main` peut diverger → `git pull --rebase` |
 
 ## Stack & sécurité
 
