@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.5.9';
+const APP_VERSION = '9.6.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5700,7 +5700,12 @@ const D_TILES = [
   { k: 'spawner', icon:'👹', name: 'Générateur',    txt: 'fait surgir un monstre au-dessus de toi — une seule fois, puis elle s\'éteint' },
   { k: 'accord',  icon:'🪗', name: 'Accordéon',     txt: 'se comprime sous le poids, puis se détend d\'un coup et te propulse très haut' },
   { k: 'ghost',   icon:'👻', name: 'Fantôme',       txt: 's\'efface deux secondes après qu\'on a marché dessus' },
+  { k: 'casino',  icon:'🃏', name: 'Casino',        txt: 'imite au hasard une autre tuile débloquée — chaque dalle a le sien, tiré à sa naissance' },
 ];
+// 🃏 TYPE EFFECTIF d'une dalle : celui du casino est celui qu'il imite. ⚠ TOUT ce qui décide
+// d'un comportement doit passer par ici — létalité comprise. Un casino qui tire la 🌵 Pique
+// doit tuer ; tester `p.type` le laisserait inoffensif, et la dalle mentirait sur ce qu'elle est.
+function doodleEffType(p) { return p.type === 'casino' && p.roll ? p.roll : p.type; }
 // 👻 Deux secondes de sursis, contre ~1 s pour le ☁️ Nuage. ⚠ Les deux partagent le compteur
 // `p.fade` et le même nettoyage : un compteur de plus, c'est une chance de plus d'en oublier un.
 const D_GHOST_LIFE = 120;
@@ -5870,7 +5875,12 @@ const D_BOMB_FUSE = 58;         // ~1 s de mèche
 const D_METEOR_V = 4.6, D_METEOR_R = 15, D_METEOR_BOOM = 62;
 // ⚙️⚡ Fenêtre active d'une tuile à cycle. La phase est propre à chaque dalle (voir doodleSpawnRow).
 function doodleCycleOn(p, t) {
-  const cyc = p.type === 'zap' ? D_ZAP_CYCLE : D_PICOT_CYCLE, on = p.type === 'zap' ? D_ZAP_ON : D_PICOT_ON;
+  // ⚠ Type EFFECTIF : appelée avec la vraie dalle depuis la collision (un casino y porte encore
+  // `type:'casino'`) et avec la dalle imitée depuis le dessin. Lire `p.type` donnait au casino
+  // le cycle des picots alors qu'il affichait celui de l'électrifiée — la fenêtre mortelle et
+  // l'éclair dessiné ne coïncidaient plus.
+  const et = doodleEffType(p);
+  const cyc = et === 'zap' ? D_ZAP_CYCLE : D_PICOT_CYCLE, on = et === 'zap' ? D_ZAP_ON : D_PICOT_ON;
   return ((t + (p.ph || 0)) % cyc) < on;
 }
 function doodleTileUnlock(s) {
@@ -5900,6 +5910,21 @@ function doodleTileSpent(ctx, p) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // 🃏 Casino : dos de carte tant qu'on n'y a pas touché, puis la dalle qu'il imite — c'est
+  // ainsi que le compte à rebours du nuage, la mèche de la bombe ou les piques restent visibles.
+  // ⚠ La récursion est bornée : `p.roll` ne vaut jamais 'casino' (exclu du tirage).
+  if (p.type === 'casino') {
+    if (p.shown && p.roll) return doodleTileDraw(ctx, { ...p, type: p.roll }, t);
+    doodleRR(ctx, x, y, w, h, 6, '#2f2a4a');
+    ctx.fillStyle = '#1b1830'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 1.4;
+    doodleRR(ctx, x + 3, y + 2.5, w - 6, h - 7, 4, 'rgba(0,0,0,0)'); ctx.stroke();
+    ctx.save(); ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffd54a'; ctx.globalAlpha = 0.65 + Math.sin(t * 0.13) * 0.35;
+    ctx.fillText('?', x + w / 2, y + h / 2);
+    ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    return;
+  }
   // 👻 Fantôme : dalle bleutée à l'ourlet ondulé, qui pâlit jusqu'à disparaître. L'opacité EST
   // le compte à rebours — c'est le seul avertissement avant qu'elle ne cesse de porter.
   if (p.type === 'ghost') {
@@ -6652,18 +6677,30 @@ function doodleSpawnRow(s, ny, risky) {
     if (pool.length) type = pool[Math.floor(Math.random() * pool.length)];   // ⚠ le décor normal n'a pas de tuile : la rangée reste ordinaire
   }
   const p = { x, y: ny, w, h: D_PLAT_H, type, dead: false };
-  if (D_SPIKY.has(type)) p.armed = false;
-  if (type === 'cloud' || type === 'ghost') p.fade = 0;
-  if (type === 'bomb') p.fuse = 0;
+  // 🃏 Casino : CHAQUE dalle tire son effet à la naissance, parmi les tuiles déjà débloquées —
+  // deux casinos d'une même partie n'ont donc pas le même. ⚠ Repli sur la table complète si le
+  // casino est la seule tuile débloquée : sans lui, la toute première serait une dalle morte.
+  if (type === 'casino') {
+    const pool = s.tiles.filter(k => k !== 'casino');
+    const all = D_TILES.map(t2 => t2.k).filter(k => k !== 'casino');
+    const src = pool.length ? pool : all;
+    p.roll = src[Math.floor(Math.random() * src.length)];
+  }
+  // ⚠ À partir d'ici tout se règle sur le type EFFECTIF : un casino doit naître avec la mèche,
+  // la phase ou le sens d'entraînement de la tuile qu'il imite.
+  const type2 = doodleEffType(p);
+  if (D_SPIKY.has(type2)) p.armed = false;
+  if (type2 === 'cloud' || type2 === 'ghost') p.fade = 0;
+  if (type2 === 'bomb') p.fuse = 0;
   // ⚠ Phase TIRÉE AU HASARD par dalle : sans elle, toutes les tuiles à cycle de l'écran
   // clignoteraient à l'unisson et il n'y aurait plus qu'un seul instant sûr pour tout le monde.
-  if (type === 'picots' || type === 'zap') p.ph = Math.floor(Math.random() * 120);
-  if (type === 'belt') p.dir = Math.random() < 0.5 ? -1 : 1;
+  if (type2 === 'picots' || type2 === 'zap') p.ph = Math.floor(Math.random() * 120);
+  if (type2 === 'belt') p.dir = Math.random() < 0.5 ? -1 : 1;
   // ⚠ La pique est la SEULE tuile mortelle : elle vient donc toujours avec une plateforme
   // verte de secours sur la MÊME ligne, à l'autre bout de l'écran (« toujours une case pas
   // loin »). Sans elle, une pique pourrait fermer la seule voie et rendre la montée
   // impossible — un piège n'est un piège que s'il est évitable.
-  if (D_SPIKY.has(type)) {
+  if (D_SPIKY.has(type2)) {
     const sx = (x + w / 2 < DOODLE_W / 2) ? DOODLE_W - w - 8 : 8;
     s.platforms.push({ x: sx, y: ny, w, h: D_PLAT_H, type: 'green', dead: false });
   }
@@ -7007,16 +7044,25 @@ function GameDoodle() {
           if (p.dead) continue;
           if (s.px + 11 > p.x && s.px - 11 < p.x + p.w && s.prevFeet <= p.y && feet >= p.y) {
             if (p.type === 'break') { p.dead = true; for (let k = 0; k < 6; k++) s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: (Math.random() - 0.5) * 4, vy: 1 + Math.random() * 2, life: 26, max: 26, sz: 4, c: '#8a5a2c' }); break; }
+            // 🃏 Le casino se RÉVÈLE au contact et se comporte dès lors comme la tuile tirée.
+            // ⚠ `et` est lu par TOUS les tests qui suivent, létalité comprise.
+            const et = doodleEffType(p);
+            if (p.type === 'casino' && !p.shown) {
+              p.shown = true;
+              const rt = D_TILES.find(t2 => t2.k === p.roll);
+              if (rt) s.toast = { txt: `🃏 Casino → ${rt.icon} ${rt.name}`, life: D_TOAST_LIFE };
+              for (let k = 0; k < 12; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 24, max: 24, sz: 3, c: k % 2 ? '#ffd54a' : '#2f2a4a' }); }
+            }
             // ⚠ 9.1.8 — pique ARMÉE = mortelle. Testé AVANT de replacer le doodler, comme
             // la plateforme cassante : rien ne doit se passer d'autre.
-            if (D_SPIKY.has(p.type) && p.armed && !doodleHurt(s)) { die(); return; }
+            if (D_SPIKY.has(et) && p.armed && !doodleHurt(s)) { die(); return; }
             // ⚙️⚡ Tuiles à cycle : elles ne blessent QUE dans leur fenêtre active, et cette
             // fenêtre se voit (piques sorties, éclair). C'est un piège de rythme, pas un piège
             // caché — d'où un cycle lent et une phase visible bien avant l'atterrissage.
-            if ((p.type === 'picots' || p.type === 'zap') && doodleCycleOn(p, s.tw) && !doodleHurt(s)) { die(); return; }
+            if ((et === 'picots' || et === 'zap') && doodleCycleOn(p, s.tw) && !doodleHurt(s)) { die(); return; }
             // ⚠ « si changement de case ça revient » : les piques des AUTRES dalles se
             // rétractent dès qu'on pose le pied ailleurs.
-            for (const q of s.platforms) if (q !== p && D_SPIKY.has(q.type)) q.armed = false;
+            for (const q of s.platforms) if (q !== p && D_SPIKY.has(doodleEffType(q))) q.armed = false;
             s.py = p.y - D_FEET;
             if (p === s.lastPlat) s.bounceStreak++; else { s.bounceStreak = 0; s.lastPlat = p; }   // rebond sur la MÊME case → +40 % / autre case → retour au saut de base
             let bv = p.trampoline ? D_TRAMPO : p.spring ? D_SPRING : D_JUMP;
@@ -7041,8 +7087,8 @@ function GameDoodle() {
             // ⚠ La dalle multicolore a CHANGÉ DE PLACE : la série de rebonds « même case »
             // est donc rompue, sinon on cumulerait le +40 % en la poursuivant.
             if (p.type === 'rainbow') { doodleRainbowHop(s, p); s.lastPlat = null; s.bounceStreak = 0; }
-            if (D_SPIKY.has(p.type)) p.armed = true;                                   // 🌵 sortie des piques : le 2e rebond sera fatal
-            if (p.type === 'ice') { s.vy *= D_ICE_BOUNCE; s.slip = D_ICE_SLIP; s.slipVx = s.vx || s.face * 2.4; }   // 🧊 rebond mou + on glisse
+            if (D_SPIKY.has(et)) p.armed = true;                                       // 🌵 sortie des piques : le 2e rebond sera fatal
+            if (et === 'ice') { s.vy *= D_ICE_BOUNCE; s.slip = D_ICE_SLIP; s.slipVx = s.vx || s.face * 2.4; }   // 🧊 rebond mou + on glisse
             // ── tuiles de biome (une par biome, voir D_BIOMES) ──
             if (p.type === 'sand') { s.vy *= 0.86; if ((p.sink = (p.sink || 0) + 1) >= 2) p.dead = true; }   // 🏜️ rebond mou, s'effondre au 2e passage
             else if (p.type === 'gust') { s.vy *= D_GUST; for (let k = 0; k < 6; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 2, vy: -2 - Math.random() * 2, life: 22, max: 22, sz: 2.5, c: '#bfe4f5' }); }   // 🌬️ souffle ascendant
@@ -7055,17 +7101,17 @@ function GameDoodle() {
               if (mul > 1) s.toast = { txt: `🌠 Étoile filante ×${mul}`, life: D_TOAST_LIFE };
               s.lastPlat = null; s.bounceStreak = 0;
             }
-            if (p.type === 'cloud' && !p.fade) p.fade = D_CLOUD_FADE;                 // ☁️ compte à rebours d'évaporation
-            if (p.type === 'ghost' && !p.fade) p.fade = D_GHOST_LIFE;                 // 👻 deux secondes avant l'effacement
-            if (p.type === 'meteor') s.meteors.push({ x: 24 + Math.random() * (W - 48), y: -26, vy: D_METEOR_V });   // ☄️ une météorite par rebond, abscisse tirée au hasard
+            if (et === 'cloud' && !p.fade) p.fade = D_CLOUD_FADE;                     // ☁️ compte à rebours d'évaporation
+            if (et === 'ghost' && !p.fade) p.fade = D_GHOST_LIFE;                     // 👻 deux secondes avant l'effacement
+            if (et === 'meteor') s.meteors.push({ x: 24 + Math.random() * (W - 48), y: -26, vy: D_METEOR_V });   // ☄️ une météorite par rebond, abscisse tirée au hasard
             // ── tuiles 9.4.4 ──
-            if (p.type === 'belt') { s.beltVx = p.dir * D_BELT_V; s.beltLeft = D_BELT_LIFE; }   // ➡️ 3 s d'entraînement latéral + adhérence réduite
-            if (p.type === 'magnet') { s.tmag = 70; s.tmagX = s.px; s.tmagY = s.py; }        // 🧲 aspiration des coffres et bonus alentour
-            if (p.type === 'slow') { s.slowLeft = D_SLOW_LIFE; s.toast = { txt: '⏱️ Temps ralenti — 10 s', life: D_TOAST_LIFE }; }
+            if (et === 'belt') { s.beltVx = p.dir * D_BELT_V; s.beltLeft = D_BELT_LIFE; }   // ➡️ 3 s d'entraînement latéral + adhérence réduite
+            if (et === 'magnet') { s.tmag = 70; s.tmagX = s.px; s.tmagY = s.py; }        // 🧲 aspiration des coffres et bonus alentour
+            if (et === 'slow') { s.slowLeft = D_SLOW_LIFE; s.toast = { txt: '⏱️ Temps ralenti — 10 s', life: D_TOAST_LIFE }; }
             // ── tuiles 9.5.7 et suivantes ──
             // 👹 Générateur : UNE seule invocation par dalle, puis elle s'éteint. Le monstre est
             // tiré par `doodleMakeMob`, donc c'est bien une créature du biome courant.
-            if (p.type === 'spawner' && !p.used) {
+            if (et === 'spawner' && !p.used) {
               p.used = true;
               const mob = doodleMakeMob(s, s.py - (D_SPAWNER_MIN + Math.random() * D_SPAWNER_SPAN));
               mob.x = 10 + Math.random() * (W - mob.w - 20);
@@ -7075,9 +7121,9 @@ function GameDoodle() {
               s.toast = { txt: '👹 Un monstre surgit !', life: D_TOAST_LIFE };
             }
             // 🪗 Accordéon : on annule le rebond ordinaire, la détente viendra après la compression.
-            if (p.type === 'accord' && !s.acc) { s.acc = { p, left: D_ACCORD_HOLD }; s.vy = 0; p.squash = 0; }
-            if (p.type === 'bomb' && !p.fuse) p.fuse = D_BOMB_FUSE;                   // 🧨 mèche allumée
-            if (p.type === 'warp') {                                                  // 🌀 renvoi à l'opposé de l'écran
+            if (et === 'accord' && !s.acc) { s.acc = { p, left: D_ACCORD_HOLD }; s.vy = 0; p.squash = 0; }
+            if (et === 'bomb' && !p.fuse) p.fuse = D_BOMB_FUSE;                       // 🧨 mèche allumée
+            if (et === 'warp') {                                                  // 🌀 renvoi à l'opposé de l'écran
               for (let k = 0; k < 10; k++) s.parts.push({ x: s.px, y: s.py, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 20, max: 20, sz: 3, c: '#b98cff' });
               s.px = ((s.px + W / 2) % W + W) % W;
               s.lastPlat = null; s.bounceStreak = 0;
