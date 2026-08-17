@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.4.3';
+const APP_VERSION = '9.4.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4913,6 +4913,11 @@ function GameCrossy() {
       if (!alive) return;
       const s = g.current, ctx = canvasRef.current.getContext('2d');
       s.t++;
+      // ⏱️ Ralentisseur : tout ce qui bouge AUTOUR du doodler tourne au ralenti. On ne touche
+      // pas à sa gravité : la modifier changerait la hauteur de ses sauts, donc la portée entre
+      // rangées, et pourrait rendre la montée infaisable. Ici c'est un pur avantage de lecture.
+      const sf = s.slowLeft > 0 ? D_SLOW : 1;
+      if (s.slowLeft > 0) s.slowLeft--;
       crEnsure(s, Math.ceil(s.cam) + 18);
       // Caméra : suit le joueur ET pousse toute seule (l'« aigle » du jeu d'origine). Elle ne
       // décroche jamais de plus de 4 rangées → rester immobile finit toujours par tuer.
@@ -5630,7 +5635,20 @@ const D_TILES = [
   { k: 'warp',  icon: '🌀', name: 'Téléporteur', txt: 'renvoie à l\'opposé de l\'écran' },
   { k: 'bomb',  icon: '🧨', name: 'Bombe',       txt: 'explose et nettoie les monstres' },
   { k: 'meteor', icon:'☄️', name: 'Météorite',   txt: 'appelle une météorite à chaque rebond' },
+  // ⚠ 9.4.4 — Cinq tuiles de plus (demandes utilisateur). La « friable » demandée n'est PAS
+  // reprise : elle faisait doublon avec le 🏜️ Sable mouvant du Désert, qui s'effondre déjà au
+  // 2e passage.
+  { k: 'picots', icon:'⚙️', name: 'Piège à picots', txt: 'des piques sortent par intermittence : saute au bon moment' },
+  { k: 'belt',   icon:'➡️', name: 'Tapis roulant',  txt: 'entraîne vers la gauche ou la droite dès le contact' },
+  { k: 'zap',    icon:'⚡', name: 'Électrifiée',    txt: 'une décharge toutes les deux secondes : mortelle si active' },
+  { k: 'magnet', icon:'🧲', name: 'Aimantée',       txt: 'attire les coffres et bonus alentour quand on s\'y pose' },
+  { k: 'slow',   icon:'⏱️', name: 'Ralentisseur',   txt: 'ralentit le temps pendant 10 secondes' },
 ];
+const D_PICOT_CYCLE = 108, D_PICOT_ON = 46;    // ⚙️ ~1,8 s de cycle, piques sorties sur ~0,8 s
+const D_ZAP_CYCLE = 120, D_ZAP_ON = 34;        // ⚡ décharge toutes les 2 s, active ~0,55 s
+const D_BELT_V = 1.7;                          // ➡️ entraînement latéral, en px/frame
+const D_TMAGNET_R = 150, D_TMAGNET_V = 3.2;    // 🧲 rayon d'attraction et vitesse
+const D_SLOW_LIFE = 600, D_SLOW = 0.55;        // ⏱️ 10 s à 60 fps, tout tourne à 55 % de vitesse
 // ⚠ 9.4.2 — Deux réglages de la même demande, appliqués dans l'ordre reçu :
 //   · −25 % sur la bande des tuiles débloquées ET sur les monstres ;
 //   · puis +10 % sur les tuiles à partir de 500 points, +20 % au-delà de 1000.
@@ -5738,6 +5756,11 @@ const D_BOMB_FUSE = 58;         // ~1 s de mèche
 // l'écran et tue les monstres pris dans le souffle. Elle est dangereuse pour le doodler aussi
 // — c'est ce qui en fait une tuile à double tranchant plutôt qu'un bonus gratuit.
 const D_METEOR_V = 4.6, D_METEOR_R = 15, D_METEOR_BOOM = 62;
+// ⚙️⚡ Fenêtre active d'une tuile à cycle. La phase est propre à chaque dalle (voir doodleSpawnRow).
+function doodleCycleOn(p, t) {
+  const cyc = p.type === 'zap' ? D_ZAP_CYCLE : D_PICOT_CYCLE, on = p.type === 'zap' ? D_ZAP_ON : D_PICOT_ON;
+  return ((t + (p.ph || 0)) % cyc) < on;
+}
 function doodleTileUnlock(s) {
   const left = D_TILES.filter(t => s.tiles.indexOf(t.k) < 0);
   if (!left.length) return null;                       // les 5 sont déjà là → seuls les bonus continuent
@@ -5756,8 +5779,71 @@ function doodleMeteorDraw(ctx, m) {
   ctx.fillStyle = '#ffd54a'; ctx.beginPath(); ctx.arc(m.x - 3, m.y - 3, D_METEOR_R * 0.2, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
-function doodleTileDraw(ctx, p) {
+function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // ⚙️ Piège à picots : la dalle est sûre, sauf quand les piques sont sorties. Un liseré
+  // s'allume juste AVANT la sortie — sans cette annonce, le piège serait injouable.
+  if (p.type === 'picots') {
+    const on = doodleCycleOn(p, t), prox = ((t + (p.ph || 0)) % D_PICOT_CYCLE) > D_PICOT_CYCLE - 20;
+    doodleRR(ctx, x, y, w, h, 6, on ? '#8e2b2b' : '#8b8f98');
+    ctx.fillStyle = on ? '#5c1a1a' : '#5f636b'; ctx.fillRect(x, y + h - 4, w, 4);
+    if (prox && !on) { ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 2; doodleRR(ctx, x + 1, y + 1, w - 2, h - 2, 5, 'rgba(0,0,0,0)'); ctx.stroke(); }
+    if (on) { ctx.fillStyle = '#f2f4f7'; for (let i = 0; i < 5; i++) { const px = x + 8 + i * (w - 16) / 4; ctx.beginPath(); ctx.moveTo(px - 4, y); ctx.lineTo(px, y - 10); ctx.lineTo(px + 4, y); ctx.closePath(); ctx.fill(); } }
+    else { ctx.fillStyle = '#5f636b'; for (let i = 0; i < 5; i++) { const px = x + 8 + i * (w - 16) / 4; ctx.beginPath(); ctx.arc(px, y + 3, 1.6, 0, Math.PI * 2); ctx.fill(); } }
+    return;
+  }
+  // ➡️ Tapis roulant : chevrons qui DÉFILENT dans le sens de l'entraînement — la direction se
+  // lit avant même d'avoir posé le pied.
+  if (p.type === 'belt') {
+    doodleRR(ctx, x, y, w, h, 6, '#4a4f59');
+    ctx.save(); doodleRR(ctx, x, y, w, h, 6, '#4a4f59'); ctx.clip();
+    ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 2.4;
+    const off = ((t * 1.6 * (p.dir || 1)) % 14 + 14) % 14;
+    for (let i = -1; i < w / 14 + 1; i++) {
+      const bx = x + i * 14 + off;
+      ctx.beginPath(); ctx.moveTo(bx, y + 3); ctx.lineTo(bx + 5 * (p.dir || 1), y + h / 2); ctx.lineTo(bx, y + h - 3); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.fillStyle = '#2f333b'; ctx.fillRect(x, y + h - 3, w, 3);
+    return;
+  }
+  // ⚡ Électrifiée : arc visible pendant la décharge, bornes ternes le reste du temps.
+  if (p.type === 'zap') {
+    const on = doodleCycleOn(p, t);
+    doodleRR(ctx, x, y, w, h, 6, on ? '#3f6fd8' : '#6b7280');
+    ctx.fillStyle = on ? '#2b4a96' : '#4b5058'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.fillStyle = '#c9ced6';
+    [x + 7, x + w - 7].forEach(bx => { ctx.beginPath(); ctx.arc(bx, y + h / 2, 3, 0, Math.PI * 2); ctx.fill(); });
+    if (on) {
+      ctx.strokeStyle = '#ffe98a'; ctx.lineWidth = 2.2; ctx.beginPath();
+      ctx.moveTo(x + 7, y + h / 2);
+      for (let i = 1; i < 6; i++) ctx.lineTo(x + 7 + i * (w - 14) / 6, y + h / 2 + (i % 2 ? -6 : 6));
+      ctx.lineTo(x + w - 7, y + h / 2); ctx.stroke();
+    }
+    return;
+  }
+  // 🧲 Aimantée : fer à cheval rouge et blanc, plus des ondes quand elle vient de servir.
+  if (p.type === 'magnet') {
+    doodleRR(ctx, x, y, w, h, 6, '#c94a4a');
+    ctx.fillStyle = '#8e2b2b'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#f2f4f7'; ctx.lineWidth = 3; ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.arc(x + w / 2, y + h - 2, 7, Math.PI, 0); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1.4;
+    for (let i = 1; i <= 2; i++) { ctx.beginPath(); ctx.arc(x + w / 2, y + h - 2, 7 + i * 5 + (t % 30) / 6, Math.PI, 0); ctx.stroke(); }
+    return;
+  }
+  // ⏱️ Ralentisseur : cadran dont l'aiguille tourne… lentement.
+  if (p.type === 'slow') {
+    doodleRR(ctx, x, y, w, h, 6, '#3fa9c8');
+    ctx.fillStyle = '#276b81'; ctx.fillRect(x, y + h - 4, w, 4);
+    const cx2 = x + w / 2, cy2 = y + h / 2;
+    ctx.fillStyle = '#eaf7fb'; ctx.strokeStyle = '#1c4e5e'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(cx2, cy2, 5.4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    const a = t * 0.012;
+    ctx.strokeStyle = '#1c4e5e'; ctx.lineWidth = 1.6; ctx.beginPath();
+    ctx.moveTo(cx2, cy2); ctx.lineTo(cx2 + Math.cos(a - Math.PI / 2) * 3.6, cy2 + Math.sin(a - Math.PI / 2) * 3.6); ctx.stroke();
+    return;
+  }
   if (p.type === 'meteor') {
     doodleRR(ctx, x, y, w, h, 6, '#6b5563');
     ctx.fillStyle = '#3f3038'; ctx.fillRect(x, y + h - 4, w, 4);
@@ -5936,7 +6022,7 @@ function doodlePlatform(ctx, p, t) {
   if (p.type === 'rainbow') return doodleRainbowPlat(ctx, p);
   if (p.type === 'perk' || p.type === 'lucky') return doodleCase(ctx, p, t || 0);
   if (D_BIOME_TILES.has(p.type)) return doodleBiomeTile(ctx, p, t || 0);
-  if (D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p);
+  if (D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);
   const c = cols[p.type] || cols.green;
   doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
   ctx.fillStyle = c[1]; ctx.fillRect(p.x + 3, p.y + p.h - 4, p.w - 6, 3);
@@ -6228,6 +6314,10 @@ function doodleSpawnRow(s, ny, risky) {
   if (type === 'spike') p.armed = false;
   if (type === 'cloud') p.fade = 0;
   if (type === 'bomb') p.fuse = 0;
+  // ⚠ Phase TIRÉE AU HASARD par dalle : sans elle, toutes les tuiles à cycle de l'écran
+  // clignoteraient à l'unisson et il n'y aurait plus qu'un seul instant sûr pour tout le monde.
+  if (type === 'picots' || type === 'zap') p.ph = Math.floor(Math.random() * 120);
+  if (type === 'belt') p.dir = Math.random() < 0.5 ? -1 : 1;
   // ⚠ La pique est la SEULE tuile mortelle : elle vient donc toujours avec une plateforme
   // verte de secours sur la MÊME ligne, à l'autre bout de l'écran (« toujours une case pas
   // loin »). Sans elle, une pique pourrait fermer la seule voie et rendre la montée
@@ -6358,7 +6448,8 @@ function GameDoodle() {
       climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0,
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
-      biome: 0, banner: null, glide: 0, padQ: -1, unlocked: null, shTmp: 0, shBefore: null };
+      biome: 0, banner: null, glide: 0, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
+      beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0 };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
   const start = () => { reset(); setPhase('playing'); };
@@ -6445,6 +6536,8 @@ function GameDoodle() {
       if (s.slip > 0) { s.slip--; s.px += s.slipVx; }   // 🧊 glace : aucun contrôle pendant la glissade
       else if (s.targetX != null) { let dx = s.targetX - s.px; if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W; s.px += Math.max(-7.2, Math.min(7.2, dx)); s.vx = Math.max(-7.2, Math.min(7.2, dx)); if (dx > 0.6) s.face = 1; else if (dx < -0.6) s.face = -1; }
       else { s.vx += (s.mrev > 0 ? -s.dir : s.dir) * 0.72; s.vx *= 0.90; s.vx = Math.max(-5.6, Math.min(5.6, s.vx)); s.px += s.vx; if (s.vx > 0.3) s.face = 1; else if (s.vx < -0.3) s.face = -1; }   // 🌀 Vertige : au clavier, l'inversion se fait ici (au doigt, dans `steer`)
+      // ➡️ Tapis roulant : dérive qui s'ajoute au pilotage et s'épuise toute seule.
+      if (s.beltLeft > 0) { s.beltLeft--; s.px += s.beltVx; }
       s.px = ((s.px % W) + W) % W;   // bords traversants : sortie à droite → retour à gauche (et inversement)
       // — vertical (gravité ou vol) —
       // ⚠ L'invulnérabilité est armée à la frame EXACTE où le bonus se termine (`fly === 0`)
@@ -6464,13 +6557,13 @@ function GameDoodle() {
         s.bullets.forEach(b => b.y += d); s.holes.forEach(h => h.y += d); s.items.forEach(it => it.y += d); s.parts.forEach(pt => pt.y += d); s.booms.forEach(b => b.y += d); s.chests.forEach(c => c.y += d); s.meteors.forEach(mt => mt.y += d);
       }
       // — plateformes mobiles —
-      s.platforms.forEach(p => { if (p.type === 'blue' && p.vx) { p.x += p.vx; if (p.x < 4) { p.x = 4; p.vx *= -1; } else if (p.x + p.w > W - 4) { p.x = W - 4 - p.w; p.vx *= -1; } } });
+      s.platforms.forEach(p => { if (p.type === 'blue' && p.vx) { p.x += p.vx * sf; if (p.x < 4) { p.x = 4; p.vx *= -1; } else if (p.x + p.w > W - 4) { p.x = W - 4 - p.w; p.vx *= -1; } } });
       // — monstres mobiles —
       s.monsters.forEach(m => {
-        if (m.vx) { m.x += m.vx; if (m.x < 6) { m.x = 6; m.vx *= -1; } else if (m.x + m.w > W - 6) { m.x = W - 6 - m.w; m.vx *= -1; } }
-        if (m.wave) { m.wt += 0.062; m.y = m.y0 + Math.sin(m.wt) * m.wave * 4; }   // vol ondulant
+        if (m.vx) { m.x += m.vx * sf; if (m.x < 6) { m.x = 6; m.vx *= -1; } else if (m.x + m.w > W - 6) { m.x = W - 6 - m.w; m.vx *= -1; } }
+        if (m.wave) { m.wt += 0.062 * sf; m.y = m.y0 + Math.sin(m.wt) * m.wave * 4; }   // vol ondulant
         // 👁 Rôdeur : va-et-vient vertical BORNÉ autour de sa ligne d'apparition.
-        if (m.span) { m.y += m.vy2; if (m.y < m.y0 - m.span || m.y > m.y0 + m.span) { m.y = Math.max(m.y0 - m.span, Math.min(m.y0 + m.span, m.y)); m.vy2 *= -1; } }
+        if (m.span) { m.y += m.vy2 * sf; if (m.y < m.y0 - m.span || m.y > m.y0 + m.span) { m.y = Math.max(m.y0 - m.span, Math.min(m.y0 + m.span, m.y)); m.vy2 *= -1; } }
       });
       // — balles —
       s.bullets.forEach(b => { b.x += (b.vx || 0); b.y += b.vy; });
@@ -6489,7 +6582,7 @@ function GameDoodle() {
       // reste un atout, elle ne doit pas tuer le joueur qui vient de s'en servir.
       for (const mt of s.meteors) {
         if (mt.done) continue;
-        mt.y += mt.vy;
+        mt.y += mt.vy * sf;
         let hit = mt.y > H + 10;
         if (!hit) for (const p of s.platforms) {
           if (p.dead) continue;
@@ -6525,6 +6618,10 @@ function GameDoodle() {
             // ⚠ 9.1.8 — pique ARMÉE = mortelle. Testé AVANT de replacer le doodler, comme
             // la plateforme cassante : rien ne doit se passer d'autre.
             if (p.type === 'spike' && p.armed && !doodleHurt(s)) { die(); return; }
+            // ⚙️⚡ Tuiles à cycle : elles ne blessent QUE dans leur fenêtre active, et cette
+            // fenêtre se voit (piques sorties, éclair). C'est un piège de rythme, pas un piège
+            // caché — d'où un cycle lent et une phase visible bien avant l'atterrissage.
+            if ((p.type === 'picots' || p.type === 'zap') && doodleCycleOn(p, s.t) && !doodleHurt(s)) { die(); return; }
             // ⚠ « si changement de case ça revient » : les piques des AUTRES dalles se
             // rétractent dès qu'on pose le pied ailleurs.
             for (const q of s.platforms) if (q !== p && q.type === 'spike') q.armed = false;
@@ -6566,6 +6663,10 @@ function GameDoodle() {
             }
             if (p.type === 'cloud' && !p.fade) p.fade = D_CLOUD_FADE;                 // ☁️ compte à rebours d'évaporation
             if (p.type === 'meteor') s.meteors.push({ x: 24 + Math.random() * (W - 48), y: -26, vy: D_METEOR_V });   // ☄️ une météorite par rebond, abscisse tirée au hasard
+            // ── tuiles 9.4.4 ──
+            if (p.type === 'belt') { s.beltVx = p.dir * D_BELT_V; s.beltLeft = 42; }        // ➡️ entraînement latéral : on garde le contrôle, mais on dérive
+            if (p.type === 'magnet') { s.tmag = 70; s.tmagX = s.px; s.tmagY = s.py; }        // 🧲 aspiration des coffres et bonus alentour
+            if (p.type === 'slow') { s.slowLeft = D_SLOW_LIFE; s.toast = { txt: '⏱️ Temps ralenti — 10 s', life: D_TOAST_LIFE }; }
             if (p.type === 'bomb' && !p.fuse) p.fuse = D_BOMB_FUSE;                   // 🧨 mèche allumée
             if (p.type === 'warp') {                                                  // 🌀 renvoi à l'opposé de l'écran
               for (let k = 0; k < 10; k++) s.parts.push({ x: s.px, y: s.py, vx: (Math.random() - 0.5) * 5, vy: (Math.random() - 0.5) * 5, life: 20, max: 20, sz: 3, c: '#b98cff' });
@@ -6588,6 +6689,14 @@ function GameDoodle() {
         c.taken = true;
         doodleLootGrant(s); setAmmo(s.ammo);
         for (let k = 0; k < 14; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5; s.parts.push({ x: c.x + c.w / 2, y: c.y + c.h / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 26, max: 26, sz: 3, c: k % 2 ? '#ffd54a' : '#c98b3a' }); }
+      }
+      // 🧲 Tuile aimantée : aspire coffres et bonus vers le point où l'on s'est posé.
+      if (s.tmag > 0) {
+        s.tmag--;
+        const pull = o => { const dx = s.tmagX - (o.x + o.w / 2), dy = s.tmagY - (o.y + o.h / 2), d = Math.hypot(dx, dy);
+          if (d > D_TMAGNET_R || d < 2) return; o.x += dx / d * D_TMAGNET_V; o.y += dy / d * D_TMAGNET_V; };
+        for (const it of s.items) if (!it.taken) pull(it);
+        for (const c of s.chests) if (!c.taken) { pull(c); c.landed = false; c.vy = 0; }   // ⚠ un coffre aspiré doit REDEVENIR mobile, sinon il reste collé à sa plateforme
       }
       // — aimant : attire les bonus proches (rayon proportionnel au niveau) —
       if (s.perks.magnet > 0) {
