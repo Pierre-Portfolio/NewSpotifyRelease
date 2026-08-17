@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.7.5';
+const APP_VERSION = '9.7.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5716,6 +5716,12 @@ const D_TILES = [
   { k: 'roulette', icon:'🎲', name: 'Roulette russe', txt: 'plusieurs dalles identiques apparaissent, une seule est réelle — et il y en a une de plus à chaque fois' },
   { k: 'clone',   icon:'👥', name: 'Clones',         txt: '4 clones apparaissent et tentent de grimper comme toi ; ceux qui ratent tombent dans le vide' },
   { k: 'boost',   icon:'📈', name: 'Multiplicateur', txt: 'chaque passage augmente de 5 % le multiplicateur de score, pour toute la partie' },
+  // ⚠ 9.7.6 — 🔀 RANDOMISEUR (demande utilisateur) : au rebond, TOUTES les dalles visibles
+  // échangent leurs places entre elles. ⚠ C'est une PERMUTATION des positions occupées, jamais un
+  // tirage de nouvelles coordonnées : l'ensemble des points d'appui reste EXACTEMENT le même, donc
+  // aucune rangée ne devient infranchissable — seul l'endroit où se trouve chaque type change. Un
+  // placement libre aurait pu ouvrir un trou de plus de D_GAP_MAX et condamner la montée.
+  { k: 'shuffle', icon:'🔀', name: 'Randomiseur',   txt: 'toutes les dalles visibles échangent leurs places au hasard' },
 ];
 // 📈 Multiplicateur de score. ⚠ Il ne fait que CROÎTRE et l'altitude aussi : le score reste
 // donc monotone, ce dont dépend tout le reste (paliers de bonus, déblocage des tuiles,
@@ -5977,6 +5983,24 @@ function doodleCycleOn(p, t) {
   const et = doodleEffType(p);
   const cyc = et === 'zap' ? D_ZAP_CYCLE : D_PICOT_CYCLE, on = et === 'zap' ? D_ZAP_ON : D_PICOT_ON;
   return ((t + (p.ph || 0)) % cyc) < on;
+}
+// 🔀 Randomiseur : permutation des POSITIONS des dalles visibles, et rien d'autre. Ce qui est
+// PORTÉ par une dalle doit suivre son déplacement : l'axe du va-et-vient de l'ascenseur (`y0`) et
+// les coffres posés dessus — sinon le premier sortirait de sa ligne et les seconds resteraient
+// suspendus dans le vide. Renvoie le nombre de dalles déplacées (0 s'il n'y a rien à mélanger).
+function doodleShuffleTiles(s, H) {
+  const vis = s.platforms.filter(p => !p.dead && p.y > -20 && p.y < H + 20);
+  if (vis.length < 2) return 0;
+  const pos = vis.map(p => ({ x: p.x, y: p.y }));
+  for (let i = pos.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = pos[i]; pos[i] = pos[j]; pos[j] = tmp; }   // Fisher-Yates
+  vis.forEach((p, i) => {
+    const nx = Math.max(4, Math.min(DOODLE_W - p.w - 4, pos[i].x)), dx = nx - p.x, dy = pos[i].y - p.y;
+    p.x = nx; p.y = pos[i].y;
+    if (p.y0 != null) p.y0 += dy;                                          // 🛗 l'ascenseur emporte l'axe de sa course
+    for (const c of s.chests) if (c.plat === p) { c.x += dx; c.y += dy; }   // 📦 le coffre posé voyage avec sa dalle
+    for (let k = 0; k < 3; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y + p.h / 2, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, life: 20, max: 20, sz: 2.5, c: k % 2 ? '#ffe9a8' : '#8e5bd8' });
+  });
+  return vis.length;
 }
 function doodleTileUnlock(s) {
   if (doodleClassic(s)) return null;   // 🎮 Classique : aucune tuile ne se débloque
@@ -6347,6 +6371,28 @@ function doodleTileDraw(ctx, p, t) {
     ctx.strokeStyle = '#dcc8ff'; ctx.lineWidth = 2; ctx.beginPath();
     for (let a = 0; a < Math.PI * 3.4; a += 0.28) { const rr = 1 + a * 1.5; ctx.lineTo(x + w / 2 + Math.cos(a) * rr, y + h / 2 + Math.sin(a) * rr * 0.42); }
     ctx.stroke();
+    return;
+  }
+  // 🔀 Randomiseur : les deux flèches croisées du symbole « aléatoire ». Elles oscillent tant
+  // que la dalle n'a pas servi, puis se figent sous le voile des tuiles épuisées.
+  if (p.type === 'shuffle') {
+    doodleRR(ctx, x, y, w, h, 6, '#8e5bd8');
+    ctx.fillStyle = '#4d2b7a'; ctx.fillRect(x + 3, y + h - 4, w - 6, 3);
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    if (!p.used) ctx.rotate(Math.sin(t * 0.06) * 0.3);
+    ctx.strokeStyle = '#ffe9a8'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    [1, -1].forEach(sg => {
+      ctx.beginPath();
+      ctx.moveTo(-11, sg * 3.4);
+      ctx.bezierCurveTo(-3, sg * 3.4, 3, -sg * 3.4, 9, -sg * 3.4);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(5.8, -sg * 6.4); ctx.lineTo(10.2, -sg * 3.4); ctx.lineTo(5.8, -sg * 0.4);
+      ctx.stroke();
+    });
+    ctx.restore();
+    if (p.used) doodleTileSpent(ctx, p);
     return;
   }
   // 🧨 bombe : la mèche RACCOURCIT à vue d'œil, sinon on ne saurait pas quand ça part
@@ -7540,6 +7586,14 @@ function GameDoodle() {
               s.scoreMul = (s.scoreMul || 1) * D_BOOST_MUL;
               s.toast = { txt: `📈 Score ×${s.scoreMul.toFixed(2)}`, life: D_TOAST_LIFE };
               for (let k = 0; k < 10; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 3, vy: -1.5 - Math.random() * 2, life: 24, max: 24, sz: 3, c: k % 2 ? '#ffd54a' : '#e0a13a' });
+            }
+            // 🔀 Randomiseur : UNE seule fois par dalle. Le rebond a déjà eu lieu, mais la
+            // plateforme quittée peut désormais être n'importe où : la série de rebonds est rompue.
+            if (et === 'shuffle' && !p.used) {
+              p.used = true;
+              const nsh = doodleShuffleTiles(s, H);
+              s.lastPlat = null; s.bounceStreak = 0;
+              s.toast = { txt: `🔀 ${nsh} dalles mélangées !`, life: D_TOAST_LIFE };
             }
             if (et === 'clone' && !p.used) {
               p.used = true;
