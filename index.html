@@ -118,8 +118,8 @@ const ESTIMATED_TOTAL = 1400;
 // Version de l'app : MAJ.MIN.U = nombre de commits du dépôt découpé en
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
-// ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '9.2.3';
+// ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
+const APP_VERSION = '9.2.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5380,17 +5380,27 @@ function doodleTrampoline(ctx, cx, py) {
 // ⚠ 9.1.6 — DALLE MULTICOLORE (demande utilisateur) : on rebondit dessus normalement, puis
 // elle DISPARAÎT de sa place et RÉAPPARAÎT plus haut. Elle tient 3 à 5 passages, après quoi
 // elle s'évapore pour de bon. C'est une échelle mobile : on peut la suivre… si on la rattrape.
-// ⚠ 9.2.1 — PROBABILITÉ DIVISÉE (demande utilisateur) : /3 avant D_RAINBOW_SCORE points, /2
-// au-delà. Elle reste la part HAUTE du tirage de type (voir doodleSpawnRow) : RÉTRÉCIR cette
-// bande ne touche AUCUN seuil historique (break/blue/white, tous sous 0,48) ni la bande des
-// tuiles débloquées (sous 0,65) — le tirage libéré retombe simplement en plateforme verte.
+// ⚠ 9.2.5 — PROBABILITÉ ENCORE DIVISÉE (demande utilisateur) : /6 avant D_RAINBOW_SCORE
+// points, /4 au-delà. Elle reste la part HAUTE du tirage de type (voir doodleSpawnRow) :
+// RÉTRÉCIR cette bande ne touche AUCUN seuil historique (break/blue/white, tous sous 0,48)
+// ni la bande des tuiles débloquées (sous 0,65) — le tirage libéré retombe en plateforme verte.
+// ⚠ 9.2.5 — « ACCALMIE » : tant qu'une multicolore est EN VIE, le reste s'efface (demande
+// utilisateur : « il doit quasiment n'y en avoir aucune autre »). Deux leviers combinés, tous
+// deux plafonnés pour que la montée reste JOUABLE : les tuiles spéciales et les dangers
+// tombent de moitié (le tirage libéré redevient une verte ordinaire) et les rangées s'espacent
+// jusqu'à D_GAP_SAFE — jamais au-delà, sinon on déclencherait la dalle blanche + son monstre
+// d'escorte, soit exactement le contraire de l'effet recherché.
 const D_RAINBOW_BASE = 0.055;                     // probabilité d'origine, gardée comme référence
-const D_RAINBOW_P = D_RAINBOW_BASE / 3;           // avant D_RAINBOW_SCORE points
-const D_RAINBOW_P_HI = D_RAINBOW_BASE / 2;        // à partir de D_RAINBOW_SCORE points (plus fréquente, sans revenir au niveau d'origine)
+const D_RAINBOW_P = D_RAINBOW_BASE / 6;           // avant D_RAINBOW_SCORE points (≈ 0,9 %)
+const D_RAINBOW_P_HI = D_RAINBOW_BASE / 4;        // à partir de D_RAINBOW_SCORE points (≈ 1,4 %, sans revenir au niveau d'origine)
 const D_RAINBOW_SCORE = 1000;                     // seuil de bascule (même repère que D_PERK_STEP, 1er palier de bonus/tuiles)
 const D_RAINBOW_MIN = 3, D_RAINBOW_MAX = 5;       // nombre de réapparitions, bornes incluses
 const D_RAINBOW_UP = [72, 40];                    // saut vers le haut : 72 à 112 px (< D_GAP_MAX, donc toujours rattrapable)
 const D_RAINBOW_SIDE = 108;                       // écart horizontal maximal : elle reste « pas loin »
+const D_RAINBOW_CALM = 0.5;                       // accalmie : −50 % sur les tuiles spéciales ET les dangers
+const D_RAINBOW_CALM_GAP = 1.8;                   // accalmie : rangées espacées ×1,8, PLAFONNÉES à D_GAP_SAFE
+const D_RAINBOW_PAD = 10;                         // marge libre exigée autour d'elle à la réapparition
+const D_RAINBOW_TRIES = 14;                       // tentatives de placement avant d'évincer ce qui gêne
 const D_RAINBOW_COLS = ['#e6484d', '#f0913c', '#f2d64b', '#63c45a', '#4aa8e8', '#9b6fe0'];
 function doodleRainbowPlat(ctx, p) {
   const n = D_RAINBOW_COLS.length, bw = p.w / n;
@@ -5405,6 +5415,29 @@ function doodleRainbowPlat(ctx, p) {
   ctx.fillStyle = '#fff';
   for (let i = 0; i < u; i++) { ctx.beginPath(); ctx.arc(cx + (i - (u - 1) / 2) * 8, p.y + 4.5, 2.1, 0, Math.PI * 2); ctx.fill(); }
 }
+// Y a-t-il une multicolore en vie ? Pilote l'accalmie (voir D_RAINBOW_CALM). Relu à chaque
+// rangée plutôt que mémorisé dans `s` : aucun compteur à tenir à jour, donc rien à désynchroniser
+// quand elle meurt d'usure, explose avec une bombe ou sort par le bas de l'écran.
+function doodleRainbowAlive(s) {
+  for (const q of s.platforms) if (q.type === 'rainbow' && !q.dead) return true;
+  return false;
+}
+// ⚠ 9.2.5 — Emplacement LIBRE ? La dalle se téléporte : sans ce test elle réapparaissait
+// SUR une autre plateforme (demande utilisateur). On exige aussi une marge face aux monstres
+// et aux trous noirs — une dalle qu'on est censé suivre ne doit jamais mener dans un piège.
+function doodleRainbowFree(s, p, x, y) {
+  const g = D_RAINBOW_PAD;
+  for (const q of s.platforms) {
+    if (q === p || q.dead) continue;
+    if (x < q.x + q.w + g && x + p.w + g > q.x && y < q.y + q.h + g && y + p.h + g > q.y) return false;
+  }
+  for (const m of s.monsters) {
+    if (!m.alive) continue;
+    if (x < m.x + m.w && x + p.w > m.x && y < m.y + m.h + g && y + p.h + g > m.y) return false;
+  }
+  for (const h of s.holes) if (Math.hypot(x + p.w / 2 - h.x, y + p.h / 2 - h.y) < h.r + g) return false;
+  return true;
+}
 // Déplacement de la dalle après un rebond. ⚠ Le nouvel écart vertical reste sous D_GAP_MAX
 // (portée d'un saut) et le décalage horizontal est BORNÉ : une dalle qui réapparaîtrait
 // n'importe où serait un bonus qu'on ne peut pas suivre, donc décoratif.
@@ -5412,9 +5445,31 @@ function doodleRainbowHop(s, p) {
   for (let k = 0; k < 10; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y + Math.random() * p.h, vx: (Math.random() - 0.5) * 3, vy: -1 - Math.random() * 2, life: 24, max: 24, sz: 3, c: D_RAINBOW_COLS[k % D_RAINBOW_COLS.length] });
   p.uses--;
   if (p.uses <= 0) { p.dead = true; return; }
-  p.y -= D_RAINBOW_UP[0] + Math.random() * D_RAINBOW_UP[1];
-  const nx = p.x + (Math.random() * 2 - 1) * D_RAINBOW_SIDE;
-  p.x = Math.max(6, Math.min(DOODLE_W - p.w - 6, nx));
+  // On tire des emplacements jusqu'à en trouver un LIBRE (aucune superposition).
+  let nx = p.x, ny = p.y - D_RAINBOW_UP[0], placed = false;
+  for (let k = 0; k < D_RAINBOW_TRIES && !placed; k++) {
+    const cy = p.y - (D_RAINBOW_UP[0] + Math.random() * D_RAINBOW_UP[1]);
+    const cx = Math.max(6, Math.min(DOODLE_W - p.w - 6, p.x + (Math.random() * 2 - 1) * D_RAINBOW_SIDE));
+    nx = cx; ny = cy;                                     // ⚠ retenu même en cas d'échec : le repli ci-dessous part du DERNIER candidat, jamais de la place qu'elle quitte
+    if (doodleRainbowFree(s, p, cx, cy)) placed = true;
+  }
+  // Aucun emplacement libre (rangées serrées) : plutôt que de se superposer, elle PREND la
+  // place — tout ce qu'elle recouvre s'efface. La voie reste ouverte puisqu'elle occupe
+  // désormais cet emplacement, et surtout elle ne peut JAMAIS réapparaître sur un monstre ou
+  // un trou : on la donne à suivre, la suivre ne doit pas pouvoir tuer.
+  if (!placed) {
+    for (const q of s.platforms) {
+      if (q === p || q.dead) continue;
+      if (nx < q.x + q.w && nx + p.w > q.x && ny < q.y + q.h + D_RAINBOW_PAD && ny + p.h + D_RAINBOW_PAD > q.y) q.dead = true;
+    }
+    for (const m of s.monsters) {
+      if (m.alive && nx < m.x + m.w && nx + p.w > m.x && ny < m.y + m.h + D_RAINBOW_PAD && ny + p.h + D_RAINBOW_PAD > m.y) m.alive = false;
+    }
+    s.holes = s.holes.filter(h => Math.hypot(nx + p.w / 2 - h.x, ny + p.h / 2 - h.y) >= h.r + D_RAINBOW_PAD);
+  }
+  p.x = nx; p.y = ny;
+  // Gerbe d'arrivée : elle se téléporte, il faut pouvoir la retrouver du regard.
+  for (let k = 0; k < 6; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y + p.h / 2, vx: (Math.random() - 0.5) * 2, vy: 0.6 + Math.random(), life: 20, max: 20, sz: 2.5, c: D_RAINBOW_COLS[k % D_RAINBOW_COLS.length] });
 }
 // ⚠ 9.1.7 — BONUS PERMANENTS TOUS LES 1000 POINTS (demande utilisateur) : un bloc apparaît
 // à chaque palier ; le ramasser accorde UN des 5 bonus AU HASARD, et ils se CUMULENT (un
@@ -5660,6 +5715,10 @@ function doodleSpawnRow(s, ny, risky) {
   const nItems = s.items.length;
   const w = D_PLAT_W, x = 6 + Math.random() * (DOODLE_W - w - 12);
   let type = 'green';
+  // ⚠ 9.2.5 — ACCALMIE : tant qu'une multicolore est en vie, TOUTES les bandes spéciales et
+  // TOUS les dangers sont divisés par deux ; le tirage ainsi libéré retombe en plateforme
+  // verte ordinaire. Seule la verte reste à taux plein — c'est le plancher de jouabilité.
+  const calm = doodleRainbowAlive(s) ? D_RAINBOW_CALM : 1;
   // — saut « limite » : dalle blanche (rebond garanti mais à usage unique) + monstre qui patrouille de droite à gauche —
   // jamais deux dalles à usage unique/cassantes d'affilée → on garde toujours une plateforme solide entre deux
   if (risky && s.lastType !== 'white' && s.lastType !== 'break') {
@@ -5671,15 +5730,17 @@ function doodleSpawnRow(s, ny, risky) {
   }
   if (s.lastType !== 'break') {   // jamais deux cassantes d'affilée (garde la montée jouable)
     const r = Math.random();
-    const pB = 0.06 + diff * 0.10, pM = 0.10 + diff * 0.12, pV = diff * 0.10;
+    const pB = (0.06 + diff * 0.10) * calm, pM = (0.10 + diff * 0.12) * calm, pV = diff * 0.10 * calm;
     // ⚠ La dalle multicolore prend la part HAUTE de `r` (et non un tirage de plus) : les
     // seuils historiques break/blue/white, tous sous 0.48, restent rigoureusement inchangés.
     // Jamais deux multicolores d'affilée : deux dalles qui s'envolent à la suite rendraient
     // la montée illisible, il faut une plateforme solide entre les deux.
     // ⚠ 9.2.1 — la bande est DEUX FOIS plus étroite avant 1000 points qu'après : la dalle
     // multicolore reste un imprévu en début de montée et devient un vrai moyen d'avancer ensuite.
+    // ⚠ Jamais DEUX multicolores en vie en même temps : deux échelles mobiles simultanées
+    // sont illisibles, et l'accalmie perdrait son sens (elle est faite pour en isoler UNE).
     const rainbowP = s.score >= D_RAINBOW_SCORE ? D_RAINBOW_P_HI : D_RAINBOW_P;
-    if (r > 1 - rainbowP && s.lastType !== 'rainbow') type = 'rainbow';
+    if (r > 1 - rainbowP && s.lastType !== 'rainbow' && calm === 1) type = 'rainbow';
     else if (r < pB) type = 'break';
     else if (r < pB + pM) type = 'blue';
     else if (r < pB + pM + pV) type = 'white';
@@ -5688,9 +5749,9 @@ function doodleSpawnRow(s, ny, risky) {
     // supplémentaire, aucune séquence de Math.random décalée. « Max 1 de suite » = jamais
     // une tuile spéciale juste après une autre.
     else if (s.tiles.length && !D_SPECIAL.has(s.lastType)) {
-      const lo = pB + pM + pV;
-      if (r >= lo && r < lo + D_TILE_P) {
-        const i = Math.min(s.tiles.length - 1, Math.floor((r - lo) / D_TILE_P * s.tiles.length));
+      const lo = pB + pM + pV, band = D_TILE_P * calm;
+      if (r >= lo && r < lo + band) {
+        const i = Math.min(s.tiles.length - 1, Math.floor((r - lo) / band * s.tiles.length));
         type = s.tiles[i];
       }
     }
@@ -5714,10 +5775,12 @@ function doodleSpawnRow(s, ny, risky) {
   if ((type === 'green' || type === 'blue') && !p.spring && !p.trampoline && Math.random() < 0.03) {
     const jet = Math.random() < 0.35;
     s.items.push({ x: x + w / 2 - 12, y: ny - 24, w: 24, h: 20, type: jet ? 'jet' : 'prop', taken: false });
-  } else if (s.score > 60 && Math.random() < 0.02 + diff * 0.10) {
+  // ⚠ 9.2.5 — `type !== 'rainbow'` : la multicolore n'emmène JAMAIS un monstre ni un trou sur
+  // sa propre ligne. On la donne à suivre, elle ne doit pas conduire droit dans un piège.
+  } else if (type !== 'rainbow' && s.score > 60 && Math.random() < (0.02 + diff * 0.10) * calm) {
     const mt = Math.floor(Math.random() * 3);
     s.monsters.push({ x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.72 : 0 });
-  } else if (s.score > 350 && Math.random() < 0.015 + diff * 0.02) {
+  } else if (type !== 'rainbow' && s.score > 350 && Math.random() < (0.015 + diff * 0.02) * calm) {
     s.holes.push({ x: 24 + Math.random() * (DOODLE_W - 48), y: ny - 22, r: 22 });
   }
   // ⚠ 9.1.7 — le bloc bonus est posé APRÈS la cascade ci-dessus et NE TIRE AUCUN aléatoire :
@@ -5735,6 +5798,7 @@ function GameDoodle() {
   const g = React.useRef(null);
   const phaseRef = React.useRef('ready');
   const lastTapRef = React.useRef(0);   // ⚠ déclaré ICI (et non plus près des handlers tactiles) : `tapShoot` le lit
+  const dragRef = React.useRef(false);  // ⚠ idem : `togglePause` le remet à zéro, or il est défini bien plus haut
   const [score, setScore] = React.useState(0);
   const [best, setBest] = React.useState(() => gameHi('doodle'));
   const [phase, setPhase] = React.useState('ready');
@@ -5748,6 +5812,20 @@ function GameDoodle() {
     setScore(0);
   };
   const start = () => { reset(); setPhase('playing'); };
+  // ⚠ 9.2.5 — PAUSE : la boucle rAF est déjà montée sur `phase === 'playing'` (voir l'effet
+  // plus bas), donc basculer en 'paused' l'arrête et libère la frame — rien d'autre à couper.
+  // La physique est comptée en FRAMES (jamais en horloge murale) : la reprise ne provoque
+  // aucun bond de rattrapage, quelle que soit la durée de la pause.
+  const togglePause = () => setPhase(p => {
+    if (p === 'playing') {
+      // On lâche le pilotage en cours : sans ça, un doigt encore posé au moment de la pause
+      // téléporterait le doodler sur une cible périmée à la reprise.
+      dragRef.current = false;
+      if (g.current) { g.current.targetX = null; g.current.dir = 0; }
+      return 'paused';
+    }
+    return p === 'paused' ? 'playing' : p;
+  });
   // ⚠ 9.1.4 — 1 TAP = 1 TIR DROIT · 2 TAPS = 3 TIRS (1 haut + 2 en diagonale). Le 1er tap
   // tire IMMÉDIATEMENT (aucune latence : attendre la fenêtre de double-tap pour savoir quoi
   // envoyer rendrait le tir mou dans un jeu d'action) et le 2e tap n'ajoute QUE les deux
@@ -5898,6 +5976,11 @@ function GameDoodle() {
       let topY = Infinity; for (const p of s.platforms) if (p.y < topY) topY = p.y;
       while (topY > -12) {
         let gap = 42 + Math.random() * 20 + Math.min(38, s.score * 0.04);
+        // ⚠ 9.2.5 — ACCALMIE : rangées espacées ×1,8 tant qu'une multicolore est en vie, donc
+        // ~2× moins de plateformes à l'écran. PLAFOND à D_GAP_SAFE (et non D_GAP_MAX) : au-delà
+        // la rangée devient « à risque » et s'accompagne d'une dalle blanche + d'un monstre —
+        // l'inverse de l'effet voulu. Sous ce plafond, chaque saut reste largement faisable.
+        if (doodleRainbowAlive(s)) gap = Math.min(D_GAP_SAFE, gap * D_RAINBOW_CALM_GAP);
         if (gap > D_GAP_MAX) gap = D_GAP_MAX;                     // jamais un saut infaisable
         const ny = topY - gap;
         doodleSpawnRow(s, ny, gap > D_GAP_SAFE);                  // saut « limite » → dalle blanche + monstre latéral
@@ -5938,6 +6021,7 @@ function GameDoodle() {
   React.useEffect(() => {
     const kd = e => {
       const s = g.current; if (!s) return;
+      if (phaseRef.current !== 'playing') return;   // ⚠ en pause, une flèche restée enfoncée ferait démarrer le doodler à la reprise
       if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A' || e.key === 'q' || e.key === 'Q') { s.dir = -1; s.targetX = null; }
       else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { s.dir = 1; s.targetX = null; }
       else if (e.code === 'Space' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W' || e.key === 'z' || e.key === 'Z') { e.preventDefault(); if (!e.repeat) tapShoot(); }   // 2 appuis rapprochés = tir triple, comme au doigt
@@ -5951,9 +6035,10 @@ function GameDoodle() {
     return () => { window.removeEventListener('keydown', kd); window.removeEventListener('keyup', ku); };
   }, []);
   // pilotage tactile : on glisse le doigt sur le plateau, le doodler suit la position X
-  const dragRef = React.useRef(false);
   const steer = e => { const s = g.current; if (!s || phaseRef.current !== 'playing') return; const r = canvasRef.current.getBoundingClientRect(); s.targetX = (e.clientX - r.left) / r.width * W; s.dir = 0; };
   const onDown = e => {
+    // ⚠ En pause, une touche REPREND la partie — surtout pas `start()`, qui la remettrait à zéro.
+    if (phaseRef.current === 'paused') { togglePause(); return; }
     if (phaseRef.current !== 'playing') { start(); return; }
     tapShoot();   // 1 tap = tir droit · 2 taps = + 2 diagonales (donc 3 tirs en tout)
     dragRef.current = true; try { canvasRef.current.setPointerCapture(e.pointerId); } catch {} steer(e);
@@ -5961,14 +6046,23 @@ function GameDoodle() {
   const onMove = e => { if (dragRef.current) steer(e); };
   const onUp = () => { dragRef.current = false; if (g.current) g.current.targetX = null; };
   return (
-    <GameWrap bar={<span style={{ fontSize:12, color:C.muted }}>Altitude <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+    <GameWrap bar={<>
+      <span style={{ fontSize:12, color:C.muted }}>Altitude <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>
+      {/* `bar` est déjà en space-between (voir GameWrap) : ce 2e enfant part donc à DROITE,
+          sur la même ligne qu'Altitude et Record. Rendu même hors partie, en désactivé, pour
+          que la barre ne change pas de hauteur quand la partie démarre ou se termine. */}
+      <button onClick={togglePause} disabled={phase !== 'playing' && phase !== 'paused'}
+        style={gameBtn(phase !== 'playing' && phase !== 'paused' ? { opacity:0.4, cursor:'default' } : {})}>
+        {phase === 'paused' ? '▶ Reprendre' : '⏸ Pause'}
+      </button>
+    </>}>
       <div style={{ position:'relative', width:'100%', maxWidth:'min(100%, 62vh)' }}>
         <canvas ref={canvasRef} width={W} height={H} onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
           style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
         {phase !== 'playing' && (
           <div onPointerDown={onDown} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#333', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
-            <div style={{ fontSize:17, fontWeight:800 }}>{phase === 'dead' ? `💥 Chute ! Altitude ${score}` : '🟢 Doodle Jump'}</div>
-            <div style={{ fontSize:12, background:'#ffffffcc', padding:'6px 12px', borderRadius:8, fontWeight:700 }}>Touche pour {phase === 'dead' ? 'rejouer' : 'jouer'}</div>
+            <div style={{ fontSize:17, fontWeight:800 }}>{phase === 'dead' ? `💥 Chute ! Altitude ${score}` : phase === 'paused' ? '⏸ Pause' : '🟢 Doodle Jump'}</div>
+            <div style={{ fontSize:12, background:'#ffffffcc', padding:'6px 12px', borderRadius:8, fontWeight:700 }}>Touche pour {phase === 'dead' ? 'rejouer' : phase === 'paused' ? 'reprendre' : 'jouer'}</div>
           </div>
         )}
       </div>
@@ -19821,7 +19915,7 @@ async function actuFetchHibp() {
     }));
 }
 
-// JSON same-origin data/actu.json généré par la GitHub Action update-actu.yml
+// JSON same-origin data/actu.json généré par la GitHub Action update-data.yml
 // (scripts/fetch_actu.py, cron 2 h) — CONTOURNE les proxies CORS peu fiables :
 // le serveur GitHub fetch les sources sans CORS, l'app lit le fichier en 'self'.
 // Retourne null si absent/périmé (> 24 h — Action en panne) → replis client.
@@ -22990,7 +23084,7 @@ async function fetchAlphaOil() { return fetchAlphaCommodity('WTI', 'daily'); }
 
 // VRAIS indices (NASDAQ-100, S&P 500, CAC 40) via un JSON same-origin (`data/indices.json`)
 // généré PÉRIODIQUEMENT par une GitHub Action (cron) qui interroge Yahoo Finance CÔTÉ
-// SERVEUR — voir .github/workflows/update-indices.yml + scripts/fetch_indices.py. Comme
+// SERVEUR — voir .github/workflows/update-data.yml + scripts/fetch_indices.py. Comme
 // le fichier est servi par la même origine (GitHub Pages = 'self'), aucun proxy CORS ni
 // clé n'est nécessaire, et on contourne le mur de consentement RGPD que Yahoo impose aux
 // navigateurs UE. Données EOD/différé rafraîchies plusieurs fois par jour ouvré.
