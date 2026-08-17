@@ -7,7 +7,7 @@
   - **Les garder COURTS** : décrire l'état actuel et les pièges, jamais l'historique des correctifs (il est dans git). Une modif de doc doit **corriger ou remplacer** une ligne existante bien plus souvent qu'elle n'en ajoute une ; ces deux fichiers sont relus intégralement à chaque session, chaque ligne inutile se paie à chaque fois.
 - **Éditer le dépôt principal**, jamais un worktree temporaire (`.claude/worktrees/*`).
 - **⚠ Pas de build tool** : toute l'app est UN seul `<script type="text/babel">` compilé au runtime. La moindre erreur de syntaxe fait échouer la compilation entière → `#root` vide → **écran tout noir**, sans message. **Après toute modif d'`index.html`, vérifier que la page monte avant de commit.**
-- `APP_VERSION` (constante module-level, actuellement `'9.2.1'`) : **à incrémenter à la main à chaque commit**. Format `MAJ.MIN.U` dérivé du nombre de commits **du projet** (~711) : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)`.
+- `APP_VERSION` (constante module-level en tête d'`index.html`, **valeur à y lire** — la recopier ici la rendrait fausse au commit suivant) : **à incrémenter à la main à chaque commit**. Format `MAJ.MIN.U` dérivé du nombre de commits **du projet** : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)`.
 
 ---
 
