@@ -1,7 +1,10 @@
 # ⚠️ RÈGLES ABSOLUES
 
 - **Git** : committer et pousser directement sur `main` (pas de branche), sauf demande contraire. **Un commit distinct par demande.**
-- **Docs** : après toute modif fonctionnelle, mettre à jour `CLAUDE.md` (technique) et `README.md` (utilisateur) dans le même commit. **Les garder COURTS** : décrire l'état actuel et les pièges, jamais l'historique des correctifs (il est dans git).
+- **Docs** : `CLAUDE.md` (technique) et `README.md` (utilisateur) se mettent à jour dans le **même commit** que la modif — mais **UNIQUEMENT SI C'EST PERTINENT**, et chacun indépendamment de l'autre. La question à se poser : *est-ce que ma modif rend une phrase existante FAUSSE, ou ajoute-t-elle un piège / un comportement qu'on ne devine pas en lisant le code ?*
+  - **OUI, documenter** : nouveau module ou onglet · nouvelle origine dans la CSP · nouvelle clé de stockage · changement d'API tierce · nouveau piège durement acquis · comportement visible par l'utilisateur qui change (→ `README.md`).
+  - **NON, ne toucher à aucun des deux** : correctif interne, refacto, ajustement d'une valeur ou d'un style, un mini-jeu de plus, une source de plus dans une liste déjà décrite — bref tout ce que le message de commit raconte déjà mieux. **Un commit sans changement de doc est normal et attendu.**
+  - **Les garder COURTS** : décrire l'état actuel et les pièges, jamais l'historique des correctifs (il est dans git). Une modif de doc doit **corriger ou remplacer** une ligne existante bien plus souvent qu'elle n'en ajoute une ; ces deux fichiers sont relus intégralement à chaque session, chaque ligne inutile se paie à chaque fois.
 - **Éditer le dépôt principal**, jamais un worktree temporaire (`.claude/worktrees/*`).
 - **⚠ Pas de build tool** : toute l'app est UN seul `<script type="text/babel">` compilé au runtime. La moindre erreur de syntaxe fait échouer la compilation entière → `#root` vide → **écran tout noir**, sans message. **Après toute modif d'`index.html`, vérifier que la page monte avant de commit.**
 - `APP_VERSION` (constante module-level, actuellement `'9.2.1'`) : **à incrémenter à la main à chaque commit**. Format `MAJ.MIN.U` dérivé du nombre de commits **du projet** (~711) : `patch = N%10`, `minor = floor(N/10)%10`, `major = floor(N/100)`.
