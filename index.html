@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.2.8';
+const APP_VERSION = '9.2.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5336,26 +5336,38 @@ const D_AMMO_START = 50, D_AMMO_PICK = 25;
 // Coffre lâché par CHAQUE monstre tué. Il TOMBE jusqu'à se poser sur la première plateforme
 // rencontrée : laissé en l'air au point de mort, il serait le plus souvent inatteignable.
 const D_CHEST_W = 24, D_CHEST_H = 19, D_CHEST_G = 0.34, D_CHEST_VMAX = 6.5;
-// Les 5 butins, tirés UNIFORMÉMENT et cumulatifs (même principe que les bonus de palier).
+// ⚠ 9.2.9 — Butins des coffres (demande utilisateur) : l'ÉVENTAIL est le seul cumulable — il
+// ajoute +1 balle par palier jusqu'à D_SPREAD_MAX, et TOUTES ces balles ne coûtent qu'UNE
+// munition (on paie le TIR, pas les balles). Les autres améliorations sont uniques : une fois
+// prises, elles sortent du tirage (`max: 1`) pour ne jamais retomber en double.
+// ⚠ Les MUNITIONS restent volontairement répétables : c'est la seule recharge du jeu, la
+// rendre unique condamnerait la partie à ~50 balles puis au corps-à-corps définitif.
+const D_SPREAD_MAX = 7;
 const D_LOOT = [
-  { k:'ammo',   icon:'📦', label:'Munitions',  txt:'+' + D_AMMO_PICK + ' balles' },
-  { k:'rate',   icon:'⚡', label:'Cadence',    txt:'tir plus rapide' },
-  { k:'pierce', icon:'🎯', label:'Perforant',  txt:'traverse un monstre de plus' },
-  { k:'boom',   icon:'💥', label:'Explosives', txt:'les balles éclatent' },
-  { k:'spread', icon:'🌟', label:'Éventail',   txt:'tir triple permanent' },
+  { k:'ammo',   icon:'📦', label:'Munitions',  txt:'+' + D_AMMO_PICK + ' balles',                    max: Infinity },
+  { k:'spread', icon:'🌟', label:'Éventail',   txt:'+1 balle par tir, toujours 1 munition',          max: D_SPREAD_MAX },
+  { k:'rate',   icon:'⚡', label:'Cadence',    txt:'tir plus rapide',                                max: 1 },
+  { k:'pierce', icon:'🎯', label:'Perforant',  txt:'la balle traverse un monstre de plus',           max: 1 },
+  { k:'boom',   icon:'💥', label:'Explosives', txt:'les balles éclatent à l\'impact',                max: 1 },
 ];
-const D_WPN_RATE_MAX = 4;          // ⚠ plancher de cadence : sous ~2 frames d'écart, le tir devient un mur de balles
+const D_WPN_RATE = 3;              // ⚠ gain de cadence de « Cadence » — unique, donc appliqué une seule fois
 const D_BULLET_BOOM_R = 34;        // 💥 souffle d'une balle explosive : bien plus court que D_BOOM_R (bouclier)
-function doodleShotGap(s) { return Math.max(2, D_SHOT_GAP - Math.min(4, s.perks.gun) - Math.min(D_WPN_RATE_MAX, s.wpn.rate)); }
+const D_SPREAD_DX = 1.5;           // écartement horizontal ajouté par balle d'éventail
+function doodleShotGap(s) { return Math.max(2, D_SHOT_GAP - Math.min(4, s.perks.gun) - (s.wpn.rate > 0 ? D_WPN_RATE : 0)); }
 // ⚠ Les améliorations sont figées DANS la balle au moment du tir : ramasser « Perforant »
 // pendant qu'une balle est en l'air ne doit pas la transformer en vol.
 function doodleBullet(s, x, y, vx, vy) { return { x, y, vx, vy, pierce: s.wpn.pierce, boom: s.wpn.boom > 0 }; }
+function doodleLootLvl(s, k) { return k === 'ammo' ? 0 : (s.wpn[k] || 0); }
+// Butins encore disponibles : ceux dont le palier maximal n'est pas atteint.
+function doodleLootPool(s) { return D_LOOT.filter(l => doodleLootLvl(s, l.k) < l.max); }
 function doodleLootGrant(s) {
-  const l = D_LOOT[Math.floor(Math.random() * D_LOOT.length)];
+  const pool = doodleLootPool(s);
+  // Tout est au maximum : le coffre rend des munitions plutôt que rien.
+  const l = pool.length ? pool[Math.floor(Math.random() * pool.length)] : D_LOOT[0];
   if (l.k === 'ammo') s.ammo += D_AMMO_PICK;
-  else if (l.k === 'spread') s.perks.gun++;      // même compteur que le bonus 🔫 Canon : les deux se cumulent
   else s.wpn[l.k]++;
-  s.toast = { txt: `${l.icon} ${l.label} · ${l.txt}`, life: D_TOAST_LIFE };
+  const lvl = doodleLootLvl(s, l.k);
+  s.toast = { txt: `${l.icon} ${l.label}${l.max > 1 && lvl > 1 ? ' ×' + lvl : ''} · ${l.txt}`, life: D_TOAST_LIFE };
   return l;
 }
 // ⚠ Mort d'un monstre CENTRALISÉE : elle est déclenchée de quatre endroits (balle, écrasement,
@@ -5704,7 +5716,7 @@ function doodlePerkHud(ctx, s) {
   const got = D_PERKS.filter(p => s.perks[p.k] > 0);
   // Améliorations d'arme et malus actifs partagent ce bandeau : ce sont les seuls états
   // durables invisibles autrement (« pourquoi mes commandes sont inversées ? »).
-  const wpn = [['rate', '⚡'], ['pierce', '🎯'], ['boom', '💥']].filter(([k]) => s.wpn && s.wpn[k] > 0);
+  const wpn = D_LOOT.filter(l => l.k !== 'ammo' && s.wpn && s.wpn[l.k] > 0).map(l => [l.k, l.icon]);
   const bad = D_MALUS.filter(m => s[m.k] > 0);
   if (!got.length && !wpn.length && !bad.length) return;
   ctx.save(); ctx.font = 'bold 12px sans-serif'; ctx.textBaseline = 'middle';
@@ -6030,7 +6042,7 @@ function GameDoodle() {
     for (let i = 0; i < 9; i++) { y -= 52 + Math.random() * 22; plats.push({ x: 6 + Math.random() * (W - D_PLAT_W - 12), y, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false }); }
     g.current = { px: W / 2, py: H - 92, vx: 0, vy: D_JUMP, face: 1, platforms: plats, monsters: [], bullets: [], items: [], holes: [], parts: [], chests: [],
       climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
-      ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0 },
+      ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0 },
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, banner: null, glide: 0 };
     setScore(0); setAmmo(D_AMMO_START);
@@ -6060,10 +6072,16 @@ function GameDoodle() {
     // ⚠ Le message d'alerte est posé AVANT le throttle de cadence ? Non : après, sinon un appui
     // maintenu le réafficherait à chaque frame. Ici on n'y arrive qu'une fois la cadence prête.
     if (s.ammo <= 0) { s.toast = { txt: '📦 Plus de munitions — saute sur un monstre pour un coffre', life: D_TOAST_LIFE }; return; }
-    s.lastShot = s.t; s.bullets.push(doodleBullet(s, s.px, s.py - 16, 0, -D_BULLET_V)); s.ammo--; s.faceTimer = 12;
-    // 🔫 Canon : le tir SIMPLE part déjà en éventail — mais il coûte alors ses 3 balles, et on
-    // ne le déclenche que si on peut les payer (sinon la balle droite part seule).
-    if (s.perks.gun > 0 && s.ammo >= 2) { for (const dx of [-1, 1]) s.bullets.push(doodleBullet(s, s.px + dx * 6, s.py - 14, dx * D_BULLET_DX, -D_BULLET_DY)); s.ammo -= 2; }
+    // ⚠ 9.2.9 — UNE munition par TIR, quel que soit le nombre de balles : l'Éventail et le
+    // bonus 🔫 Canon ajoutent des balles GRATUITES. On paie le geste, pas le plomb.
+    s.lastShot = s.t; s.ammo--; s.faceTimer = 12;
+    s.bullets.push(doodleBullet(s, s.px, s.py - 16, 0, -D_BULLET_V));
+    // 🌟 Éventail : les balles supplémentaires s'écartent symétriquement de part et d'autre.
+    for (let i = 1; i <= s.wpn.spread; i++) {
+      const dx = Math.ceil(i / 2) * (i % 2 ? 1 : -1);
+      s.bullets.push(doodleBullet(s, s.px + dx * 5, s.py - 15, dx * D_SPREAD_DX, -D_BULLET_V));
+    }
+    if (s.perks.gun > 0) for (const dx of [-1, 1]) s.bullets.push(doodleBullet(s, s.px + dx * 6, s.py - 14, dx * D_BULLET_DX, -D_BULLET_DY));   // 🔫 Canon : diagonales offertes
     setAmmo(s.ammo);
   };
   // ⚠ Les diagonales IGNORENT la cadence (`lastShot`) : c'est le complément d'un geste déjà
