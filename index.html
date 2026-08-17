@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.7.3';
+const APP_VERSION = '9.7.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5715,7 +5715,13 @@ const D_TILES = [
   { k: 'target',  icon:'🎯', name: 'Cible',          txt: 'atterris pile au centre et tu gagnes un butin de coffre ; sinon elle se détruit' },
   { k: 'roulette', icon:'🎲', name: 'Roulette russe', txt: 'plusieurs dalles identiques apparaissent, une seule est réelle — et il y en a une de plus à chaque fois' },
   { k: 'clone',   icon:'👥', name: 'Clones',         txt: '4 clones apparaissent et tentent de grimper comme toi ; ceux qui ratent tombent dans le vide' },
+  { k: 'boost',   icon:'📈', name: 'Multiplicateur', txt: 'chaque passage augmente de 5 % le multiplicateur de score, pour toute la partie' },
 ];
+// 📈 Multiplicateur de score. ⚠ Il ne fait que CROÎTRE et l'altitude aussi : le score reste
+// donc monotone, ce dont dépend tout le reste (paliers de bonus, déblocage des tuiles,
+// biomes, bouclier temporel). Un multiplicateur qui pourrait redescendre ferait reculer le
+// score, et un palier déjà franchi se redéclencherait en boucle.
+const D_BOOST_MUL = 1.05;
 // 👥 Quatre clones, quatre couleurs, quatre niveaux d'adresse. ⚠ Ils sont DÉCORATIFS : ils ne
 // touchent ni au doodler, ni aux monstres, ni aux coffres. Un clone qui pourrait pousser le
 // joueur ou voler un butin transformerait une trouvaille en punition aléatoire.
@@ -6000,6 +6006,18 @@ function doodleTileSpent(ctx, p) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // 📈 Multiplicateur : courbe ascendante sur fond doré.
+  if (p.type === 'boost') {
+    doodleRR(ctx, x, y, w, h, 6, '#e0a13a');
+    ctx.fillStyle = '#9c6b12'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#3a2a10'; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x + 12, y + h - 5); ctx.lineTo(x + w / 2 - 3, y + h / 2); ctx.lineTo(x + w / 2 + 5, y + h / 2 + 3); ctx.lineTo(x + w - 13, y + 4);
+    ctx.stroke();
+    ctx.fillStyle = '#3a2a10';
+    ctx.beginPath(); ctx.moveTo(x + w - 13, y + 3); ctx.lineTo(x + w - 20, y + 5); ctx.lineTo(x + w - 15, y + 10); ctx.closePath(); ctx.fill();
+    return;
+  }
   // 👥 Clones : quatre silhouettes empilées, chacune de la couleur d'un clone.
   if (p.type === 'clone') {
     doodleRR(ctx, x, y, w, h, 6, '#2f5e18');
@@ -6385,6 +6403,7 @@ function doodlePerkHud(ctx, s, W) {
   // ⚠ Effets de TUILES en cours : ils durent au-delà de la dalle qui les a posés, donc rien à
   // l'écran ne les expliquerait autrement (« pourquoi je saute si haut d'un coup ? »).
   if (s.rebLeft > 0) chips.push({ t: `🦘×${s.rebLeft}`, bg:'rgba(63,191,106,0.92)', fg:'#08301a' });
+  if (s.scoreMul && s.scoreMul > 1.001) chips.push({ t: `📈×${s.scoreMul.toFixed(2)}`, bg:'rgba(224,161,58,0.92)', fg:'#3a2a10' });
   if (s.mobTime != null && s.mobTime !== 1) chips.push({ t: s.mobTime === 0 ? '⏸️' : '⏸️×2', bg: s.mobTime === 0 ? 'rgba(63,111,216,0.92)' : 'rgba(192,57,43,0.92)', fg:'#fff' });
   if (!chips.length) return;
   ctx.save(); ctx.font = 'bold 12px sans-serif'; ctx.textBaseline = 'middle';
@@ -7187,7 +7206,7 @@ function GameDoodle() {
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0,
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
-      beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, mode };
+      beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, mode };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
   const start = () => { reset(); setPhase('playing'); };
@@ -7516,6 +7535,12 @@ function GameDoodle() {
             // déjà eu lieu — on ne meurt jamais d'avoir mal visé, on perd seulement la plateforme.
             // 👥 Quatre clones, chacun avec sa couleur, sa vitesse, son erreur de visée et sa
             // détente : c'est ce qui les fait « différents » et donne à chacun sa propre fin.
+            // 📈 Répétable à dessein : « chaque passage » augmente le multiplicateur.
+            if (et === 'boost') {
+              s.scoreMul = (s.scoreMul || 1) * D_BOOST_MUL;
+              s.toast = { txt: `📈 Score ×${s.scoreMul.toFixed(2)}`, life: D_TOAST_LIFE };
+              for (let k = 0; k < 10; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 3, vy: -1.5 - Math.random() * 2, life: 24, max: 24, sz: 3, c: k % 2 ? '#ffd54a' : '#e0a13a' });
+            }
             if (et === 'clone' && !p.used) {
               p.used = true;
               s.clones = s.clones || [];
@@ -7734,7 +7759,7 @@ function GameDoodle() {
           for (let k = 0; k < 14; k++) s.parts.push({ x: s.px, y: H - 10, vx: (Math.random() - 0.5) * 5, vy: -1 - Math.random() * 3, life: 26, max: 26, sz: 3, c: k % 2 ? '#bfe4f5' : '#ffffff' });
         } else { die(); return; }
       }
-      const nsc = Math.floor(s.climb / 10);
+      const nsc = Math.floor(s.climb / 10 * (s.scoreMul || 1));
       // ⏳ Le bouclier temporel se consomme en POINTS gagnés, pas en frames : rester immobile
       // ne le fait pas fondre, et 250 points valent autant en début qu'en fin de partie.
       if (s.shTimeLeft > 0 && nsc > s.score) s.shTimeLeft = Math.max(0, s.shTimeLeft - (nsc - s.score));
