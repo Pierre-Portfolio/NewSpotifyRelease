@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/indices.json) gonflent aussi N.
-const APP_VERSION = '9.1.8';
+const APP_VERSION = '9.2.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -10217,6 +10217,15 @@ async function geminiGenerate(parts, opts) {
     _aiLast = 'gemini';
     return await geminiCall(parts, opts);
   }
+  // ⚠ 9.2.0 — MÊME RÈGLE POUR `file_data` (lien YouTube) : seul Gemini sait aller REGARDER
+  // la vidéo. Les fournisseurs compatibles OpenAI n'ont pas d'équivalent, et `aiPartsToOpenAi`
+  // laisserait tomber la partie `file_data` EN SILENCE — le modèle inventerait alors un résumé
+  // d'une vidéo qu'il n'a jamais vue, ce qui est pire que pas de résumé du tout.
+  if (parts.some(p => p && p.file_data)) {
+    if (chain[0].id !== 'gemini') throw new Error('NO_YOUTUBE');
+    _aiLast = 'gemini';
+    return await geminiCall(parts, null);
+  }
   let last = null;
   for (const p of chain) {
     try {
@@ -10226,6 +10235,157 @@ async function geminiGenerate(parts, opts) {
     } catch (e) { last = e; }          // quota, clé morte, réseau → au suivant
   }
   throw last || new Error('Erreur IA.');
+}
+
+// ════════ 9.2.0 — RÉSUMÉ D'UNE VIDÉO YOUTUBE PAR GEMINI ════════
+// ⚠ RÉPONSE À « est-ce qu'il existe une extension Chrome pour résumer des vidéos YouTube ? » :
+// OUI, il en existe plusieurs (« YouTube Summary with Gemini », « Tubenote », « Gemini YouTube
+// Summarizer »…). Mais une extension ne rendrait service QUE dans youtube.com : les vidéos du
+// Hub sont lues dans une iframe `youtube-nocookie.com` (TV Time, section Actu), où aucune
+// extension n'injecte de bouton. D'où l'intégration NATIVE ci-dessous, qui a l'avantage de
+// réutiliser la clé Gemini déjà en place.
+//
+// ⚠ AUCUNE nouvelle origine CSP : `generativelanguage.googleapis.com` est déjà en connect-src.
+// Le résumé passe par `file_data.file_uri` = l'URL YouTube publique — c'est Google qui va
+// chercher la vidéo côté serveur, la page n'a rien à télécharger ni à transcrire.
+// ⚠ NON VÉRIFIABLE CÔTÉ AGENT : aucune clé Gemini ici et le proxy réseau bloque l'API — le
+// comportement réel (vidéo privée ou avec restriction d'âge, quota de 8 h de vidéo par jour,
+// langue de la réponse) n'a PAS pu être confronté à l'API. Le parsing est défensif et tout
+// échec est affiché tel quel à l'utilisateur.
+const YT_SUM_LS = 'spotifyplus_yt_summaries';
+const YT_SUM_MAX = 40;                       // cache re-fetchable ⇒ PAS dans buildBackup
+function ytSumLoad() { try { const o = JSON.parse(localStorage.getItem(YT_SUM_LS) || '{}'); return (o && typeof o === 'object') ? o : {}; } catch { return {}; } }
+function ytSumGet(id) { const o = ytSumLoad(); const e = o[id]; return e && e.txt ? e.txt : ''; }
+function ytSumSave(id, txt) {
+  try {
+    const o = ytSumLoad();
+    o[id] = { txt, at: Date.now() };
+    // purge des plus anciens au-delà du plafond (le localStorage est partagé par TOUT le Hub)
+    const ks = Object.keys(o).sort((a, b) => (o[b].at || 0) - (o[a].at || 0)).slice(YT_SUM_MAX);
+    for (const k of ks) delete o[k];
+    localStorage.setItem(YT_SUM_LS, JSON.stringify(o));
+  } catch {}
+}
+function ytSumPrompt(title) {
+  return [
+    'Résume cette vidéo YouTube EN FRANÇAIS, pour quelqu\'un qui ne l\'a pas regardée.',
+    title ? 'Titre annoncé : « ' + title +' ».' : '',
+    'Structure attendue, en texte simple (pas de Markdown, pas de gras) :',
+    '1) Une phrase qui dit de quoi ça parle.',
+    '2) « Les points clés : » puis 3 à 6 puces commençant par « - », dans l\'ordre de la vidéo,',
+    '   avec l\'horodatage entre parenthèses quand il est pertinent.',
+    '3) « À retenir : » puis une ou deux phrases de conclusion.',
+    'N\'invente rien : si la vidéo est inaccessible ou muette, dis-le simplement.',
+  ].filter(Boolean).join('\n');
+}
+// `force` = ignorer le cache (bouton ↻). Renvoie { txt, cached }.
+async function ytSummarize(id, title, force) {
+  if (!id) throw new Error('Vidéo inconnue.');
+  if (!force) { const c = ytSumGet(id); if (c) return { txt: c, cached: true }; }
+  const txt = await geminiGenerate([
+    { text: ytSumPrompt(title) },
+    { file_data: { file_uri: 'https://www.youtube.com/watch?v=' + id } },
+  ]);
+  ytSumSave(id, txt);
+  return { txt, cached: false };
+}
+const YT_SUM_ERRS = {
+  NO_KEY: 'Aucune clé Gemini enregistrée. Ajoute-la dans le module 🔌 API (ligne « Gemini ») — c\'est la même clé que le Frigo et Santé.',
+  NO_YOUTUBE: 'Le résumé de vidéo n\'existe QUE chez Gemini : les autres IA de secours ne savent pas regarder une vidéo. Renseigne une clé Gemini dans le module 🔌 API.',
+};
+function ytSumErrMsg(e) {
+  const m = (e && e.message) || '';
+  if (YT_SUM_ERRS[m]) return YT_SUM_ERRS[m];
+  if (/quota/i.test(m)) return m + ' (le résumé de vidéo est plafonné à 8 h de vidéo par jour côté Google).';
+  return m || 'Erreur inconnue.';
+}
+// Étincelle Gemini (SVG en ligne — aucune image distante, donc rien à ajouter à la CSP et ça
+// marche hors ligne). ⚠ Un id de dégradé FIXE et partagé : toutes les instances sont
+// identiques, le navigateur résout sur la première, le rendu est le même partout.
+function GeminiIcon({ size = 14 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ display:'block', flexShrink:0 }}>
+      <defs>
+        <linearGradient id="hub-gmn" x1="0" y1="24" x2="24" y2="0">
+          <stop offset="0%" stopColor="#4285f4" /><stop offset="45%" stopColor="#8b6ee8" /><stop offset="100%" stopColor="#d96570" />
+        </linearGradient>
+      </defs>
+      <path fill="url(#hub-gmn)" d="M12 0c0 6.63 5.37 12 12 12-6.63 0-12 5.37-12 12 0-6.63-5.37-12-12-12C6.63 12 12 6.63 12 0z" />
+    </svg>
+  );
+}
+// Bouton + pop-up, AUTONOME (il porte son propre état) : on le pose tel quel partout où une
+// vidéo non-Short est rendue, sans rien câbler dans le composant parent.
+function GeminiSumBtn({ id, title, size = 26, label, style }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <>
+      <button onClick={e => { e.stopPropagation(); setOpen(true); }}
+        title={'Résumer cette vidéo avec Gemini' + (ytSumGet(id) ? ' (résumé déjà en mémoire)' : '')}
+        aria-label="Résumer cette vidéo avec Gemini"
+        style={{ width:size, height:size, borderRadius:'50%', flexShrink:0, cursor:'pointer', padding:0,
+          background:'none', border:`1px solid ${ytSumGet(id) ? '#8b6ee8' : C.border}`,
+          display:'flex', alignItems:'center', justifyContent:'center', gap:4,
+          ...(label ? { width:'auto', padding:'0 9px', borderRadius:14 } : {}), ...style }}>
+        <GeminiIcon size={Math.round(size * 0.54)} />
+        {label ? <span style={{ fontSize:10, color:C.dim }}>{label}</span> : null}
+      </button>
+      {open && <YtSummaryModal id={id} title={title} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+function YtSummaryModal({ id, title, onClose }) {
+  const [st, setSt] = React.useState({ state:'loading' });
+  const run = React.useCallback(async (force) => {
+    setSt({ state:'loading' });
+    try { const r = await ytSummarize(id, title, force); setSt({ state:'ok', txt:r.txt, cached:r.cached }); }
+    catch (e) { setSt({ state:'err', err: ytSumErrMsg(e) }); }
+  }, [id, title]);
+  React.useEffect(() => { run(false); }, [run]);
+  // ⚠ Échap ferme, et le scroll de la page est bloqué pendant l'affichage — la pop-up peut
+  // s'ouvrir PAR-DESSUS le lecteur plein écran (z 400), d'où le z 450.
+  React.useEffect(() => {
+    const k = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', k, true);
+    const ov = document.body.style.overflow; document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', k, true); document.body.style.overflow = ov; };
+  }, [onClose]);
+  return ReactDOM.createPortal(
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:450, background:'rgba(0,0,0,0.72)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, width:'min(560px, 100%)', maxHeight:'82vh', display:'flex', flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 14px', borderBottom:`1px solid ${C.border}` }}>
+          <GeminiIcon size={16} />
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.06em', color:'#8b6ee8' }}>RÉSUMÉ GEMINI</div>
+            <div style={{ fontSize:11, color:C.dim, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{title || 'Vidéo YouTube'}</div>
+          </div>
+          {st.state === 'ok' && (
+            <button onClick={() => run(true)} title="Refaire le résumé (ignore celui gardé en mémoire)"
+              style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.dim, fontSize:12, padding:'3px 8px', cursor:'pointer' }}>↻</button>
+          )}
+          <button onClick={onClose} title="Fermer (Échap)" aria-label="Fermer le résumé"
+            style={{ background:'none', border:'1px solid #e0505066', borderRadius:8, color:'#e05050', fontSize:14, lineHeight:1, padding:'3px 9px', cursor:'pointer' }}>✕</button>
+        </div>
+        <div style={{ padding:'12px 14px', overflowY:'auto', fontSize:12.5, color:C.text, lineHeight:1.55, whiteSpace:'pre-wrap' }}>
+          {st.state === 'loading' && <span style={{ color:C.dim, fontStyle:'italic' }}>⏳ Gemini regarde la vidéo… (ça peut prendre une minute sur une vidéo longue)</span>}
+          {st.state === 'err' && (
+            <div style={{ color:'#e05050' }}>
+              {st.err}
+              <div style={{ marginTop:10 }}>
+                <a href={'https://www.youtube.com/watch?v=' + encodeURIComponent(id)} target="_blank" rel="noopener noreferrer" style={{ color:C.dim, fontSize:11 }}>↗ Ouvrir la vidéo sur YouTube</a>
+              </div>
+            </div>
+          )}
+          {st.state === 'ok' && st.txt}
+        </div>
+        {st.state === 'ok' && (
+          <div style={{ padding:'8px 14px 12px', fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+            {st.cached ? 'résumé gardé en mémoire · ↻ pour le refaire' : 'résumé généré par Gemini · vérifie les chiffres et les noms'}
+          </div>
+        )}
+      </div>
+    </div>, document.body);
 }
 // Retire les ``` d'un bloc de code et isole la 1re structure JSON (tableau ou objet).
 function geminiExtract(txt, open, close) {
@@ -20176,6 +20336,9 @@ function ActuYoutubeSection() {
               {v.channel} · {actuAgo(v.date)}
             </div>
           </div>
+          {/* ⚠ 9.2.0 — résumé Gemini : sur les vidéos NON-Short seulement (un Short de
+              moins de 3 min n'a rien à résumer). */}
+          {!ytSubIsShort(v) && <GeminiSumBtn id={v.id} title={v.title} size={32} />}
           <a href={watch} target="_blank" rel="noopener noreferrer" title="Ouvrir dans un nouvel onglet du navigateur"
             style={{ fontSize:13, color:YT_COLOR, background:'none', border:`1px solid ${YT_COLOR}66`, textDecoration:'none',
               borderRadius:20, width:32, height:32, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', flexShrink:0 }}>↗</a>
@@ -26250,6 +26413,7 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
                               style={{ width:24, height:24, borderRadius:'50%', flexShrink:0, cursor:'pointer', background:'none',
                                 border:`1px solid ${TV_IGNORED_COLOR}88`, color:TV_IGNORED_COLOR, fontSize:11, lineHeight:1, padding:0 }}>🙈</button>
                           )}
+                          {!ytIsShortEntry(v) && <GeminiSumBtn id={v.id} title={v.title} size={24} />}
                           {!vseen && onWatchLater && <WatchLater v={v} />}
                           <Check done={vseen} onClick={() => toggleVideo(v)}
                             title={vseen ? 'Marquer non vue' : 'Marquer vue'} />
@@ -26976,6 +27140,13 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
               : copied === -1 ? { background:'#e05050cc', border:'1px solid #e05050' } : null) }}>
           {copied === 1 ? '✓ Copié' : copied === -1 ? '✕ Refusé' : '🔗'}
         </button>
+        {/* ⚠ 9.2.0 — résumé Gemini, sur les vidéos NON-Short uniquement. Il s'insère AVANT le
+            💬 pour que celui-ci reste le dernier élément, donc en haut à DROITE (7.9.9). */}
+        {/* ⚠ `pointerEvents:'auto'` OBLIGATOIRE : la barre est en `none` (elle ne doit pas
+            voler les clics à la vidéo) et chaque bouton le réactive — cf. `obtn`. Sans ça le
+            bouton s'affiche mais reste totalement inerte. */}
+        {!ytIsShortEntry(v) && <GeminiSumBtn id={v.id} title={v.title} size={22}
+          style={{ pointerEvents:'auto', background:'rgba(0,0,0,0.66)', borderColor:'#ffffff55', backdropFilter:'blur(2px)' }} />}
         <button onClick={() => setShowComments(o => !o)}
           title={showComments ? 'Masquer les commentaires' : 'Voir les commentaires de la vidéo'}
           style={{ ...obtn(YT_COLOR, false),
