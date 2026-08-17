@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.4.4';
+const APP_VERSION = '9.4.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4913,11 +4913,6 @@ function GameCrossy() {
       if (!alive) return;
       const s = g.current, ctx = canvasRef.current.getContext('2d');
       s.t++;
-      // ⏱️ Ralentisseur : tout ce qui bouge AUTOUR du doodler tourne au ralenti. On ne touche
-      // pas à sa gravité : la modifier changerait la hauteur de ses sauts, donc la portée entre
-      // rangées, et pourrait rendre la montée infaisable. Ici c'est un pur avantage de lecture.
-      const sf = s.slowLeft > 0 ? D_SLOW : 1;
-      if (s.slowLeft > 0) s.slowLeft--;
       crEnsure(s, Math.ceil(s.cam) + 18);
       // Caméra : suit le joueur ET pousse toute seule (l'« aigle » du jeu d'origine). Elle ne
       // décroche jamais de plus de 4 rangées → rester immobile finit toujours par tuer.
@@ -5480,10 +5475,13 @@ function doodleMix(a, b, t) {
 }
 // Couleurs du décor à l'instant `score` : celles du biome courant, fondues vers le suivant
 // dès qu'on approche du palier. Renvoie toujours un objet prêt à peindre.
-function doodleBiomeCols(score) {
-  const i = doodleBiomeIdx(score), cur = D_BIOMES[i], nxt = D_BIOMES[i + 1];
-  if (!nxt) return cur;                                     // dernier biome : plus rien vers quoi fondre
-  const reste = (i + 1) * D_BIOME_STEP - score;             // points restants avant le palier
+function doodleBiomeCols(s, score) {
+  const tier = doodleTier(score), cur = D_BIOMES[doodleBiomeAt(s, tier)];
+  // ⚠ Tire le biome de la tranche SUIVANTE avec ~220 points d'avance : c'est ce qui permet au
+  // fondu d'exister. Le tirage étant mémorisé, celui qui s'affichera sera bien celui-là.
+  const nxt = D_BIOMES[doodleBiomeAt(s, tier + 1)];
+  if (!nxt) return cur;
+  const reste = (tier + 1) * D_BIOME_STEP - score;          // points restants avant le palier
   if (reste > D_BIOME_FADE) return cur;
   const t = Math.max(0, Math.min(1, 1 - reste / D_BIOME_FADE));
   return { paper: doodleMix(cur.paper, nxt.paper, t), rule: doodleMix(cur.rule, nxt.rule, t), marge: doodleMix(cur.marge, nxt.marge, t) };
@@ -5492,7 +5490,7 @@ function doodleBiomeCols(score) {
 // chaque frame sans provoquer un rendu React par frame. Ce jeton ne change que 8 fois par
 // transition — le dégradé reste lisible à l'œil pour un coût négligeable.
 function doodleBiomeFadeStep(score) {
-  const i = doodleBiomeIdx(score), reste = (i + 1) * D_BIOME_STEP - score;
+  const i = doodleTier(score), reste = (i + 1) * D_BIOME_STEP - score;
   return i * 16 + (reste > D_BIOME_FADE ? 0 : Math.min(8, Math.floor((1 - reste / D_BIOME_FADE) * 8) + 1));
 }
 // ⚠ Le fond reste la PAGE DE CARNET d'origine — seules ses trois couleurs suivent le biome.
@@ -5685,8 +5683,15 @@ const D_JAM = 15;               // 🔧 munitions perdues
 // ⚠ Le 5e biome est le DERNIER : au-delà de 5000 points on y reste. Boucler ferait « redescendre »
 // visuellement alors qu'on continue de monter.
 const D_BIOME_STEP = 1000;
+// ⚠ 9.4.5 — AUCUN biome thématique avant 1000 points (demande utilisateur) : la première
+// tranche est le décor NORMAL, celui du jeu d'origine, sans créature ni tuile propres. Ensuite,
+// chaque palier tire l'un des cinq AU HASARD (voir `doodleBiomeRoll`) — l'ordre n'est plus fixe.
+// ⚠ `mobs: []` et `tile: null` sur le biome normal : tout le code de biome doit donc tolérer
+// l'absence de créature et de tuile, et c'est ce qui rend la première tranche identique à
+// l'ancien jeu.
 const D_BIOMES = [
-  { k:'prairie', name:'Prairie',  icon:'🌿', paper:'#f4efdd', rule:'#cfe0ef', marge:'#f2c0c0',
+  { k:'normal',  name:'Départ',   icon:'📄', paper:'#f4efdd', rule:'#cfe0ef', marge:'#f2c0c0', tile:null, mobs:[] },
+  { k:'prairie', name:'Prairie',  icon:'🌿', paper:'#eef7e2', rule:'#cfe3bd', marge:'#8fbf6a',
     tile:{ k:'grass',    icon:'🌿', name:'Herbe haute',   txt:'la chute est freinée après le rebond' },
     // ⚠ 9.4.3 — Les deux créatures de la Prairie sont DESSINÉES (demande utilisateur) : l'abeille
     // et le hibou en émoji juraient avec le trait du jeu. Voir `doodleMonster`.
@@ -5713,13 +5718,28 @@ const D_ROAM_FROM = 1000, D_ROAM_P = 0.035, D_ROAM_SPAN = 58, D_ROAM_VY = 0.9, D
 const D_BIOME_TILE_P = 0.05;      // « peu courante » : ~5 % des rangées du biome
 const D_MOB_RARE = 0.06;          // part des monstres qui sont la créature TRÈS rare du biome
 const D_MOB_UNCOMMON = 0.28;      // … et celle qui sont la peu rare
-const D_BIOME_TILES = new Set(D_BIOMES.map(b => b.tile.k));
+const D_BIOME_TILES = new Set(D_BIOMES.filter(b => b.tile).map(b => b.tile.k));
 const D_GRASS_GLIDE = 62;         // 🌿 frames de chute freinée
 const D_GRASS_FALL = 0.45;        // … et facteur appliqué à la gravité pendant ce temps
 const D_GUST = 1.32;              // 🌬️ rebond renforcé
 const D_GEYSER = 1.62, D_GEYSER_SLIP = 26;   // 🌋 projection + frames sans contrôle
 const D_WARPSTAR = 128;           // 🌠 bond instantané, en pixels
-function doodleBiomeIdx(score) { return Math.max(0, Math.min(D_BIOMES.length - 1, Math.floor(score / D_BIOME_STEP))); }
+function doodleTier(score) { return Math.max(0, Math.floor(score / D_BIOME_STEP)); }
+// ⚠ 9.4.5 — Le biome d'une tranche est TIRÉ AU SORT une fois puis MÉMORISÉ dans la partie :
+// le recalculer à la volée le ferait clignoter d'une frame à l'autre. La tranche 0 est toujours
+// le décor normal, et deux tranches voisines ne tombent jamais sur le même biome.
+function doodleBiomeAt(s, tier) {
+  if (tier <= 0) return 0;
+  if (!s.biomes) s.biomes = [0];
+  for (let k = 1; k <= tier; k++) {
+    if (s.biomes[k] != null) continue;
+    const prev = s.biomes[k - 1];
+    let pick;
+    do { pick = 1 + Math.floor(Math.random() * (D_BIOMES.length - 1)); } while (pick === prev);
+    s.biomes[k] = pick;
+  }
+  return s.biomes[tier];
+}
 function doodleBiome(s) { return D_BIOMES[s.biome || 0]; }
 // Un monstre pour la rangée `ny` : la créature TRÈS rare du biome, sa peu rare, ou l'un des
 // trois monstres d'origine. ⚠ Le tirage remplace le monstre standard, il ne s'y AJOUTE pas :
@@ -5734,7 +5754,7 @@ function doodleMakeMob(s, ny) {
              kind: 'roamer', rare: true, vx: (Math.random() < 0.5 ? -1 : 1) * D_ROAM_VX,
              vy2: (Math.random() < 0.5 ? -1 : 1) * D_ROAM_VY, span: D_ROAM_SPAN };
   }
-  const spec = r < D_MOB_RARE ? b.mobs[1] : r < D_MOB_RARE + D_MOB_UNCOMMON ? b.mobs[0] : null;
+  const spec = !b.mobs.length ? null : r < D_MOB_RARE ? b.mobs[1] : r < D_MOB_RARE + D_MOB_UNCOMMON ? b.mobs[0] : null;
   if (spec) {
     return { x: 10 + Math.random() * (DOODLE_W - spec.w - 20), y: ny - 40 - (spec.rare ? 8 : 0),
              w: spec.w, h: spec.h, type: 1, alive: true, kind: spec.k, icon: spec.icon, rare: !!spec.rare,
@@ -6006,7 +6026,7 @@ function doodleCase(ctx, p, t) {
 const D_BIOME_TILE_COLS = { grass:['#8fd45f','#4e8f2c'], sand:['#e8c98a','#b58a4a'], gust:['#bfe4f5','#6fa9c8'], geyser:['#f0a07a','#c4553a'], warpstar:['#c3b7f2','#7b63c8'] };
 function doodleBiomeTile(ctx, p, t) {
   const c = D_BIOME_TILE_COLS[p.type] || ['#7ec850', '#4e8f2c'];
-  const tile = D_BIOMES.find(b => b.tile.k === p.type);
+  const tile = D_BIOMES.find(b => b.tile && b.tile.k === p.type);
   doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
   ctx.fillStyle = c[1]; ctx.fillRect(p.x, p.y + p.h - 4, p.w, 4);
   // 🏜️ Le sable mouvant s'assombrit après le 1er passage : c'est le seul indice qu'il ne
@@ -6206,7 +6226,7 @@ function doodleDoodler(ctx, x, y, face, fly, t) {
   ctx.restore();
 }
 function doodleDraw(ctx, s, W, H) {
-  doodleBg(ctx, W, H, s.climb, doodleBiomeCols(s.score));   // couleurs fondues vers le biome suivant
+  doodleBg(ctx, W, H, s.climb, doodleBiomeCols(s, s.score));   // couleurs fondues vers le biome suivant
   s.holes.forEach(h => doodleHole(ctx, h, s.t));
   s.platforms.forEach(p => doodlePlatform(ctx, p, s.t));
   s.items.forEach(it => doodleItem(ctx, it, s.t));
@@ -6308,7 +6328,8 @@ function doodleSpawnRow(s, ny, risky) {
   // rangée ni à une case (due), ni à une multicolore, ni à une tuile débloquée. « Peu courante »
   // = ~5 % des rangées, et jamais deux spéciales de suite comme partout ailleurs.
   else if ((type === 'green' || type === 'blue') && !D_SPECIAL.has(s.lastType) && Math.random() < D_BIOME_TILE_P * calm) {
-    type = doodleBiome(s).tile.k;
+    const bt = doodleBiome(s).tile;
+    if (bt) type = bt.k;   // ⚠ le décor normal n'a pas de tuile : la rangée reste ordinaire
   }
   const p = { x, y: ny, w, h: D_PLAT_H, type, dead: false };
   if (type === 'spike') p.armed = false;
@@ -6391,7 +6412,7 @@ function doodleRules() {
       ...odds.map(l => ({ i:l.icon, n:l.label, d:`${l.txt} — ${pOf(l.k)} du contenu d'un coffre, ` + (l.max === 1 ? 'une seule fois par partie.' : l.max > 1 && l.max < 99 ? `cumulable jusqu'à ${l.max}.` : 'répétable.') })),
     ] },
     { t:'Tuiles débloquées (une par palier de 1000 points)', c:'#2f7fbf', rows: D_TILES.map(t => ({ i:t.icon, n:t.name, d:t.txt })) },
-    { t:'Tuiles de biome (le biome change tous les 1000 points)', c:'#41b0d8', rows: D_BIOMES.map(b => ({ i:b.tile.icon, n:`${b.tile.name} — ${b.name}`, d:b.tile.txt })) },
+    { t:'Tuiles de biome (un biome tiré au hasard tous les 1000 points)', c:'#41b0d8', rows: D_BIOMES.filter(b => b.tile).map(b => ({ i:b.tile.icon, n:`${b.tile.name} — ${b.name}`, d:b.tile.txt })) },
   ];
 }
 function DoodleRules({ onClose }) {
@@ -6448,7 +6469,7 @@ function GameDoodle() {
       climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0,
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
-      biome: 0, banner: null, glide: 0, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
+      biome: 0, biomes: [0], banner: null, glide: 0, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
       beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0 };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
@@ -6532,6 +6553,11 @@ function GameDoodle() {
       if (!alive) return;
       const s = g.current, ctx = canvasRef.current.getContext('2d');
       s.t++;
+      // ⏱️ Ralentisseur : tout ce qui bouge AUTOUR du doodler tourne au ralenti. On ne touche
+      // pas à sa gravité : la modifier changerait la hauteur de ses sauts, donc la portée entre
+      // rangées, et pourrait rendre la montée infaisable. Ici c'est un pur avantage de lecture.
+      const sf = s.slowLeft > 0 ? D_SLOW : 1;
+      if (s.slowLeft > 0) s.slowLeft--;
       // — déplacement horizontal —
       if (s.slip > 0) { s.slip--; s.px += s.slipVx; }   // 🧊 glace : aucun contrôle pendant la glissade
       else if (s.targetX != null) { let dx = s.targetX - s.px; if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W; s.px += Math.max(-7.2, Math.min(7.2, dx)); s.vx = Math.max(-7.2, Math.min(7.2, dx)); if (dx > 0.6) s.face = 1; else if (dx < -0.6) s.face = -1; }
@@ -6805,12 +6831,12 @@ function GameDoodle() {
       // un canal séparé du toast : les deux tombent au même palier et se seraient écrasés.
       // Fondu du repose-pouce : suit le décor, mais par paliers (voir doodleBiomeFadeStep).
       const fq = doodleBiomeFadeStep(s.score);
-      if (fq !== s.padQ) { s.padQ = fq; setPadBiome(doodleBiomeCols(s.score)); }
-      const nb = doodleBiomeIdx(s.score);
+      if (fq !== s.padQ) { s.padQ = fq; setPadBiome(doodleBiomeCols(s, s.score)); }
+      const nb = doodleBiomeAt(s, doodleTier(s.score));
       if (nb !== s.biome) {
         s.biome = nb; setBiomeIdx(nb);
         const b = D_BIOMES[nb];
-        s.banner = { txt: `${b.icon} ${b.name}`, sub: `${b.tile.icon} ${b.tile.name} · ${b.tile.txt}`, life: D_BANNER_LIFE };
+        s.banner = { txt: `${b.icon} ${b.name}`, sub: b.tile ? `${b.tile.icon} ${b.tile.name} · ${b.tile.txt}` : 'décor de départ — ni créature ni tuile propre', life: D_BANNER_LIFE };
       }
       if (s.toast && --s.toast.life <= 0) s.toast = null;
       if (s.banner && --s.banner.life <= 0) s.banner = null;
