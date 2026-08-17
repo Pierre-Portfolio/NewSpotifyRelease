@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.6.6';
+const APP_VERSION = '9.6.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5706,7 +5706,12 @@ const D_TILES = [
   { k: 'lift',    icon:'🛗', name: 'Ascenseur',     txt: 'monte et descend sans arrêt le long de sa ligne' },
   { k: 'rebound', icon:'🦘', name: 'Rebond',        txt: 'les 3 prochains sauts montent deux fois plus haut' },
   { k: 'invert',  icon:'🔃', name: 'Inversion',     txt: 'inverse la gauche et la droite pendant quelques secondes' },
+  { k: 'slot',    icon:'🎰', name: 'Machine à sous', txt: 'met le jeu en pause et tire 3 tuiles, aussitôt ajoutées à la partie' },
 ];
+// 🎰 Une fois DÉBLOQUÉE, la machine à sous revient d'elle-même tous les D_SLOT_STEP points
+// (demande utilisateur). Le jalon est posé au déblocage, à partir du score COURANT : parti de
+// zéro, il aurait rattrapé d'un coup tous les paliers déjà franchis.
+const D_SLOT_STEP = 500;
 // 🔃 Réutilise `mrev`, l'inversion du malus 🌀 Vertige : elle est déjà appliquée au doigt
 // (dans `steer`) ET au clavier, et elle a déjà sa pastille de décompte dans le HUD. En
 // recréer une seconde, c'était garantir d'en oublier la moitié des points d'usage.
@@ -5920,6 +5925,7 @@ function doodleTileUnlock(s) {
   if (!left.length) return null;                       // les 5 sont déjà là → seuls les bonus continuent
   const t = left[Math.floor(Math.random() * left.length)];
   s.tiles.push(t.k);
+  if (t.k === 'slot') s.nextSlot = s.score + D_SLOT_STEP;   // 🎰 une dalle garantie tous les 500 points à partir d'ici
   return t;
 }
 // ☄️ Météorite en chute : boule ardente + traînée, pour qu'on la voie arriver de loin.
@@ -5941,6 +5947,21 @@ function doodleTileSpent(ctx, p) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // 🎰 Machine à sous : bandeau rouge, trois fenêtres et un levier. Éteinte une fois jouée.
+  if (p.type === 'slot') {
+    doodleRR(ctx, x, y, w, h, 6, '#c0392b');
+    ctx.fillStyle = '#7a1f18'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.fillStyle = '#f5e6c8';
+    [0, 1, 2].forEach(i => ctx.fillRect(x + 9 + i * 12, y + 3.5, 9, h - 9));
+    ctx.fillStyle = '#7a1f18'; ctx.font = '6px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    [0, 1, 2].forEach(i => ctx.fillText('7', x + 13.5 + i * 12, y + h / 2));
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.strokeStyle = '#f5e6c8'; ctx.lineWidth = 2; ctx.lineCap = 'round';   // levier
+    ctx.beginPath(); ctx.moveTo(x + w - 5, y + h - 5); ctx.lineTo(x + w - 5, y + 4); ctx.stroke();
+    ctx.fillStyle = '#ffd54a'; ctx.beginPath(); ctx.arc(x + w - 5, y + 3, 2.4, 0, Math.PI * 2); ctx.fill();
+    if (p.used) doodleTileSpent(ctx, p);
+    return;
+  }
   // 🔃 Inversion : deux flèches qui s'échangent, et qui tournent tant que la dalle est neuve.
   if (p.type === 'invert') {
     doodleRR(ctx, x, y, w, h, 6, '#7b4bd0');
@@ -6792,6 +6813,7 @@ function doodleSpawnRow(s, ny, risky) {
   // malchance. La case chance, elle, ne prend la rangée que si le tirage très rare tombe ET
   // que ses deux garde-fous le permettent : 3 par partie, 500 points d'écart minimum.
   if (s.perkPending) { type = 'perk'; s.perkPending = false; }
+  else if (s.slotPending) { type = 'slot'; s.slotPending = false; }   // 🎰 due, comme la case bonus : jamais repoussée de rangée en rangée par la malchance
   else if (!doodleClassic(s) && s.luckyLeft > 0 && s.score >= s.luckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'lucky'; s.luckyLeft--; s.luckyAt = s.score + D_LUCKY_GAP;
   }
@@ -6907,6 +6929,45 @@ function doodleRules() {
     { t:'Tuiles de biome (un biome tiré au hasard tous les 1000 points, les biomes se cumulent)', c:'#41b0d8', rows: D_BIOMES.filter(b => b.tile).map(b => ({ i:b.tile.icon, n:`${b.tile.name} — ${b.name}`, d:b.tile.txt })) },
   ];
 }
+// 🎰 Overlay de la machine à sous. ⚠ Les trois rouleaux s'arrêtent L'UN APRÈS L'AUTRE : trois
+// arrêts simultanés ne se lisent pas comme un tirage, seulement comme un affichage.
+// ⚠ Le bouton n'apparaît qu'une fois les trois arrêtés — sinon on reprend avant d'avoir vu ce
+// qu'on a gagné, et la tuile n'aurait servi qu'à interrompre la partie.
+const D_SLOT_STOPS = [560, 900, 1240];
+function DoodleSlot({ roll, onDone }) {
+  const [stopped, setStopped] = React.useState(0);
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const iv = setInterval(() => setTick(x => x + 1), 70);
+    const ts = D_SLOT_STOPS.map((ms, i) => setTimeout(() => setStopped(i + 1), ms));
+    return () => { clearInterval(iv); ts.forEach(clearTimeout); };
+  }, []);
+  const done = stopped >= 3;
+  const cell = i => stopped > i ? D_TILES.find(t => t.k === roll[i]) : D_TILES[(tick * 3 + i * 5) % D_TILES.length];
+  return (
+    <div style={{ position:'absolute', inset:0, borderRadius:12, background:'linear-gradient(160deg, rgba(24,26,32,0.96), rgba(64,26,26,0.96))', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, padding:'0 14px', textAlign:'center', userSelect:'none', zIndex:4 }}>
+      <div style={{ fontSize:11, fontWeight:800, letterSpacing:1.6, color:'#ffd54a', textTransform:'uppercase' }}>🎰 Machine à sous</div>
+      <div style={{ display:'flex', gap:8 }}>
+        {[0, 1, 2].map(i => {
+          const c = cell(i);
+          return (
+            <div key={i} style={{ width:72, minHeight:82, borderRadius:10, background:'#f5e6c8', border:`2px solid ${stopped > i ? '#ffd54a' : '#8a7050'}`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:3, padding:'6px 3px' }}>
+              <div style={{ fontSize:26, lineHeight:1 }}>{c.icon}</div>
+              <div style={{ fontSize:9, fontWeight:800, color:'#5a3200', lineHeight:1.2 }}>{stopped > i ? c.name : '…'}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize:11, color:'#d9dde6', maxWidth:260, lineHeight:1.45 }}>
+        {done ? 'Ces trois tuiles rejoignent la partie en cours.' : 'Les rouleaux tournent…'}
+      </div>
+      {done && (
+        <button onPointerDown={e => { e.stopPropagation(); onDone(); }}
+          style={gameBtn({ marginTop:2, padding:'9px 18px', fontSize:13 })}>▶ Reprendre</button>
+      )}
+    </div>
+  );
+}
 function DoodleRules({ onClose }) {
   return (
     <div style={{ position:'absolute', inset:0, background:'rgba(24,26,32,0.96)', borderRadius:12, display:'flex', flexDirection:'column', zIndex:5 }}>
@@ -6979,7 +7040,7 @@ function GameDoodle() {
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0,
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
-      beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, tw: 0, acc: null, rebLeft: 0, mode };
+      beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, nextSlot: null, mode };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
   const start = () => { reset(); setPhase('playing'); };
@@ -7002,6 +7063,17 @@ function GameDoodle() {
       s.shTimeLeft += D_SHTIME;
       s.shTmp = D_UNLOCK_INV;
       s.unlocked = null;
+    }
+    setPhase('playing');
+  };
+  // 🎰 Les trois tuiles tirées entrent dans la partie. ⚠ Union et non affectation : une tuile
+  // déjà débloquée ne doit pas être poussée en double dans `s.tiles`, sinon elle occuperait
+  // deux parts de la bande de tirage et deviendrait deux fois plus fréquente que les autres.
+  const resumeSlot = () => {
+    const s = g.current;
+    if (s && s.slotRoll) {
+      for (const k of s.slotRoll) if (s.tiles.indexOf(k) < 0) s.tiles.push(k);
+      s.slotRoll = null;
     }
     setPhase('playing');
   };
@@ -7274,6 +7346,13 @@ function GameDoodle() {
             // immédiatement, comme la pique armée — rien d'autre ne doit se produire ensuite.
             // ⚠ `max` et non affectation : deux dalles d'inversion coup sur coup doivent
             // prolonger l'effet, jamais le raccourcir.
+            // 🎰 Le tirage est posé ici ; c'est la fin de la boucle qui gèle la partie et bascule
+            // en phase 'slot', exactement comme l'annonce de déblocage.
+            if (et === 'slot' && !p.used) {
+              p.used = true;
+              const pool = D_TILES.map(t2 => t2.k).filter(k => k !== 'slot');
+              s.slotRoll = [0, 1, 2].map(() => pool[Math.floor(Math.random() * pool.length)]);
+            }
             if (et === 'invert') { s.mrev = Math.max(s.mrev, D_INVERT_LIFE); s.toast = { txt: '🔃 Commandes inversées', life: D_TOAST_LIFE }; }
             if (et === 'rebound') { s.rebLeft = D_REBOUND_N; s.toast = { txt: `🦘 ${D_REBOUND_N} sauts deux fois plus hauts`, life: D_TOAST_LIFE }; }
             if (et === 'tentacle' && !p.tent) {
@@ -7436,6 +7515,9 @@ function GameDoodle() {
       if (nsc !== s.score) { s.score = nsc; setScore(nsc); }
       // ⚠ `while` et non `if` : un vol de jetpack peut franchir PLUSIEURS paliers d'un coup,
       // et un `if` en avalerait silencieusement.
+      // 🎰 `while` pour la même raison que les paliers de bonus : un vol de jetpack peut
+      // franchir plusieurs jalons d'un coup.
+      while (s.nextSlot != null && s.score >= s.nextSlot) { s.nextSlot += D_SLOT_STEP; s.slotPending = true; }
       let unlocked = null;
       while (s.score >= s.nextPerk) {
         s.nextPerk += D_PERK_STEP; s.perkPending = true;
@@ -7461,6 +7543,10 @@ function GameDoodle() {
       // reprogrammer de rAF — c'est le passage en phase 'unlock' qui gèle la boucle, exactement
       // comme la pause. La reprise est gérée par `resumeUnlock`.
       if (unlocked) { s.unlocked = unlocked; doodleDraw(ctx, s, W, H); setPhase('unlock'); return; }
+      // 🎰 Testé APRÈS le déblocage : si les deux tombent sur la même frame, l'annonce passe
+      // d'abord et le tirage n'est pas perdu — il repart à la frame suivante, `slotRoll` étant
+      // encore posé.
+      if (s.slotRoll) { doodleDraw(ctx, s, W, H); setPhase('slot'); return; }
       doodleDraw(ctx, s, W, H); raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -7488,6 +7574,7 @@ function GameDoodle() {
   const onDown = e => {
     // ⚠ En pause, une touche REPREND la partie — surtout pas `start()`, qui la remettrait à zéro.
     if (phaseRef.current === 'unlock') { resumeUnlock(); return; }   // ⚠ sinon `start()` remettrait la partie à zéro
+    if (phaseRef.current === 'slot') return;                         // ⚠ c'est l'overlay qui rend la main, et seulement une fois les rouleaux arrêtés
     if (phaseRef.current === 'paused') { togglePause(); return; }
     if (phaseRef.current !== 'playing') { start(); return; }
     tapShoot();   // 1 tap = tir droit · 2 taps = + 2 diagonales (donc 3 tirs en tout)
@@ -7540,7 +7627,10 @@ function GameDoodle() {
               style={gameBtn({ marginTop:2, padding:'9px 18px', fontSize:13 })}>▶ Reprendre</button>
           </div>
         )}
-        {phase !== 'playing' && phase !== 'unlock' && (
+        {phase === 'slot' && g.current && g.current.slotRoll && (
+          <DoodleSlot roll={g.current.slotRoll} onDone={resumeSlot} />
+        )}
+        {phase !== 'playing' && phase !== 'unlock' && phase !== 'slot' && (
           <div onPointerDown={onDown} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#333', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
             <div style={{ fontSize:17, fontWeight:800 }}>{phase === 'dead' ? `💥 Chute ! Altitude ${score}` : phase === 'paused' ? '⏸ Pause' : '🟢 Doodle Jump'}</div>
             <div style={{ fontSize:12, background:'#ffffffcc', padding:'6px 12px', borderRadius:8, fontWeight:700 }}>Touche pour {phase === 'dead' ? 'rejouer' : phase === 'paused' ? 'reprendre' : 'jouer'}</div>
