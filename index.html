@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.3.8';
+const APP_VERSION = '10.3.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5535,6 +5535,7 @@ function doodleLootGrant(s) {
 function doodleKillMonster(s, m) {
   if (!m.alive) return;
   m.alive = false;
+  s.questKills = (s.questKills || 0) + 1;   // 🎯 comptée ICI : c'est le seul point de passage des quatre façons de tuer
   const c = m.rare ? '#e2564a' : m.type === 1 ? '#d04b7b' : m.type === 2 ? '#8a7bd8' : '#7b4bd0';
   for (let k = 0; k < (m.rare ? 16 : 9); k++) s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 0.5) * 6, life: 24, max: 24, sz: 4, c });
   // ⚠ La créature TRÈS rare du biome lâche DEUX coffres : c'est ce qui récompense de l'avoir
@@ -6128,6 +6129,27 @@ const D_GLUE_V = 1.6;
 // le dessin n'a pas accès à la position du doodler, et deux calculs séparés auraient fini par
 // faire loucher la dalle ailleurs qu'elle ne va.
 const D_ALIVE_V = 0.85, D_ALIVE_SPAN = 46;
+// 🎯 10.3.9 — QUÊTE (demande utilisateur) : la dalle ouvre un défi tiré au sort ; le réussir
+// rapporte D_QUEST_LOOT butins.
+// ⚠ UNE SEULE quête à la fois : deux défis en cours, c'est deux compteurs dans le HUD et un
+// joueur qui ne sait plus lequel il poursuit. Une dalle rencontrée pendant une quête le dit et
+// ne consomme rien — elle reste utilisable plus tard.
+// ⚠ Les trois compteurs sont RELATIFS à l'instant du départ (`from`) : compter en absolu aurait
+// validé « 500 points de plus » à un joueur qui en était déjà à 3000.
+const D_QUEST_LOOT = 3;
+const D_QUESTS = [
+  { k:'plats', icon:'🟩', n:20,  txt: p2 => `rebondis sur ${p2} plateformes` },
+  { k:'alt',   icon:'📈', n:500, txt: p2 => `grimpe de ${p2} points d'altitude` },
+  { k:'kills', icon:'💀', n:5,   txt: p2 => `abats ${p2} créatures` },
+];
+// Avancement courant de la quête, borné à sa cible. ⚠ Un seul endroit pour les trois : le HUD,
+// le test de réussite et le libellé le relisent ici, et ne peuvent donc pas diverger.
+function doodleQuestDone(s) {
+  const q = s.quest; if (!q) return 0;
+  if (q.k === 'plats') return Math.min(q.n, s.questPlats - q.from);
+  if (q.k === 'alt') return Math.min(q.n, Math.max(0, s.score - q.from));
+  return Math.min(q.n, s.questKills - q.from);
+}
 const D_GRAP_GAP = 240, D_GRAP_REACH = 170, D_GRAP_V = 3.4, D_GRAP_HIT = 13, D_GRAP_PULL = 4.6;
 const D_LIGHT_STEP = 120;
 function doodleLightPhase(p, t) { return Math.floor((t + (p.ph || 0)) / D_LIGHT_STEP) % 3; }
@@ -6198,6 +6220,7 @@ const D_TILES = [
   // 🎊 10.1.3 — CONFETTIS (demande utilisateur) : purement festive, elle ne fait RIEN d'autre.
   { k: 'confetti', icon:'🎊', name: 'Confettis',    txt: 'elle crache des confettis pendant 5 secondes, qui retombent ensuite — de la pure décoration' },
   { k: 'gravity',  icon:'🪐', name: 'Gravité',      txt: 'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
+  { k: 'quest',    icon:'🎯', name: 'Quête',          txt: 'elle te confie un défi tiré au sort ; le réussir rapporte ' + D_QUEST_LOOT + ' butins de coffre. Une seule quête en cours à la fois' },
   { k: 'alive',    icon:'👀', name: 'Vivante',        txt: 'elle a des yeux, elle te regarde et elle se traîne vers toi — sans jamais s\'éloigner beaucoup de l\'endroit où elle est née' },
   { k: 'mimic',    icon:'🪞', name: 'Mimétique',      txt: 'elle prend l\'apparence ET l\'effet de la dernière dalle sur laquelle tu as rebondi — elle change donc au fil de la partie' },
   { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur mais se déplace sans relâche pour rester juste sous toi' },
@@ -7001,6 +7024,20 @@ function doodleTileSpent(ctx, p) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // 🎯 Quête : parchemin beige roulé aux deux bouts, marqué d'une cible. Épuisée, elle prend le
+  // voile commun des tuiles à usage unique.
+  if (p.type === 'quest') {
+    doodleRR(ctx, x, y, w, h, 5, '#efe0b8');
+    ctx.fillStyle = '#c4a86a'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.fillStyle = '#d8c088';
+    [x + 3, x + w - 8].forEach(rx => doodleRR(ctx, rx, y - 1, 5, h + 2, 2.5, '#d8c088'));   // les rouleaux
+    const cx = x + w / 2, cy = y + h / 2;
+    [[6.5, '#e2564a'], [4, '#f6efe2'], [1.8, '#e2564a']].forEach(([r, col]) => {
+      ctx.fillStyle = col; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    });
+    if (p.used) doodleTileSpent(ctx, p);
+    return;
+  }
   // 👀 Vivante : dalle de chair rose, deux gros yeux dont les pupilles SUIVENT le doodler
   // (`lookX`/`lookY`, calculés dans la boucle) et une bouche qui respire.
   if (p.type === 'alive') {
@@ -7918,6 +7955,7 @@ function doodlePerkHud(ctx, s, W) {
   if (s.gravLeft > 0) chips.push({ t: `🪐${Math.ceil(s.gravLeft / 60)}s`, bg:'rgba(122,96,196,0.92)', fg:'#fff' });
   if (s.shroom > 0) chips.push({ t: `🍄${Math.ceil(s.shroom / 60)}s`, bg:'rgba(226,86,74,0.92)', fg:'#fff' });
   if (s.blind) chips.push({ t: '🌁', bg:'rgba(150,160,172,0.92)', fg:'#1c2028' });
+  if (s.quest) chips.push({ t: `🎯${doodleQuestDone(s)}/${s.quest.n}`, bg:'rgba(99,196,90,0.92)', fg:'#08301a' });
   if (s.beltLeft > 0) chips.push({ t: `${s.beltSoap ? '🧼' : s.beltVx > 0 ? '➡️' : '⬅️'}${Math.ceil(s.beltLeft / 60)}s`, bg:'rgba(255,213,74,0.92)', fg:'#3a2a10' });   // ➡️ sans elle, on subit la dérive sans savoir ni pourquoi ni pour combien de temps
   if (s.scoreMul && s.scoreMul > 1.001) chips.push({ t: `📈×${s.scoreMul.toFixed(2)}`, bg:'rgba(224,161,58,0.92)', fg:'#3a2a10' });
   if (s.mobTime != null && s.mobTime !== 1) chips.push({ t: s.mobTime === 0 ? '⏸️' : '⏸️×2', bg: s.mobTime === 0 ? 'rgba(63,111,216,0.92)' : 'rgba(192,57,43,0.92)', fg:'#fff' });
@@ -9245,7 +9283,7 @@ function GameDoodle() {
     let y = H - 60;
     for (let i = 0; i < 9; i++) { y -= 52 + Math.random() * 22; plats.push({ x: 6 + Math.random() * (W - D_PLAT_W - 12), y, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false }); }
     g.current = { px: W / 2, py: H - 92, vx: 0, vy: D_JUMP, face: 1, platforms: plats, monsters: [], bullets: [], items: [], holes: [], parts: [], chests: [], meteors: [],
-      clones: [], confs: [], tshots: [], slays: [], drops: [], spirits: [], boss: null, bossHide: false, bossDone: false, bossFloorY: 0, bossShots: [], bossSpikes: [], bossBeam: null, bossLoot: 0, climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastTileK: null, lastShot: -99, lastPlat: null, bounceStreak: 0,
+      clones: [], confs: [], tshots: [], slays: [], drops: [], spirits: [], boss: null, bossHide: false, bossDone: false, bossFloorY: 0, bossShots: [], bossSpikes: [], bossBeam: null, bossLoot: 0, climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastTileK: null, quest: null, questPlats: 0, questKills: 0, lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, big: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0, lastMissile: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, unluckyLeft: D_LUCKY_MAX, unluckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
@@ -9676,6 +9714,7 @@ function GameDoodle() {
             // 🪞 Modèle de la mimétique : le type EFFECTIF de la dalle qu'on vient de toucher.
             // ⚠ Rebondir sur une mimétique ne fige rien : son type effectif EST déjà le modèle.
             s.lastTileK = et;
+            s.questPlats = (s.questPlats || 0) + 1;   // 🎯 une plateforme de plus pour la quête en cours
             if (p === s.lastPlat) s.bounceStreak++; else { s.bounceStreak = 0; s.lastPlat = p; }   // rebond sur la MÊME case → +40 % / autre case → retour au saut de base
             let bv = p.trampoline ? D_TRAMPO : p.spring ? D_SPRING : D_JUMP;
             if (s.bounceStreak > 0) bv *= Math.pow(D_BOUNCE_BOOST, s.bounceStreak / 2);
@@ -9945,6 +9984,16 @@ function GameDoodle() {
               s.blind = true;
               s.toast = { txt: '🌁 Les dalles disparaissent !', life: D_TOAST_LIFE };
               for (let k = 0; k < 14; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 4, vy: -0.5 - Math.random() * 1.5, life: 30, max: 30, sz: 4, c: k % 2 ? '#e6ebf0' : '#b9c2cc' });
+            }
+            // 🎯 Quête : une seule à la fois, et la dalle n'est consommée que si elle en ouvre une.
+            if (et === 'quest' && !p.used) {
+              if (s.quest) s.toast = { txt: `🎯 Quête déjà en cours — ${doodleQuestDone(s)}/${s.quest.n}`, life: D_TOAST_LIFE };
+              else {
+                p.used = true;
+                const qd = D_QUESTS[Math.floor(Math.random() * D_QUESTS.length)];
+                s.quest = { k: qd.k, n: qd.n, icon: qd.icon, from: qd.k === 'plats' ? (s.questPlats || 0) : qd.k === 'alt' ? s.score : (s.questKills || 0) };
+                s.banner = { txt: `🎯 Quête : ${qd.txt(qd.n)}`, sub: `réussie, elle rapporte ${D_QUEST_LOOT} butins`, life: D_BANNER_LIFE };
+              }
             }
             // ☠️ Destructrice : bande d'altitude, pas rayon — la demande porte sur l'altitude.
             if (et === 'slayer') {
@@ -10372,6 +10421,16 @@ function GameDoodle() {
       s.chests = s.chests.filter(c => !c.taken && c.y < H + 40);
       s.holes = s.holes.filter(h => h.y < H + 40);
       if (s.confs && s.confs.length) s.confs = s.confs.filter(cf => cf.y < H + 40 && cf.x > -40 && cf.x < W + 40);   // 🎊 sortis de l'écran : le décor ne s'accumule pas indéfiniment
+      // 🎯 Réussite de la quête : testée une fois par frame, à un seul endroit, parce que les
+      // trois compteurs avancent depuis trois endroits différents du code.
+      if (s.quest && doodleQuestDone(s) >= s.quest.n) {
+        const got = [];
+        for (let i = 0; i < D_QUEST_LOOT; i++) got.push(doodleLootGrant(s).label);
+        setAmmo(s.ammo);
+        s.quest = null;
+        s.banner = { txt: '🎯 Quête réussie !', sub: got.join(' · '), life: D_BANNER_LIFE * 1.4 };
+        for (let k = 0; k < 22; k++) { const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 4; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 30, max: 30, sz: 3, c: k % 2 ? '#ffd54a' : '#63c45a' }); }
+      }
       if (s.faceTimer > 0) s.faceTimer--;
       for (const k of ['mrev', 'mheavy', 'mfog', 'sandLeft', 'frost', 'gravLeft', 'shroom']) if (s[k] > 0) s[k]--;   // 🍀 malus, tempête, gel et gravité : ils s'épuisent tout seuls
       // Fin du prêt de boucliers : on retombe au MINIMUM entre l'état courant et celui d'avant
