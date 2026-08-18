@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.3.5';
+const APP_VERSION = '10.3.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6102,6 +6102,17 @@ const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5;
 // prendre l'apparence d'une tuile que le joueur n'a jamais vue n'aurait trompé personne.
 // ⚠ `doodleEffType` ne la traduit PAS (contrairement au casino) : c'est ce qui garantit qu'aucun
 // effet ne se déclenche, sans avoir à exclure la tuile un par un dans toute la chaîne.
+// 🩹 10.3.6 — POT DE COLLE (demande utilisateur) : elle garde SA hauteur mais se déplace pour
+// rester à l'aplomb du joueur.
+// ⚠ Elle SUIT à vitesse bornée (D_GLUE_V) au lieu de se téléporter sous le doodler : une dalle
+// collée en permanence à l'abscisse du joueur, c'est un filet de sécurité permanent, et la
+// poursuite n'aurait même pas été visible.
+// ⚠ Seule l'abscisse bouge : lui laisser toucher la hauteur aurait fait d'elle un ascenseur qui
+// suit, c'est-à-dire une fin de partie impossible.
+// ⚠ Écart pris par le PLUS COURT chemin, bords traversants compris — comme le pilotage et
+// l'attraction gravitationnelle, sinon elle traverserait tout l'écran pour rejoindre un joueur
+// qui vient de sortir par le bord opposé.
+const D_GLUE_V = 1.6;
 const D_GRAP_GAP = 240, D_GRAP_REACH = 170, D_GRAP_V = 3.4, D_GRAP_HIT = 13, D_GRAP_PULL = 4.6;
 const D_LIGHT_STEP = 120;
 function doodleLightPhase(p, t) { return Math.floor((t + (p.ph || 0)) / D_LIGHT_STEP) % 3; }
@@ -6172,6 +6183,7 @@ const D_TILES = [
   // 🎊 10.1.3 — CONFETTIS (demande utilisateur) : purement festive, elle ne fait RIEN d'autre.
   { k: 'confetti', icon:'🎊', name: 'Confettis',    txt: 'elle crache des confettis pendant 5 secondes, qui retombent ensuite — de la pure décoration' },
   { k: 'gravity',  icon:'🪐', name: 'Gravité',      txt: 'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
+  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur mais se déplace sans relâche pour rester juste sous toi' },
   { k: 'chameleon', icon:'🦎', name: 'Caméléon',      txt: 'elle prend l\'apparence d\'une autre de tes tuiles… et n\'en a aucun des effets : c\'est une plateforme ordinaire' },
   { k: 'grapple',  icon:'🪝', name: 'Grappin',        txt: 'elle lance un grappin sur toi de temps en temps : s\'il t\'accroche, il te ramène sur la dalle, où tu repars d\'un saut' },
   { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : verte elle est ordinaire, jaune on glisse, rouge elle efface tes bonus et tes améliorations' },
@@ -6972,6 +6984,20 @@ function doodleTileSpent(ctx, p) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // 🩹 Pot de colle : tube de colle blanche couché sur la dalle, bouchon orange, et une traînée
+  // gluante derrière lui — c'est elle qui dit qu'il vient de se déplacer.
+  if (p.type === 'glue') {
+    doodleRR(ctx, x, y, w, h, 6, '#e8e2d2');
+    ctx.fillStyle = '#b8b09a'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    for (let i = 0; i < 3; i++) { const dx = x + 8 + i * 18, dl = 3 + Math.sin(t * 0.1 + i * 2) * 2; ctx.fillRect(dx, y + h - 3, 3, 3 + dl); }
+    doodleRR(ctx, x + w / 2 - 13, y + 2, 26, h - 7, 3, '#f8f4ea');       // le tube
+    ctx.fillStyle = '#e8913a';
+    ctx.fillRect(x + w / 2 + 11, y + 4, 5, h - 11);                       // le bouchon
+    ctx.fillStyle = '#c9c1ae';
+    ctx.fillRect(x + w / 2 - 9, y + 4, 12, 2);                            // l'étiquette
+    return;
+  }
   // 🦎 Caméléon : il se dessine comme la tuile copiée, et RIEN d'autre ne le trahit. ⚠ Une
   // COPIE de la dalle, jamais la dalle elle-même : lui écrire `type` dessus, c'était lui donner
   // pour de bon les effets qu'elle est censée seulement mimer.
@@ -9431,6 +9457,15 @@ function GameDoodle() {
         if (s.drops) s.drops.forEach(dr => dr.y += d);   // 🌋 la lave tombe DANS le monde, elle suit son geyser
       }
       // — plateformes mobiles —
+      // 🩹 Pot de colle : elle rejoint l'abscisse du doodler, à vitesse bornée et sans jamais
+      // changer de hauteur. ⚠ Sur les dalles VISIBLES seulement : une poursuite hors écran
+      // n'aurait servi qu'à replacer une dalle qu'on ne verra pas dans cet état.
+      for (const q of s.platforms) {
+        if (doodleEffType(q) !== 'glue' || q.dead || q.y < -20 || q.y > H + 20) continue;
+        let dx = s.px - (q.x + q.w / 2);
+        if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+        q.x = Math.max(2, Math.min(W - q.w - 2, q.x + Math.max(-D_GLUE_V, Math.min(D_GLUE_V, dx)) * sf));
+      }
       s.platforms.forEach(p => { if (p.type === 'blue' && p.vx) { p.x += p.vx * sf; if (p.x < 4) { p.x = 4; p.vx *= -1; } else if (p.x + p.w > W - 4) { p.x = W - 4 - p.w; p.vx *= -1; } } });
       // 🛗 Ascenseur : va-et-vient vertical borné autour de sa ligne d'apparition.
       for (const p of s.platforms) {
