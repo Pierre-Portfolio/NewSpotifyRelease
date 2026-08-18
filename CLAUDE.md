@@ -172,7 +172,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 
 **Règles de fusion** (`restoreBackup`, complet ou partiel, clés absentes ignorées) :
 - **⚠ Cumuls et compteurs : au MAX, JAMAIS en somme** (artistes, `games.hi`, `api_calls`) — une sauvegarde contient déjà l'historique local, additionner **doublerait** à chaque ré-import.
-- Union / le plus avancé : tvtime, listens (cap 5000), notes (`updatedAt` le plus récent), finance, food (jours : le local gagne), collection / revente / note_media (par id, **le local gagne**).
+- Union / le plus avancé : tvtime, listens (cap 5000), notes (`updatedAt` le plus récent), finance, food (jours et favoris : le local gagne), collection / revente / note_media (par id, **le local gagne**).
 - Remplacés : todos, rappels, remembers, maps, modules, home_modules, prefs, mdp_vault (backup dans `spotifyplus_mdp_vault_prev`), clés/pseudos si non vides.
 - Dates d'artistes **jamais régressées** ; `music` : `listened`/`liked` au MAX.
 - `food.weights` fusionné par `weightMerge` (doublons jour+poids ignorés).
@@ -210,7 +210,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 | **Mot de Passe** | `GestionMdpPanel`, ambre | `spotifyplus_mdp_vault` | AES-GCM 256 + PBKDF2 600k. Le blob chiffré contient `{entries, tags}` → suivi automatiquement par les sauvegardes. Verrouillage auto 10 min. ⚠ Mot de passe oublié = irrécupérable |
 | **Note** | `NotePanel`, `#6fd345` | `spotifyplus_notes`, `_notes_enc_check`, IndexedDB `spotifyplus_note_media` | 2 espaces (clair / crypté au mot de passe **global**). Sauvegarde auto 700 ms. Pièces jointes audio/photo : la note ne porte que les ids, les contenus vivent en IndexedDB (chiffrés dans l'espace privé) |
 | **Revente** | `ReventePanel`, `#86d941` | `spotifyplus_revente` | Rédaction d'annonces Vinted/Leboncoin/eBay par IA. ⚠ La publication automatique est **impossible sans backend** (aucune API publique de dépôt) |
-| **Santé** (id `food`) | `NourriturePanel`, `#9bd93f` | `_food_profile`, `_food_days`, `_food_meals` (local seul), `_food_weights` | Calories (Open Food Facts + IA + photo de plat), macros, journal de pesées |
+| **Santé** (id `food`) | `NourriturePanel`, `#9bd93f` | `_food_profile`, `_food_days`, `_food_meals` (local seul), `_food_weights`, `_food_favs` | Calories (Open Food Facts + IA + photo de plat), macros, journal de pesées. ⭐ **Favoris** : `☆` sur tout résultat → valeurs /100 g épinglées (id = `nom|marque`, jamais d'image), retrouvées par leur propre barre de recherche LOCALE sous la saisie manuelle |
 | **Sport** | `SportPanel`, `#c3d93f` | `spotifyplus_sport` | 9 groupes musculaires × 70 exercices illustrés (images Wikimedia Commons), appui long → fiche animée |
 | **To do** | `TodoPanel`, vert | `spotifyplus_todos`, `_todos_done` | 7 rubriques en carrousel. Dans `daily` et `cecile` le × **valide** au lieu de supprimer ; appui long 3 s dans `daily` = supprimer la récurrence |
 | **TV Time** | `TvTimePanel`, ambre | `spotifyplus_tvtime`, `_tvtime_eps` | Séries/films (TMDB), chaînes YouTube, livres (Google Books + Open Library). Source de vérité = `tvWatchedSet`. Lecteur plein écran `YtFullscreenPlayer`. Synchro quotidienne `tvSyncDaily` reprenable |

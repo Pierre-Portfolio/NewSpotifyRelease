@@ -62,7 +62,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 | **🔐 Mot de passe** | Coffre chiffré AES-GCM 256 (PBKDF2 600 000 itérations), tags, réordonnancement, verrouillage automatique après 10 min |
 | **🗒️ Note** | Notes libres + un espace **crypté** séparé (mot de passe global), notes vocales et photos jointes, sauvegarde automatique à la frappe |
 | **♻️ Revente** | L'IA rédige tes annonces Vinted / Leboncoin / eBay à partir de tes photos et des infos de l'article (titre, description et prix adaptés à chaque plateforme, prêts à copier) |
-| **🩺 Santé** | Calories par repas (base Open Food Facts, estimation IA, **photo de ton assiette**), macros, besoin quotidien calculé, journal de pesées avec courbes |
+| **🩺 Santé** | Calories par repas (base Open Food Facts, estimation IA, **photo de ton assiette**), macros, besoin quotidien calculé, **aliments favoris** (☆ sur un résultat, puis leur propre barre de recherche), journal de pesées avec courbes |
 | **🏋️ Sport** | 9 groupes musculaires, 70 exercices illustrés avec démonstration animée, machines Basic-Fit |
 | **✅ To do** | 7 rubriques (quotidien, aujourd'hui, semaine, mois, année, un jour, à deux), favorites, validation quotidienne |
 | **🎬 TV Time** | Séries et films (TMDB), chaînes YouTube (vidéos et Shorts comptés séparément, lecteur plein écran avec file d'attente), livres. Progression épisode par épisode, synchronisation quotidienne automatique |

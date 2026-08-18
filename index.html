@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.7.8';
+const APP_VERSION = '9.7.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18413,7 +18413,7 @@ function buildBackup() {
     // Santé : profil + totaux caloriques quotidiens + journal des pesées (section Poids).
     // La COMPOSITION des repas (spotifyplus_food_meals) est volontairement EXCLUE de
     // l'export (demande utilisateur) ; les pesées, elles, sont sauvegardées.
-    food: { profile: lsJson(FOOD_PROFILE_KEY), days: lsJson(FOOD_DAYS_KEY) || {}, weights: lsJson(WEIGHT_KEY) || [] },
+    food: { profile: lsJson(FOOD_PROFILE_KEY), days: lsJson(FOOD_DAYS_KEY) || {}, weights: lsJson(WEIGHT_KEY) || [], favs: lsJson(FOOD_FAVS_KEY) || [] },
     // Bon Plan : jeux suivis (⭐ Ma liste) + prix cibles — les caches promos/boutiques
     // (re-fetchables) restent exclus
     bonplan: lsJson(CMP_WATCH_LS) || [],
@@ -18746,6 +18746,14 @@ function applyBackup(data) {
     // évidents (même jour + même poids) sont ignorés, tout le reste est ajouté.
     if (Array.isArray(data.food.weights)) {
       try { saveWeights(weightMerge(loadWeights(), data.food.weights)); } catch {}
+    }
+    // Aliments favoris — UNION par id (nom|marque) : le local gagne, les absents sont ajoutés.
+    if (Array.isArray(data.food.favs)) {
+      try {
+        const local = loadFoodFavs();
+        const have = new Set(local.map(f => f && f.id));
+        saveFoodFavs(local.concat(data.food.favs.filter(f => f && f.id && f.name && f.kcal100 && !have.has(f.id))));
+      } catch {}
     }
   }
   // Note — FUSIONNÉ par id : la version la plus récemment modifiée (updatedAt) gagne,
@@ -30803,6 +30811,24 @@ function saveFoodMeals(m) {
   lsSet(FOOD_MEALS_KEY, JSON.stringify(out));
   return out;
 }
+// ── ⭐ Aliments favoris (spotifyplus_food_favs) ───────────────────────────────
+// Un résultat de recherche (Open Food Facts, IA ou photo) épinglé pour le retrouver sans
+// re-chercher : on ne garde que les valeurs pour 100 g, JAMAIS d'image (quota localStorage).
+// Identité = nom + marque en minuscules → ré-épingler le même produit ne le duplique pas.
+const FOOD_FAVS_KEY = 'spotifyplus_food_favs';
+function loadFoodFavs() { try { const a = JSON.parse(localStorage.getItem(FOOD_FAVS_KEY)); return Array.isArray(a) ? a : []; } catch { return []; } }
+function saveFoodFavs(l) { const out = l.slice(0, 200); return lsSet(FOOD_FAVS_KEY, JSON.stringify(out)) ? out : null; }   // null = quota plein, rien écrit
+function foodFavId(r) { return `${(r && r.name) || ''}|${(r && r.brand) || ''}`.trim().toLowerCase(); }
+// Copie MINIMALE d'un résultat : de quoi reconstruire une ligne (kcal + macros /100 g),
+// sans les champs volatils (aperçu photo, items reconnus…).
+function foodFavPick(r) {
+  return {
+    id: foodFavId(r), name: r.name, brand: r.brand || '', kcal100: r.kcal100,
+    c100: r.c100 == null ? null : r.c100, p100: r.p100 == null ? null : r.p100, f100: r.f100 == null ? null : r.f100,
+    ...(r.ai ? { ai: r.ai } : {}), ...(r.portionG ? { portionG: r.portionG } : {}),
+    at: Date.now(),
+  };
+}
 // Métabolisme de base (Mifflin-St Jeor) puis besoin quotidien = BMR × activité + objectif
 function foodBmr(p) {
   if (!p || !p.weight || !p.height || !p.age) return 0;
@@ -31082,7 +31108,8 @@ async function foodPhotoAnalyze(img) {
 // Une ligne de résultat : portion en grammes ajustable → calcule les kcal ET les macros en
 // direct, bouton + ajoute le repas dans la catégorie sélectionnée.
 // `defaultGrams` : portion pré-remplie (photo de plat → poids estimé par l'IA ; défaut 100 g).
-function FoodResultRow({ r, onAdd, defaultGrams }) {
+// `onFav` (facultatif) : ⭐ épingler / retirer des favoris — `fav` dit l'état courant.
+function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav }) {
   const [grams, setGrams] = React.useState(String(defaultGrams || 100));
   const g = parseInt(grams, 10) || 0;
   const kcal = Math.round(r.kcal100 * g / 100);
@@ -31111,6 +31138,10 @@ function FoodResultRow({ r, onAdd, defaultGrams }) {
           style={inSt} title="Quantité en grammes" />
         <span style={{ fontSize:9, color:C.dim }}>g</span>
         <span style={{ fontSize:10, color:FOOD_COLOR, fontFamily:'DM Mono,monospace', width:56, textAlign:'right', flexShrink:0 }}>{kcal} kcal</span>
+        {onFav && (
+          <button onClick={() => onFav(r)} title={fav ? 'Retirer des favoris' : 'Mettre en favori'}
+            style={{ background:'none', border:`1px solid ${fav ? '#f5c518' : C.border}`, borderRadius:6, color: fav ? '#f5c518' : C.dim, fontSize:12, lineHeight:1, padding:'2px 6px', cursor:'pointer', flexShrink:0 }}>{fav ? '★' : '☆'}</button>
+        )}
         <button onClick={() => { if (kcal > 0) onAdd(r, g, kcal, macros); }} title="Ajouter"
           style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'2px 8px', cursor:'pointer', flexShrink:0 }}>+</button>
       </div>
@@ -31134,6 +31165,10 @@ function NourriturePanel() {
   const [results, setResults] = React.useState(null);   // null = pas de recherche, [] = aucun résultat
   const [searching, setSearching] = React.useState(false);
   const [searchErr, setSearchErr] = React.useState('');
+  // ⭐ Favoris : aliments épinglés depuis n'importe quel résultat (Open Food Facts, IA,
+  // photo) et retrouvables via LEUR PROPRE barre de recherche, sans requête réseau.
+  const [favs, setFavs] = React.useState(loadFoodFavs);
+  const [favQ, setFavQ] = React.useState('');
   // Suggestions IA affichées EN TÊTE des résultats (une par fournisseur configuré) :
   // [{ provider, state:'loading'|'ok'|'err'|'none', data, err }] — arrivent indépendamment
   // d'Open Food Facts, chacune s'affiche dès qu'elle répond.
@@ -31262,6 +31297,19 @@ function NourriturePanel() {
     commitMeals({ ...meals, [selDay]: [...dayMeals, entry] });
     setKcal(''); clearSearch();
   };
+
+  // ⭐ Épingler / retirer — l'écriture localStorage est validée AVANT de toucher l'état
+  // (quota plein ⇒ rien n'a été écrit, on n'affiche pas un favori fantôme).
+  const favSet = new Set(favs.map(f => f.id));
+  const toggleFav = (r) => {
+    const id = foodFavId(r);
+    if (!id) return;
+    const next = favSet.has(id) ? favs.filter(f => f.id !== id) : [foodFavPick(r), ...favs.filter(f => f.id !== id)];
+    const saved = saveFoodFavs(next);
+    if (saved) setFavs(saved);
+  };
+  const favQn = favQ.trim().toLowerCase();
+  const favShown = favQn ? favs.filter(f => (f.name + ' ' + (f.brand || '')).toLowerCase().includes(favQn)) : favs;
 
   const imc = profile && profile.weight && profile.height ? profile.weight / Math.pow(profile.height / 100, 2) : 0;
   const pct = target ? Math.min(100, Math.round(dayTotal / target * 100)) : 0;
@@ -31431,7 +31479,7 @@ function NourriturePanel() {
             {photoRows.map(row => {
               const tint = '#8b7bf5';
               const nom  = aiLabel(row.prov || ((aiChain(true)[0] || {}).id));
-              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} defaultGrams={row.data.portionG} />;
+              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} defaultGrams={row.data.portionG} fav={favSet.has(foodFavId(row.data))} onFav={toggleFav} />;
               return (
                 <div key={row.provider} style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: row.state === 'err' ? C.dim : tint,
                   background:C.surfaceHigh, border:`1px solid ${row.state === 'err' ? C.border : tint + '44'}`, borderRadius:8, padding:'5px 8px' }}>
@@ -31450,7 +31498,7 @@ function NourriturePanel() {
             {aiRows.map(row => {
               const tint = '#8b7bf5';
               const nom = aiLabel(row.prov || ((aiChain(false)[0] || {}).id));
-              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} />;
+              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} fav={favSet.has(foodFavId(row.data))} onFav={toggleFav} />;
               return (
                 <div key={row.provider} style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: row.state === 'err' ? C.dim : tint,
                   background:C.surfaceHigh, border:`1px solid ${row.state === 'err' ? C.border : tint + '44'}`, borderRadius:8, padding:'5px 8px' }}>
@@ -31467,7 +31515,7 @@ function NourriturePanel() {
         {searchErr && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{searchErr}</div>}
         {results && results.length > 0 && (
           <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:260, overflowY:'auto' }}>
-            {results.map((r, i) => <FoodResultRow key={i} r={r} onAdd={addFromResult} />)}
+            {results.map((r, i) => <FoodResultRow key={i} r={r} onAdd={addFromResult} fav={favSet.has(foodFavId(r))} onFav={toggleFav} />)}
           </div>
         )}
         {/* Saisie manuelle des kcal (repli si l'aliment n'est pas dans la base) */}
@@ -31478,6 +31526,28 @@ function NourriturePanel() {
             style={{ ...inputSt, flex:1, width:'auto', minWidth:0 }} />
           <button onClick={addMeal} style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:16, lineHeight:1, padding:'0 11px', cursor:'pointer', flexShrink:0 }}>+</button>
         </div>
+        {/* ⭐ Mes favoris : recherche LOCALE parmi les aliments épinglés (aucune requête).
+            Vide = toute la liste ; le ★ de chaque ligne retire le favori. */}
+        {favs.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:5, background:C.surface, border:`1px solid #f5c51833`, borderRadius:8, padding:'6px 8px' }}>
+            <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+              <span style={{ fontSize:11, color:'#f5c518', flexShrink:0 }} title="Aliments mis en favori">★</span>
+              <input type="text" value={favQ} placeholder={`Mes favoris (${favs.length})…`} onChange={e => setFavQ(e.target.value)}
+                style={{ ...inputSt, flex:1, width:'auto', minWidth:0 }} />
+              {favQ && (
+                <button onClick={() => setFavQ('')} title="Effacer"
+                  style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:13, lineHeight:1, padding:'0 8px', cursor:'pointer', flexShrink:0 }}>×</button>
+              )}
+            </div>
+            {favShown.length === 0 ? (
+              <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>Aucun favori ne correspond.</div>
+            ) : (
+              <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:220, overflowY:'auto' }}>
+                {favShown.map(f => <FoodResultRow key={f.id} r={f} onAdd={addFromResult} defaultGrams={f.portionG} fav onFav={toggleFav} />)}
+              </div>
+            )}
+          </div>
+        )}
         {/* Repas du jour édité groupés par catégorie */}
         {dayMeals.length === 0 ? (
           <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'4px 0', fontFamily:'DM Mono,monospace' }}>
