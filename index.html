@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.9.5';
+const APP_VERSION = '9.9.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5939,7 +5939,18 @@ const D_TILES = [
   { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre' },
   // 🪙 9.9.1 — QUITTE OU DOUBLE (demande utilisateur) : une seule fois par dalle, pile ou face.
   { k: 'gamble',  icon:'🪙', name: 'Quitte ou double', txt: 'une chance sur deux de DOUBLER tes bonus et tes tuiles… une chance sur deux de TOUT perdre' },
+  // 🕯️ 9.9.6 — ESPRITS (demande utilisateur) : trois apparitions qui fondent sur toi chacune
+  // leur tour pour te voler un bonus. Elles ne font AUCUN dégât.
+  { k: 'spirit',  icon:'🕯️', name: 'Esprits',      txt: 'trois esprits t\'encerclent et fondent sur toi l\'un après l\'autre pour te voler un bonus — esquive-les' },
 ];
+// 🕯️ Les trois postes de guet, en fractions de l'écran : haut-gauche, haut-droit, bas-droit.
+// ⚠ Ce sont des positions D'ÉCRAN, pas de monde : les esprits ne suivent PAS la caméra, ils
+// restent plantés là où on les voit tant qu'ils n'ont pas chargé — c'est ce qui les rend
+// lisibles pendant qu'on continue de grimper.
+const D_SPIRIT_POSTS = [[0.14, 0.16], [0.86, 0.16], [0.86, 0.74]];
+// Chacun charge à son tour, D_SPIRIT_WAIT frames après le précédent. La charge vise la
+// position du doodler À CET INSTANT et ne se corrige plus : c'est ce qui la rend esquivable.
+const D_SPIRIT_WAIT = 78, D_SPIRIT_V = 7.4, D_SPIRIT_R = 15;
 // 🚇 Écart vertical entre les deux bouches d'une paire — « relativement proche », soit une à
 // deux rangées. ⚠ Le jumeau est posé EN DESSOUS de la rangée courante : au-dessus, il abaisserait
 // `topY` et la boucle de génération croirait la rangée suivante déjà faite, ouvrant un trou.
@@ -5973,6 +5984,21 @@ function doodleGamble(s) {
     s.tiles = []; s.nextSlot = null;
   }
   return win;
+}
+// 🕯️ Vol d'un bonus : un niveau, pris au hasard parmi tout ce qui en a. ⚠ Les BOUCLIERS et
+// les munitions sont hors de portée : voler la protection ou les balles, c'est tuer à retardement
+// une dalle qui, elle, ne fait aucun dégât. Renvoie le libellé volé, ou null s'il n'y avait rien.
+function doodleSpiritSteal(s) {
+  const pool = [];
+  for (const p of D_PERKS) if (s.perks[p.k] > 0) pool.push({ icon: p.icon, label: p.label, take: () => s.perks[p.k]-- });
+  for (const l of D_LOOT) {
+    if (l.k === 'ammo' || l.k.startsWith('sh') || !s.wpn[l.k]) continue;
+    pool.push({ icon: l.icon, label: l.label, take: () => s.wpn[l.k]-- });
+  }
+  if (!pool.length) return null;
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  pick.take();
+  return `${pick.icon} ${pick.label}`;
 }
 // 📈 Multiplicateur de score. ⚠ Il ne fait que CROÎTRE et l'altitude aussi : le score reste
 // donc monotone, ce dont dépend tout le reste (paliers de bonus, déblocage des tuiles,
@@ -6728,6 +6754,24 @@ function doodleTileDraw(ctx, p, t) {
     ctx.strokeStyle = '#dcc8ff'; ctx.lineWidth = 2; ctx.beginPath();
     for (let a = 0; a < Math.PI * 3.4; a += 0.28) { const rr = 1 + a * 1.5; ctx.lineTo(x + w / 2 + Math.cos(a) * rr, y + h / 2 + Math.sin(a) * rr * 0.42); }
     ctx.stroke();
+    return;
+  }
+  // 🕯️ Esprits : dalle d'un violet sourd sur laquelle trois petites âmes montent en flottant.
+  if (p.type === 'spirit') {
+    doodleRR(ctx, x, y, w, h, 6, '#4a3d6b');
+    ctx.fillStyle = '#2a2142'; ctx.fillRect(x, y + h - 4, w, 4);
+    [0.24, 0.5, 0.76].forEach((f, i) => {
+      const gy = y + h / 2 + Math.sin(t * 0.09 + i * 2.1) * 2.4;
+      ctx.save(); ctx.globalAlpha = 0.55 + Math.sin(t * 0.11 + i * 1.7) * 0.4;
+      ctx.fillStyle = '#efe6ff';
+      ctx.beginPath(); ctx.arc(x + w * f, gy - 1, 3.4, Math.PI, 0);
+      ctx.lineTo(x + w * f + 3.4, gy + 3); ctx.lineTo(x + w * f, gy + 1.4); ctx.lineTo(x + w * f - 3.4, gy + 3);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#3a2a55';
+      [-1.4, 1.4].forEach(dx => { ctx.beginPath(); ctx.arc(x + w * f + dx, gy - 1.4, 0.8, 0, Math.PI * 2); ctx.fill(); });
+      ctx.restore();
+    });
+    if (p.used) doodleTileSpent(ctx, p);
     return;
   }
   // 🪙 Quitte ou double : une pièce qui tourne sur la tranche, ×2 d'un côté, 0 de l'autre.
@@ -7520,6 +7564,38 @@ function doodleDraw(ctx, s, W, H) {
     }
     ctx.restore();
   }
+  // 🕯️ Esprits : voile translucide, deux yeux vides et une traîne ondulante. En guet, un
+  // liseré pulse pour dire qu'il va charger ; en charge, une comète le suit.
+  if (s.spirits && s.spirits.length) {
+    ctx.save();
+    for (const sp of s.spirits) {
+      const rushing = sp.state !== 'wait';
+      if (rushing) {                                                     // traîne de charge
+        ctx.globalAlpha = 0.25;
+        ctx.fillStyle = '#c9a8ff';
+        for (let i = 1; i <= 3; i++) { ctx.beginPath(); ctx.arc(sp.x - sp.vx * i * 1.8, sp.y - sp.vy * i * 1.8, D_SPIRIT_R * (1 - i * 0.22), 0, Math.PI * 2); ctx.fill(); }
+      }
+      ctx.globalAlpha = rushing ? 0.95 : 0.75 + Math.sin(s.t * 0.09 + sp.ph) * 0.2;
+      ctx.fillStyle = '#efe6ff'; ctx.strokeStyle = '#6a4bb0'; ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y - 2, D_SPIRIT_R * 0.72, Math.PI, 0);
+      const n = 4, span = D_SPIRIT_R * 1.44;
+      for (let i = 0; i < n; i++) {
+        const bx = sp.x + D_SPIRIT_R * 0.72 - (i + 0.5) * (span / n);
+        ctx.arc(bx, sp.y - 2 + D_SPIRIT_R * 0.62 + Math.sin(s.t * 0.14 + i + sp.ph) * 1.8, span / n / 2, 0, Math.PI);
+      }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#3a2a55';
+      [-4.6, 4.6].forEach(dx => { ctx.beginPath(); ctx.ellipse(sp.x + dx, sp.y - 3, 2.2, 3.2, 0, 0, Math.PI * 2); ctx.fill(); });
+      ctx.beginPath(); ctx.ellipse(sp.x, sp.y + 3, 2.6, 3.4, 0, 0, Math.PI * 2); ctx.fill();
+      if (!rushing) {
+        ctx.globalAlpha = 0.35 + Math.sin(s.t * 0.16 + sp.ph) * 0.3;
+        ctx.strokeStyle = '#c9a8ff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, D_SPIRIT_R + 5, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
   // 🌫️ Brouillard : halo clair autour du doodler, le reste s'assombrit. ⚠ Dessiné APRÈS le
   // décor mais AVANT le HUD — un malus ne doit jamais cacher les compteurs.
   if (s.mfog > 0) {
@@ -7836,7 +7912,7 @@ function GameDoodle() {
     let y = H - 60;
     for (let i = 0; i < 9; i++) { y -= 52 + Math.random() * 22; plats.push({ x: 6 + Math.random() * (W - D_PLAT_W - 12), y, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false }); }
     g.current = { px: W / 2, py: H - 92, vx: 0, vy: D_JUMP, face: 1, platforms: plats, monsters: [], bullets: [], items: [], holes: [], parts: [], chests: [], meteors: [],
-      clones: [], stars: [], drops: [], climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
+      clones: [], stars: [], drops: [], spirits: [], climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0, lastMissile: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
@@ -8230,6 +8306,16 @@ function GameDoodle() {
               s.toast = { txt: `📈 Score ×${s.scoreMul.toFixed(2)}`, life: D_TOAST_LIFE };
               for (let k = 0; k < 10; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 3, vy: -1.5 - Math.random() * 2, life: 24, max: 24, sz: 3, c: k % 2 ? '#ffd54a' : '#e0a13a' });
             }
+            // 🕯️ Esprits : UNE seule fois par dalle, et jamais deux volées en même temps —
+            // une nouvelle dalle pendant que trois esprits guettent ne fait rien.
+            if (et === 'spirit' && !p.used && !(s.spirits && s.spirits.length)) {
+              p.used = true;
+              s.spirits = D_SPIRIT_POSTS.map(([fx, fy], i) => ({
+                x: fx * W, y: fy * H, ax: fx * W, ay: fy * H,
+                wait: D_SPIRIT_WAIT * (i + 1), state: 'wait', ph: Math.random() * 6.28,
+              }));
+              s.toast = { txt: '🕯️ Trois esprits te guettent…', life: D_TOAST_LIFE };
+            }
             // 🪙 Quitte ou double : UNE seule fois par dalle, et la dalle reste praticable ensuite
             // (elle se voile simplement). Le rebond a déjà eu lieu : on ne meurt jamais du pari.
             if (et === 'gamble' && !p.used) {
@@ -8416,6 +8502,34 @@ function GameDoodle() {
           if (doodleHurt(s)) continue;
           die(); return;
         }
+      }
+      // 🕯️ Esprits : chacun guette à son poste D'ÉCRAN, puis charge à son tour. ⚠ Aucun
+      // dégât : le contact ne coûte qu'un niveau de bonus, jamais une vie.
+      if (s.spirits && s.spirits.length) {
+        for (const sp of s.spirits) {
+          if (sp.state === 'wait') {
+            sp.wait -= sf;
+            sp.x = sp.ax; sp.y = sp.ay + Math.sin(s.t * 0.06 + sp.ph) * 5;   // il flotte sur place
+            if (sp.wait <= 0) {
+              // ⚠ Cap FIGÉ au départ de la charge : un esprit qui se recorrigerait en vol
+              // serait impossible à esquiver, et la dalle deviendrait un impôt automatique.
+              const dx = s.px - sp.x, dy = s.py - sp.y, d = Math.hypot(dx, dy) || 1;
+              sp.vx = dx / d * D_SPIRIT_V; sp.vy = dy / d * D_SPIRIT_V;
+              sp.state = 'rush';
+              for (let k = 0; k < 10; k++) s.parts.push({ x: sp.x, y: sp.y, vx: (Math.random() - 0.5) * 4, vy: (Math.random() - 0.5) * 4, life: 20, max: 20, sz: 3, c: k % 2 ? '#c9a8ff' : '#e8e0ff' });
+            }
+            continue;
+          }
+          sp.x += sp.vx * sf; sp.y += sp.vy * sf;
+          if (sp.state === 'rush' && Math.hypot(sp.x - s.px, sp.y - s.py) < D_SPIRIT_R + 10) {
+            sp.state = 'flee';
+            const stolen = doodleSpiritSteal(s);
+            s.toast = { txt: stolen ? `🕯️ Un esprit te vole ${stolen} !` : '🕯️ Un esprit repart bredouille', life: D_TOAST_LIFE };
+            for (let k = 0; k < 14; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 24, max: 24, sz: 3, c: k % 2 ? '#c9a8ff' : '#ffffff' }); }
+          }
+        }
+        // Sortis de l'écran : leur passage est fini, touché ou esquivé.
+        s.spirits = s.spirits.filter(sp => sp.state === 'wait' || (sp.x > -40 && sp.x < W + 40 && sp.y > -40 && sp.y < H + 40));
       }
       // 🌋 Geysers : émission des gouttes, chute, puis contact mortel.
       for (const q of s.platforms) {
