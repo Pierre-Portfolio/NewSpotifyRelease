@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.4.7';
+const APP_VERSION = '10.4.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5392,8 +5392,8 @@ const D_BOOM_BONUS = 1.2;
 const D_BULLET_V = 6.8, D_BULLET_DX = 3.4, D_BULLET_DY = 5.89, D_SHOT_GAP = 8, D_DTAP_MS = 320;
 // ⚠ 9.2.6 — MUNITIONS (demande utilisateur) : 50 au départ, UNE PAR BALLE — donc 1 sur un tap
 // simple et 3 sur le tir triple. À sec on ne tire plus : restent le saut sur la tête et
-// l'esquive. Les coffres lâchés par les monstres tués sont la SEULE recharge, ce qui boucle
-// l'économie du jeu (tirer coûte, tuer rapporte).
+// l'esquive. Deux sources de recharge seulement : les coffres lâchés par les monstres tués (ce
+// qui boucle l'économie du jeu — tirer coûte, tuer rapporte) et la 🔋 tuile Recharge.
 const D_AMMO_START = 50, D_AMMO_PICK = 25;
 // Coffre lâché par CHAQUE monstre tué. Il TOMBE jusqu'à se poser sur la première plateforme
 // rencontrée : laissé en l'air au point de mort, il serait le plus souvent inatteignable.
@@ -5402,8 +5402,8 @@ const D_CHEST_W = 24, D_CHEST_H = 19, D_CHEST_G = 0.34, D_CHEST_VMAX = 6.5;
 // ajoute +1 balle par palier jusqu'à D_SPREAD_MAX, et TOUTES ces balles ne coûtent qu'UNE
 // munition (on paie le TIR, pas les balles). Les autres améliorations sont uniques : une fois
 // prises, elles sortent du tirage (`max: 1`) pour ne jamais retomber en double.
-// ⚠ Les MUNITIONS restent volontairement répétables : c'est la seule recharge du jeu, la
-// rendre unique condamnerait la partie à ~50 balles puis au corps-à-corps définitif.
+// ⚠ Les MUNITIONS restent volontairement répétables : la rendre unique condamnerait la partie
+// à ~50 balles puis au corps-à-corps définitif dès que la 🔋 Recharge ne tombe plus.
 const D_SPREAD_MAX = 7;
 const D_SHTIME = 250;
 const D_UNLOCK_INV = 180;          // 3 s à 60 fps : invulnérabilité + prêt des boucliers après une annonce de déblocage              // ⏳ portée du bouclier temporel, en POINTS d'altitude (pas en secondes)
@@ -6192,6 +6192,14 @@ const D_EGG_JUMPS = 5;
 // les corps de fonction, jamais au moment où ces constantes-ci sont évaluées.
 // ⚠ Purement DÉCORATIVE, comme la 🎊 Confettis : chaque rebond hisse un autre pays et le nomme,
 // et c'est tout. La dalle se comporte pour le reste comme une plateforme verte.
+// 🔋 10.4.8 — RECHARGE (demande utilisateur) : +5 balles à chaque passage, sans aucune limite.
+// ⚠ Répétable et SANS `p.used` : « cumulable à l'infini » est explicite, et c'est le seul point
+// où le jeu redonne des munitions autrement qu'en tuant. Elle ne rend donc pas les coffres
+// inutiles — 5 balles contre les 25 d'un coffre — elle empêche seulement qu'une partie meure
+// à sec de munitions sans qu'aucun geste puisse la rattraper.
+// ⚠ `setAmmo` est appelé dans la foulée : le compteur du HUD vit dans React, pas dans `s`, et
+// l'oublier aurait affiché un stock périmé jusqu'au tir suivant.
+const D_RECHARGE = 5;
 const D_FLAG_W = 28, D_FLAG_H = 18, D_FLAG_POLE = 4;
 // Le drapeau porté par la dalle, en tolérant que le catalogue soit vide.
 function doodleFlagOf(p) { return (typeof FLAGS !== 'undefined' && FLAGS.length) ? FLAGS[(p.flag || 0) % FLAGS.length] : null; }
@@ -6292,6 +6300,7 @@ const D_TILES = [
   // 🎊 10.1.3 — CONFETTIS (demande utilisateur) : purement festive, elle ne fait RIEN d'autre.
   { k: 'confetti', icon:'🎊', name: 'Confettis',    txt: 'elle crache des confettis pendant 5 secondes, qui retombent ensuite — de la pure décoration' },
   { k: 'gravity',  icon:'🪐', name: 'Gravité',      txt: 'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
+  { k: 'recharge', icon:'🔋', name: 'Recharge',       txt: '+' + D_RECHARGE + ' balles à chaque passage, autant de fois que tu y reviens' },
   { k: 'flag',     icon:'🚩', name: 'Drapeau',        txt: 'elle hisse le drapeau d\'un pays au bout d\'un mât, et en change à chaque rebond — de la pure décoration' },
   { k: 'notif',    icon:'🔔', name: 'Notif',          txt: 'elle fait surgir une fausse notification de téléphone — ou la barre de volume qui descend. Aucun effet sur le jeu, et une seule fois par dalle' },
   { k: 'egg',      icon:'🪺', name: 'Œuf',            txt: 'pose-toi dessus avant ' + D_EGG_JUMPS + ' sauts ou il éclôt et lâche un monstre — et il change de place à chacun de tes sauts' },
@@ -7105,6 +7114,25 @@ function doodleTileSpent(ctx, p) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // 🔋 Recharge : pile posée sur la dalle, avec ses barres de charge qui se remplissent en
+  // boucle et son éclair — l'image dit à la fois « munitions » et « ça revient ».
+  if (p.type === 'recharge') {
+    doodleRR(ctx, x, y, w, h, 6, '#3f6f4a');
+    ctx.fillStyle = '#22432a'; ctx.fillRect(x, y + h - 4, w, 4);
+    const bx = x + 10, bw = w - 26, by = y + 3, bh = h - 9;
+    doodleRR(ctx, bx, by, bw, bh, 2.5, '#e8f0e2');                       // le corps de la pile
+    ctx.fillStyle = '#e8f0e2'; ctx.fillRect(bx + bw, by + bh * 0.28, 3, bh * 0.44);   // la borne +
+    const lvl = ((t * 0.03) % 1);                                        // la charge, qui monte en boucle
+    ctx.fillStyle = '#7ed957';
+    for (let i = 0; i < 3; i++) {
+      if (i / 3 > lvl) continue;
+      ctx.fillRect(bx + 2 + i * (bw - 4) / 3, by + 2, (bw - 4) / 3 - 1.5, bh - 4);
+    }
+    ctx.fillStyle = '#ffd54a';                                           // l'éclair
+    const ex = x + w - 9, ey = y + h / 2;
+    ctx.beginPath(); ctx.moveTo(ex + 1.5, ey - 5); ctx.lineTo(ex - 2.5, ey + 0.5); ctx.lineTo(ex + 0.2, ey + 0.5); ctx.lineTo(ex - 1.5, ey + 5); ctx.lineTo(ex + 2.8, ey - 1); ctx.lineTo(ex + 0.2, ey - 1); ctx.closePath(); ctx.fill();
+    return;
+  }
   // 🚩 Drapeau : mât planté sur la dalle et drapeau hissé AU-DESSUS, à partir de la grille de
   // pixels du catalogue. ⚠ Dessiné hors de la boîte de la dalle, comme l'antenne du 📡 Arc :
   // ramené à 62 × 14, un drapeau de 15 × 10 cases n'aurait plus été qu'un empilement de traits.
@@ -10334,6 +10362,12 @@ function GameDoodle() {
               s.blind = true;
               s.toast = { txt: '🌁 Les dalles disparaissent !', life: D_TOAST_LIFE };
               for (let k = 0; k < 14; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 4, vy: -0.5 - Math.random() * 1.5, life: 30, max: 30, sz: 4, c: k % 2 ? '#e6ebf0' : '#b9c2cc' });
+            }
+            // 🔋 Recharge : +5 balles, à chaque passage et sans plafond.
+            if (et === 'recharge') {
+              s.ammo += D_RECHARGE; setAmmo(s.ammo);
+              s.toast = { txt: `🔋 +${D_RECHARGE} balles — ${s.ammo} en réserve`, life: D_TOAST_LIFE };
+              for (let k = 0; k < 12; k++) { const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.2, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2 + (Math.random() - 0.5) * p.w * 0.6, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 24, max: 24, sz: 3, c: k % 2 ? '#7ed957' : '#ffd54a' }); }
             }
             // 🚩 Drapeau : on hisse le pays suivant et on le nomme. Aucun effet de jeu.
             if (et === 'flag') {
