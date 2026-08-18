@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.8.6';
+const APP_VERSION = '9.8.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5910,7 +5910,7 @@ const D_TILES = [
   { k: 'ghost',   icon:'👻', name: 'Fantôme',       txt: 's\'efface deux secondes après qu\'on a marché dessus' },
   { k: 'casino',  icon:'🃏', name: 'Casino',        txt: 'imite au hasard une autre tuile débloquée — chaque dalle a le sien, tiré à sa naissance' },
   { k: 'boomer',  icon:'🪃', name: 'Boomerang',     txt: 'se détache au rebond, décrit un arc, puis revient exactement à sa place' },
-  { k: 'tentacle', icon:'🦑', name: 'Tentacule',    txt: 'un tentacule surgit : une fois sur deux il te frappe, une fois sur deux il te propulse' },
+  { k: 'tentacle', icon:'🦑', name: 'Tentacule',    txt: 'un tentacule jaillit de la dalle et te projette avec une force et dans une direction imprévisibles' },
   { k: 'lift',    icon:'🛗', name: 'Ascenseur',     txt: 'monte et descend sans arrêt le long de sa ligne' },
   { k: 'rebound', icon:'🦘', name: 'Rebond',        txt: 'les 3 prochains sauts montent deux fois plus haut' },
   { k: 'invert',  icon:'🔃', name: 'Inversion',     txt: 'inverse la gauche et la droite pendant quelques secondes' },
@@ -5992,10 +5992,15 @@ const D_REBOUND_N = 3, D_REBOUND_MUL = Math.SQRT2;
 // et l'écart entre deux rangées — le seul garant qu'un saut reste faisable — ne voudrait
 // plus rien dire.
 const D_LIFT_V = 0.9, D_LIFT_SPAN = 40;
-// 🦑 Le coup passe par `doodleHurt`, donc par TOUTE la cascade de boucliers — un joueur
-// équipé n'y perd qu'une charge. Sans bouclier c'est mortel, exactement comme un monstre :
-// c'est le prix assumé d'une dalle qui, l'autre fois sur deux, propulse comme un trampoline.
-const D_TENT_LIFE = 34;
+// 🦑 9.8.7 — LE TENTACULE NE FRAPPE PLUS, IL PROJETTE (demande utilisateur) : il jaillit de la
+// dalle et lance le doodler dans une direction ET avec une force tirées au sort. Le pile ou face
+// mortel disparaît — la dalle n'est plus un piège, c'est une catapulte qu'on ne maîtrise pas.
+// ⚠ L'éventail reste sous ±π/2 : sin(angle) demeure donc négatif et la poussée a TOUJOURS une
+// composante vers le haut. Un tir vers le bas aurait été une mort déguisée, pas un imprévu.
+// ⚠ La composante latérale passe par `slip` (le mécanisme de la 🧊 glace) et non par `s.vx` :
+// avec le pilotage au doigt, `s.vx` est réécrit à la frame suivante et la projection latérale
+// n'aurait tout simplement pas eu lieu.
+const D_TENT_LIFE = 46, D_TENT_SPREAD = 2.5, D_TENT_V = [9, 18], D_TENT_SLIP = 22;
 // 🪃 L'arc est décrit en OFFSET par rapport à la position courante, jamais en coordonnées
 // absolues mémorisées : la caméra fait défiler les plateformes en permanence, et une position
 // de départ figée ramènerait la dalle à un endroit qui n'existe plus à l'écran.
@@ -6422,18 +6427,41 @@ function doodleTileDraw(ctx, p, t) {
   // 🦑 Tentacule : dalle sombre à ventouses. Quand il surgit, le tentacule ondule au-dessus —
   // vert s'il propulse, rouge s'il frappe. C'est APRÈS coup : la dalle ne prévient pas, c'est
   // tout son propos.
+  // 🦑 Tentacule : dalle-antre percée d'une gueule, d'où le bras JAILLIT dans la direction
+  // qu'il vient de donner au doodler, puis se rétracte. ⚠ Le bras est tracé segment par
+  // segment avec une épaisseur DÉCROISSANTE : un trait d'épaisseur constante ne se lisait pas
+  // comme un membre, seulement comme un câble.
   if (p.type === 'tentacle') {
     doodleRR(ctx, x, y, w, h, 6, '#4a2b52');
     ctx.fillStyle = '#2b1730'; ctx.fillRect(x, y + h - 4, w, 4);
     ctx.fillStyle = '#8a5a95';
-    [0.22, 0.5, 0.78].forEach(f => { ctx.beginPath(); ctx.arc(x + w * f, y + h / 2, 2.6, 0, Math.PI * 2); ctx.fill(); });
+    [0.18, 0.82].forEach(f => { ctx.beginPath(); ctx.arc(x + w * f, y + h / 2, 2.6, 0, Math.PI * 2); ctx.fill(); });
+    ctx.fillStyle = '#1a0e1f';                                                    // la gueule d'où sort le bras
+    ctx.beginPath(); ctx.ellipse(x + w / 2, y + 4.5, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
     if (p.tent > 0) {
-      const k = 1 - p.tent / D_TENT_LIFE, L = 30 * Math.sin(Math.min(1, k * 1.6) * Math.PI);
-      ctx.save();
-      ctx.strokeStyle = p.tentGood ? '#63c45a' : '#e2564a'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(x + w / 2, y + 2);
-      ctx.quadraticCurveTo(x + w / 2 + Math.sin(t * 0.3) * 12, y - L * 0.6, x + w / 2 + Math.sin(t * 0.3) * 7, y - L);
-      ctx.stroke();
+      const k = 1 - p.tent / D_TENT_LIFE;
+      const ext = Math.sin(Math.min(1, k * 1.35) * Math.PI);                      // sort vite, rentre doucement
+      const L = 62 * ext, ang = p.tentAng == null ? -Math.PI / 2 : p.tentAng;
+      const bx = x + w / 2, by = y + 3, segs = 10;
+      const nx = Math.cos(ang + Math.PI / 2), ny2 = Math.sin(ang + Math.PI / 2);
+      const pts = [];
+      for (let i = 0; i <= segs; i++) {
+        const f = i / segs, wob = Math.sin(t * 0.28 - f * 3.4) * 7 * f * ext;
+        pts.push([bx + Math.cos(ang) * L * f + nx * wob, by + Math.sin(ang) * L * f + ny2 * wob]);
+      }
+      ctx.save(); ctx.lineCap = 'round';
+      [['#2b1730', 1.4], ['#a05ab0', 1]].forEach(([col, mul]) => {
+        ctx.strokeStyle = col;
+        for (let i = 0; i < segs; i++) {
+          ctx.lineWidth = (9 - i * 0.72) * mul;
+          ctx.beginPath(); ctx.moveTo(pts[i][0], pts[i][1]); ctx.lineTo(pts[i + 1][0], pts[i + 1][1]); ctx.stroke();
+        }
+      });
+      ctx.fillStyle = '#f0c8f8';                                                  // ventouses, alignées d'un seul côté
+      for (let i = 1; i < segs; i += 2) {
+        const r = (7 - i * 0.5) * 0.42;
+        ctx.beginPath(); ctx.arc(pts[i][0] + nx * r * 1.6, pts[i][1] + ny2 * r * 1.6, Math.max(1, r), 0, Math.PI * 2); ctx.fill();
+      }
       ctx.restore();
     }
     return;
@@ -8046,14 +8074,19 @@ function GameDoodle() {
             if (et === 'rebound') { s.rebLeft = D_REBOUND_N; s.toast = { txt: `🦘 ${D_REBOUND_N} sauts deux fois plus hauts`, life: D_TOAST_LIFE }; }
             if (et === 'tentacle' && !p.tent) {
               p.tent = D_TENT_LIFE;
-              p.tentGood = Math.random() < 0.5;
-              const col = p.tentGood ? '#63c45a' : '#e2564a';
-              for (let k = 0; k < 14; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1.5, life: 24, max: 24, sz: 3, c: k % 2 ? col : '#4a2b52' }); }
-              if (p.tentGood) {
-                s.vy = D_TRAMPO; s.inv = Math.max(s.inv, D_INV); s.lastPlat = null; s.bounceStreak = 0;
-                s.toast = { txt: '🦑 Le tentacule te propulse !', life: D_TOAST_LIFE };
-              } else if (!doodleHurt(s)) { die(); return; }
-              else s.toast = { txt: '🦑 Le tentacule te frappe !', life: D_TOAST_LIFE };
+              const ang = -Math.PI / 2 + (Math.random() - 0.5) * D_TENT_SPREAD;
+              const v = D_TENT_V[0] + Math.random() * (D_TENT_V[1] - D_TENT_V[0]);
+              p.tentAng = ang;                                                  // le bras pointera là où il vient de lancer
+              // ⚠ Plancher à D_JUMP : sur un angle très couché, sin(angle) rabotait la poussée
+              // sous un saut ordinaire — la dalle devenait strictement moins bonne qu'une verte,
+              // alors qu'elle doit être imprévisible, pas punitive. Le hasard porte sur le CÔTÉ.
+              s.vy = Math.min(D_JUMP, Math.sin(ang) * v);
+              s.slipVx = Math.cos(ang) * v * 0.55; s.slip = D_TENT_SLIP;        // ⚠ 0,55 : à pleine vitesse la traversée d'écran était instantanée et illisible
+              s.inv = Math.max(s.inv, D_INV);                                   // on ne maîtrise plus rien pendant la projection : on ne doit pas y mourir bêtement
+              s.lastPlat = null; s.bounceStreak = 0;
+              for (let k = 0; k < 16; k++) { const a = Math.random() * Math.PI * 2, vp = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * vp, vy: Math.sin(a) * vp - 1.5, life: 24, max: 24, sz: 3, c: k % 2 ? '#a05ab0' : '#4a2b52' }); }
+              const cote = Math.cos(ang) > 0.25 ? 'à droite' : Math.cos(ang) < -0.25 ? 'à gauche' : 'droit devant';
+              s.toast = { txt: `🦑 Le tentacule te projette ${cote} !`, life: D_TOAST_LIFE };
             }
             if (et === 'boomer' && !p.boo) {
               const dir = (p.x + p.w / 2 < W / 2) ? 1 : -1;
