@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.9.6';
+const APP_VERSION = '9.9.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6227,6 +6227,152 @@ function doodleStrike(s, m, W) {
   doodleKillMonster(s, m);
   return false;
 }
+// ════════ 💀 9.9.7 — LA CASE CAUCHEMARDESQUE (demande utilisateur) ════════
+// Une dalle, UNE SEULE FOIS par partie et au taux de la 🍀 case chance, qui fait surgir un
+// monstre horrible. Le combat suspend le jeu de plateforme : les dalles disparaissent, un
+// plancher apparaît sous le doodler (il ne peut plus tomber), il NE SAUTE PLUS et ne fait que
+// se déplacer à gauche et à droite. Cinq points de vie, trois monstres possibles, trois
+// attaques chacun. Terrassé, il lâche trois trésors et une tuile neuve ; une fois les trésors
+// ramassés, les dalles reviennent et la montée reprend.
+// ⚠ Le TIR EST GRATUIT pendant le combat : à sec de munitions, la partie se serait bloquée
+// pour de bon dans une arène sans issue. C'est la seule garantie que le combat soit gagnable.
+// ⚠ Pas avant D_BOSS_FROM points : le combat suspend tout le jeu de plateforme, le déclencher
+// dans les vingt premières secondes aurait remplacé l'apprentissage du jeu par une arène.
+const D_BOSS_FROM = 400;
+const D_BOSS_HP = 5;
+const D_BOSS_LOOT = 3;
+const D_BOSS_ATK_GAP = 88;     // frames entre deux attaques
+const D_BOSS_TEL = 42;         // frames d'annonce AVANT que l'attaque ne parte
+const D_BOSS_W = 108, D_BOSS_H = 74, D_BOSS_Y = 92;
+const D_BOSS_SHOT_V = 3.1, D_BOSS_SHOT_R = 7;
+const D_BOSS_SPIKE_UP = 34, D_BOSS_SPIKE_LIFE = 78, D_BOSS_SPIKE_W = 26;
+const D_BOSS_BEAM_V = 1.35, D_BOSS_BEAM_W = 22;
+// ⚠ Les trois monstres partagent le MÊME vocabulaire d'attaques (`rain`, `spikes`, `beam`,
+// `volley`) : ce sont leur ORDRE, leur cadence et leur réglage qui les distinguent. Trois jeux
+// d'attaques entièrement séparés auraient triplé la surface de bugs pour le même résultat à
+// l'écran. ⚠ Toutes se parent EN SE DÉPLAÇANT LATÉRALEMENT, jamais en sautant : le doodler
+// n'en a plus le droit pendant le combat.
+const D_BOSS_KINDS = [
+  { k:'ver',    name:'Le Ver Blême',      atk:['rain', 'spikes', 'volley'], n:[7, 3, 5],  body:'#cfd6b8', dark:'#7c8a5c', eye:'#3a2a10' },
+  { k:'gueule', name:'La Gueule',         atk:['volley', 'beam', 'rain'],   n:[3, 1, 4],  body:'#b0424a', dark:'#5f1b21', eye:'#ffd54a' },
+  { k:'oeil',   name:"L'Œil Sans Fond",   atk:['beam', 'spikes', 'volley'], n:[2, 5, 7],  body:'#6a4bb0', dark:'#33205c', eye:'#eafcff' },
+];
+function doodleBossKind(s) { return D_BOSS_KINDS.find(b => b.k === (s.boss && s.boss.kind)) || D_BOSS_KINDS[0]; }
+// Ouverture du combat. ⚠ Tous les états « en cours » du doodler sont coupés net (vol, liane,
+// accordéon, glissade, tapis) : entrer dans l'arène en plein jetpack l'aurait fait traverser
+// le plancher, et une liane accrochée à une dalle devenue invisible n'aurait mené nulle part.
+function doodleBossStart(s, W, H) {
+  const kind = D_BOSS_KINDS[Math.floor(Math.random() * D_BOSS_KINDS.length)];
+  s.bossDone = true;
+  s.bossHide = true;
+  s.bossFloorY = Math.max(H * 0.55, Math.min(H - 52, s.py + D_FEET));
+  s.boss = { kind: kind.k, hp: D_BOSS_HP, x: W / 2, vx: 1.15, timer: D_BOSS_ATK_GAP, seq: 0, cur: null, tel: 0, hurt: 0 };
+  s.bossShots = []; s.bossSpikes = []; s.bossBeam = null; s.bossLoot = 0;
+  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
+  s.py = s.bossFloorY - D_FEET; s.vy = 0;
+  s.lastPlat = null; s.bounceStreak = 0;
+  s.banner = { txt: `💀 ${kind.name}`, sub: 'plus de saut — déplace-toi et tire · 5 points de vie', life: D_BANNER_LIFE * 1.6 };
+}
+// Déclenche l'attaque `k` du boss. Chaque forme est un simple semis d'objets : c'est la boucle
+// qui les fait vivre, ce qui garde le déclenchement lisible.
+function doodleBossFire(s, W, H, k, n) {
+  const b = s.boss;
+  if (k === 'rain') {
+    for (let i = 0; i < n; i++) s.bossShots.push({ x: 16 + Math.random() * (W - 32), y: b.y0 + 30, vx: 0, vy: D_BOSS_SHOT_V });
+  } else if (k === 'volley') {
+    // Visée FIGÉE sur la position du doodler au départ : des projectiles qui se recorrigeraient
+    // ne seraient pas esquivables, et l'arène deviendrait une mort à retardement.
+    const dx = s.px - b.x, dy = (s.bossFloorY - D_FEET) - b.y0, d = Math.hypot(dx, dy) || 1;
+    for (let i = 0; i < n; i++) {
+      const a = Math.atan2(dy, dx) + (i - (n - 1) / 2) * 0.17;
+      s.bossShots.push({ x: b.x, y: b.y0 + 26, vx: Math.cos(a) * D_BOSS_SHOT_V * 1.25, vy: Math.sin(a) * D_BOSS_SHOT_V * 1.25 });
+    }
+  } else if (k === 'spikes') {
+    // Fentes RÉPARTIES sur la largeur et tirées sans doublon : il doit toujours rester un
+    // passage libre, sinon l'attaque ne s'esquive pas et ne se pare qu'avec un bouclier.
+    const slots = Math.max(n + 2, 6), used = [];
+    for (let i = 0; i < n; i++) {
+      let sl; do { sl = Math.floor(Math.random() * slots); } while (used.indexOf(sl) >= 0);
+      used.push(sl);
+      s.bossSpikes.push({ x: (sl + 0.5) * (W / slots), life: D_BOSS_SPIKE_LIFE, max: D_BOSS_SPIKE_LIFE });
+    }
+  } else if (k === 'beam') {
+    // Le rayon balaie depuis le bord OPPOSÉ au doodler : on a toujours le temps de le voir venir.
+    const fromLeft = s.px > W / 2;
+    s.bossBeam = { x: fromLeft ? -D_BOSS_BEAM_W : W + D_BOSS_BEAM_W, vx: (fromLeft ? 1 : -1) * D_BOSS_BEAM_V * (n > 1 ? 1.5 : 1) };
+  }
+}
+// Un pas de combat. Renvoie false si le doodler y laisse la vie — l'appelant déclenche la mort.
+function doodleBossStep(s, W, H, sf) {
+  const b = s.boss, kind = doodleBossKind(s);
+  b.y0 = D_BOSS_Y;
+  b.x += b.vx * sf;
+  if (b.x < D_BOSS_W / 2 + 6) { b.x = D_BOSS_W / 2 + 6; b.vx *= -1; }
+  else if (b.x > W - D_BOSS_W / 2 - 6) { b.x = W - D_BOSS_W / 2 - 6; b.vx *= -1; }
+  if (b.hurt > 0) b.hurt -= sf;
+  // — enchaînement des attaques : annonce, puis tir —
+  if (b.tel > 0) {
+    b.tel -= sf;
+    if (b.tel <= 0) {
+      const i = b.seq % kind.atk.length;
+      doodleBossFire(s, W, H, kind.atk[i], kind.n[i]);
+      b.seq++;
+      b.timer = D_BOSS_ATK_GAP;
+    }
+  } else {
+    b.timer -= sf;
+    if (b.timer <= 0) { b.tel = D_BOSS_TEL; b.cur = kind.atk[b.seq % kind.atk.length]; }
+  }
+  // — projectiles —
+  const hit = (x, y, r) => Math.abs(x - s.px) < r + 10 && Math.abs(y - s.py) < r + 15;
+  for (const sh of s.bossShots) { sh.x += sh.vx * sf; sh.y += sh.vy * sf; }
+  for (const sh of s.bossShots) {
+    if (sh.spent || !hit(sh.x, sh.y, D_BOSS_SHOT_R)) continue;
+    sh.spent = true;
+    if (!doodleHurt(s)) return false;
+  }
+  s.bossShots = s.bossShots.filter(sh => !sh.spent && sh.y < H + 20 && sh.x > -20 && sh.x < W + 20);
+  // — piques du plancher : elles sortent, restent, puis rentrent —
+  for (const sp of s.bossSpikes) {
+    sp.life -= sf;
+    const up = Math.sin(Math.min(1, (1 - sp.life / sp.max) * 1.25) * Math.PI);
+    sp.up = up;
+    if (up > 0.35 && Math.abs(s.px - sp.x) < D_BOSS_SPIKE_W / 2 + 8 && !sp.spent) {
+      sp.spent = true;
+      if (!doodleHurt(s)) return false;
+    }
+  }
+  s.bossSpikes = s.bossSpikes.filter(sp => sp.life > 0);
+  // — rayon balayant —
+  if (s.bossBeam) {
+    s.bossBeam.x += s.bossBeam.vx * sf;
+    if (Math.abs(s.bossBeam.x - s.px) < D_BOSS_BEAM_W / 2 + 8) {
+      if (!s.bossBeam.spent) { s.bossBeam.spent = true; if (!doodleHurt(s)) return false; }
+    } else s.bossBeam.spent = false;
+    if (s.bossBeam.x < -D_BOSS_BEAM_W * 2 || s.bossBeam.x > W + D_BOSS_BEAM_W * 2) s.bossBeam = null;
+  }
+  return true;
+}
+// Mise à mort du boss : trois trésors sur le plancher et une tuile neuve. ⚠ Le déblocage passe
+// par un simple toast et non par l'écran de déblocage habituel : geler la partie en pleine
+// arène, entre les coffres à ramasser, aurait cassé le rythme du combat.
+function doodleBossKill(s, W) {
+  const kind = doodleBossKind(s);
+  for (let k = 0; k < 40; k++) { const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 5; s.parts.push({ x: s.boss.x, y: D_BOSS_Y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 34, max: 34, sz: 4, c: k % 2 ? kind.body : kind.dark }); }
+  s.boss = null; s.bossShots = []; s.bossSpikes = []; s.bossBeam = null;
+  s.bossLoot = D_BOSS_LOOT;
+  for (let i = 0; i < D_BOSS_LOOT; i++) {
+    s.chests.push({ x: (i + 0.5) * (W / D_BOSS_LOOT) - D_CHEST_W / 2, y: s.bossFloorY - D_CHEST_H, w: D_CHEST_W, h: D_CHEST_H, vy: 0, landed: true, taken: false, plat: null, boss: true });
+  }
+  const t = doodleTileUnlock(s);
+  s.banner = { txt: `💀 ${kind.name} terrassé !`, sub: t ? `${D_BOSS_LOOT} trésors + ${t.icon} ${t.name}` : `${D_BOSS_LOOT} trésors`, life: D_BANNER_LIFE * 1.6 };
+}
+// Plancher de l'arène : de VRAIES dalles dessinées côte à côte — « seulement des tuiles sous
+// doodle », et elles disent d'elles-mêmes qu'on ne peut pas tomber.
+function doodleBossFloor(ctx, s, W) {
+  const y = s.bossFloorY;
+  for (let x = -6; x < W + 6; x += D_PLAT_W + 2) doodlePlatform(ctx, { x, y, w: D_PLAT_W, h: D_PLAT_H, type: 'green' }, s.tw);
+}
 // ⚠ 9.3.7 — RÔDEUR (demande utilisateur) : la seule créature qui se déplace sur LES DEUX AXES.
 // Elle n'apparaît qu'à partir de 1000 points et reste très rare. Son va-et-vient vertical est
 // borné à D_ROAM_SPAN autour de sa ligne d'apparition : libre, elle finirait par sortir de
@@ -6318,7 +6464,7 @@ function doodleMakeMob(s, ny) {
   return { x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.72 : 0 };
 }
 // « max 1 de suite » : jamais une tuile spéciale juste après une autre (ni après une cassante).
-const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'chest', 'rrfake'], [...D_BIOME_TILES]));
+const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'chest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
 // 🎲 Les leurres de la roulette russe : dessinés comme une dalle, mais RIEN ne s'y pose —
 // ni le doodler, ni un coffre qui tombe, ni une météorite. Un seul prédicat pour les trois,
 // sinon un coffre finirait par flotter en l'air sur une plateforme qui n'existe pas.
@@ -6756,6 +6902,26 @@ function doodleTileDraw(ctx, p, t) {
     ctx.stroke();
     return;
   }
+  // 💀 Case cauchemardesque : dalle noire fendue d'où deux yeux rouges guettent, entourée
+  // d'une aura qui bat. Elle doit se voir de loin et faire hésiter : c'est un piège assumé.
+  if (p.type === 'nightmare') {
+    ctx.save();
+    ctx.globalAlpha = 0.28 + Math.sin(t * 0.12) * 0.2;
+    doodleRR(ctx, x - 5, y - 5, w + 10, h + 10, 9, '#e2564a');
+    ctx.restore();
+    doodleRR(ctx, x, y, w, h, 6, '#191019');
+    ctx.fillStyle = '#0b060b'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#8a1f2a'; ctx.lineWidth = 1.4;                          // fissures
+    [0.2, 0.46, 0.74].forEach(f => { ctx.beginPath(); ctx.moveTo(x + w * f, y + 1); ctx.lineTo(x + w * f + 4, y + h / 2); ctx.lineTo(x + w * f - 2, y + h - 2); ctx.stroke(); });
+    [-9, 9].forEach(dx => {                                                     // les yeux
+      ctx.save(); ctx.globalAlpha = p.used ? 0.5 : 0.6 + Math.sin(t * 0.17) * 0.4;
+      ctx.fillStyle = p.used ? '#5a3a3a' : '#ff3b30';
+      ctx.beginPath(); ctx.ellipse(x + w / 2 + dx, y + h / 2, 3.4, 2.4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    });
+    if (p.used) doodleTileSpent(ctx, p);
+    return;
+  }
   // 🕯️ Esprits : dalle d'un violet sourd sur laquelle trois petites âmes montent en flottant.
   if (p.type === 'spirit') {
     doodleRR(ctx, x, y, w, h, 6, '#4a3d6b');
@@ -6997,7 +7163,7 @@ function doodlePlatform(ctx, p, t) {
   if (p.type === 'rainbow') return doodleRainbowPlat(ctx, p);
   if (p.type === 'perk' || p.type === 'lucky') return doodleCase(ctx, p, t || 0);
   if (D_BIOME_TILES.has(p.type)) return doodleBiomeTile(ctx, p, t || 0);
-  if (p.type === 'chest' || p.type === 'rrfake' || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre ni les leurres 🎲 ne sont dans D_TILES
+  if (p.type === 'chest' || p.type === 'rrfake' || p.type === 'nightmare' || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni les leurres 🎲, ni la 💀 cauchemardesque ne sont dans D_TILES
   const c = cols[p.type] || cols.green;
   doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
   ctx.fillStyle = c[1]; ctx.fillRect(p.x + 3, p.y + p.h - 4, p.w - 6, 3);
@@ -7415,13 +7581,122 @@ function doodleShieldAura(ctx, s) {
   });
   ctx.restore();
 }
+// Les trois monstres. Même grammaire que les créatures du jeu (aplats vifs, gros contour
+// sombre) mais à une tout autre échelle, et chacun avec sa silhouette : un ver segmenté, une
+// gueule de mâchoires, un œil unique. `tel` = 0..1, l'annonce de l'attaque en cours : le
+// monstre se gonfle et rougeoie juste avant de frapper, c'est le seul avertissement.
+const D_BOSS_DRAW = {
+  ver(ctx, k, cx, cy, t, tel) {
+    const seg = 5;
+    for (let i = seg - 1; i >= 0; i--) {                                  // anneaux du corps
+      const f = i / (seg - 1), sx = cx + Math.sin(t * 0.05 + i * 0.8) * 16 * f;
+      doodleBlob(ctx, sx, cy + 8 + i * 9, 30 - i * 4.5, 15 - i * 2, i % 2 ? k.dark : k.body);
+    }
+    doodleBlob(ctx, cx, cy - 6, 34, 26, k.body);
+    ctx.fillStyle = k.dark;
+    for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.ellipse(cx - 22 + i * 11, cy - 22, 3.4, 6, 0, 0, Math.PI * 2); ctx.fill(); }
+    doodleEye(ctx, cx - 12, cy - 6, 8, 0);
+    doodleEye(ctx, cx + 12, cy - 6, 8, 0);
+    ctx.fillStyle = '#2b2b33'; ctx.beginPath(); ctx.ellipse(cx, cy + 12, 13 + tel * 6, 7 + tel * 4, 0, 0, Math.PI * 2); ctx.fill();
+    doodleFangs(ctx, cx, cy + 6, 22, 5);
+  },
+  gueule(ctx, k, cx, cy, t, tel) {
+    const gap = 12 + tel * 16 + Math.sin(t * 0.06) * 3;                    // les mâchoires s'ouvrent avant de cracher
+    ctx.fillStyle = '#1a0a0c';                                             // gorge
+    ctx.beginPath(); ctx.ellipse(cx, cy, 40, 30, 0, 0, Math.PI * 2); ctx.fill();
+    [-1, 1].forEach(sy => {                                                // mâchoires
+      ctx.fillStyle = sy < 0 ? k.body : k.dark; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2.6;
+      ctx.beginPath();
+      ctx.moveTo(cx - 46, cy + sy * gap);
+      ctx.quadraticCurveTo(cx, cy + sy * (gap + 34), cx + 46, cy + sy * gap);
+      ctx.quadraticCurveTo(cx, cy + sy * (gap + 12), cx - 46, cy + sy * gap);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#f2f4f7'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.4;
+      for (let i = 0; i < 7; i++) {                                        // crocs
+        const tx = cx - 36 + i * 12, ty = cy + sy * (gap + 2);
+        ctx.beginPath(); ctx.moveTo(tx - 5, ty); ctx.lineTo(tx, ty + sy * 13); ctx.lineTo(tx + 5, ty); ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+    });
+    ctx.fillStyle = k.eye;                                                 // braises au fond de la gorge
+    for (let i = 0; i < 3; i++) { ctx.globalAlpha = 0.4 + Math.sin(t * 0.12 + i) * 0.4; ctx.beginPath(); ctx.arc(cx - 16 + i * 16, cy, 4 + tel * 3, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  },
+  oeil(ctx, k, cx, cy, t, tel) {
+    for (let i = 0; i < 8; i++) {                                          // tentacules d'ancrage
+      const a = Math.PI + i / 7 * Math.PI, r = 40 + Math.sin(t * 0.07 + i) * 5;
+      ctx.strokeStyle = k.dark; ctx.lineWidth = 5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.quadraticCurveTo(cx + Math.cos(a) * r * 0.7, cy + Math.sin(a) * r * 0.7 + 12, cx + Math.cos(a) * r, cy + Math.sin(a) * r + 22); ctx.stroke();
+    }
+    doodleBlob(ctx, cx, cy, 40, 34, k.body);
+    ctx.fillStyle = k.eye; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.ellipse(cx, cy, 26 - tel * 4, 22 - tel * 3, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#8a1f2a'; ctx.beginPath(); ctx.ellipse(cx, cy, 14 + tel * 6, 12 + tel * 5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#15151c'; ctx.beginPath(); ctx.ellipse(cx, cy, 6 + tel * 4, 11 - tel * 2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#8a1f2a'; ctx.lineWidth = 1.6;                      // veines
+    for (let i = 0; i < 5; i++) {
+      const a = i / 5 * Math.PI * 2 + t * 0.01;
+      ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * 26, cy + Math.sin(a) * 22); ctx.lineTo(cx + Math.cos(a) * 38, cy + Math.sin(a) * 32); ctx.stroke();
+    }
+  },
+};
+// Le boss, ses attaques et sa barre de vie. ⚠ Tout est dessiné APRÈS le plancher et le
+// doodler : dans une arène, ce qui tue doit toujours passer devant ce qui décore.
+function doodleBossDraw(ctx, s, W, H) {
+  // Piques du plancher : elles sortent progressivement, un liseré rouge annonce la sortie.
+  for (const sp of s.bossSpikes || []) {
+    const up = (sp.up || 0) * D_BOSS_SPIKE_UP;
+    ctx.fillStyle = '#f2f4f7'; ctx.strokeStyle = '#8e2b2b'; ctx.lineWidth = 1.6;
+    for (let i = -1; i <= 1; i++) {
+      const bx = sp.x + i * 9;
+      ctx.beginPath(); ctx.moveTo(bx - 5, s.bossFloorY); ctx.lineTo(bx, s.bossFloorY - up); ctx.lineTo(bx + 5, s.bossFloorY); ctx.closePath(); ctx.fill(); ctx.stroke();
+    }
+  }
+  // Rayon balayant : colonne pleine hauteur, cœur clair et halo.
+  if (s.bossBeam) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,90,90,0.28)'; ctx.fillRect(s.bossBeam.x - D_BOSS_BEAM_W, 0, D_BOSS_BEAM_W * 2, H);
+    ctx.fillStyle = 'rgba(255,220,220,0.85)'; ctx.fillRect(s.bossBeam.x - D_BOSS_BEAM_W / 4, 0, D_BOSS_BEAM_W / 2, H);
+    ctx.restore();
+  }
+  for (const sh of s.bossShots || []) {
+    ctx.fillStyle = 'rgba(226,86,74,0.35)'; ctx.beginPath(); ctx.arc(sh.x, sh.y, D_BOSS_SHOT_R * 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e2564a'; ctx.strokeStyle = '#5f1b21'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(sh.x, sh.y, D_BOSS_SHOT_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffd54a'; ctx.beginPath(); ctx.arc(sh.x - 1.5, sh.y - 1.5, D_BOSS_SHOT_R * 0.36, 0, Math.PI * 2); ctx.fill();
+  }
+  const b = s.boss;
+  if (!b) return;
+  const kind = doodleBossKind(s), tel = b.tel > 0 ? 1 - b.tel / D_BOSS_TEL : 0;
+  ctx.save();
+  if (b.hurt > 0 && Math.floor(b.hurt / 3) % 2) ctx.globalAlpha = 0.45;   // clignotement de dégât
+  const draw = D_BOSS_DRAW[b.kind] || D_BOSS_DRAW.ver;
+  draw(ctx, kind, b.x, D_BOSS_Y, s.t, tel);
+  ctx.restore();
+  // Barre de vie : elle est le seul repère de progression du combat.
+  const bw = W - 40;
+  doodleRR(ctx, 20, 12, bw, 12, 6, 'rgba(30,32,40,0.72)');
+  doodleRR(ctx, 22, 14, (bw - 4) * Math.max(0, b.hp) / D_BOSS_HP, 8, 4, b.hp > 2 ? '#e2564a' : '#ffd54a');
+  ctx.save(); ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff'; ctx.fillText(`💀 ${kind.name} · ${Math.max(0, b.hp)} / ${D_BOSS_HP}`, W / 2, 18.5);
+  ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
 function doodleDraw(ctx, s, W, H) {
   doodleBg(ctx, W, H, s.climb, doodleBiomeCols(s, s.score), s);   // couleurs ET décor fondus vers le biome suivant
-  s.holes.forEach(h => doodleHole(ctx, h, s.t));
-  s.platforms.forEach(p => doodlePlatform(ctx, p, s.tw));   // ⚠ horloge du MONDE : le dessin d'une tuile à cycle doit coïncider à la frame près avec sa fenêtre mortelle
-  s.items.forEach(it => doodleItem(ctx, it, s.t));
+  // 💀 Arène : le monde ordinaire est MASQUÉ (dalles, trous, monstres, bonus, météorites) et
+  // remplacé par le seul plancher. Les coffres, eux, restent visibles : ce sont les trésors du combat.
+  const arena = !!s.bossHide;
+  if (arena) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(20,8,16,0.55)'; ctx.fillRect(0, 0, W, H);   // le cauchemar assombrit tout
+    ctx.restore();
+    doodleBossFloor(ctx, s, W);
+  } else {
+    s.holes.forEach(h => doodleHole(ctx, h, s.t));
+    s.platforms.forEach(p => doodlePlatform(ctx, p, s.tw));   // ⚠ horloge du MONDE : le dessin d'une tuile à cycle doit coïncider à la frame près avec sa fenêtre mortelle
+    s.items.forEach(it => doodleItem(ctx, it, s.t));
+    s.meteors.forEach(mt => doodleMeteorDraw(ctx, mt));
+  }
   s.chests.forEach(c => doodleChest(ctx, c, s.t));
-  s.meteors.forEach(mt => doodleMeteorDraw(ctx, mt));
   // 🌋 Gouttes de lave : goutte allongée dans le sens de la chute, cœur clair et halo — à
   // 5 px de rayon, un simple point rouge se serait perdu dans le décor du Volcan.
   if (s.drops) s.drops.forEach(dr => {
@@ -7433,7 +7708,7 @@ function doodleDraw(ctx, s, W, H) {
     ctx.fillStyle = '#ffd54a'; ctx.beginPath(); ctx.ellipse(0, -D_LAVA_R * st * 0.25, D_LAVA_R * 0.42, D_LAVA_R * st * 0.42, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   });
-  s.monsters.forEach(m => doodleMonster(ctx, m, s.t));
+  if (!arena) s.monsters.forEach(m => doodleMonster(ctx, m, s.t));
   s.parts.forEach(pt => { ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c; ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz); });
   ctx.globalAlpha = 1;
   ctx.fillStyle = '#3a7d1e';
@@ -7603,6 +7878,7 @@ function doodleDraw(ctx, s, W, H) {
     gr.addColorStop(0, 'rgba(40,44,54,0)'); gr.addColorStop(1, 'rgba(40,44,54,0.82)');
     ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
   }
+  if (arena) doodleBossDraw(ctx, s, W, H);   // 💀 ce qui tue passe devant ce qui décore
   doodlePerkHud(ctx, s, W); doodleToast(ctx, s, W); doodleBanner(ctx, s, W, H);
 }
 function doodleSpawnRow(s, ny, risky) {
@@ -7664,6 +7940,12 @@ function doodleSpawnRow(s, ny, risky) {
   else if (s.slotPending) { type = 'slot'; s.slotPending = false; }   // 🎰 due, comme la case bonus : jamais repoussée de rangée en rangée par la malchance
   else if (!doodleClassic(s) && s.luckyLeft > 0 && s.score >= s.luckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'lucky'; s.luckyLeft--; s.luckyAt = s.score + D_LUCKY_GAP;
+  }
+  // 💀 Case cauchemardesque : MÊME taux que la case chance, mais UNE SEULE fois par partie —
+  // `bossDone` est posé dès l'ouverture du combat, pas à sa fin, sinon une seconde dalle
+  // pourrait naître pendant qu'on se bat.
+  else if (!doodleClassic(s) && !s.bossDone && s.score >= D_BOSS_FROM && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
+    type = 'nightmare';
   }
   // ⚠ 9.2.8 — La tuile du biome ne remplace qu'une plateforme ORDINAIRE : elle ne doit voler la
   // rangée ni à une case (due), ni à une multicolore, ni à une tuile débloquée. « Peu courante »
@@ -7774,7 +8056,8 @@ function doodleRules() {
       { i:'🌈', n:'Multicolore',  d:`${doodlePct(D_RAINBOW_P * (1 + D_MORE_RAINBOW * D_EARLY_MUL))} des rangées avant 1000 points, ${doodlePct(D_RAINBOW_P_HI)} au-delà. Jamais deux en vie à la fois.` },
       { i:'🎁', n:'Tuile coffre', d:'même taux que la multicolore, mais disponible dès 0 point : elle ne passe pas par les paliers de 1000.' },
       { i:'❓', n:'Case bonus',   d:`garantie à chaque palier de ${D_PERK_STEP} points — ce n'est pas un tirage.` },
-      { i:'🍀', n:'Case chance',  d:`${doodlePct(D_LUCKY_P)} des rangées éligibles, ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points. Environ 4 parties sur 10 n'en voient aucune.` },
+      { i:'🍀', n:'Case chance',  d:`${doodlePct(D_LUCKY_P)} des rangées éligibles, ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
+      { i:'💀', n:'Case cauchemardesque', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}), à partir de ${D_BOSS_FROM} points, UNE SEULE fois par partie.` },
       { i:'🔓', n:'Tuiles débloquées', d:`une nouvelle tous les ${D_TILE_STEP} points ; elles se partagent ensuite ${doodlePct(D_TILE_P)} des rangées.` },
       { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_P)} des rangées, partagées entre TOUTES les tuiles de biome déjà traversées — elles ne disparaissent plus au palier suivant.` },
       { i:'👾', n:'Monstres',     d:`${doodlePct(0.02 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct(0.12 * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
@@ -7794,6 +8077,7 @@ function doodleRules() {
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
       { i:'🍀', n:'Case chance',  d:'très rare (3 par partie au maximum, jamais deux à moins de 500 points). Elle donne un bonus permanent… ou l\'un des malus.' },
+      { i:'💀', n:'Case cauchemardesque', d:`une seule par partie. Elle ouvre un combat : les dalles disparaissent, un plancher apparaît, tu ne sautes plus et tu ne fais que te déplacer et tirer — le tir y est gratuit. ${D_BOSS_HP} points de vie, l'un des ${D_BOSS_KINDS.length} monstres (${D_BOSS_KINDS.map(b => b.name).join(', ')}) et ses ${D_BOSS_KINDS[0].atk.length} attaques. Terrassé : ${D_BOSS_LOOT} trésors et une tuile neuve ; une fois les trésors ramassés, les dalles reviennent.` },
     ] },
     { t:'Bonus permanents', c:'#7b4bd0', rows: D_PERKS.map(p => ({ i:p.icon, n:p.label, d:p.txt + ' — cumulable.' })) },
     { t:'Malus de la case chance', c:'#e2564a', rows: D_MALUS.map(m => ({ i:m.icon, n:m.label, d:m.txt + (['jam','ambush'].indexOf(m.k) < 0 ? ' — pendant environ 6 s.' : '.') })) },
@@ -7912,7 +8196,7 @@ function GameDoodle() {
     let y = H - 60;
     for (let i = 0; i < 9; i++) { y -= 52 + Math.random() * 22; plats.push({ x: 6 + Math.random() * (W - D_PLAT_W - 12), y, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false }); }
     g.current = { px: W / 2, py: H - 92, vx: 0, vy: D_JUMP, face: 1, platforms: plats, monsters: [], bullets: [], items: [], holes: [], parts: [], chests: [], meteors: [],
-      clones: [], stars: [], drops: [], spirits: [], climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
+      clones: [], stars: [], drops: [], spirits: [], boss: null, bossHide: false, bossDone: false, bossFloorY: 0, bossShots: [], bossSpikes: [], bossBeam: null, bossLoot: 0, climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0, lastMissile: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
@@ -7972,10 +8256,12 @@ function GameDoodle() {
     const s = g.current; if (!s || s.t - s.lastShot < doodleShotGap(s)) return;
     // ⚠ Le message d'alerte est posé AVANT le throttle de cadence ? Non : après, sinon un appui
     // maintenu le réafficherait à chaque frame. Ici on n'y arrive qu'une fois la cadence prête.
-    if (!doodleClassic(s) && s.ammo <= 0) { s.toast = { txt: '📦 Plus de munitions — saute sur un monstre pour un coffre', life: D_TOAST_LIFE }; return; }
+    if (!doodleClassic(s) && !s.bossHide && s.ammo <= 0) { s.toast = { txt: '📦 Plus de munitions — saute sur un monstre pour un coffre', life: D_TOAST_LIFE }; return; }
     // ⚠ 9.2.9 — UNE munition par TIR, quel que soit le nombre de balles : l'Éventail et le
     // bonus 🔫 Canon ajoutent des balles GRATUITES. On paie le geste, pas le plomb.
-    s.lastShot = s.t; if (!doodleClassic(s)) s.ammo--; s.faceTimer = 12;   // 🎮 Classique : tir illimité, aucun coffre ne pourrait recharger
+    // 💀 Dans l'arène le tir est GRATUIT : à sec de munitions, le combat aurait été
+    // impossible à finir et la partie bloquée pour de bon dans une arène sans issue.
+    s.lastShot = s.t; if (!doodleClassic(s) && !s.bossHide) s.ammo--; s.faceTimer = 12;   // 🎮 Classique : tir illimité, aucun coffre ne pourrait recharger
     s.bullets.push(doodleBullet(s, s.px, s.py - 16, 0, -D_BULLET_V));
     // 🌟 Éventail : les balles supplémentaires s'écartent symétriquement de part et d'autre.
     for (let i = 1; i <= doodleWpnOf(s, 'spread'); i++) {
@@ -7993,9 +8279,9 @@ function GameDoodle() {
   const shootSpread = () => {
     if (phaseRef.current !== 'playing') return;
     const s = g.current; if (!s) return;
-    if (!doodleClassic(s) && s.ammo < 2) return;   // ⚠ pas de demi-éventail : les deux diagonales partent ensemble ou pas du tout
+    if (!doodleClassic(s) && !s.bossHide && s.ammo < 2) return;   // ⚠ pas de demi-éventail : les deux diagonales partent ensemble ou pas du tout
     for (const dx of [-1, 1]) s.bullets.push(doodleBullet(s, s.px + dx * 6, s.py - 14, dx * D_BULLET_DX, -D_BULLET_DY));
-    if (!doodleClassic(s)) { s.ammo -= 2; setAmmo(s.ammo); }
+    if (!doodleClassic(s) && !s.bossHide) { s.ammo -= 2; setAmmo(s.ammo); }
     s.faceTimer = 12;
   };
   // Un tap : tir droit ; deuxième tap dans la fenêtre : les 2 diagonales.
@@ -8049,12 +8335,15 @@ function GameDoodle() {
       // ⚠ L'invulnérabilité est armée à la frame EXACTE où le bonus se termine (`fly === 0`)
       // et n'est décomptée que hors vol : reprendre un bonus pendant les 2 s ne les consomme
       // pas, elles repartiront à zéro à la fin du nouveau vol.
+      // 💀 Arène : le doodler est COLLÉ au plancher, il ne saute plus. Testée avant tout le
+      // reste — pendant le combat il n'est ni en saut, ni en chute, ni en vol, ni sur une liane.
+      if (s.bossHide) { s.py = s.bossFloorY - D_FEET; s.vy = 0; }
       // 🌿 Liane : on remonte la corde, sans gravité ni contrôle, jusqu'à la dalle — puis on
       // repart en saut ordinaire. ⚠ Testée EN TÊTE de la chaîne verticale, avant l'accordéon
       // et le vol : tant qu'on est accroché, on n'est dans aucun des autres états.
       // ⚠ On se recentre sur la corde : sans ça, une dérive latérale (tapis, glissade) faisait
       // monter le doodler à côté de la liane, ce qui ne se lisait plus du tout.
-      if (s.vine) {
+      else if (s.vine) {
         const v = s.vine;
         if (v.dead || v.y > H + 30) s.vine = null;
         else {
@@ -8145,6 +8434,15 @@ function GameDoodle() {
         b.x += (b.vx || 0) * sf; b.y += b.vy * sf;
       });
       s.bullets = s.bullets.filter(b => {
+        // 💀 Le boss encaisse une balle par point de vie. ⚠ Testé AVANT les monstres : ceux-ci
+        // sont suspendus pendant le combat, mais une balle qui les traverserait quand même
+        // aurait pu être consommée avant d'atteindre l'arène.
+        if (s.boss && Math.abs(b.x - s.boss.x) < D_BOSS_W / 2 && Math.abs(b.y - D_BOSS_Y) < D_BOSS_H / 2) {
+          s.boss.hp--; s.boss.hurt = 12;
+          for (let k = 0; k < 10; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: b.x, y: b.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, max: 22, sz: 3, c: k % 2 ? '#ffd54a' : '#e2564a' }); }
+          if (s.boss.hp <= 0) doodleBossKill(s, W);
+          return false;
+        }
         for (const m of s.monsters) {
           if (!m.alive || !rectHit(b.x - 4, b.y - 4, 8, 8, m.x, m.y, m.w, m.h)) continue;
           // 🏗️ Bâtisseur : la balle ne l'abat pas, elle le met au travail. Elle s'y arrête,
@@ -8190,7 +8488,7 @@ function GameDoodle() {
       }
       // — atterrissage (uniquement en chute, hors vol) —
       const feet = s.py + D_FEET;
-      if (s.vy > 0 && s.fly <= 0) {
+      if (s.vy > 0 && s.fly <= 0 && !s.bossHide) {   // 💀 dans l'arène, les dalles n'existent plus
         for (const p of s.platforms) {
           if (!doodleSolid(p)) continue;   // 🎲 un leurre se traverse
           if (s.px + 11 > p.x && s.px - 11 < p.x + p.w && s.prevFeet <= p.y && feet >= p.y) {
@@ -8305,6 +8603,14 @@ function GameDoodle() {
               s.scoreMul = (s.scoreMul || 1) * D_BOOST_MUL;
               s.toast = { txt: `📈 Score ×${s.scoreMul.toFixed(2)}`, life: D_TOAST_LIFE };
               for (let k = 0; k < 10; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 3, vy: -1.5 - Math.random() * 2, life: 24, max: 24, sz: 3, c: k % 2 ? '#ffd54a' : '#e0a13a' });
+            }
+            // 💀 Case cauchemardesque : le combat s'ouvre ici. Le rebond a déjà eu lieu, mais
+            // tout est aussitôt écrasé par `doodleBossStart` — on entre dans l'arène, pas en saut.
+            if (et === 'nightmare' && !p.used) {
+              p.used = true;
+              doodleBossStart(s, W, H);
+              for (let k = 0; k < 26; k++) { const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 5; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 32, max: 32, sz: 3, c: k % 2 ? '#e2564a' : '#2b1730' }); }
+              break;
             }
             // 🕯️ Esprits : UNE seule fois par dalle, et jamais deux volées en même temps —
             // une nouvelle dalle pendant que trois esprits guettent ne fait rien.
@@ -8446,7 +8752,7 @@ function GameDoodle() {
       }
       // 🌿 Prise de la liane : au CONTACT, en montant comme en descendant. Une corde qu'il
       // faudrait « viser » n'aurait pas été jouable au doigt.
-      if (!s.vine && s.fly <= 0 && !s.acc) {
+      if (!s.vine && s.fly <= 0 && !s.acc && !s.bossHide) {
         for (const q of s.platforms) {
           if (q.type !== 'vine' || q.dead) continue;
           if (Math.abs(s.px - (q.x + q.w / 2)) > D_VINE_GRAB) continue;
@@ -8489,7 +8795,8 @@ function GameDoodle() {
         }
       }
       // — monstres (hors vol) : sauter DESSUS l'écrase et fait rebondir ; tout autre contact = mort —
-      if (s.fly <= 0) {
+      // ⚠ 💀 Suspendus dans l'arène : ils sont invisibles, ils ne peuvent pas tuer.
+      if (s.fly <= 0 && !s.bossHide) {
         for (const m of s.monsters) {
           if (!m.alive || !rectHit(s.px - 11, s.py - 12, 22, 26, m.x + 4, m.y + 4, m.w - 8, m.h - 8)) continue;
           if (s.vy > 0 && s.prevFeet <= m.y + 14) {   // en chute, pieds venus d'au-dessus → écrasement
@@ -8502,6 +8809,21 @@ function GameDoodle() {
           if (doodleHurt(s)) continue;
           die(); return;
         }
+      }
+      // 💀 Combat de boss : un pas d'arène, puis la sortie une fois les trésors ramassés.
+      if (s.boss && !doodleBossStep(s, W, H, sf)) { die(); return; }
+      // ⚠ Les dalles ne reviennent qu'une fois TOUS les trésors pris : elles reparaîtraient
+      // sinon par-dessus les coffres posés sur le plancher, et on en perdrait.
+      if (s.bossHide && !s.boss && s.bossLoot > 0 && !s.chests.some(c => c.boss && !c.taken)) {
+        s.bossHide = false; s.bossLoot = 0;
+        // ⚠ Une dalle de SORTIE est posée sous le doodler : rien ne garantit qu'à l'endroit
+        // exact du plancher il reste une plateforme d'origine à portée de saut, et le combat
+        // se serait alors soldé par une chute mortelle juste après la victoire.
+        s.platforms.push({ x: Math.max(6, Math.min(W - D_PLAT_W - 6, s.px - D_PLAT_W / 2)), y: s.bossFloorY, w: D_PLAT_W, h: D_PLAT_H, type: 'green', dead: false });
+        s.py = s.bossFloorY - D_FEET; s.prevFeet = s.py + D_FEET;
+        s.vy = D_JUMP; s.inv = Math.max(s.inv, D_INV);   // on repart d'un saut, invulnérable le temps de retrouver une dalle
+        s.lastPlat = null; s.bounceStreak = 0;
+        s.toast = { txt: '💀 Le cauchemar se dissipe — les dalles reviennent', life: D_TOAST_LIFE };
       }
       // 🕯️ Esprits : chacun guette à son poste D'ÉCRAN, puis charge à son tour. ⚠ Aucun
       // dégât : le contact ne coûte qu'un niveau de bonus, jamais une vie.
@@ -8579,7 +8901,7 @@ function GameDoodle() {
         });
       }
       // — trous noirs —
-      if (s.fly <= 0 && s.inv <= 0) {
+      if (s.fly <= 0 && s.inv <= 0 && !s.bossHide) {
         for (const h of s.holes) {
           if (Math.hypot(s.px - h.x, s.py - h.y) >= h.r * 0.6) continue;
           if (doodleHurt(s)) { s.vy = D_JUMP; break; }   // ⚠ le trou noir REJECTE vers le haut : sans ça on y retomberait aussitôt, bouclier après bouclier
@@ -8587,8 +8909,10 @@ function GameDoodle() {
         }
       }
       // — génération de nouvelles rangées au-dessus —
+      // ⚠ 💀 Rien ne défile pendant le combat : générer serait sans objet, et une rangée posée
+      // sous le plancher de l'arène aurait attendu là, hors de vue, tout le combat.
       let topY = Infinity; for (const p of s.platforms) if (p.y < topY) topY = p.y;
-      while (topY > -12) {
+      while (topY > -12 && !s.bossHide) {
         // ⚠ 9.4.2 — Les plateformes se raréfiaient TROP VITE (demande utilisateur) : l'écart
         // gagnait 0,04 px par point et saturait dès 950 points, si bien qu'à 500 points on
         // jouait déjà presque à l'espacement maximal. Le gain est ramené à 0,022 px/point et
@@ -8673,7 +8997,7 @@ function GameDoodle() {
       // — chute mortelle — 🪂 le parachute est la DERNIÈRE chance : il ne protège d'aucun coup,
       // il ne sert qu'ici. Il renvoie depuis le bas de l'écran avec l'élan d'un trampoline, ce
       // qui laisse le temps de viser une plateforme, et pose l'invulnérabilité le temps de la remontée.
-      if (s.py - D_HALF > H) {
+      if (s.py - D_HALF > H && !s.bossHide) {
         if (s.wpn.shFall > 0) {
           s.wpn.shFall--; s.py = H - 4; s.vy = D_TRAMPO; s.inv = D_INV; s.lastPlat = null; s.bounceStreak = 0;
           s.toast = { txt: `🪂 Parachute ! ${s.wpn.shFall} restant(s)`, life: D_TOAST_LIFE };
