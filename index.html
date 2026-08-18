@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '9.8.1';
+const APP_VERSION = '9.8.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5580,15 +5580,171 @@ function doodleBiomeFadeStep(score) {
   const i = doodleTier(score), reste = (i + 1) * D_BIOME_STEP - score;
   return i * 16 + (reste > D_BIOME_FADE ? 0 : Math.min(8, Math.floor((1 - reste / D_BIOME_FADE) * 8) + 1));
 }
-// ⚠ Le fond reste la PAGE DE CARNET d'origine — seules ses trois couleurs suivent le biome.
-// Changer aussi le motif ferait cinq jeux différents ; on veut cinq ambiances du même jeu.
-function doodleBg(ctx, W, H, climb, biome) {
+// 🎨 9.8.2 — IDENTITÉ GRAPHIQUE PAR BIOME (demande utilisateur). Avant le 1er palier
+// (1000 points), le fond reste la PAGE DE CARNET d'origine, seules ses trois couleurs
+// suivant le biome. À partir de 1000 points, un VRAI décor la recouvre : ciel dégradé
+// franchement saturé + éléments dessinés propres au biome, en parallaxe sur `climb`.
+// ⚠ Les ciels sont choisis pour CONTRASTER avec le vert des plateformes (bleu, ocre, glace,
+// braise, nuit) : un décor vert sur des dalles vertes aurait rendu la montée illisible, ce
+// qui n'est pas « cacher un peu les tuiles » mais rendre le jeu injouable.
+const D_SCENE = {
+  prairie: { sky:['#4fbdf0', '#a8e86a'], far:'#5aa83c', near:'#2f7a24', ink:'#1c4d14' },
+  desert:  { sky:['#e8892c', '#ffdf9e'], far:'#d99a4a', near:'#b26a22', ink:'#6f3a0e' },
+  glacier: { sky:['#1f7fc4', '#dff4ff'], far:'#9ed8f2', near:'#f2fbff', ink:'#215f8a' },
+  volcan:  { sky:['#3c0808', '#ff7a30'], far:'#4a1210', near:'#240808', ink:'#ffcf6a' },
+  cosmos:  { sky:['#0d0726', '#4b2f8f'], far:'#2a1a5e', near:'#150d33', ink:'#ffe9a8' },
+};
+// ⚠ Positions DÉTERMINISTES : un Math.random() par frame ferait grésiller tout le décor.
+// Hachage classique sinus × grand nombre — reproductible, sans état à porter.
+function doodleRnd(i) { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+// Décalage d'une couche en parallaxe qui se répète tous les `span` px.
+function doodleParallax(climb, par, span, phase) { return (((climb * par + (phase || 0)) % span) + span) % span; }
+// Une bande de relief (collines, dunes, crêtes) répétée verticalement. `wave(fx)` donne la
+// hauteur du relief pour l'abscisse normalisée `fx`, `depth` l'épaisseur du socle sous la crête.
+// ⚠ `depth` doit rester BIEN INFÉRIEUR à `span` : à `depth = span` les bandes se rejoignent et
+// noient tout l'écran sous un aplat — le ciel disparaît et les dalles ne se détachent plus.
+function doodleRidge(ctx, W, H, off, span, fill, wave, depth) {
+  ctx.fillStyle = fill;
+  for (let base = off - span; base < H + span; base += span) {
+    ctx.beginPath();
+    ctx.moveTo(0, base);
+    for (let px = 0; px <= W; px += 10) ctx.lineTo(px, base - wave(px / W));
+    ctx.lineTo(W, base + depth); ctx.lineTo(0, base + depth); ctx.closePath(); ctx.fill();
+  }
+}
+// Décor complet d'un biome. `a` = opacité, ce qui permet de FONDRE un palier dans le suivant.
+function doodleScene(ctx, W, H, climb, k, a) {
+  const sc = D_SCENE[k];
+  if (!sc || a <= 0.004) return;
+  ctx.save(); ctx.globalAlpha = Math.min(1, a);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, sc.sky[0]); g.addColorStop(1, sc.sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (k === 'prairie') {
+    // Collines en deux plans, brins d'herbe et fleurs sur le plus proche, pétales au vent.
+    doodleRidge(ctx, W, H, doodleParallax(climb, 0.07, 240), 240, sc.far, fx => 26 + Math.sin(fx * 6.2) * 16, 34);
+    const off = doodleParallax(climb, 0.15, 190);
+    doodleRidge(ctx, W, H, off, 190, sc.near, fx => 18 + Math.sin(fx * 9 + 1.2) * 12, 26);
+    ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+    for (let base = off - 190; base < H + 190; base += 190) {
+      for (let i = 0; i < 12; i++) {
+        const fx = (i + 0.5) / 12, bx = fx * W, by = base - (18 + Math.sin(fx * 9 + 1.2) * 12);
+        ctx.strokeStyle = sc.ink;
+        ctx.beginPath(); ctx.moveTo(bx, by); ctx.quadraticCurveTo(bx + 3, by - 7, bx + 7, by - 9); ctx.stroke();
+        if (i % 3 === 1) { ctx.fillStyle = i % 2 ? '#ffd54a' : '#ff8fc8'; ctx.beginPath(); ctx.arc(bx + 7, by - 10, 2.4, 0, Math.PI * 2); ctx.fill(); }
+      }
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    for (let i = 0; i < 10; i++) {
+      const px = ((doodleRnd(i) * W + climb * 0.35 * (0.4 + doodleRnd(i + 40))) % (W + 20) + W + 20) % (W + 20) - 10;
+      const py = doodleParallax(climb, 0.5 + doodleRnd(i + 9) * 0.4, H + 40, doodleRnd(i + 3) * H);
+      ctx.beginPath(); ctx.ellipse(px, py, 3, 1.8, doodleRnd(i + 7) * 3, 0, Math.PI * 2); ctx.fill();
+    }
+  } else if (k === 'desert') {
+    // Soleil FIXE (il est à l'infini, il ne défile pas), dunes, cactus, ondes de chaleur.
+    ctx.fillStyle = 'rgba(255,236,170,0.55)'; ctx.beginPath(); ctx.arc(W - 62, 74, 52, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff3c4'; ctx.beginPath(); ctx.arc(W - 62, 74, 27, 0, Math.PI * 2); ctx.fill();
+    doodleRidge(ctx, W, H, doodleParallax(climb, 0.06, 250), 250, sc.far, fx => 30 + Math.sin(fx * 4.4 + 0.6) * 20, 36);
+    const off = doodleParallax(climb, 0.14, 200);
+    doodleRidge(ctx, W, H, off, 200, sc.near, fx => 20 + Math.sin(fx * 7 + 2.1) * 14, 28);
+    ctx.fillStyle = sc.ink;
+    for (let base = off - 200; base < H + 200; base += 200) {
+      [0.18, 0.62, 0.85].forEach((fx, j) => {
+        const bx = fx * W, by = base - (20 + Math.sin(fx * 7 + 2.1) * 14), hgt = 16 + j * 5;
+        ctx.fillRect(bx - 2.5, by - hgt, 5, hgt);
+        ctx.fillRect(bx - 9, by - hgt * 0.7, 4, 2.5); ctx.fillRect(bx - 9, by - hgt * 0.7, 2.5, 8);
+        ctx.fillRect(bx + 5, by - hgt * 0.55, 4, 2.5); ctx.fillRect(bx + 6.5, by - hgt * 0.55, 2.5, 7);
+      });
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.4;
+    for (let i = 0; i < 6; i++) {
+      const hy = doodleParallax(climb, 0.3, H + 60, i * 90);
+      ctx.beginPath();
+      for (let px = 0; px <= W; px += 12) ctx.lineTo(px, hy + Math.sin(px * 0.06 + climb * 0.02 + i) * 3);
+      ctx.stroke();
+    }
+  } else if (k === 'glacier') {
+    // Aurore en haut, deux crêtes de glace en dents de scie, neige qui tombe.
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = `rgba(${140 + i * 20},255,${220 - i * 20},0.16)`;
+      ctx.fillRect(0, 12 + i * 16 + Math.sin(climb * 0.01 + i) * 6, W, 11);
+    }
+    doodleRidge(ctx, W, H, doodleParallax(climb, 0.06, 260), 260, sc.far, fx => 22 + Math.abs(((fx * 3) % 1) - 0.5) * 76, 34);
+    doodleRidge(ctx, W, H, doodleParallax(climb, 0.14, 210), 210, sc.near, fx => 14 + Math.abs(((fx * 4.5) % 1) - 0.5) * 58, 26);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    for (let i = 0; i < 26; i++) {
+      const px = (doodleRnd(i) * W + Math.sin(climb * 0.014 + i) * 10 + W) % W;
+      const py = doodleParallax(climb, 0.55 + doodleRnd(i + 5) * 0.5, H + 30, doodleRnd(i + 2) * H);
+      ctx.beginPath(); ctx.arc(px, py, 1.1 + doodleRnd(i + 11) * 1.6, 0, Math.PI * 2); ctx.fill();
+    }
+  } else if (k === 'volcan') {
+    // Cônes en silhouette, lueur et coulée du cratère, braises qui MONTENT (parallaxe inversée).
+    doodleRidge(ctx, W, H, doodleParallax(climb, 0.06, 270), 270, sc.far, fx => 20 + Math.max(0, 62 - Math.abs(fx - 0.3) * 210), 40);
+    const off = doodleParallax(climb, 0.13, 220);
+    doodleRidge(ctx, W, H, off, 220, sc.near, fx => 14 + Math.max(0, 70 - Math.abs(fx - 0.72) * 240), 30);
+    for (let base = off - 220; base < H + 220; base += 220) {
+      const cx = 0.72 * W, cy = base - 84;
+      ctx.fillStyle = 'rgba(255,140,58,0.35)'; ctx.beginPath(); ctx.arc(cx, cy, 26, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = sc.ink; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.quadraticCurveTo(cx + 12, cy + 34, cx + 4, base - 14); ctx.stroke();
+    }
+    ctx.fillStyle = '#ffb14a';
+    for (let i = 0; i < 18; i++) {
+      const px = (doodleRnd(i) * W + Math.sin(climb * 0.02 + i * 2) * 12 + W) % W;
+      const py = H - doodleParallax(climb, -0.7 - doodleRnd(i + 6) * 0.6, H + 40, doodleRnd(i + 4) * H);
+      ctx.globalAlpha = Math.min(1, a) * (0.35 + doodleRnd(i + 8) * 0.5);
+      ctx.beginPath(); ctx.arc(px, py, 1.3 + doodleRnd(i + 13) * 1.7, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = Math.min(1, a);
+  } else if (k === 'cosmos') {
+    // Nébuleuses, deux champs d'étoiles à des parallaxes différentes, une planète annelée.
+    [[0.28, 0.3, 96, 'rgba(160,90,220,0.28)'], [0.74, 0.66, 120, 'rgba(70,150,230,0.22)']].forEach(([fx, fy, r, col]) => {
+      const ny = doodleParallax(climb, 0.05, H + 260, fy * H);
+      const rg = ctx.createRadialGradient(fx * W, ny, 4, fx * W, ny, r);
+      rg.addColorStop(0, col); rg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+    });
+    for (let i = 0; i < 46; i++) {
+      const px = doodleRnd(i) * W;
+      const py = doodleParallax(climb, i % 2 ? 0.12 : 0.3, H + 40, doodleRnd(i + 1) * H);
+      ctx.globalAlpha = Math.min(1, a) * (0.4 + doodleRnd(i + 21) * 0.6);
+      ctx.fillStyle = i % 7 === 0 ? '#ffd9a8' : i % 5 === 0 ? '#a8d8ff' : '#ffffff';
+      ctx.beginPath(); ctx.arc(px, py, 0.8 + doodleRnd(i + 31) * 1.3, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = Math.min(1, a);
+    const py = doodleParallax(climb, 0.05, H + 420, 120);
+    ctx.fillStyle = '#c98bd8'; ctx.beginPath(); ctx.arc(58, py, 24, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.beginPath(); ctx.arc(66, py - 5, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = sc.ink; ctx.lineWidth = 3;
+    ctx.save(); ctx.translate(58, py); ctx.rotate(-0.42);
+    ctx.beginPath(); ctx.ellipse(0, 0, 38, 9, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+  }
+  ctx.restore();
+}
+// Fond complet. Le PAPIER est la base et reste seul visible avant le 1er palier ; au-delà, le
+// décor du biome courant le recouvre, fondu vers celui du palier suivant sur les
+// D_BIOME_FADE derniers points — exactement la même fenêtre que les couleurs.
+// ⚠ Les lignes de carnet sont conservées PAR-DESSUS le décor, en filigrane : elles sont depuis
+// toujours le repère de défilement du jeu, les supprimer aurait rendu la montée moins lisible.
+function doodleBg(ctx, W, H, climb, biome, s) {
   const b = biome || D_BIOMES[0];
   ctx.fillStyle = b.paper; ctx.fillRect(0, 0, W, H);                 // papier teinté par le biome
+  let scened = 0;
+  if (s && !doodleClassic(s)) {                                      // 🎮 Classique : le carnet d'origine, jamais de décor
+    const tier = doodleTier(s.score), reste = (tier + 1) * D_BIOME_STEP - s.score;
+    const f = reste > D_BIOME_FADE ? 0 : Math.max(0, Math.min(1, 1 - reste / D_BIOME_FADE));
+    const cur = D_BIOMES[doodleBiomeAt(s, tier)], nxt = D_BIOMES[doodleBiomeAt(s, tier + 1)];
+    doodleScene(ctx, W, H, climb, cur.k, 1 - f);
+    doodleScene(ctx, W, H, climb, nxt.k, f);
+    scened = (D_SCENE[cur.k] ? 1 - f : 0) + (D_SCENE[nxt.k] ? f : 0);
+  }
+  ctx.save();
+  ctx.globalAlpha = 1 - scened * 0.78;                               // filigrane dès qu'un décor est là
   ctx.strokeStyle = b.rule; ctx.lineWidth = 1;
   const sp = 28, off = ((climb % sp) + sp) % sp;
   ctx.beginPath(); for (let y = off; y < H; y += sp) { ctx.moveTo(0, y); ctx.lineTo(W, y); } ctx.stroke();
   ctx.strokeStyle = b.marge; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(26, 0); ctx.lineTo(26, H); ctx.stroke();
+  ctx.restore();
 }
 function doodleSpring(ctx, cx, py) {
   ctx.strokeStyle = '#b9bec6'; ctx.lineWidth = 2;
@@ -6967,7 +7123,7 @@ function doodleShieldAura(ctx, s) {
   ctx.restore();
 }
 function doodleDraw(ctx, s, W, H) {
-  doodleBg(ctx, W, H, s.climb, doodleBiomeCols(s, s.score));   // couleurs fondues vers le biome suivant
+  doodleBg(ctx, W, H, s.climb, doodleBiomeCols(s, s.score), s);   // couleurs ET décor fondus vers le biome suivant
   s.holes.forEach(h => doodleHole(ctx, h, s.t));
   s.platforms.forEach(p => doodlePlatform(ctx, p, s.tw));   // ⚠ horloge du MONDE : le dessin d'une tuile à cycle doit coïncider à la frame près avec sa fenêtre mortelle
   s.items.forEach(it => doodleItem(ctx, it, s.t));
