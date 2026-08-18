@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.0.5';
+const APP_VERSION = '10.0.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6151,9 +6151,16 @@ function doodleTileBand(score) { return D_TILE_P * (score >= 1000 ? 1.2 : score 
 // CASE sur laquelle on REBOND (demande utilisateur) : impossible à manquer, et elle occupe la
 // rangée au lieu de s'y superposer. Elle s'ouvre au premier rebond puis redevient une
 // plateforme verte ordinaire — sinon on la ferait rendre à l'infini en rebondissant dessus.
-// ⚠ La CASE CHANCE, elle, est un pari : mêmes bonus, ou l'un des 5 malus. TRÈS TRÈS RARE et
-// bornée deux fois (3 par partie MAXIMUM, jamais deux à moins de 500 points d'écart), parce
-// qu'un malus subi en boucle serait juste punitif.
+// ⚠ 10.0.6 — LA CASE CHANCE EST COUPÉE EN DEUX (demande utilisateur) : 🍀 la case chance ne
+// donne plus QUE des bonus (elle ne tire plus de malus du tout), et ☠️ la CASE MALCHANCE,
+// nouvelle, ne donne QUE des malus. Elles ont le MÊME taux (`D_LUCKY_P`), les MÊMES garde-fous
+// (`D_LUCKY_MAX` par partie, `D_LUCKY_GAP` points d'écart) mais des COMPTEURS SÉPARÉS
+// (`luckyLeft`/`luckyAt` vs `unluckyLeft`/`unluckyAt`) : partagés, l'une aurait mangé les
+// apparitions de l'autre. Seul le DESSIN les distingue à l'écran (irisé clair vs cramoisi
+// sombre) — d'où deux palettes bien tranchées dans `doodleCase`.
+// ⚠ Les DEUX restent TRÈS TRÈS RARES et bornées deux fois (3 par partie MAXIMUM chacune,
+// jamais deux à moins de 500 points d'écart), parce qu'un malus subi en boucle serait juste
+// punitif.
 // ⚠ D_LUCKY_P est calibrée POUR le garde-fou des 500 points, pas indépendamment de lui : à
 // ~85 rangées par fenêtre de 500 points, 0,0012 par rangée donne ~10 % de chances d'en voir
 // une par fenêtre, soit environ UNE par partie de 5000 points — les 3 restent exceptionnelles.
@@ -6171,7 +6178,7 @@ function doodleTileBand(score) { return D_TILE_P * (score >= 1000 ? 1.2 : score 
 // ⚠ Les deux garde-fous ne bougent pas : 3 par partie au maximum, 500 points d'écart minimum.
 // Ce sont eux qui empêchent qu'un malus soit subi en boucle, pas le taux — et c'est pour ça
 // qu'on peut régler celui-ci sans qu'un malus puisse être subi en boucle.
-const D_LUCKY_MAX = 3, D_LUCKY_GAP = 500, D_LUCKY_P = (0.0012 * 1.20 + 0.01) * 0.70, D_LUCKY_MALUS_P = 0.4;
+const D_LUCKY_MAX = 3, D_LUCKY_GAP = 500, D_LUCKY_P = (0.0012 * 1.20 + 0.01) * 0.70;
 const D_MALUS = [
   { k: 'mrev',   icon: '🌀', label: 'Vertige',    txt: 'commandes inversées' },
   { k: 'mheavy', icon: '🪨', label: 'Plomb',      txt: 'saut alourdi' },
@@ -6515,13 +6522,13 @@ function doodleMakeMob(s, ny) {
   return { x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.72 : 0 };
 }
 // « max 1 de suite » : jamais une tuile spéciale juste après une autre (ni après une cassante).
-const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'chest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
+const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'unlucky', 'chest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
 // 🎲 Les leurres de la roulette russe : dessinés comme une dalle, mais RIEN ne s'y pose —
 // ni le doodler, ni un coffre qui tombe, ni une météorite. Un seul prédicat pour les trois,
 // sinon un coffre finirait par flotter en l'air sur une plateforme qui n'existe pas.
 function doodleSolid(p) { return !p.dead && p.type !== 'rrfake'; }
 // Ces cases-là n'emmènent jamais de monstre ni de trou sur leur propre ligne.
-const D_NOMOB = new Set(['rainbow', 'perk', 'lucky']);
+const D_NOMOB = new Set(['rainbow', 'perk', 'lucky', 'unlucky']);
 const D_ICE_SLIP = 22;          // frames sans contrôle après un rebond sur la glace
 const D_ICE_BOUNCE = 0.82;      // et rebond plus mou
 const D_CLOUD_FADE = 62;        // ~1 s avant l'évaporation
@@ -7075,12 +7082,13 @@ function doodlePerkGrant(s) {
   s.toast = { txt: `${p.icon} ${p.label} +1 · ${p.txt}`, life: D_TOAST_LIFE };
   return p;
 }
-// 🍀 Case chance : le MÊME bonus qu'un palier, ou l'un des 5 malus. Les deux malus instantanés
-// (munitions, embuscade) frappent tout de suite ; les trois autres posent un compte à rebours
-// lu par la boucle. ⚠ Aucun malus n'est mortel en soi : ils rendent la montée difficile, ils
-// ne la ferment pas — un piège tiré au hasard ne doit jamais TUER sans que le joueur ait joué.
-function doodleLuckyGrant(s, x, y) {
-  if (Math.random() >= D_LUCKY_MALUS_P) return doodlePerkGrant(s);
+// ☠️ Case malchance : l'un des 5 malus, toujours. Les deux malus instantanés (munitions,
+// embuscade) frappent tout de suite ; les trois autres posent un compte à rebours lu par la
+// boucle. ⚠ Aucun malus n'est mortel en soi : ils rendent la montée difficile, ils ne la
+// ferment pas — un piège tiré au hasard ne doit jamais TUER sans que le joueur ait joué.
+// ⚠ La 🍀 case chance, elle, appelle directement `doodlePerkGrant` : depuis 10.0.6 elle ne
+// tire plus aucun malus, c'est toute la raison d'être de cette seconde case.
+function doodleUnluckyGrant(s, x, y) {
   const m = D_MALUS[Math.floor(Math.random() * D_MALUS.length)];
   if (m.k === 'jam') s.ammo = Math.max(0, s.ammo - D_JAM);
   else if (m.k === 'ambush') for (let i = 0; i < 2; i++) s.monsters.push({ x: 10 + Math.random() * (DOODLE_W - 60), y: y - 78 - i * 46, w: 44, h: 38, type: Math.floor(Math.random() * 3), alive: true, vx: 0 });
@@ -7156,29 +7164,34 @@ function doodleToast(ctx, s, W) {
   ctx.fillStyle = '#5a3200'; ctx.fillText(s.toast.txt, W / 2, 48);
   ctx.restore(); ctx.textAlign = 'left';
 }
-// Case bonus (dorée, « ? ») et case chance (irisée, « 🍀 »). Toutes deux se REBONDISSENT :
-// elles sont dessinées comme une plateforme pleine, surmontée de leur marque.
+// Case bonus (dorée, « ? »), case chance (irisée claire, « 🍀 ») et case malchance (cramoisie
+// sombre, « ☠️ »). Toutes trois se REBONDISSENT : elles sont dessinées comme une plateforme
+// pleine, surmontée de leur marque.
+// ⚠ Les deux cases rares ne se distinguent QUE par la couleur et la marque, et on les croise
+// en tombant vite : la palette de la malchance est volontairement SOMBRE et chaude là où celle
+// de la chance est CLAIRE et irisée — un simple changement de teinte n'aurait pas suffi.
 function doodleCase(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h, cx = x + w / 2;
-  const lucky = p.type === 'lucky';
+  const lucky = p.type === 'lucky', unlucky = p.type === 'unlucky';
   const g = ctx.createLinearGradient(x, y, x + w, y + h);
   if (lucky) { g.addColorStop(0, '#6fd345'); g.addColorStop(0.5, '#4aa8e8'); g.addColorStop(1, '#9b6fe0'); }
+  else if (unlucky) { g.addColorStop(0, '#e2564a'); g.addColorStop(0.5, '#7b2d8e'); g.addColorStop(1, '#2b1030'); }
   else { g.addColorStop(0, '#ffd54a'); g.addColorStop(0.5, '#ff8c3a'); g.addColorStop(1, '#e0a13a'); }
   doodleRR(ctx, x, y, w, h, 6, g);
   ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(x, y + h - 4, w, 4);
   // Pulsation : une case qui scintille se repère de loin, et c'est le seul indice qui la
   // distingue d'une plateforme ordinaire quand on descend vite.
-  // Une case chance épuisée cesse de scintiller et se ternit : elle reste là pour rebondir,
-  // mais elle ne doit plus promettre un butin qu'elle a déjà donné.
+  // Une case chance ou malchance épuisée cesse de scintiller et se ternit : elle reste là pour
+  // rebondir, mais elle ne doit plus annoncer un effet qu'elle a déjà donné.
   if (p.used) { ctx.save(); ctx.globalAlpha = 0.45; ctx.fillStyle = '#2b2b33'; doodleRR(ctx, x, y, w, h, 6, '#2b2b33'); ctx.restore(); }
   const a = p.used ? 0.3 : 0.55 + Math.sin(t * 0.14) * 0.45;
   ctx.save(); ctx.globalAlpha = a;
-  ctx.strokeStyle = lucky ? '#ffffff' : '#7a3b00'; ctx.lineWidth = 2;
+  ctx.strokeStyle = unlucky ? '#ffb3ac' : lucky ? '#ffffff' : '#7a3b00'; ctx.lineWidth = 2;
   doodleRR(ctx, x + 1, y + 1, w - 2, h - 2, 5, 'rgba(0,0,0,0)'); ctx.stroke();
   ctx.restore();
   ctx.save(); ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = lucky ? '#ffffff' : '#7a3b00';
-  ctx.fillText(lucky ? '🍀' : '?', cx, y + h / 2);
+  ctx.fillStyle = unlucky ? '#ffb3ac' : lucky ? '#ffffff' : '#7a3b00';
+  ctx.fillText(unlucky ? '☠️' : lucky ? '🍀' : '?', cx, y + h / 2);
   ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
 // Tuile de biome : une plateforme aux couleurs du biome, marquée de son émoji. Même gabarit
@@ -7220,7 +7233,7 @@ function doodleBiomeTile(ctx, p, t) {
 function doodlePlatform(ctx, p, t) {
   const cols = { green: ['#7ec850', '#4e8f2c'], blue: ['#5cb8ef', '#2f7fbf'], break: ['#c68a4e', '#8a5a2c'], white: ['#eef2f5', '#c3ccd4'] };
   if (p.type === 'rainbow') return doodleRainbowPlat(ctx, p);
-  if (p.type === 'perk' || p.type === 'lucky') return doodleCase(ctx, p, t || 0);
+  if (p.type === 'perk' || p.type === 'lucky' || p.type === 'unlucky') return doodleCase(ctx, p, t || 0);
   if (D_BIOME_TILES.has(p.type)) return doodleBiomeTile(ctx, p, t || 0);
   if (p.type === 'chest' || p.type === 'rrfake' || p.type === 'nightmare' || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni les leurres 🎲, ni la 💀 cauchemardesque ne sont dans D_TILES
   const c = cols[p.type] || cols.green;
@@ -8000,6 +8013,11 @@ function doodleSpawnRow(s, ny, risky) {
   else if (!doodleClassic(s) && s.luckyLeft > 0 && s.score >= s.luckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'lucky'; s.luckyLeft--; s.luckyAt = s.score + D_LUCKY_GAP;
   }
+  // ☠️ Case malchance : MÊME taux et MÊMES garde-fous que la case chance, mais des compteurs
+  // à elle — sinon les deux cases se voleraient leurs apparitions et on n'en verrait qu'une.
+  else if (!doodleClassic(s) && s.unluckyLeft > 0 && s.score >= s.unluckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
+    type = 'unlucky'; s.unluckyLeft--; s.unluckyAt = s.score + D_LUCKY_GAP;
+  }
   // 💀 Case cauchemardesque : MÊME taux que la case chance, mais UNE SEULE fois par partie —
   // `bossDone` est posé dès l'ouverture du combat, pas à sa fin, sinon une seconde dalle
   // pourrait naître pendant qu'on se bat.
@@ -8116,6 +8134,7 @@ function doodleRules() {
       { i:'🎁', n:'Tuile coffre', d:'même taux que la multicolore, mais disponible dès 0 point : elle ne passe pas par les paliers de 1000.' },
       { i:'❓', n:'Case bonus',   d:`garantie à chaque palier de ${D_PERK_STEP} points — ce n'est pas un tirage.` },
       { i:'🍀', n:'Case chance',  d:`${doodlePct(D_LUCKY_P)} des rangées éligibles, ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
+      { i:'☠️', n:'Case malchance', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}) et mêmes garde-fous, mais comptés séparément : ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
       { i:'💀', n:'Case cauchemardesque', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}), à partir de ${D_BOSS_FROM} points, UNE SEULE fois par partie.` },
       { i:'🔓', n:'Tuiles débloquées', d:`une nouvelle tous les ${D_TILE_STEP} points ; elles se partagent ensuite ${doodlePct(D_TILE_P)} des rangées.` },
       { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_P)} des rangées, partagées entre TOUTES les tuiles de biome déjà traversées — elles ne disparaissent plus au palier suivant.` },
@@ -8135,11 +8154,12 @@ function doodleRules() {
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
-      { i:'🍀', n:'Case chance',  d:'très rare (3 par partie au maximum, jamais deux à moins de 500 points). Elle donne un bonus permanent… ou l\'un des malus.' },
+      { i:'🍀', n:'Case chance',  d:`très rare (${D_LUCKY_MAX} par partie au maximum, jamais deux à moins de ${D_LUCKY_GAP} points). Elle donne un bonus permanent, et rien d'autre. Elle ne rend qu'au premier rebond mais reste une plateforme.` },
+      { i:'☠️', n:'Case malchance', d:`la jumelle sombre de la case chance, aussi rare qu'elle et comptée à part. Elle donne l'un des malus ci-dessous, et rien d'autre. Elle ne frappe qu'au premier rebond mais reste une plateforme.` },
       { i:'💀', n:'Case cauchemardesque', d:`une seule par partie. Elle ouvre un combat : les dalles disparaissent, un plancher apparaît, tu ne sautes plus et tu ne fais que te déplacer et tirer — le tir y est gratuit. ${D_BOSS_HP} points de vie, l'un des ${D_BOSS_KINDS.length} monstres (${D_BOSS_KINDS.map(b => b.name).join(', ')}) et ses ${D_BOSS_KINDS[0].atk.length} attaques. Terrassé : ${D_BOSS_LOOT} trésors et une tuile neuve ; une fois les trésors ramassés, les dalles reviennent.` },
     ] },
     { t:'Bonus permanents', c:'#7b4bd0', rows: D_PERKS.map(p => ({ i:p.icon, n:p.label, d:p.txt + ' — cumulable.' })) },
-    { t:'Malus de la case chance', c:'#e2564a', rows: D_MALUS.map(m => ({ i:m.icon, n:m.label, d:m.txt + (['jam','ambush'].indexOf(m.k) < 0 ? ' — pendant environ 6 s.' : '.') })) },
+    { t:'Malus de la case malchance', c:'#e2564a', rows: D_MALUS.map(m => ({ i:m.icon, n:m.label, d:m.txt + (['jam','ambush'].indexOf(m.k) < 0 ? ' — pendant environ 6 s.' : '.') })) },
     { t:'Coffres des monstres', c:'#c98b3a', rows:[
       { i:'📦', n:'Coffre',  d:'chaque monstre tué en lâche un ; il tombe et se pose sur la première plateforme. La créature très rare d\'un biome en lâche deux.' },
       ...odds.map(l => ({ i:l.icon, n:l.label, d:`${l.txt} — ${pOf(l.k)} du contenu d'un coffre, ` + (l.max === 1 ? 'une seule fois par partie.' : l.max > 1 && l.max < 99 ? `cumulable jusqu'à ${l.max}.` : 'répétable.') })),
@@ -8260,7 +8280,7 @@ function GameDoodle() {
     g.current = { px: W / 2, py: H - 92, vx: 0, vy: D_JUMP, face: 1, platforms: plats, monsters: [], bullets: [], items: [], holes: [], parts: [], chests: [], meteors: [],
       clones: [], stars: [], drops: [], spirits: [], boss: null, bossHide: false, bossDone: false, bossFloorY: 0, bossShots: [], bossSpikes: [], bossBeam: null, bossLoot: 0, climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0, lastMissile: -99, shur: [],
-      luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
+      luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, unluckyLeft: D_LUCKY_MAX, unluckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
       vine: null, beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, sandLeft: 0, frost: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, mode };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
@@ -8593,16 +8613,18 @@ function GameDoodle() {
             s.vy = bv;
             // ⚠ 9.2.7 — La case s'ouvre au 1er rebond puis redevient une plateforme verte
             // ordinaire : sans ça, on la ferait rendre à l'infini en rebondissant dessus.
-            // ⚠ 9.3.9 — La case CHANCE ne rend qu'au PREMIER passage mais ne disparaît PAS
-            // (demande utilisateur) : elle reste une plateforme sur laquelle on peut revenir
-            // rebondir, simplement épuisée. La case BONUS, elle, redevient verte : sa marque
-            // « ? » promettrait sinon un butin qu'elle ne donnerait plus.
-            if ((p.type === 'perk' || p.type === 'lucky') && !p.used) {
-              const lucky = p.type === 'lucky';
-              if (lucky) doodleLuckyGrant(s, p.x + p.w / 2, p.y); else doodlePerkGrant(s);
+            // ⚠ 9.3.9 — Les cases CHANCE et MALCHANCE ne rendent qu'au PREMIER passage mais ne
+            // disparaissent PAS (demande utilisateur) : elles restent des plateformes sur
+            // lesquelles on peut revenir rebondir, simplement épuisées. La case BONUS, elle,
+            // redevient verte : sa marque « ? » promettrait sinon un butin qu'elle ne
+            // donnerait plus.
+            if ((p.type === 'perk' || p.type === 'lucky' || p.type === 'unlucky') && !p.used) {
+              const lucky = p.type === 'lucky', unlucky = p.type === 'unlucky';
+              if (unlucky) doodleUnluckyGrant(s, p.x + p.w / 2, p.y); else doodlePerkGrant(s);
               setAmmo(s.ammo);                                                         // 🔧 Enrayé retire des munitions : le compteur doit suivre
-              if (lucky) p.used = true; else p.type = 'green';
-              for (let k = 0; k < 14; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 26, max: 26, sz: 3, c: lucky ? (k % 2 ? '#6fd345' : '#4aa8e8') : (k % 2 ? '#ffd54a' : '#e0489b') }); }
+              if (lucky || unlucky) p.used = true; else p.type = 'green';
+              const pc = unlucky ? ['#e2564a', '#7b2d8e'] : lucky ? ['#6fd345', '#4aa8e8'] : ['#ffd54a', '#e0489b'];
+              for (let k = 0; k < 14; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 26, max: 26, sz: 3, c: pc[k % 2] }); }
             }
             if (p.type === 'white') p.dead = true;
             // ⚠ La dalle multicolore a CHANGÉ DE PLACE : la série de rebonds « même case »
