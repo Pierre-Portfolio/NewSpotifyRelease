@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.1.9';
+const APP_VERSION = '10.2.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5974,6 +5974,17 @@ function doodleBHoleSpawn(s, W) {
 // 🪙 Plancher du gain de la 🪙 Quitte ou double. ⚠ Déclaré AVANT D_TILES : la règle affichée
 // de la tuile le lit, et une const module-level lue plus haut serait une TDZ (écran noir).
 const D_GAMBLE_MIN = 2;
+// 💧 10.2.0 — EAU (demande utilisateur) : la dalle laisse tomber DEUX filets, un par bord, qui
+// ruissellent sur les dalles qu'ils touchent — lesquelles en relancent deux à leur tour.
+// ⚠ Le réseau est RECALCULÉ à chaque frame depuis la disposition courante (`doodleWaterFlows`)
+// et jamais mémorisé sur la dalle : les plateformes bougent (bleues, ascenseurs, randomiseur),
+// un réseau figé aurait fait couler l'eau à côté de son support au bout de deux secondes.
+// ⚠ D_WATER_MAX plafonne les dalles MOUILLÉES, pas la profondeur : sans lui, une colonne de
+// dalles alignées aurait rempli l'écran de rideaux d'eau.
+// ⚠ Pris dans un filet, on ne meurt pas et on ne rebondit pas : on descend à D_WATER_FALL,
+// c'est-à-dire dix fois moins vite qu'une chute libre plafonnée (D_VMAX). Se poser sur une
+// dalle rend la main — c'est la seule sortie, et elle vient toute seule.
+const D_WATER_MAX = 3, D_WATER_W = 7, D_WATER_HIT = 9, D_WATER_FALL = 1.25, D_WATER_PULL = 0.4, D_WATER_POOL = 100, D_WATER_GRAB = 6;
 const D_TILES = [
   { k: 'spike', icon: '🌵', name: 'Pique',       txt: 'mortelle au 2e rebond' },
   { k: 'cloud', icon: '☁️', name: 'Nuage',       txt: 's\'évapore après le rebond' },
@@ -6022,6 +6033,7 @@ const D_TILES = [
   // 🎊 10.1.3 — CONFETTIS (demande utilisateur) : purement festive, elle ne fait RIEN d'autre.
   { k: 'confetti', icon:'🎊', name: 'Confettis',    txt: 'elle crache des confettis pendant 5 secondes, qui retombent ensuite — de la pure décoration' },
   { k: 'gravity',  icon:'🪐', name: 'Gravité',      txt: 'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
+  { k: 'water',    icon:'💧', name: 'Eau',            txt: 'deux cascades tombent de ses bords et ruissellent sur les dalles touchées (' + D_WATER_MAX + ' au plus), qui en relancent deux à leur tour ; s\'y poser fait une flaque, et se prendre un filet t\'emporte doucement vers le bas jusqu\'à la dalle suivante' },
   { k: 'arc',      icon:'📡', name: 'Arc électrique', txt: 'seule elle ne fait rien : dès qu\'une deuxième antenne est à l\'écran et à portée, un arc se tend entre elles et crépite par intermittence — le traverser allumé fait mal' },
   { k: 'bhole',    icon:'🕳️', name: 'Trou noir',    txt: 'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
 ];
@@ -6694,6 +6706,38 @@ const D_BOMB_FUSE = 58;         // ~1 s de mèche
 // l'écran et tue les monstres pris dans le souffle. Elle est dangereuse pour le doodler aussi
 // — c'est ce qui en fait une tuile à double tranchant plutôt qu'un bonus gratuit.
 const D_METEOR_V = 4.6, D_METEOR_R = 15, D_METEOR_BOOM = 62;
+// 💧 Réseau des filets d'eau à l'écran. Renvoie `{ falls, wet }` : les segments verticaux à
+// dessiner (et dont on peut se faire prendre) et les dalles mouillées (film d'eau + gouttes).
+// ⚠ UNE SEULE source pour le dessin ET pour la capture du doodler : deux parcours séparés, et
+// c'était la garantie qu'un filet visible finisse par ne pas être celui qui emporte.
+// ⚠ Parcours en LARGEUR : une cascade nourrit ses deux voisines avant que celles-ci ne
+// nourrissent les leurs. En profondeur, le budget de D_WATER_MAX serait parti tout entier dans
+// une seule branche et l'autre bord de la dalle n'aurait jamais coulé.
+function doodleWaterFlows(s, H) {
+  const falls = [], wet = [];
+  const src = s.platforms.filter(q => doodleEffType(q) === 'water' && !q.dead && q.y > -60 && q.y < H + 20);
+  for (const p0 of src) {
+    let budget = D_WATER_MAX;
+    const queue = [p0];
+    while (queue.length && budget > 0) {
+      const p = queue.shift();
+      for (const side of [-1, 1]) {
+        const x = side < 0 ? p.x + 3 : p.x + p.w - 3;
+        let hit = null;
+        for (const q of s.platforms) {
+          if (q === p || !doodleSolid(q) || q.y <= p.y + 6) continue;
+          if (x < q.x || x > q.x + q.w) continue;
+          if (!hit || q.y < hit.y) hit = q;
+        }
+        falls.push({ x, y0: p.y + p.h, y1: hit ? hit.y : H + 24 });
+        if (!hit || budget <= 0) continue;
+        if (wet.indexOf(hit) >= 0) continue;   // déjà mouillée par l'autre bord : elle ne consomme pas deux fois le budget
+        wet.push(hit); budget--; queue.push(hit);
+      }
+    }
+  }
+  return { falls, wet };
+}
 // ⚙️⚡ Fenêtre active d'une tuile à cycle. La phase est propre à chaque dalle (voir doodleSpawnRow).
 function doodleCycleOn(p, t) {
   // ⚠ Type EFFECTIF : appelée avec la vraie dalle depuis la collision (un casino y porte encore
@@ -7209,6 +7253,25 @@ function doodleTileDraw(ctx, p, t) {
     });
     ctx.restore();
     if (p.used) doodleTileSpent(ctx, p);
+    return;
+  }
+  // 💧 Eau : dalle bleue à surface ondulante, deux becs verseurs aux bords (c'est de là que
+  // partent les filets) et, après un rebond, une flaque qui s'étale et s'évapore.
+  if (p.type === 'water') {
+    doodleRR(ctx, x, y, w, h, 6, '#4aa8d8');
+    ctx.fillStyle = '#2b7099'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i <= 10; i++) { const px = x + 4 + i * (w - 8) / 10; const py = y + 5 + Math.sin(t * 0.12 + i * 0.8) * 1.8; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+    ctx.stroke();
+    ctx.fillStyle = '#8fd8f5';                                            // les deux becs
+    [x + 3, x + w - 6].forEach(bx => ctx.fillRect(bx, y + h - 5, 3, 5));
+    if (p.pool > 0) {                                                     // la flaque, qui s'évapore
+      ctx.save(); ctx.globalAlpha = Math.min(0.75, p.pool / D_WATER_POOL);
+      ctx.fillStyle = '#bfeaf8';
+      ctx.beginPath(); ctx.ellipse(x + w / 2, y + 3, w * 0.36, 3.2, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
     return;
   }
   // 📡 Arc électrique : dalle métallique surmontée d'une ANTENNE (mât, deux traverses, boule au
@@ -8010,6 +8073,29 @@ function doodleDraw(ctx, s, W, H) {
   } else {
     s.holes.forEach(h => doodleHole(ctx, h, s.t));
     s.platforms.forEach(p => doodlePlatform(ctx, p, s.tw));   // ⚠ horloge du MONDE : le dessin d'une tuile à cycle doit coïncider à la frame près avec sa fenêtre mortelle
+    // 💧 Filets d'eau : APRÈS les dalles (ils coulent devant) et depuis la MÊME liste que la
+    // capture. ⚠ Deux passes, du plus large au plus fin : sans le voile clair par-dessous, un
+    // trait de 7 px se lisait comme une barre pleine et non comme de l'eau qui tombe.
+    {
+      const flow = doodleWaterFlows(s, H);
+      if (flow.falls.length) {
+        ctx.save();
+        for (const f of flow.falls) {
+          const g = ctx.createLinearGradient(f.x, f.y0, f.x, f.y1);
+          g.addColorStop(0, 'rgba(143,216,245,0.85)'); g.addColorStop(1, 'rgba(143,216,245,0.35)');
+          ctx.fillStyle = g; ctx.fillRect(f.x - D_WATER_W / 2, f.y0, D_WATER_W, Math.max(0, f.y1 - f.y0));
+          ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.2;
+          ctx.beginPath();                                   // le fil clair qui serpente : c'est lui qui fait « couler »
+          for (let yy = f.y0; yy < f.y1; yy += 9) { const px = f.x + Math.sin((yy + s.tw * 2.4) * 0.16) * 2; yy === f.y0 ? ctx.moveTo(px, yy) : ctx.lineTo(px, yy); }
+          ctx.stroke();
+        }
+        // Film d'eau sur les dalles mouillées + gouttes au bord : elles disent que l'eau
+        // continue plus bas, ce que les seuls filets ne montreraient qu'après coup.
+        ctx.fillStyle = 'rgba(143,216,245,0.6)';
+        for (const q of flow.wet) ctx.fillRect(q.x, q.y - 1, q.w, 3);
+        ctx.restore();
+      }
+    }
     // 📡 Arcs électriques : APRÈS les dalles (ils passent devant les antennes) et depuis la
     // MÊME liste que les dégâts. ⚠ La dentelure est tirée de `doodleRnd` et se rafraîchit avec
     // le temps : c'est ce qui fait crépiter l'éclair au lieu d'un simple trait qui s'allume.
@@ -8553,7 +8639,7 @@ function GameDoodle() {
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, big: 0, shTime: 0, shHit: 0, shFall: 0 }, shTimeLeft: 0, lastMissile: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, unluckyLeft: D_LUCKY_MAX, unluckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
-      vine: null, beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, mode };
+      vine: null, beltVx: 0, beltLeft: 0, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, wat: 0, watX: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, mode };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
   const start = () => { reset(); setPhase('playing'); };
@@ -9062,6 +9148,11 @@ function GameDoodle() {
             if (et === 'rebound') { s.rebLeft = D_REBOUND_N; s.toast = { txt: `🦘 ${D_REBOUND_N} sauts deux fois plus hauts`, life: D_TOAST_LIFE }; }
             // 🪐 `max` et non affectation : deux dalles de gravité coup sur coup prolongent
             // l'effet, elles ne doivent pas l'écourter.
+            // 💧 « quand je la touche elle fait une petite flaque qui éclabousse »
+            if (et === 'water') {
+              p.pool = D_WATER_POOL;
+              for (let k = 0; k < 16; k++) { const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.4, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2 + (Math.random() - 0.5) * p.w * 0.7, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 24, max: 24, sz: 2.5, c: k % 2 ? '#8fd8f5' : '#ffffff' }); }
+            }
             if (et === 'gravity') { s.gravLeft = Math.max(s.gravLeft || 0, D_GRAVITY_LIFE); s.toast = { txt: `🪐 Gravité — sauts deux fois moins hauts ${Math.round(D_GRAVITY_LIFE / 60)} s`, life: D_TOAST_LIFE }; }
             // 🕳️ Trou noir : le 1er passage le fait naître, les suivants DOUBLENT sa surface.
             // ⚠ On vérifie que le trou mémorisé est TOUJOURS dans `s.holes` : sorti par le bas,
@@ -9336,6 +9427,27 @@ function GameDoodle() {
           die(); return;
         }
       }
+      // 💧 Filets d'eau : s'y trouver, c'est descendre AVEC l'eau. On n'y meurt pas — on n'y
+      // rebondit pas non plus, la chute est simplement ramenée à D_WATER_FALL et le doodler
+      // recentré sur le filet. ⚠ `s.wat` est un COMPTEUR de quelques frames et non un booléen :
+      // sans cette rémanence, sortir d'un pixel du filet à chaque frame l'aurait fait clignoter
+      // entre chute libre et chute lente. ⚠ Le vol garde son passe-droit, comme partout.
+      if (s.wat > 0) s.wat--;
+      if (s.fly <= 0 && !s.bossHide && !s.acc && !s.vine) {
+        const flows = doodleWaterFlows(s, H);
+        for (const f of flows.falls) {
+          if (Math.abs(s.px - f.x) > D_WATER_HIT || s.py < f.y0 - 6 || s.py > f.y1) continue;
+          s.wat = D_WATER_GRAB; s.watX = f.x;
+          break;
+        }
+        if (s.wat > 0) {
+          s.vy = Math.min(s.vy, D_WATER_FALL);          // ⚠ `min` : on ne RALENTIT jamais une remontée en cours, on plafonne la descente
+          if (s.vy < 0) s.vy = Math.min(0, s.vy + 0.5 * sf);   // … mais un élan vers le haut est éteint progressivement : l'eau finit par gagner
+          const dx = s.watX - s.px;
+          s.px += Math.max(-D_WATER_PULL, Math.min(D_WATER_PULL, dx)) * sf;
+          if (s.t % 4 === 0) s.parts.push({ x: s.px + (Math.random() - 0.5) * 10, y: s.py + (Math.random() - 0.5) * 14, vx: (Math.random() - 0.5) * 1.2, vy: 0.8 + Math.random(), life: 16, max: 16, sz: 2, c: Math.random() < 0.5 ? '#8fd8f5' : '#ffffff' });
+        }
+      }
       // 📡 Arcs électriques : ils ne blessent que dans leur fenêtre allumée, et la même liste
       // sert au dessin — un éclair visible est toujours un éclair qui blesse, et réciproquement.
       if (s.fly <= 0 && s.inv <= 0 && !s.bossHide && doodleArcOn(s.tw)) {
@@ -9411,6 +9523,7 @@ function GameDoodle() {
         if (p.pcool > 0) p.pcool--;                                                            // 🚇 repos de la bouche de tuyau
       }
       s.parts = s.parts.filter(pt => pt.life > 0);
+      for (const q of s.platforms) if (q.pool > 0) q.pool -= sf;   // 💧 la flaque s'évapore
       s.booms.forEach(b => b.life--); s.booms = s.booms.filter(b => b.life > 0);
       s.platforms = s.platforms.filter(p => !p.dead && p.y < H + 30);
       s.monsters = s.monsters.filter(m => m.alive && m.y < H + 40);
