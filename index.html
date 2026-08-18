@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.1.8';
+const APP_VERSION = '10.1.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6022,6 +6022,7 @@ const D_TILES = [
   // 🎊 10.1.3 — CONFETTIS (demande utilisateur) : purement festive, elle ne fait RIEN d'autre.
   { k: 'confetti', icon:'🎊', name: 'Confettis',    txt: 'elle crache des confettis pendant 5 secondes, qui retombent ensuite — de la pure décoration' },
   { k: 'gravity',  icon:'🪐', name: 'Gravité',      txt: 'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
+  { k: 'arc',      icon:'📡', name: 'Arc électrique', txt: 'seule elle ne fait rien : dès qu\'une deuxième antenne est à l\'écran et à portée, un arc se tend entre elles et crépite par intermittence — le traverser allumé fait mal' },
   { k: 'bhole',    icon:'🕳️', name: 'Trou noir',    txt: 'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
 ];
 // 🕯️ Les trois postes de guet, en fractions de l'écran : haut-gauche, haut-droit, bas-droit.
@@ -6210,6 +6211,37 @@ const D_ACCORD_HOLD = 14, D_ACCORD_MUL = 1.75;
 const D_SPAWNER_MIN = 95, D_SPAWNER_SPAN = 150;
 const D_PICOT_CYCLE = 108, D_PICOT_ON = 46;    // ⚙️ ~1,8 s de cycle, piques sorties sur ~0,8 s
 const D_ZAP_CYCLE = 120, D_ZAP_ON = 34;        // ⚡ décharge toutes les 2 s, active ~0,55 s
+// 📡 10.1.9 — ARC ÉLECTRIQUE (demande utilisateur) : la dalle porte une antenne et ne fait RIEN
+// toute seule — il en faut DEUX à l'écran pour qu'un arc se tende entre elles.
+// ⚠ Cycle GLOBAL (lu sur `s.tw`, pas sur une phase par dalle) : tous les arcs de l'écran
+// crépitent ensemble. Des phases décalées auraient donné un rideau permanent d'éclairs entre
+// lesquels plus aucune fenêtre sûre n'existait.
+// ⚠ Portée BORNÉE : sans elle, deux antennes aux deux bouts de l'écran auraient barré toute
+// une rangée, et une rangée barrée sans issue n'est plus un piège de rythme mais un mur.
+// ⚠ L'arc BLESSE via `doodleHurt` (jamais une mort sèche) : il est donc paré par les boucliers,
+// comme la ⚡ Électrifiée et le ⚙️ Piège à picots dont il reprend la grammaire.
+const D_ARC_CYCLE = 130, D_ARC_ON = 42, D_ARC_RANGE = 190, D_ARC_HIT = 9;
+function doodleArcOn(t) { return (t % D_ARC_CYCLE) < D_ARC_ON; }
+// Les segments d'arc à l'écran : toutes les paires d'antennes visibles à portée l'une de
+// l'autre. ⚠ Une seule source pour le DESSIN et pour les dégâts — deux parcours séparés, et
+// c'était la garantie qu'un éclair dessiné finisse par ne pas être celui qui blesse.
+function doodleArcPairs(s, H) {
+  const a = [];
+  for (const q of s.platforms) if (doodleEffType(q) === 'arc' && !q.dead && q.y > -20 && q.y < H + 20) a.push(q);
+  const out = [];
+  for (let i = 0; i < a.length; i++) for (let j = i + 1; j < a.length; j++) {
+    const x1 = a[i].x + a[i].w / 2, y1 = a[i].y, x2 = a[j].x + a[j].w / 2, y2 = a[j].y;
+    if (Math.hypot(x2 - x1, y2 - y1) > D_ARC_RANGE) continue;
+    out.push({ x1, y1: y1 - 9, x2, y2: y2 - 9 });   // −9 : l'arc part du HAUT de l'antenne, pas de la dalle
+  }
+  return out;
+}
+// Distance d'un point au SEGMENT (et non à la droite) : au-delà des antennes, l'arc n'existe pas.
+function doodleSegDist(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy;
+  const u = l2 ? Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / l2)) : 0;
+  return Math.hypot(px - (x1 + u * dx), py - (y1 + u * dy));
+}
 // ➡️ 9.5.0 — TAPIS ROULANT DURCI (demande utilisateur) : il ne suffisait plus de dériver
 // 0,7 s. L'entraînement dure maintenant D_BELT_LIFE (3 s) ET le doodler n'obéit plus qu'à
 // D_BELT_GRIP de son pilotage pendant ce temps — c'est ce qui rend « difficile de venir là
@@ -7179,6 +7211,27 @@ function doodleTileDraw(ctx, p, t) {
     if (p.used) doodleTileSpent(ctx, p);
     return;
   }
+  // 📡 Arc électrique : dalle métallique surmontée d'une ANTENNE (mât, deux traverses, boule au
+  // sommet). ⚠ L'antenne dépasse VERS LE HAUT, hors de la boîte de la dalle : c'est ce qui la
+  // rend reconnaissable de loin, et c'est de sa pointe que part l'arc.
+  if (p.type === 'arc') {
+    const on = doodleArcOn(t);
+    doodleRR(ctx, x, y, w, h, 6, on ? '#4a6f9e' : '#6b7280');
+    ctx.fillStyle = on ? '#2b4a72' : '#4b5058'; ctx.fillRect(x, y + h - 4, w, 4);
+    const cx = x + w / 2;
+    ctx.strokeStyle = '#c9ced6'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cx, y + h - 3); ctx.lineTo(cx, y - 9); ctx.stroke();          // le mât
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, y - 2); ctx.lineTo(cx + 5, y - 2);                                     // traverses
+    ctx.moveTo(cx - 3.5, y - 6); ctx.lineTo(cx + 3.5, y - 6);
+    ctx.moveTo(cx - 6, y + 4); ctx.lineTo(cx, y - 2); ctx.moveTo(cx + 6, y + 4); ctx.lineTo(cx, y - 2);   // haubans
+    ctx.stroke();
+    ctx.fillStyle = on ? '#ffe98a' : '#8f959e';                                               // la boule au sommet, qui s'allume
+    ctx.beginPath(); ctx.arc(cx, y - 10, on ? 3.2 : 2.4, 0, Math.PI * 2); ctx.fill();
+    if (on) { ctx.strokeStyle = 'rgba(255,233,138,0.5)'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(cx, y - 10, 6 + Math.sin(t * 0.35) * 1.5, 0, Math.PI * 2); ctx.stroke(); }
+    return;
+  }
   // 🕳️ Trou noir : dalle d'un noir bleuté percée d'une spirale qui tourne — le même motif que
   // le trou noir lui-même (`doodleHole`), pour qu'on fasse le lien avant même le premier saut.
   if (p.type === 'bhole') {
@@ -7957,6 +8010,30 @@ function doodleDraw(ctx, s, W, H) {
   } else {
     s.holes.forEach(h => doodleHole(ctx, h, s.t));
     s.platforms.forEach(p => doodlePlatform(ctx, p, s.tw));   // ⚠ horloge du MONDE : le dessin d'une tuile à cycle doit coïncider à la frame près avec sa fenêtre mortelle
+    // 📡 Arcs électriques : APRÈS les dalles (ils passent devant les antennes) et depuis la
+    // MÊME liste que les dégâts. ⚠ La dentelure est tirée de `doodleRnd` et se rafraîchit avec
+    // le temps : c'est ce qui fait crépiter l'éclair au lieu d'un simple trait qui s'allume.
+    if (doodleArcOn(s.tw)) {
+      const arcs = doodleArcPairs(s, H);
+      if (arcs.length) {
+        ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        arcs.forEach((a, ai) => {
+          const n = 7, dx = a.x2 - a.x1, dy = a.y2 - a.y1, len = Math.hypot(dx, dy) || 1;
+          const nx = -dy / len, ny = dx / len;   // normale au segment : c'est sur elle qu'on écarte
+          const pts = [];
+          for (let i = 0; i <= n; i++) {
+            const u = i / n, amp = i === 0 || i === n ? 0 : 9 * Math.sin(u * Math.PI);
+            const j = (doodleRnd(ai * 31 + i * 7 + Math.floor(s.tw / 4)) - 0.5) * 2 * amp;
+            pts.push([a.x1 + dx * u + nx * j, a.y1 + dy * u + ny * j]);
+          }
+          [['rgba(140,200,255,0.45)', 6], ['#ffe98a', 2.2]].forEach(([col, lw]) => {
+            ctx.strokeStyle = col; ctx.lineWidth = lw;
+            ctx.beginPath(); pts.forEach(([px, py], i) => i ? ctx.lineTo(px, py) : ctx.moveTo(px, py)); ctx.stroke();
+          });
+        });
+        ctx.restore();
+      }
+    }
     s.items.forEach(it => doodleItem(ctx, it, s.t));
     s.meteors.forEach(mt => doodleMeteorDraw(ctx, mt));
   }
@@ -9256,6 +9333,15 @@ function GameDoodle() {
         for (const h of s.holes) {
           if (Math.hypot(s.px - h.x, s.py - h.y) >= h.r * 0.6) continue;
           if (doodleHurt(s)) { s.vy = D_JUMP; break; }   // ⚠ le trou noir REJECTE vers le haut : sans ça on y retomberait aussitôt, bouclier après bouclier
+          die(); return;
+        }
+      }
+      // 📡 Arcs électriques : ils ne blessent que dans leur fenêtre allumée, et la même liste
+      // sert au dessin — un éclair visible est toujours un éclair qui blesse, et réciproquement.
+      if (s.fly <= 0 && s.inv <= 0 && !s.bossHide && doodleArcOn(s.tw)) {
+        for (const arc of doodleArcPairs(s, H)) {
+          if (doodleSegDist(s.px, s.py, arc.x1, arc.y1, arc.x2, arc.y2) > D_ARC_HIT + 10) continue;
+          if (doodleHurt(s)) break;
           die(); return;
         }
       }
