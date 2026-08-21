@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.5.7';
+const APP_VERSION = '10.5.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5521,9 +5521,19 @@ function doodleLootLvl(s, k) { return k === 'ammo' ? 0 : (s.wpn[k] || 0); }
 // bouclier finisse par n'être honoré que dans deux cas sur trois. Renvoie false = mort.
 function doodleHurt(s) {
   if (s.inv > 0) return true;
+  // 🖌️ Teintes qui protègent. ⚠ ⚪ Statue et ⚫ Ombre ne posent PAS `s.inv` : leur protection
+  // court déjà sur leur propre décompte, et l'invulnérabilité ordinaire explose en s'éteignant
+  // (voir D_BOOM_R) — elles auraient offert une bombe gratuite à chaque coup encaissé.
+  if (doodlePaintIs(s, 'marble') || doodlePaintIs(s, 'shadow')) return true;
+  // 🟤 Écorce : elle encaisse UN coup et s'en va. Placée AVANT les boucliers : c'est un
+  // consommable de peau, le laisser derrière une carapace l'aurait condamné à ne jamais servir.
+  if (doodlePaintIs(s, 'bark')) { s.inv = D_INV; doodlePaintEnd(s, 'elle a encaissé le coup'); return true; }
   if (s.shTimeLeft > 0) { s.inv = D_INV; return true; }                                   // ⏳ absorbe sans se consommer : il court sur des points, pas sur des coups
   if (s.wpn.shHit > 0) { s.wpn.shHit--; s.inv = D_INV; s.toast = { txt: `🛡️ Bouclier ! ${s.wpn.shHit} restant(s)`, life: D_TOAST_LIFE }; return true; }
   if (s.armorLeft > 0) { s.armorLeft--; s.inv = D_INV; s.toast = { txt: `🛡️ Carapace ! ${s.armorLeft} restante(s)`, life: D_TOAST_LIFE }; return true; }
+  // 💀 Revenant : le DERNIER filet, après tous les boucliers. Il ne se dépense donc que sur un
+  // coup que plus rien d'autre n'aurait arrêté — c'est ce qui en fait une vie, pas un bouclier.
+  if (doodlePaintIs(s, 'revenant')) { s.inv = D_INV; doodlePaintEnd(s, 'elle t\'a relevé'); return true; }
   return false;
 }
 // Butins encore disponibles : ceux dont le palier maximal n'est pas atteint.
@@ -6315,6 +6325,104 @@ function doodleBubblePop(s) {
 }
 const D_ORIGAMI_STEP = 96;   // frames par forme, soit 1,6 s
 function doodleOrigamiForm(p, t) { return Math.floor((t + (p.ph || 0)) / D_ORIGAMI_STEP) % 3; }
+// 🖌️ 10.5.8 — PEINTURE FRAÎCHE (demande utilisateur) : une dalle qui REPEINT la peau du
+// doodler et lui donne l'effet associé à la teinte, UNE SEULE FOIS par dalle. Chaque dalle
+// tire sa teinte à sa naissance et l'AFFICHE : on choisit d'y aller ou pas en connaissance
+// de cause, exactement comme le 🃏 Casino révèle la sienne au contact.
+// ⚠ La couleur ne survit PAS à l'effet : elle s'éteint avec lui (ou avec sa consommation pour
+// les teintes à usage unique). Une peau qui resterait teinte laisserait croire à un pouvoir
+// qu'on n'a plus — c'est précisément le seul repère à l'écran qui dise ce qui est actif.
+// ⚠ `life` en FRAMES comme toute durée du jeu ; `life: 0` = teinte CONSOMMABLE, qui ne
+// s'épuise pas au temps mais à son usage (elle encaisse, elle écrase, elle relève).
+const D_PAINT_MARBLE_JUMP = 0.6, D_PAINT_MARBLE_G = 2;    // ⚪ Statue : lourde à monter, prompte à retomber
+const D_PAINT_MINI_JUMP = 0.82, D_PAINT_MINI_SZ = 0.5;    // 🔷 Miniature : petites jambes, petite cible
+const D_PAINT_GIANT_SZ = 1.8;                             // 🟧 Colosse : il écrase, mais il se prend tout
+const D_PAINT_WIND = 2;                                   // 🩵 Courant d'air : pilotage doublé
+const D_PAINT_CRYO_R = 46;                                // 🔵 Cryogène : rayon de gel
+const D_PAINT_BOLT_GAP = 120, D_PAINT_BOLT_LIFE = 14;     // 🟡 Paratonnerre : un éclair toutes les 2 s
+const D_PAINT_TOX_EVERY = 5, D_PAINT_TOX_LIFE = 90, D_PAINT_TOX_R = 20;   // 🟢 Toxique : dépôt, rémanence, portée
+const D_PAINT_SIPHON_V = 4.2;                             // 🟣 Siphon : bien plus vif que l'aimant ordinaire
+const D_PAINT_ANVIL_R = 78, D_PAINT_ANVIL_MUL = 1.35;     // 🩶 Enclume : souffle de l'impact et détente du choc
+const D_PAINT_GUM_JUMP = 0.9;                             // 🩷 Élastique : le rebond mural relance un saut presque plein
+const D_PAINTS = [
+  { k:'berserk',  icon:'🔴', name:'Berserk',        body:'#e2564a', dark:'#8f2a22', eye:'#4a1410', life:480, txt:'tu tues les créatures au CONTACT au lieu d\'en mourir' },
+  { k:'cryo',     icon:'🔵', name:'Cryogène',       body:'#7fc9e0', dark:'#3a7f9c', eye:'#123647', life:480, txt:'toute créature qui t\'approche se fige sur place pour de bon' },
+  { k:'bolt',     icon:'🟡', name:'Paratonnerre',   body:'#ffd54a', dark:'#c48f10', eye:'#5a3f00', life:600, txt:'la foudre frappe une créature à l\'écran toutes les 2 secondes' },
+  { k:'shadow',   icon:'⚫', name:'Ombre',          body:'#4a4550', dark:'#221f28', eye:'#0d0b10', life:360, txt:'tu traverses créatures et trous noirs sans dégât — mais tu ne peux plus tirer' },
+  { k:'marble',   icon:'⚪', name:'Statue',         body:'#eef2f5', dark:'#9aa6b0', eye:'#4a545c', life:300, txt:'rien ne peut te blesser, mais tu sautes bas et tu retombes comme une pierre' },
+  { k:'toxic',    icon:'🟢', name:'Toxique',        body:'#8fe000', dark:'#4a7a00', eye:'#1e3300', life:480, txt:'tu laisses derrière toi une traînée corrosive, mortelle pour les créatures' },
+  { k:'ember',    icon:'🟠', name:'Combustion',     body:'#ff8c3a', dark:'#a8481a', eye:'#3f1a08', life:300, txt:'tu t\'envoles en crachant des flammes, comme sous un jetpack' },
+  { k:'siphon',   icon:'🟣', name:'Siphon',         body:'#a05ab0', dark:'#5a2b66', eye:'#22102a', life:240, txt:'tous les coffres et bonus de l\'écran filent vers toi, sans limite de portée' },
+  { k:'gum',      icon:'🩷', name:'Élastique',      body:'#ff8fc8', dark:'#c0417f', eye:'#4d1030', life:600, txt:'les bords de l\'écran cessent d\'être traversants : tu rebondis dessus et ça relance un saut' },
+  { k:'bark',     icon:'🟤', name:'Écorce',         body:'#a9743a', dark:'#5f3d16', eye:'#2a1a08', life:0,   txt:'elle encaisse UN coup à ta place, puis s\'en va' },
+  { k:'anvil',    icon:'🩶', name:'Enclume',        body:'#9aa3ad', dark:'#5b626b', eye:'#22262b', life:0,   txt:'ton prochain atterrissage pulvérise la dalle et toutes les créatures alentour' },
+  { k:'chrome',   icon:'✨', name:'Réflecteur',     body:'#dfe8f0', dark:'#8fa2b4', eye:'#3a4650', life:480, txt:'tirs de dalles, gouttes de lave et arcs électriques rebondissent sur toi' },
+  { k:'invis',    icon:'🫥', name:'Invisible',      body:'#cfe0ef', dark:'#9db3c8', eye:'#5a6c80', life:600, txt:'plus rien ne te vise : grappins, dalles laser et esprits te ratent' },
+  { k:'chaos',    icon:'🌈', name:'Instable',       body:'#ff8fc8', dark:'#6b3fd4', eye:'#2a1050', life:360, txt:'chaque rebond déclenche en plus l\'effet d\'une de tes tuiles, tirée au hasard' },
+  { k:'gold',     icon:'🟨', name:'Doré',           body:'#ffd54a', dark:'#b8860b', eye:'#4a3300', life:720, txt:'l\'altitude gagnée compte DOUBLE' },
+  { k:'wind',     icon:'🩵', name:'Courant d\'air', body:'#8fe8ff', dark:'#2f8fb0', eye:'#0d3a4a', life:600, txt:'tu te déplaces deux fois plus vite d\'un bord à l\'autre' },
+  { k:'camo',     icon:'🫒', name:'Camouflage',     body:'#8a9a5b', dark:'#4d5a2a', eye:'#1e2410', life:480, txt:'les tuiles piégées (piques, picots, décharges, lasers, lave, arcs) deviennent inoffensives' },
+  { k:'mini',     icon:'🔷', name:'Miniature',      body:'#4a6fd8', dark:'#26418f', eye:'#0d1a40', life:720, txt:'tu rétrécis de moitié : bien plus dur à toucher, mais tu sautes un peu moins haut' },
+  { k:'giant',    icon:'🟧', name:'Colosse',        body:'#ff7a18', dark:'#a83f00', eye:'#3d1600', life:720, txt:'tu doubles de taille et tu écrases tout ce que tu touches en tombant — mais tu es une cible énorme' },
+  { k:'revenant', icon:'💀', name:'Revenant',       body:'#f2f0e6', dark:'#a8a08c', eye:'#3a362c', life:0,   txt:'la prochaine mort te relève au lieu de t\'achever — chute dans le vide comprise' },
+];
+// 🌈 Instable : le vivier des effets qu'elle peut rejouer. ⚠ C'est une LISTE BLANCHE et non une
+// liste d'exclusions : la plupart des tuiles lisent un état porté par LEUR dalle (`p.pipe`,
+// `p.zip`, `p.tama`, `p.egg`…) et rejouées sur une dalle étrangère elles ne feraient rien, ou
+// pire, la transformeraient en une chose qu'elle n'est pas. Ne restent ici que les effets qui
+// se suffisent à eux-mêmes. ⚠ Aucune tuile MORTELLE dedans : un rebond ne doit jamais tuer par
+// surprise à cause d'une teinte qu'on porte.
+const D_PAINT_CHAOS = ['bomb', 'meteor', 'magnet', 'slow', 'warp', 'invert', 'rebound', 'balloon', 'bubble', 'boost', 'gravity', 'negative', 'shroom', 'slayer', 'soap', 'recharge', 'confetti', 'popcorn', 'sticky', 'accord', 'tentacle', 'bhole', 'fractal', 'freeze'];
+function doodlePaintDef(k) { return D_PAINTS.find(p => p.k === k) || null; }
+// La teinte ACTIVE, ou null. ⚠ Une teinte consommable (`life: 0`) porte `left: 0` et reste
+// active jusqu'à son usage : c'est `s.skin` lui-même qui fait foi, pas son décompte.
+function doodlePaint(s) { return s && s.skin ? s.skin : null; }
+function doodlePaintIs(s, k) { const p = doodlePaint(s); return !!p && p.k === k; }
+// ⚠ Palette LUE au dessin, jamais recopiée dans l'état : la 🌈 Instable change de teinte à
+// chaque frame, une couleur figée à la pose l'aurait rendue immobile.
+function doodlePaintPal(s) {
+  const p = doodlePaint(s); if (!p) return null;
+  const d = doodlePaintDef(p.k); if (!d) return null;
+  if (p.k !== 'chaos') return { body: d.body, dark: d.dark, eye: d.eye };
+  const h = ((s.t || 0) * 4) % 360;
+  return { body: `hsl(${h},85%,62%)`, dark: `hsl(${h},75%,34%)`, eye: `hsl(${h},80%,18%)` };
+}
+function doodlePaintSize(s) { return doodlePaintIs(s, 'mini') ? D_PAINT_MINI_SZ : doodlePaintIs(s, 'giant') ? D_PAINT_GIANT_SZ : 1; }
+// Fin de teinte : la peau redevient verte. ⚠ Point de passage UNIQUE (expiration comme
+// consommation) — deux endroits qui remettent `skin` à null, c'est un des deux qui oubliera
+// d'éteindre l'effet le jour où une teinte de plus s'ajoutera.
+function doodlePaintEnd(s, why) {
+  const p = doodlePaint(s); if (!p) return;
+  s.skin = null;
+  const d = doodlePaintDef(p.k);
+  if (why && d) s.toast = { txt: `${d.icon} ${d.name} — ${why}`, life: D_TOAST_LIFE };
+  for (let k = 0; k < 10; k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 2.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 20, max: 20, sz: 2.5, c: k % 2 ? (d ? d.body : '#7ac043') : '#7ac043' }); }
+}
+// Pose d'une teinte. ⚠ Elle REMPLACE la précédente au lieu de s'y ajouter : deux effets de peau
+// simultanés n'auraient eu qu'une seule couleur pour se dire, donc l'un des deux aurait été
+// invisible. 🟠 La combustion est la seule à agir dès la pose (elle décolle).
+function doodlePaintStart(s, k) {
+  const d = doodlePaintDef(k); if (!d) return null;
+  if (s.skin) doodlePaintEnd(s);
+  s.skin = { k, left: d.life, max: d.life, tick: 0 };
+  if (k === 'ember') { s.fly = d.life; s.flyType = 'jet'; s.vy = -6.4; s.lastPlat = null; s.bounceStreak = 0; }
+  if (k === 'chaos') s.slip = 0;
+  s.toast = { txt: `${d.icon} ${d.name} · ${d.txt}`, life: D_TOAST_LIFE * 1.4 };
+  for (let j = 0; j < 20; j++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 26, max: 26, sz: 3, c: j % 2 ? d.body : d.dark }); }
+  return d;
+}
+// Gerbe d'étincelles d'un projectile RENVOYÉ (✨ Réflecteur) ou éteint (🫒 Camouflage). ⚠ Sans
+// elle, un tir qui traverse le doodler sans rien lui faire passe pour un bug d'affichage.
+function doodlePaintSpark(s, x, y) {
+  for (let k = 0; k < 12; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 20, max: 20, sz: 2.5, c: k % 2 ? '#ffffff' : '#dfe8f0' }); }
+}
+// 🌈 Instable : un effet à rejouer, pris parmi les tuiles DÉBLOQUÉES qui figurent dans la liste
+// blanche. ⚠ Rien si le joueur n'en a aucune : rejouer un effet qu'il n'a pas débloqué serait
+// lui donner une tuile par la bande.
+function doodlePaintChaosPick(s) {
+  const pool = (s.tiles || []).filter(k => D_PAINT_CHAOS.indexOf(k) >= 0);
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+}
 const D_TILES = [
   { k: 'spike', icon: '🌵', name: 'Pique',       txt: 'mortelle au 2e rebond' },
   { k: 'cloud', icon: '☁️', name: 'Nuage',       txt: 's\'évapore après le rebond' },
@@ -6393,6 +6501,8 @@ const D_TILES = [
   { k: 'water',    icon:'💧', name: 'Eau',            txt: 'deux cascades tombent de ses bords et ruissellent sur les dalles touchées (' + D_WATER_MAX + ' au plus), qui en relancent deux à leur tour ; s\'y poser fait une flaque, et se prendre un filet t\'emporte doucement vers le bas jusqu\'à la dalle suivante' },
   { k: 'arc',      icon:'📡', name: 'Arc électrique', txt: 'seule elle ne fait rien : dès qu\'une deuxième antenne est à l\'écran et à portée, un arc se tend entre elles et crépite par intermittence — le traverser allumé fait mal' },
   { k: 'bhole',    icon:'🕳️', name: 'Trou noir',    txt: 'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
+  // 🖌️ 10.5.8 — voir D_PAINTS : la dalle porte SA teinte dès sa naissance, et ne la donne qu'une fois.
+  { k: 'paint',    icon:'🖌️', name: 'Peinture fraîche', txt: 'elle repeint ta peau de la teinte qu\'elle affiche — une des ' + D_PAINTS.length + ' — et te donne l\'effet qui va avec, une seule fois par dalle' },
 ];
 // 🕯️ Les trois postes de guet, en fractions de l'écran : haut-gauche, haut-droit, bas-droit.
 // ⚠ Ce sont des positions D'ÉCRAN, pas de monde : les esprits ne suivent PAS la caméra, ils
@@ -8236,6 +8346,31 @@ function doodleTileDraw(ctx, p, t) {
     }
     return;
   }
+  // 🖌️ Peinture fraîche : la dalle est PEINTE de la teinte qu'elle donne, avec son pot et sa
+  // coulure — sa couleur est toute l'information, il faut pouvoir la lire de loin et en tombant.
+  if (p.type === 'paint') {
+    const pt = D_PAINTS[(p.paint || 0) % D_PAINTS.length];
+    doodleRR(ctx, x, y, w, h, 6, pt.body);
+    ctx.fillStyle = pt.dark; ctx.fillRect(x, y + h - 4, w, 4);
+    // Coulures : de la peinture encore fraîche déborde du bord bas, à des longueurs inégales.
+    ctx.fillStyle = pt.dark;
+    for (let i = 0; i < 3; i++) {
+      const dx = x + w * (0.24 + i * 0.26), dl = 3 + ((Math.floor(t / 9) + i * 3) % 4);
+      ctx.fillRect(dx - 1.6, y + h, 3.2, dl);
+      ctx.beginPath(); ctx.arc(dx, y + h + dl, 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    // Le pinceau, planté en travers : c'est lui qui dit « peinture » plutôt que « dalle colorée ».
+    ctx.save(); ctx.translate(x + w / 2, y + h / 2); ctx.rotate(-0.5 + Math.sin(t * 0.06) * 0.12);
+    ctx.fillStyle = '#c9a06a'; ctx.fillRect(-1.8, -8, 3.6, 10);
+    ctx.fillStyle = '#c3ccd4'; ctx.fillRect(-2.8, 1, 5.6, 3);
+    ctx.fillStyle = pt.dark; ctx.fillRect(-3.2, 4, 6.4, 4.5);
+    ctx.restore();
+    ctx.save(); ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(pt.icon, x + w - 11, y + h / 2);
+    ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    if (p.used) doodleTileSpent(ctx, p);   // épuisée : elle reste une plateforme, elle ne promet plus de teinte
+    return;
+  }
   // 🧨 bombe : la mèche RACCOURCIT à vue d'œil, sinon on ne saurait pas quand ça part
   const lit = p.fuse > 0;
   doodleRR(ctx, x, y, w, h, 6, lit && Math.floor(p.fuse / 5) % 2 ? '#e0563c' : '#4a3f3a');
@@ -8304,6 +8439,12 @@ function doodlePerkHud(ctx, s, W) {
   if (s.shroom > 0) chips.push({ t: `🍄${Math.ceil(s.shroom / 60)}s`, bg:'rgba(226,86,74,0.92)', fg:'#fff' });
   if (s.neg > 0) chips.push({ t: `🎨${Math.ceil(s.neg / 60)}s`, bg:'rgba(60,60,70,0.92)', fg:'#fff' });
   if (s.blind) chips.push({ t: '🌁', bg:'rgba(150,160,172,0.92)', fg:'#1c2028' });
+  // 🖌️ Teinte portée : la peau la dit déjà, mais elle ne dit NI son nom NI ce qu'il en reste.
+  // ⚠ Une teinte consommable (`life: 0`) affiche son icône seule : elle n'a pas de compte à rebours.
+  if (s.skin) {
+    const pd = doodlePaintDef(s.skin.k);
+    if (pd) chips.push({ t: `${pd.icon}${s.skin.left > 0 ? Math.ceil(s.skin.left / 60) + 's' : ''}`, bg: pd.body, fg: pd.eye });
+  }
   if (s.quest) chips.push({ t: `🎯${doodleQuestDone(s)}/${s.quest.n}`, bg:'rgba(99,196,90,0.92)', fg:'#08301a' });
   if (s.beltLeft > 0) chips.push({ t: `${s.beltSoap ? '🧼' : s.beltVx > 0 ? '➡️' : '⬅️'}${Math.ceil(s.beltLeft / 60)}s`, bg:'rgba(255,213,74,0.92)', fg:'#3a2a10' });   // ➡️ sans elle, on subit la dérive sans savoir ni pourquoi ni pour combien de temps
   if (s.scoreMul && s.scoreMul > 1.001) chips.push({ t: `📈×${s.scoreMul.toFixed(2)}`, bg:'rgba(224,161,58,0.92)', fg:'#3a2a10' });
@@ -9218,7 +9359,19 @@ function doodleDraw(ctx, s, W, H) {
     ctx.fillStyle = '#ffd54a'; ctx.beginPath(); ctx.ellipse(0, -D_LAVA_R * st * 0.25, D_LAVA_R * 0.42, D_LAVA_R * st * 0.42, 0, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
   });
-  if (!arena) s.monsters.forEach(m => doodleMonster(ctx, m, s.t));
+  if (!arena) s.monsters.forEach(m => {
+    doodleMonster(ctx, m, s.t);
+    // 🔵 Figée par le Cryogène : gangue bleutée + éclats. ⚠ Dessinée PAR-DESSUS la créature et
+    // non à sa place : on doit continuer de reconnaître ce qu'on a gelé (et ce qui tue encore).
+    if (!m.froz) return;
+    ctx.save();
+    ctx.globalAlpha = 0.5; ctx.fillStyle = '#bfe4f5';
+    doodleRR(ctx, m.x - 2, m.y - 2, m.w + 4, m.h + 4, 6, '#bfe4f5');
+    ctx.globalAlpha = 0.9; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(m.x + 4, m.y + m.h * 0.3); ctx.lineTo(m.x + m.w * 0.45, m.y + 2);
+    ctx.moveTo(m.x + m.w * 0.55, m.y + m.h - 2); ctx.lineTo(m.x + m.w - 4, m.y + m.h * 0.55); ctx.stroke();
+    ctx.restore();
+  });
   s.parts.forEach(pt => { ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c; ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz); });
   ctx.globalAlpha = 1;
   ctx.fillStyle = '#3a7d1e';
@@ -9257,6 +9410,36 @@ function doodleDraw(ctx, s, W, H) {
     ctx.beginPath(); ctx.moveTo(b.x - ux * L * 0.8, b.y - uy * L * 0.8); ctx.lineTo(b.x, b.y); ctx.stroke();
     ctx.restore();
   });
+  // 🟢 Traînée corrosive : flaques qui s'estompent en séchant, avec quelques bulles.
+  if (s.trail && s.trail.length) {
+    ctx.save();
+    for (const tr of s.trail) {
+      const k = Math.max(0, tr.life / tr.max);
+      ctx.globalAlpha = k * 0.55;
+      ctx.fillStyle = '#8fe000'; ctx.beginPath(); ctx.ellipse(tr.x, tr.y, D_PAINT_TOX_R * (0.6 + k * 0.4), D_PAINT_TOX_R * 0.45 * (0.6 + k * 0.4), 0, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = k * 0.8;
+      ctx.fillStyle = '#d8ff6a'; ctx.beginPath(); ctx.arc(tr.x + Math.sin(tr.life * 0.2) * 5, tr.y - 2, 2 * k + 0.6, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // 🟡 Éclair du Paratonnerre : un trait brisé qui descend du haut de l'écran jusqu'à la cible.
+  // ⚠ Le zigzag est DÉTERMINISTE (`seed`) : retiré au hasard à chaque frame, l'éclair aurait
+  // frétillé au lieu de frapper.
+  if (s.bolts && s.bolts.length) {
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const bo of s.bolts) {
+      ctx.globalAlpha = Math.max(0, bo.life / bo.max);
+      [['#fff6c8', 6], ['#ffd54a', 2.6]].forEach(([col, lw]) => {
+        ctx.strokeStyle = col; ctx.lineWidth = lw;
+        ctx.beginPath(); ctx.moveTo(bo.x, 0);
+        for (let i = 1; i <= 7; i++) ctx.lineTo(bo.x + Math.sin(bo.seed + i * 2.3) * 13, bo.y * i / 7);
+        ctx.stroke();
+      });
+      ctx.globalAlpha *= 0.6; ctx.fillStyle = '#fff6c8';
+      ctx.beginPath(); ctx.arc(bo.x, bo.y, 13, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
   ctx.fillStyle = '#3a7d1e';
   s.booms.forEach(b => doodleBoomDraw(ctx, b));
   // ⚠ 9.1.3 — L'invulnérabilité se VOIT (halo doré + clignotement) : sans signal à l'écran,
@@ -9291,7 +9474,18 @@ function doodleDraw(ctx, s, W, H) {
     for (const c of s.clones) doodleDoodler(ctx, c.x, c.y, c.face, null, s.t, c.pal);
     ctx.restore();
   }
-  doodleDoodler(ctx, s.px, s.py, s.faceTimer > 0 ? 0 : s.face, s.fly > 0 ? s.flyType : null, s.t);
+  // 🖌️ Teinte portée : la palette du corps, la taille (🔷 Miniature / 🟧 Colosse) et la
+  // transparence (🫥 Invisible). ⚠ L'échelle est prise AUTOUR du doodler (translate → scale →
+  // translate inverse) : un `scale` nu aurait aussi déplacé le personnage vers le coin haut-gauche.
+  const ppal = doodlePaintPal(s), pscl = doodlePaintSize(s), pgho = doodlePaintIs(s, 'invis');
+  const pwrap = pscl !== 1 || pgho;
+  if (pwrap) {
+    ctx.save();
+    if (pgho) ctx.globalAlpha *= 0.34;
+    if (pscl !== 1) { ctx.translate(s.px, s.py); ctx.scale(pscl, pscl); ctx.translate(-s.px, -s.py); }
+  }
+  doodleDoodler(ctx, s.px, s.py, s.faceTimer > 0 ? 0 : s.face, s.fly > 0 ? s.flyType : null, s.t, ppal);
+  if (pwrap) ctx.restore();
   if (inv) ctx.restore();
   // ✴️ Shurikens : dessinés APRÈS le doodler (elles tournent DEVANT lui la moitié du temps)
   // et avant les boucliers, dont le halo doit rester au premier plan.
@@ -9527,6 +9721,7 @@ function doodleSpawnRow(s, ny, risky) {
     const tx = (x + w / 2 < DOODLE_W / 2) ? DOODLE_W - w - 8 : 8;
     s.platforms.push({ x: tx, y: ny, w, h: D_PLAT_H, type: 'green', dead: false });
   }
+  if (type2 === 'paint') p.paint = Math.floor(Math.random() * D_PAINTS.length);   // 🖌️ sa teinte, tirée une fois pour toutes et affichée dès sa naissance
   if (type2 === 'belt') p.dir = Math.random() < 0.5 ? -1 : 1;
   if (type2 === 'lift') { p.y0 = ny; p.vy2 = (Math.random() < 0.5 ? -1 : 1) * D_LIFT_V; }
   // ⚠ La pique est la SEULE tuile mortelle : elle vient donc toujours avec une plateforme
@@ -9648,6 +9843,7 @@ function doodleRules() {
     ] },
     { t:`Tuiles débloquées (une par palier de ${D_TILE_STEP} points)`, c:'#2f7fbf', rows: D_TILES.map(t => ({ i:t.icon, n:t.name, d:t.txt })) },
     { t:'Tuiles de biome (un biome tiré au hasard tous les 1000 points, les biomes se cumulent)', c:'#41b0d8', rows: D_BIOMES.filter(b => b.tile).map(b => ({ i:b.tile.icon, n:`${b.tile.name} — ${b.name}`, d:b.tile.txt })) },
+    { t:`Teintes de la 🖌️ Peinture fraîche (chaque dalle affiche la sienne, et ne la donne qu'une fois)`, c:'#b06fd8', rows: D_PAINTS.map(pt => ({ i:pt.icon, n:pt.name, d:pt.txt + (pt.life ? ` — ${Math.round(pt.life / 60)} s.` : ' — jusqu\'à ce qu\'elle serve.') })) },
   ];
 }
 // 🎰 Overlay de la machine à sous. ⚠ Les trois rouleaux s'arrêtent L'UN APRÈS L'AUTRE : trois
@@ -9792,7 +9988,7 @@ function GameDoodle() {
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, big: 0, shTime: 0, shHit: 0, shFall: 0, shVoid: 0 }, shTimeLeft: 0, lastMissile: -99, lastAuto: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, unluckyLeft: D_LUCKY_MAX, unluckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
-      vine: null, zip: null, zipCool: 0, grab: null, beltVx: 0, beltLeft: 0, beltSoap: false, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, shroom: 0, neg: 0, blind: false, notif: null, wat: 0, watX: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, banRoll: null, banned: [], nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, mode };
+      vine: null, zip: null, zipCool: 0, grab: null, beltVx: 0, beltLeft: 0, beltSoap: false, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, shroom: 0, neg: 0, blind: false, notif: null, wat: 0, watX: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, banRoll: null, banned: [], nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, skin: null, bolts: [], trail: [], mode };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
   const start = () => { reset(); setPhase('playing'); };
@@ -9864,6 +10060,10 @@ function GameDoodle() {
     const s = g.current; if (!s || s.t - s.lastShot < doodleShotGap(s)) return;
     // ⚠ Le message d'alerte est posé AVANT le throttle de cadence ? Non : après, sinon un appui
     // maintenu le réafficherait à chaque frame. Ici on n'y arrive qu'une fois la cadence prête.
+    // ⚫ Ombre : on ne tire plus, c'est le prix de la traversée. ⚠ Testé après le throttle de
+    // cadence, comme le message de munitions vides : sinon un appui maintenu le réafficherait
+    // à chaque frame.
+    if (doodlePaintIs(s, 'shadow')) { s.toast = { txt: '⚫ Ombre — tu ne peux pas tirer', life: D_TOAST_LIFE }; return; }
     if (!doodleClassic(s) && !s.bossHide && s.ammo <= 0) { s.toast = { txt: '📦 Plus de munitions — saute sur un monstre pour un coffre', life: D_TOAST_LIFE }; return; }
     // ⚠ 9.2.9 — UNE munition par TIR, quel que soit le nombre de balles : l'Éventail et le
     // bonus 🔫 Canon ajoutent des balles GRATUITES. On paie le geste, pas le plomb.
@@ -9930,10 +10130,14 @@ function GameDoodle() {
       // — déplacement horizontal —
       // ➡️ Adhérence : pleine en temps normal, réduite tant que le tapis roulant entraîne.
       // ⚠ Déclarée AVANT la chaîne if/else if : la glace garde sa priorité absolue.
-      const grip = s.beltLeft > 0 ? D_BELT_GRIP : 1, stepMax = D_STEER_V * grip;
+      // 🩵 Courant d'air : le pas de pilotage ET le plafond de vitesse doublent. ⚠ Les deux :
+      // ne doubler que le plafond n'aurait rien changé au doigt (qui se déplace par pas), ne
+      // doubler que le pas n'aurait rien changé au clavier (qui accélère jusqu'au plafond).
+      const pwind = doodlePaintIs(s, 'wind') ? D_PAINT_WIND : 1;
+      const grip = s.beltLeft > 0 ? D_BELT_GRIP : 1, stepMax = D_STEER_V * grip * pwind;
       if (s.slip > 0) { s.slip--; s.px += s.slipVx * sf; }   // 🧊 glace : aucun contrôle pendant la glissade
       else if (s.targetX != null) { let dx = s.targetX - s.px; if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W; const st = Math.max(-stepMax, Math.min(stepMax, dx)); s.px += st * sf; s.vx = st; if (dx > 0.6) s.face = 1; else if (dx < -0.6) s.face = -1; }
-      else { s.vx += (s.mrev > 0 ? -s.dir : s.dir) * 0.72 * grip * sf; s.vx *= Math.pow(0.90, sf); s.vx = Math.max(-5.6 * grip, Math.min(5.6 * grip, s.vx)); s.px += s.vx * sf; if (s.vx > 0.3) s.face = 1; else if (s.vx < -0.3) s.face = -1; }   // ⚠ amortissement en puissance de `sf` : un ×0,90 par frame freinerait deux fois plus vite en temps de jeu   // 🌀 Vertige : au clavier, l'inversion se fait ici (au doigt, dans `steer`)
+      else { s.vx += (s.mrev > 0 ? -s.dir : s.dir) * 0.72 * grip * sf; s.vx *= Math.pow(0.90, sf); s.vx = Math.max(-5.6 * grip * pwind, Math.min(5.6 * grip * pwind, s.vx)); s.px += s.vx * sf; if (s.vx > 0.3) s.face = 1; else if (s.vx < -0.3) s.face = -1; }   // ⚠ amortissement en puissance de `sf` : un ×0,90 par frame freinerait deux fois plus vite en temps de jeu   // 🌀 Vertige : au clavier, l'inversion se fait ici (au doigt, dans `steer`)
       // ➡️ Tapis roulant : dérive qui s'ajoute au pilotage et s'épuise toute seule.
       // ⚠ Décompte en TEMPS RÉEL, pas en frames (demande utilisateur : « 3 s »). Décrémenté d'une
       // unité par frame, l'entraînement durait D_BELT_LIFE/fps : 3 s à 60 fps, mais 6 s dès que le
@@ -9967,6 +10171,16 @@ function GameDoodle() {
           }
         }
         if (pull) s.px += Math.max(-D_PULL_MAX, Math.min(D_PULL_MAX, pull)) * sf;
+      }
+      // 🩷 Élastique : les bords cessent d'être traversants et RENVOIENT. ⚠ `targetX` est lâché
+      // au passage : un doigt encore posé sur la cible d'origine aurait aussitôt repoussé le
+      // doodler dans le mur, et le rebond aurait été invisible.
+      if (doodlePaintIs(s, 'gum') && (s.px < D_HALF || s.px > W - D_HALF)) {
+        s.px = s.px < D_HALF ? D_HALF : W - D_HALF;
+        s.vx = -s.vx; s.slipVx = -s.slipVx; s.beltVx = -s.beltVx; s.targetX = null; s.dir = 0;
+        s.vy = Math.min(s.vy, D_JUMP * D_PAINT_GUM_JUMP);   // ⚠ `min` : un élan ascendant en cours ne doit pas être RABOTÉ par le rebond mural
+        s.lastPlat = null; s.bounceStreak = 0;
+        for (let k = 0; k < 10; k++) s.parts.push({ x: s.px, y: s.py + (Math.random() - 0.5) * 16, vx: (s.px < W / 2 ? 1 : -1) * (1 + Math.random() * 3), vy: -1 - Math.random() * 2, life: 20, max: 20, sz: 3, c: k % 2 ? '#ff8fc8' : '#ffffff' });
       }
       s.px = ((s.px % W) + W) % W;   // bords traversants : sortie à droite → retour à gauche (et inversement)
       // — vertical (gravité ou vol) —
@@ -10054,11 +10268,15 @@ function GameDoodle() {
       }
       // ⚠ 9.1.5 — l'explosion part à la frame EXACTE où le bouclier s'éteint (`--s.inv === 0`),
       // donc UNE seule fois : `s.inv` ne repasse jamais par 0 en décroissant ensuite.
-      else { if (s.inv > 0 && --s.inv === 0) doodleBoom(s, s.px, s.py, D_BOOM_R * D_BOOM_BONUS); s.vy += D_GRAV * sf * (1 - Math.min(D_PERK_FEATHER_MAX, doodlePerkOf(s, 'feather') * D_PERK_FEATHER)); if (s.vy > D_VMAX) s.vy = D_VMAX; }
+      else { if (s.inv > 0 && --s.inv === 0) doodleBoom(s, s.px, s.py, D_BOOM_R * D_BOOM_BONUS); s.vy += D_GRAV * sf * (1 - Math.min(D_PERK_FEATHER_MAX, doodlePerkOf(s, 'feather') * D_PERK_FEATHER)) * (doodlePaintIs(s, 'marble') ? D_PAINT_MARBLE_G : 1); if (s.vy > D_VMAX) s.vy = D_VMAX; }   // ⚪ Statue : la pierre retombe deux fois plus vite
       s.py += s.vy * sf;
       // — caméra : on monte, tout redescend —
       if (s.py < D_CAM && s.vy < 0) {
         const d = D_CAM - s.py; s.py = D_CAM; s.climb += d;
+        // 🟨 Doré : l'altitude gagnée compte DOUBLE. ⚠ C'est le `climb` de la frame qui est
+        // doublé, jamais le score total : multiplier le score aurait doublé RÉTROACTIVEMENT
+        // tout ce qui avait été gagné avant la teinte, puis tout reperdu à son extinction.
+        if (doodlePaintIs(s, 'gold')) s.climb += d;
         // ⚠ y0 = axe du va-et-vient (🛗 ascenseur, 👁 rôdeur, vol ondulant) : sans lui, l'objet
         // « remonterait » à chaque défilement, puisque son axe resterait, lui, à sa place.
         s.platforms.forEach(p => { p.y += d; if (p.y0 != null) p.y0 += d; if (p.ay != null) p.ay += d; });   // 👀 l'ancre de la vivante défile avec sa dalle
@@ -10069,6 +10287,8 @@ function GameDoodle() {
         if (s.tshots) s.tshots.forEach(sh => sh.y += d);   // 🔴 idem pour les traits de laser
         if (s.slays) s.slays.forEach(v => v.y += d);       // ☠️ et pour l'onde de la destructrice
         if (s.drops) s.drops.forEach(dr => dr.y += d);   // 🌋 la lave tombe DANS le monde, elle suit son geyser
+        if (s.bolts) s.bolts.forEach(bo => bo.y += d);   // 🟡 l'éclair frappe un point du monde
+        if (s.trail) s.trail.forEach(tr => tr.y += d);   // 🟢 la traînée corrosive reste où elle a été déposée
       }
       // — plateformes mobiles —
       // 🩹 Pot de colle : elle rejoint l'abscisse du doodler, à vitesse bornée et sans jamais
@@ -10125,12 +10345,66 @@ function GameDoodle() {
       // — monstres mobiles —
       // ⏸️ La tuile Pause fige les monstres (0) ou les déchaîne (×2) — pour le reste de la partie.
       const mf = sf * (s.mobTime == null ? 1 : s.mobTime);
+      // 🔵 Cryogène : tout ce qui s'approche se fige DÉFINITIVEMENT. ⚠ Figé ne veut pas dire
+      // inoffensif : la créature reste mortelle au contact, elle ne bouge simplement plus —
+      // sans quoi la teinte aurait nettoyé l'écran au lieu de le calmer.
+      if (doodlePaintIs(s, 'cryo')) {
+        for (const m of s.monsters) {
+          if (!m.alive || m.froz) continue;
+          if (Math.hypot(m.x + m.w / 2 - s.px, m.y + m.h / 2 - s.py) > D_PAINT_CRYO_R) continue;
+          m.froz = true; m.vx = 0; m.wave = 0; m.span = 0;
+          for (let k = 0; k < 12; k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 2.5; s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 24, max: 24, sz: 3, c: k % 2 ? '#bfe4f5' : '#ffffff' }); }
+        }
+      }
       s.monsters.forEach(m => {
+        if (m.froz) return;   // 🔵 figée sur place, pour le reste de la partie
         if (m.vx) { m.x += m.vx * mf; if (m.x < 6) { m.x = 6; m.vx *= -1; } else if (m.x + m.w > W - 6) { m.x = W - 6 - m.w; m.vx *= -1; } }
         if (m.wave) { m.wt += 0.062 * mf; m.y = m.y0 + Math.sin(m.wt) * m.wave * 4; }   // vol ondulant
         // 👁 Rôdeur : va-et-vient vertical BORNÉ autour de sa ligne d'apparition.
         if (m.span) { m.y += m.vy2 * mf; if (m.y < m.y0 - m.span || m.y > m.y0 + m.span) { m.y = Math.max(m.y0 - m.span, Math.min(m.y0 + m.span, m.y)); m.vy2 *= -1; } }
       });
+      // 🟡 Paratonnerre : la foudre tombe toute seule sur une créature VISIBLE, à cadence fixe.
+      // ⚠ Elle ne coûte aucune munition et ne passe pas par le tir : c'est le ciel qui frappe.
+      // ⚠ Le décompte vit sur la teinte (`s.skin.tick`) et non sur `s.t` : deux passages
+      // successifs de la même teinte doivent chacun repartir de leur propre cadence.
+      s.bolts = s.bolts || [];
+      if (doodlePaintIs(s, 'bolt')) {
+        s.skin.tick -= sf;
+        if (s.skin.tick <= 0) {
+          s.skin.tick = D_PAINT_BOLT_GAP;
+          const seen = s.monsters.filter(m => m.alive && m.y > -20 && m.y < H + 20);
+          if (seen.length) {
+            const m = seen[Math.floor(Math.random() * seen.length)];
+            s.bolts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, life: D_PAINT_BOLT_LIFE, max: D_PAINT_BOLT_LIFE, seed: Math.random() * 100 });
+            doodleKillMonster(s, m); setAmmo(s.ammo);
+          }
+        }
+      }
+      if (s.bolts.length) { for (const bo of s.bolts) bo.life -= sf; s.bolts = s.bolts.filter(bo => bo.life > 0); }
+      // 🟢 Toxique : un dépôt tous les D_PAINT_TOX_EVERY frames, qui ronge les créatures tant
+      // qu'il n'a pas séché. ⚠ Il appartient au MONDE (il défile avec la caméra) : une traînée
+      // collée à l'écran aurait balayé les rangées au-dessus au lieu de marquer un chemin.
+      s.trail = s.trail || [];
+      if (doodlePaintIs(s, 'toxic') && s.t % D_PAINT_TOX_EVERY === 0) s.trail.push({ x: s.px, y: s.py + 6, life: D_PAINT_TOX_LIFE, max: D_PAINT_TOX_LIFE });
+      if (s.trail.length) {
+        for (const tr of s.trail) {
+          tr.life -= sf;
+          if (tr.life <= 0) continue;
+          for (const m of s.monsters) {
+            if (!m.alive || Math.hypot(m.x + m.w / 2 - tr.x, m.y + m.h / 2 - tr.y) > D_PAINT_TOX_R) continue;
+            doodleKillMonster(s, m); setAmmo(s.ammo);
+          }
+        }
+        s.trail = s.trail.filter(tr => tr.life > 0 && tr.y < H + 40);
+      }
+      // 🟣 Siphon : coffres et bonus viennent à toi, d'où qu'ils soient à l'écran. ⚠ Un coffre
+      // aspiré doit REDEVENIR mobile (même piège que la 🧲 tuile aimantée), sinon il reste
+      // collé à la plateforme sur laquelle il s'était posé et l'aspiration ne se voit pas.
+      if (doodlePaintIs(s, 'siphon')) {
+        const suck = o => { const dx = s.px - (o.x + o.w / 2), dy = s.py - (o.y + o.h / 2), d = Math.hypot(dx, dy) || 1; o.x += dx / d * D_PAINT_SIPHON_V * sf; o.y += dy / d * D_PAINT_SIPHON_V * sf; };
+        for (const it of s.items) if (!it.taken) suck(it);
+        for (const c of s.chests) if (!c.taken) { suck(c); c.landed = false; c.vy = 0; }
+      }
       // 🚀 Missile autonome (2e palier) : il part seul tant qu'une créature est à l'écran.
       // ⚠ Pas pendant un combat de boss (`bossHide`) : la liste des monstres y est vide, la
       // tourelle n'aurait de toute façon rien à viser dans l'arène.
@@ -10219,7 +10493,9 @@ function GameDoodle() {
             if (p.type === 'break') { p.dead = true; for (let k = 0; k < 6; k++) s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: (Math.random() - 0.5) * 4, vy: 1 + Math.random() * 2, life: 26, max: 26, sz: 4, c: '#8a5a2c' }); break; }
             // 🃏 Le casino se RÉVÈLE au contact et se comporte dès lors comme la tuile tirée.
             // ⚠ `et` est lu par TOUS les tests qui suivent, létalité comprise.
-            const et = doodleEffType(p);
+            // ⚠ `let` et non `const` : la 🌈 teinte Instable REMPLACE le type effectif pour la
+            // seule partie « effet » du rebond (voir plus bas), une fois les pièges déjà tranchés.
+            let et = doodleEffType(p);
             if (p.type === 'casino' && !p.shown) {
               p.shown = true;
               const rt = D_TILES.find(t2 => t2.k === p.roll);
@@ -10228,11 +10504,15 @@ function GameDoodle() {
             }
             // ⚠ 9.1.8 — pique ARMÉE = mortelle. Testé AVANT de replacer le doodler, comme
             // la plateforme cassante : rien ne doit se passer d'autre.
-            if (D_SPIKY.has(et) && p.armed && !doodleHurt(s)) { die(); return; }
+            // 🫒 Camouflage : la dalle piégée ne se déclenche pas du tout — on ne l'encaisse
+            // même pas. ⚠ Testé AVANT `doodleHurt` : passer par lui aurait consommé un bouclier
+            // pour un piège que la teinte est précisément censée annuler.
+            const camo = doodlePaintIs(s, 'camo');
+            if (D_SPIKY.has(et) && p.armed && !camo && !doodleHurt(s)) { die(); return; }
             // ⚙️⚡ Tuiles à cycle : elles ne blessent QUE dans leur fenêtre active, et cette
             // fenêtre se voit (piques sorties, éclair). C'est un piège de rythme, pas un piège
             // caché — d'où un cycle lent et une phase visible bien avant l'atterrissage.
-            if ((et === 'picots' || et === 'zap') && doodleCycleOn(p, s.tw) && !doodleHurt(s)) { die(); return; }
+            if ((et === 'picots' || et === 'zap') && doodleCycleOn(p, s.tw) && !camo && !doodleHurt(s)) { die(); return; }
             // ⚠ « si changement de case ça revient » : les piques des AUTRES dalles se
             // rétractent dès qu'on pose le pied ailleurs.
             for (const q of s.platforms) if (q !== p && D_SPIKY.has(doodleEffType(q))) q.armed = false;
@@ -10265,6 +10545,8 @@ function GameDoodle() {
             if (doodlePerkOf(s, 'jump') > 0) bv *= Math.pow(1 + D_PERK_JUMP, doodlePerkOf(s, 'jump') / 2);   // ⚠ gain de HAUTEUR (h ∝ v²), d'où l'exposant /2   // +40 % de HAUTEUR par rebond consécutif (h ∝ v² → v ∝ √1.40), composé (40 % sur 140 %, etc.)
             if (s.mheavy > 0) bv *= D_HEAVY;                                           // 🪨 Plomb : on saute moins haut, sans jamais rendre une rangée infranchissable
             if (s.gravLeft > 0) bv *= D_GRAVITY_MUL;                                   // 🪐 Gravité : hauteur halvée (donc vitesse ÷√2)
+            if (doodlePaintIs(s, 'marble')) bv *= D_PAINT_MARBLE_JUMP;                  // ⚪ Statue : la pierre ne saute pas haut
+            if (doodlePaintIs(s, 'mini')) bv *= D_PAINT_MINI_JUMP;                      // 🔷 Miniature : petites jambes
             s.vy = bv;
             // ⚠ 9.2.7 — La case s'ouvre au 1er rebond puis redevient une plateforme verte
             // ordinaire : sans ça, on la ferait rendre à l'infini en rebondissant dessus.
@@ -10286,6 +10568,40 @@ function GameDoodle() {
             // est donc rompue, sinon on cumulerait le +40 % en la poursuivant.
             if (p.type === 'rainbow') { doodleRainbowHop(s, p); s.lastPlat = null; s.bounceStreak = 0; }
             if (D_SPIKY.has(et)) p.armed = true;                                       // 🌵 sortie des piques : le 2e rebond sera fatal
+            // 🖌️ Peinture fraîche : UNE seule fois par dalle, puis elle se voile et redevient une
+            // plateforme ordinaire. ⚠ Posée APRÈS l'armement de la pique et le calcul du saut :
+            // la teinte prise ICI ne doit pas modifier rétroactivement le rebond qui vient d'avoir
+            // lieu (une 🔷 Miniature prise sur cette dalle ne rabote pas le saut qui l'a donnée).
+            if (et === 'paint' && !p.used) {
+              p.used = true;
+              doodlePaintStart(s, D_PAINTS[(p.paint || 0) % D_PAINTS.length].k);
+            }
+            // 🩶 Enclume : le choc pulvérise la dalle et tout ce qui l'entoure, et te renvoie plus
+            // haut. ⚠ La teinte se consomme ici : c'est un usage unique, pas une durée.
+            if (doodlePaintIs(s, 'anvil')) {
+              let na = 0;
+              for (const m of s.monsters) {
+                if (!m.alive || Math.hypot(m.x + m.w / 2 - (p.x + p.w / 2), m.y + m.h / 2 - p.y) > D_PAINT_ANVIL_R) continue;
+                doodleKillMonster(s, m); na++;
+              }
+              setAmmo(s.ammo);
+              p.dead = true; s.vy *= D_PAINT_ANVIL_MUL; s.lastPlat = null; s.bounceStreak = 0;
+              s.booms.push({ x: p.x + p.w / 2, y: p.y, r: D_PAINT_ANVIL_R, life: D_BOOM_LIFE, max: D_BOOM_LIFE });
+              for (let k = 0; k < 20; k++) { const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 4; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 26, max: 26, sz: 3, c: k % 2 ? '#9aa3ad' : '#5b626b' }); }
+              doodlePaintEnd(s);
+              s.toast = { txt: na ? `🩶 Enclume — la dalle explose, ${na} créature(s) écrasée(s)` : '🩶 Enclume — la dalle explose sous le choc', life: D_TOAST_LIFE };
+            }
+            // 🌈 Instable : le rebond déclenche EN PLUS l'effet d'une autre tuile. ⚠ Écrase `et`
+            // seulement maintenant, une fois les pièges tranchés et le saut posé : le faire plus
+            // haut aurait pu tuer sur une dalle parfaitement inoffensive.
+            if (doodlePaintIs(s, 'chaos')) {
+              const ck = doodlePaintChaosPick(s);
+              if (ck) {
+                et = ck;
+                const cd = D_TILES.find(t2 => t2.k === ck);
+                if (cd) s.toast = { txt: `🌈 Instable → ${cd.icon} ${cd.name}`, life: D_TOAST_LIFE };
+              }
+            }
             // ── tuiles de biome (une par biome, voir D_BIOMES) ──
             if (p.type === 'sand') {                                                        // 🏜️ rebond mou et tempête — elle NE S'EFFONDRE PLUS (10.1.1, demande utilisateur)
               s.vy *= 0.86;
@@ -10742,8 +11058,22 @@ function GameDoodle() {
       // — monstres (hors vol) : sauter DESSUS l'écrase et fait rebondir ; tout autre contact = mort —
       // ⚠ 💀 Suspendus dans l'arène : ils sont invisibles, ils ne peuvent pas tuer.
       if (s.fly <= 0 && !s.bossHide) {
+        // 🔷🟧 La boîte de contact suit la TAILLE du doodler : n'agrandir que le dessin aurait
+        // fait du Colosse une teinte décorative, ne rétrécir que le dessin aurait fait de la
+        // Miniature un mensonge. ⚠ Elle ne touche PAS la détection d'atterrissage : un doodler
+        // réduit qui raterait les plateformes serait condamné, ce que la teinte ne promet pas.
+        const psz = doodlePaintSize(s);
         for (const m of s.monsters) {
-          if (!m.alive || !rectHit(s.px - 11, s.py - 12, 22, 26, m.x + 4, m.y + 4, m.w - 8, m.h - 8)) continue;
+          if (!m.alive || !rectHit(s.px - 11 * psz, s.py - 12 * psz, 22 * psz, 26 * psz, m.x + 4, m.y + 4, m.w - 8, m.h - 8)) continue;
+          // ⚫ Ombre : on traverse, sans dégât et sans écraser — c'est un passage, pas une arme.
+          if (doodlePaintIs(s, 'shadow')) continue;
+          // 🔴 Berserk : le contact TUE la créature. 🟧 Colosse : seulement en tombant sur elle,
+          // mais sans avoir à venir d'au-dessus — c'est tout le poids qui écrase.
+          if (doodlePaintIs(s, 'berserk') || (doodlePaintIs(s, 'giant') && s.vy > 0)) {
+            doodleKillMonster(s, m); setAmmo(s.ammo);
+            for (let k = 0; k < 10; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, max: 22, sz: 3, c: k % 2 ? '#ff7a18' : '#e2564a' }); }
+            continue;
+          }
           if (s.vy > 0 && s.prevFeet <= m.y + 14) {   // en chute, pieds venus d'au-dessus → écrasement
             doodleKillMonster(s, m);                                                                     // ⚠ l'écrasement lâche un coffre comme un tir : c'est la seule recharge quand on est à sec
             s.py = m.y - D_FEET; s.vy = D_JUMP; s.lastPlat = null; s.bounceStreak = 0;                    // écrasement d'un monstre = saut de base (on quitte la case)
@@ -10788,7 +11118,7 @@ function GameDoodle() {
             continue;
           }
           sp.x += sp.vx * sf; sp.y += sp.vy * sf;
-          if (sp.state === 'rush' && Math.hypot(sp.x - s.px, sp.y - s.py) < D_SPIRIT_R + 10) {
+          if (sp.state === 'rush' && !doodlePaintIs(s, 'invis') && Math.hypot(sp.x - s.px, sp.y - s.py) < D_SPIRIT_R + 10) {
             sp.state = 'flee';
             const stolen = doodleSpiritSteal(s);
             s.toast = { txt: stolen ? `🕯️ Un esprit te vole ${stolen} !` : '🕯️ Un esprit repart bredouille', life: D_TOAST_LIFE };
@@ -10821,6 +11151,7 @@ function GameDoodle() {
             if (dr.spent || Math.abs(dr.x - s.px) > D_LAVA_HIT_X || Math.abs(dr.y - s.py) > D_LAVA_HIT_Y) continue;
             dr.spent = true;
             for (let k = 0; k < 10; k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 3; s.parts.push({ x: dr.x, y: dr.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, max: 22, sz: 3, c: k % 2 ? '#ffd54a' : '#c4553a' }); }
+            if (doodlePaintIs(s, 'chrome') || doodlePaintIs(s, 'camo')) { doodlePaintSpark(s, dr.x, dr.y); continue; }   // ✨🫒 la goutte s'écrase sans brûler
             if (doodleHurt(s)) continue;
             die(); return;
           }
@@ -10871,8 +11202,9 @@ function GameDoodle() {
           return true;
         });
       }
-      // — trous noirs —
-      if (s.fly <= 0 && s.inv <= 0 && !s.bossHide) {
+      // — trous noirs — ⚫ Ombre : on les TRAVERSE (le rejet vers le haut de `doodleHurt` aurait
+      // au contraire fait rebondir dessus, ce qui n'est pas « traverser »).
+      if (s.fly <= 0 && s.inv <= 0 && !s.bossHide && !doodlePaintIs(s, 'shadow')) {
         for (const h of s.holes) {
           if (Math.hypot(s.px - h.x, s.py - h.y) >= h.r * 0.6) continue;
           // 🌌 Le Survivant passe AVANT les boucliers : c'est le seul butin taillé pour ce
@@ -10904,7 +11236,7 @@ function GameDoodle() {
         if (gp.len <= 0) { q.grap = null; continue; }
         // la tête, en coordonnées d'écran : la dalle bouge, l'origine se relit à chaque frame
         gp.x = q.x + q.w / 2 + gp.ux * gp.len; gp.y = q.y + q.h / 2 + gp.uy * gp.len;
-        if (!s.grab && s.fly <= 0 && !s.zip && !s.acc && !s.vine && !s.bossHide
+        if (!s.grab && s.fly <= 0 && !s.zip && !s.acc && !s.vine && !s.bossHide && !doodlePaintIs(s, 'invis')
             && Math.hypot(gp.x - s.px, gp.y - s.py) < D_GRAP_HIT) {
           s.grab = { p: q }; q.grap = null;
           s.toast = { txt: '🪝 Le grappin t\'accroche !', life: D_TOAST_LIFE };
@@ -10917,6 +11249,10 @@ function GameDoodle() {
         if (q.laz == null) q.laz = D_TLASER_GAP;
         q.laz -= sf;
         if (q.laz > 0) continue;
+        // 🫥 Invisible / 🫒 Camouflage : la dalle n'a personne à viser. Le compteur REPART quand
+        // même — sinon la dalle tirerait à l'instant précis où la teinte s'éteint, ce qui serait
+        // une punition pour l'avoir portée.
+        if (doodlePaintIs(s, 'invis') || doodlePaintIs(s, 'camo')) { q.laz = D_TLASER_GAP; continue; }
         q.laz = D_TLASER_GAP;
         const ox = q.x + q.w / 2, oy = q.y + q.h / 2;
         const dx = s.px - ox, dy = s.py - oy, d = Math.hypot(dx, dy) || 1;
@@ -10929,6 +11265,8 @@ function GameDoodle() {
           for (const sh of s.tshots) {
             if (sh.spent || Math.abs(sh.x - s.px) > D_TLASER_R + 10 || Math.abs(sh.y - s.py) > D_TLASER_R + 15) continue;
             sh.spent = true;
+            // ✨ Réflecteur / 🫒 Camouflage : le trait meurt sur toi sans rien te coûter.
+            if (doodlePaintIs(s, 'chrome') || doodlePaintIs(s, 'camo')) { doodlePaintSpark(s, sh.x, sh.y); continue; }
             if (doodleHurt(s)) continue;
             die(); return;
           }
@@ -10961,6 +11299,7 @@ function GameDoodle() {
       if (s.fly <= 0 && s.inv <= 0 && !s.bossHide && doodleArcOn(s.tw)) {
         for (const arc of doodleArcPairs(s, H)) {
           if (doodleSegDist(s.px, s.py, arc.x1, arc.y1, arc.x2, arc.y2) > D_ARC_HIT + 10) continue;
+          if (doodlePaintIs(s, 'chrome') || doodlePaintIs(s, 'camo')) { doodlePaintSpark(s, s.px, s.py); break; }   // ✨🫒 l'arc crépite sur toi sans mordre
           if (doodleHurt(s)) break;
           die(); return;
         }
@@ -11055,6 +11394,10 @@ function GameDoodle() {
       if (s.notif && (s.notif.life -= sf) <= 0) s.notif = null;   // 🔔 la notification s'efface toute seule
       if (s.faceTimer > 0) s.faceTimer--;
       for (const k of ['mrev', 'mheavy', 'mfog', 'sandLeft', 'frost', 'gravLeft', 'shroom', 'neg']) if (s[k] > 0) s[k]--;   // 🍀 malus, tempête, gel et gravité : ils s'épuisent tout seuls
+      // 🖌️ La teinte s'épuise au temps de JEU (`sf`) comme le reste : au ralenti, elle dure
+      // autant de frames, donc plus de secondes réelles — exactement comme les malus.
+      // ⚠ Une teinte consommable (`left === 0`) ne se décompte jamais : elle attend son usage.
+      if (s.skin && s.skin.left > 0) { s.skin.left -= sf; if (s.skin.left <= 0) doodlePaintEnd(s, 'la teinte s\'efface'); }
       // Fin du prêt de boucliers : on retombe au MINIMUM entre l'état courant et celui d'avant
       // l'événement. Si un bouclier a été consommé pendant les 3 s, c'est le prêté qui a servi
       // — le joueur garde donc exactement ce qu'il possédait.
@@ -11070,7 +11413,15 @@ function GameDoodle() {
       // il ne sert qu'ici. Il renvoie depuis le bas de l'écran avec l'élan d'un trampoline, ce
       // qui laisse le temps de viser une plateforme, et pose l'invulnérabilité le temps de la remontée.
       if (s.py - D_HALF > H && !s.bossHide) {
-        if (s.wpn.shFall > 0) {
+        // 💀 Revenant : il relève de TOUTE mort, chute comprise. ⚠ Testé avant le 🪂 parachute :
+        // c'est le consommable le plus étroit des deux (il ne resservira pas), autant qu'il parte
+        // en premier plutôt que d'être gardé pour une mort qui n'arrivera peut-être jamais.
+        if (doodlePaintIs(s, 'revenant')) {
+          doodlePaintEnd(s, 'elle t\'a relevé du vide');
+          s.py = H - 4; s.vy = D_TRAMPO; s.inv = D_INV; s.lastPlat = null; s.bounceStreak = 0;
+          for (let k = 0; k < 16; k++) s.parts.push({ x: s.px, y: H - 10, vx: (Math.random() - 0.5) * 5, vy: -1 - Math.random() * 3, life: 26, max: 26, sz: 3, c: k % 2 ? '#f2f0e6' : '#a8a08c' });
+        }
+        else if (s.wpn.shFall > 0) {
           s.wpn.shFall--; s.py = H - 4; s.vy = D_TRAMPO; s.inv = D_INV; s.lastPlat = null; s.bounceStreak = 0;
           s.toast = { txt: `🪂 Parachute ! ${s.wpn.shFall} restant(s)`, life: D_TOAST_LIFE };
           for (let k = 0; k < 14; k++) s.parts.push({ x: s.px, y: H - 10, vx: (Math.random() - 0.5) * 5, vy: -1 - Math.random() * 3, life: 26, max: 26, sz: 3, c: k % 2 ? '#bfe4f5' : '#ffffff' });
