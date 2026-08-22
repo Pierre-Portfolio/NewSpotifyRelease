@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.7.1';
+const APP_VERSION = '10.7.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6520,6 +6520,20 @@ const D_YY_LOW = 6, D_YY_MID = 11, D_YY_HIGH_FROM = 10, D_YY_MOB_LOOT = 3;
 // retiré à chaque frame, l'image devenait un scintillement illisible — et surtout, une dalle
 // dont la position AFFICHÉE saute n'est plus une dalle sur laquelle on peut viser un saut.
 const D_GLITCH_VX = 1.0, D_GLITCH_VY = 0.55, D_GLITCH_SPAN = 40, D_GLITCH_STEP = 6;
+// 🛟 10.7.2 — DERNIÈRE ÉCHAPPATOIRE (demande utilisateur) : on rebondit dessus, elle s'ARME ;
+// puis, au lieu d'être ramassée par le nettoyage quand elle sort par le bas, elle s'ACCROCHE à
+// l'écran à D_ESC_Y px du bord inférieur et n'en bouge plus. Elle devient un filet : tomber
+// dessus, c'est repartir d'un saut ordinaire au lieu de mourir.
+// ⚠ Accrochée, elle NE SUIT PLUS LA CAMÉRA — c'est toute la mécanique : le monde défile,
+// elle reste. Elle est donc explicitement écartée du décalage de la caméra ET du nettoyage
+// des dalles sorties par le bas, les deux seuls endroits qui la feraient disparaître.
+// ⚠ Elle reste DISCRÈTE une fois accrochée (« cachée ») mais pas invisible : un filet
+// strictement invisible, c'est un rebond inexpliqué au ras du vide. Elle s'allume en grand
+// (`flash`) à l'instant précis où elle rattrape — c'est là qu'il faut la voir.
+// ⚠ Elle ne se consomme JAMAIS : « on ne peut plus tomber dans le vide » sur sa largeur, pas
+// « une fois ». Plusieurs échappatoires armées couvrent d'autant plus de largeur.
+const D_ESC_Y = 26, D_ESC_FLASH = 26;
+function doodleEscPinned(p) { return p.type === 'escape' && p.pinned; }
 // Bruit déterministe : même entrée, même sortie. ⚠ `Math.random()` ici, c'était une dalle qui
 // se déchire différemment à chaque frame, donc un clignotement au lieu d'un parasite.
 function doodleNz(a) { const v = Math.sin(a * 12.9898) * 43758.5453; return v - Math.floor(v); }
@@ -6613,6 +6627,7 @@ const D_TILES = [
   { k: 'bhole',    icon:'🕳️', name: 'Trou noir',    txt: 'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
   // 🖌️ 10.5.8 — voir D_PAINTS : la dalle porte SA teinte dès sa naissance, et ne la donne qu'une fois.
   { k: 'paint',    icon:'🖌️', name: 'Peinture fraîche', txt: 'elle repeint ta peau de la teinte qu\'elle affiche — une des ' + D_PAINTS.length + ' — et te donne l\'effet qui va avec, une seule fois par dalle' },
+  { k: 'escape',   icon:'🛟', name: 'Dernière échappatoire', txt: 'rebondis dessus et elle s\'arme : quand le défilement l\'emmène hors de l\'écran, au lieu de disparaître elle s\'accroche tout en bas et n\'en bouge plus. Tomber dessus te renvoie d\'un saut ordinaire — sur sa largeur, le vide n\'existe plus, et elle ne s\'use pas' },
   { k: 'glitch',   icon:'🐛', name: 'Buguée',          txt: 'une dalle qui déraille : elle dérive EN DIAGONALE, les deux axes à la fois, en rebondissant sur les bords de l\'écran et sans jamais s\'éloigner de sa rangée. Le rebond, lui, est tout ce qu\'il y a de plus ordinaire' },
   { k: 'yinyang',  icon:'☯️', name: 'Yin et Yang',     txt: 'elle compte tes bonus permanents et rééquilibre : au-delà de ' + D_YY_HIGH_FROM + ' elle les DOUBLE et les créatures lâchent ' + D_YY_MOB_LOOT + ' coffres pour le reste de la partie ; de 6 à ' + D_YY_HIGH_FROM + ' elle te monte à ' + D_YY_MID + ' ; en dessous elle te monte à ' + D_YY_LOW + '. Une seule fois par dalle' },
 ];
@@ -7726,6 +7741,40 @@ function doodleTileDraw(ctx, p, t) {
     for (let i = 0; i < left; i++) {
       const dx = x + w / 2 + (i - (left - 1) / 2) * 6.4, dy = y + 2.4;
       ctx.beginPath(); ctx.moveTo(dx, dy); ctx.lineTo(dx + 2.6, dy + 4.4); ctx.lineTo(dx - 2.6, dy + 4.4); ctx.closePath(); ctx.stroke(); ctx.fill();
+    }
+    return;
+  }
+  // 🛟 Dernière échappatoire : bouée de sauvetage — anneau à quartiers et filet tendu sous la
+  // dalle. ⚠ Trois états, et il en faut trois : posée sur sa rangée elle se voit comme
+  // n'importe quelle tuile ; ARMÉE elle pulse, pour qu'on sache qu'elle descend nous attendre ;
+  // ACCROCHÉE en bas elle s'efface presque — c'est le « caché » demandé — et se rallume en
+  // grand à l'instant où elle rattrape (`flash`), le seul moment où il faut la voir.
+  if (p.type === 'escape') {
+    const fl = Math.max(0, (p.flash || 0) / D_ESC_FLASH);
+    const puls = p.saved && !p.pinned ? 0.55 + Math.sin((t || 0) * 0.16) * 0.25 : 1;
+    ctx.save();
+    ctx.globalAlpha = p.pinned ? Math.max(0.20, fl) : puls;
+    doodleRR(ctx, x, y, w, h, 6, '#2b6f52');
+    ctx.fillStyle = '#1c4a37'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = 'rgba(246,239,226,0.55)'; ctx.lineWidth = 1;      // les mailles du filet
+    for (let i = 1; i < 6; i++) { ctx.beginPath(); ctx.moveTo(x + i * w / 6, y + 2); ctx.lineTo(x + i * w / 6 - 5, y + h - 3); ctx.stroke(); }
+    for (let i = 1; i < 3; i++) { ctx.beginPath(); ctx.moveTo(x + 2, y + i * h / 3); ctx.lineTo(x + w - 2, y + i * h / 3); ctx.stroke(); }
+    // La bouée, à cheval sur l'arête haute : quatre quartiers alternés, comme une vraie.
+    const cx = x + w / 2, cy = y + 1, r = h * 0.68;
+    ctx.strokeStyle = '#f6efe2'; ctx.lineWidth = r * 0.52;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.74, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = '#e2564a';
+    [0, 2].forEach(q => { ctx.beginPath(); ctx.arc(cx, cy, r * 0.74, q * Math.PI / 2 + 0.12, (q + 1) * Math.PI / 2 - 0.12); ctx.stroke(); });
+    ctx.strokeStyle = '#1c4a37'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.48, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    // L'éclat du rattrapage : une onde qui s'ouvre par-dessus, à pleine opacité.
+    if (fl > 0) {
+      ctx.save();
+      ctx.strokeStyle = `rgba(110,230,160,${fl})`; ctx.lineWidth = 3 * fl + 1;
+      doodleRR(ctx, x - (1 - fl) * 9, y - (1 - fl) * 9, w + (1 - fl) * 18, h + (1 - fl) * 18, 8, 'rgba(0,0,0,0)'); ctx.stroke();
+      ctx.restore();
     }
     return;
   }
@@ -10929,7 +10978,9 @@ function GameDoodle() {
         if (doodlePaintIs(s, 'gold')) s.climb += d;
         // ⚠ y0 = axe du va-et-vient (🛗 ascenseur, 👁 rôdeur, vol ondulant) : sans lui, l'objet
         // « remonterait » à chaque défilement, puisque son axe resterait, lui, à sa place.
-        s.platforms.forEach(p => { p.y += d; if (p.y0 != null) p.y0 += d; if (p.ay != null) p.ay += d; });   // 👀 l'ancre de la vivante défile avec sa dalle
+        // 🛟 L'échappatoire ACCROCHÉE est la seule chose du monde que la caméra n'emporte pas :
+        // c'est précisément ce qui en fait un filet plutôt qu'une dalle de plus.
+        s.platforms.forEach(p => { if (doodleEscPinned(p)) return; p.y += d; if (p.y0 != null) p.y0 += d; if (p.ay != null) p.ay += d; });   // 👀 l'ancre de la vivante défile avec sa dalle
         s.monsters.forEach(m => { m.y += d; if (m.y0 != null) m.y0 += d; });
         s.bullets.forEach(b => b.y += d); s.holes.forEach(h => h.y += d); s.items.forEach(it => it.y += d); s.parts.forEach(pt => pt.y += d); s.booms.forEach(b => b.y += d); s.chests.forEach(c => c.y += d); s.meteors.forEach(mt => mt.y += d);
         if (s.clones) s.clones.forEach(c => c.y += d);   // 👥 sinon ils resteraient collés au bas de l'écran et ne « monteraient » jamais
@@ -11647,6 +11698,16 @@ function GameDoodle() {
               for (let k = 0; k < 12; k++) s.parts.push({ x: cx0, y: p.y, vx: (Math.random() - 0.5) * 5, vy: -0.5 - Math.random() * 2, life: 22, max: 22, sz: 3, c: k % 2 ? '#a78bfa' : '#f0e9ff' });   // 🔺 éclats à la teinte de la dalle
               s.lastPlat = null; s.bounceStreak = 0;   // la dalle n'existe plus : la série de rebonds est rompue
             }
+            // 🛟 Dernière échappatoire : le rebond l'ARME, et c'est tout ce qu'il fait — le saut
+            // reste ordinaire. ⚠ `flash` est posé aussi bien à l'armement qu'aux rattrapages
+            // suivants : c'est le même signal, « elle vient de servir ».
+            if (et === 'escape') {
+              p.flash = D_ESC_FLASH;
+              if (!p.saved) {
+                p.saved = true;
+                s.toast = { txt: '🛟 Échappatoire armée — elle t\'attendra en bas', life: D_TOAST_LIFE };
+              }
+            }
             // ☯️ Yin et Yang : elle pèse ce qu'on porte et rééquilibre. ⚠ Le total est relu
             // APRÈS coup (`doodlePerkRaise` le renvoie) et non recalculé de tête : c'est lui
             // qu'affiche le bandeau, et deux comptes séparés auraient fini par se contredire.
@@ -12169,7 +12230,19 @@ function GameDoodle() {
       for (const q of s.platforms) if (q.eat > 0) q.eat -= sf;     // 🥚 la mastication du tamagotchi
       if (s.slays && s.slays.length) { s.slays.forEach(v => v.life -= sf); s.slays = s.slays.filter(v => v.life > 0); }   // ☠️ l'onde retombe
       s.booms.forEach(b => b.life--); s.booms = s.booms.filter(b => b.life > 0);
-      s.platforms = s.platforms.filter(p => !p.dead && p.y < H + 30);
+      // 🛟 Échappatoire armée : au moment où le défilement l'amène sur la ligne du filet, elle
+      // s'y ACCROCHE. ⚠ Testé AVANT le nettoyage ci-dessous, qui l'aurait sinon ramassée à la
+      // frame même où elle allait devenir utile.
+      for (const p of s.platforms) {
+        if (p.type !== 'escape' || p.dead) continue;
+        if (p.flash > 0) p.flash -= sf;                       // l'éclat du rattrapage retombe
+        if (!p.saved || p.pinned) continue;
+        // ⚠ Accrochée, elle perd TOUT déplacement propre : une 🃏 imitation ou une naissance en
+        // dalle bleue lui aurait laissé une dérive, et un filet qui glisse n'est plus à l'endroit
+        // où on a appris à compter dessus.
+        if (p.y >= H - D_ESC_Y) { p.pinned = true; p.y = H - D_ESC_Y; p.vx = 0; p.gvx = null; p.vy2 = null; }
+      }
+      s.platforms = s.platforms.filter(p => !p.dead && (p.y < H + 30 || doodleEscPinned(p)));
       s.monsters = s.monsters.filter(m => m.alive && m.y < H + 40);
       s.items = s.items.filter(it => !it.taken && it.y < H + 40);
       s.chests = s.chests.filter(c => !c.taken && c.y < H + 40);
