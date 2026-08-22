@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.7.3';
+const APP_VERSION = '10.7.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -13684,196 +13684,285 @@ function GameFindColor() {
 // ⚠ PALETTE CANONIQUE (9 couleurs) : chaque drapeau y est ramené. C'est ce qui fait
 // FONCTIONNER le jeu — avec les teintes officielles, le rouge de la France (#002654…) et
 // celui du Portugal ne seraient pas le même et presque aucun pixel ne se révélerait jamais.
-// ⚠ CATALOGUE : tous les États du monde (~190) sont proposés, chacun ramené à un GABARIT
-// (bandes, croix, sautoir, quartiers, disque, croissant, triangle, canton, bande au
-// guindant). Les emblèmes fins — étoiles, blasons, armoiries, écritures — ne sont PAS
-// dessinés : ils sont approchés par un disque ou ignorés. Conséquence assumée : deux
-// drapeaux qui ne se distinguent QUE par leur emblème donnent la même grille de pixels →
-// `FLAGS` DÉDOUBLONNE à la construction (le premier de la liste gagne), sinon le jeu
-// proposerait des devinettes impossibles à trancher.
+// ⚠ CATALOGUE : tous les États du monde, chacun ramené à un GABARIT (bandes, croix,
+// sautoir, quartiers, diagonale, canton…) PLUS ses emblèmes. Depuis 10.7.4 les emblèmes fins
+// sont dessinés — étoiles, croissants, soleils, roues, cèdre, feuille d'érable, taegeuk,
+// anneaux d'étoiles — et toutes les ARMOIRIES sont rendues par la silhouette d'un écusson :
+// aucune n'est dessinable à cette échelle, mais sa forme, sa taille et sa place suffisent à
+// distinguer l'Espagne du Portugal ou la Serbie de la Russie.
+// ⚠ Restent hors de portée : les écritures et le détail interne des blasons. Deux drapeaux
+// que RIEN d'autre ne sépare donnent donc encore la même grille → `FLAGS` DÉDOUBLONNE à la
+// construction (le premier de la liste gagne), sinon le jeu proposerait des devinettes
+// impossibles à trancher. Il n'en reste qu'un cas, et c'est le bon : le Tchad et la Roumanie
+// ne diffèrent que par la nuance de leur bleu, y compris dans la réalité.
 const FLAG_COLOR = '#4fc4cf';
 const FLAG_PAL = { R:'#d7202f', B:'#0b4ea2', C:'#5fa9dd', W:'#f4f4f4', K:'#17171c', Y:'#f4c400', G:'#159952', O:'#f08020', M:'#7a1f2b' };
-// ⚠ 10.6.8 — RÉSOLUTION DOUBLÉE (demande utilisateur) : 15 × 10 → 30 × 20, soit 600 pixels
-// au lieu de 150. Les cellules restent CARRÉES (30/20 = 3:2, le ratio du drapeau), donc les
-// disques, croissants et étoiles se calculent en unités de cellule sans correction d'aspect.
-// ⚠ Doodle Jump garde la grille GROSSIÈRE (`FLAG_COLS_LO`) : son drapeau fait 28 × 18 px à
-// l'écran — 600 rectangles par dalle et par frame pour un résultat plus fin que le pixel de
-// l'écran, c'était payer très cher une bouillie. Chaque drapeau porte donc DEUX grilles.
-const FLAG_COLS = 30, FLAG_ROWS = 20;         // 600 pixels — le jeu « Find the Drag »
+// ⚠ 10.7.4 — RÉSOLUTION PORTÉE À 45 × 30 (demande utilisateur) : 1350 pixels par drapeau, au
+// lieu de 600. Les cellules restent CARRÉES (45/30 = 3:2, le ratio du drapeau), donc disques,
+// croissants, étoiles et écussons se calculent en unités de cellule sans correction d'aspect.
+// ⚠ Doodle Jump garde sa grille GROSSIÈRE (`FLAG_COLS_LO`, 15 × 10) ET n'y reçoit QUE les
+// emblèmes larges (voir `FLAG_EM_GROS`) : une étoile de 3 cellules ou un écusson y seraient
+// deux pixels sales, et sa dalle 🚩 fait 28 × 18 px à l'écran.
+const FLAG_COLS = 45, FLAG_ROWS = 30;         // 1350 pixels — le jeu « Find the Drag »
 const FLAG_COLS_LO = 15, FLAG_ROWS_LO = 10;   // 150 pixels — la dalle 🚩 de Doodle Jump
 const FLAG_HIDDEN = '#2a2a33';          // pixel pas encore trouvé
 const FLAG_SUGG_MAX = 7;                // suggestions affichées sous la barre de recherche
-// Gabarits : l = fond ('v' bandes verticales · 'h' horizontales · 'x' croix scandinave ·
-// 'p' croix centrée · 'z' sautoir · 'w' 4 quartiers · 'u' Union Jack · 'd' bande diagonale ·
-// 'g' partage diagonal), e = emblème optionnel ('o' disque · 'q' disque décalé au guindant ·
-// 'c' croissant · 'n' croissant + étoile · '*' étoile à 5 branches · 'h' hexagramme ·
-// 'y' soleil compact · 'z' grand soleil aux rayons droits · 'x' quatre étoiles en losange ·
-// 't' triangle au guindant ·
-// 'k' canton · 's' bande verticale au guindant). Les couleurs sont une CHAÎNE de lettres de
-// FLAG_PAL ; quand il y a un emblème, sa couleur est la DERNIÈRE lettre.
-// ⚠ 10.6.8 — LA GRILLE EST UN PARAMÈTRE, plus une constante lue en douce : le même catalogue
-// sert le jeu (30 × 20) et la dalle de Doodle Jump (15 × 10), et deux générateurs séparés,
-// c'était la garantie qu'un gabarit finisse par ne pas dire la même chose dans les deux.
-// ⚠ Toutes les tailles d'emblème sont exprimées en FRACTION DE `rows` : écrites en dur, elles
-// auraient donné un disque deux fois plus petit sur la grille doublée.
-function flagCells(f, cols, rows) {
-  const FLAG_COLS = cols || 30, FLAG_ROWS = rows || 20;
+// Les emblèmes assez GROS pour survivre à la grille de Doodle Jump. Tous les autres (étoiles
+// fines, écussons, roues, feuilles, anneaux) sont simplement ignorés là-bas.
+const FLAG_EM_GROS = new Set(['o', 'q', 'c', 'n', '*', 'h', 'y', 'z', 't', 'k', 's']);
+// ══════ Gabarits et emblèmes ══════
+// `l` = fond : 'h' bandes horizontales (défaut) · 'v' verticales · 'x' croix scandinave ·
+//   'p' croix centrée · 'z' sautoir · 'w' 4 quartiers · 'u' Union Jack · 'd' bande diagonale ·
+//   'g' partage diagonal.
+// `e` = CHAÎNE de codes d'emblèmes, appliqués DANS L'ORDRE, chacun par-dessus le précédent —
+//   c'est ce qui permet de composer (le taegeuk coréen = un disque rouge, puis sa moitié
+//   bleue). `k` = la couleur de chaque code, lettre pour lettre.
+//   o disque · q disque décalé au guindant · c croissant · n croissant + étoile ·
+//   * étoile · h hexagramme · y soleil compact · z grand soleil à rayons droits ·
+//   t triangle au guindant · k canton plein · s bande verticale au guindant ·
+//   e écusson au guindant · b écusson centré · j pastille au canton · 5 étoile au canton ·
+//   g grille d'étoiles au canton · r anneau d'étoiles · 3 arc d'étoiles en haut ·
+//   x quatre étoiles en losange · w roue à rayons · m feuille d'érable · f cèdre ·
+//   a anneau (sphère armillaire) sur la couture · + croix dans le canton · p croix centrée ·
+//   # bordure ·
+//   T moitié basse du taegeuk · 2 deux étoiles côte à côte · 8 huit rayons droits.
+// ⚠ Toutes les tailles sont exprimées en FRACTION de `rows` : écrites en dur, elles auraient
+// donné un emblème deux fois plus petit à chaque fois qu'on double la grille.
+function flagCells(f, cols, rows, gros) {
+  const C = cols || FLAG_COLS, R0 = rows || FLAG_ROWS;
+  const R = R0 * 0.27;                          // rayon de référence : le disque « plein »
   // Rayon polaire du bord d'une étoile à `k` branches, pointe en HAUT.
   // ⚠ Le bord est le SEGMENT DROIT entre une pointe et le creux voisin (intersection du rayon
   // et du segment, en polaire). Interpolé linéairement sur le rayon, il BOMBAIT — et une
-  // étoile bombée n'en est plus une, c'est un disque cabossé, ce que les premiers rendus de
-  // l'étoile marocaine et de l'hexagramme israélien montraient sans appel.
+  // étoile bombée n'en est plus une, c'est un disque cabossé.
   // `inner` = rapport creux/pointe : 0,382 pour un pentagramme, 0,577 pour un hexagramme.
-  const starR = (dx, dy, R, k, inner) => {
-    const m = Math.PI * 2 / k, hm = m / 2, ri = R * inner;
-    let ang = Math.atan2(dy, dx) + Math.PI / 2;                       // 0 = vers le haut
+  const starR = (dx, dy, r, k, inner) => {
+    const m = Math.PI * 2 / k, hm = m / 2, ri = r * inner;
+    let ang = Math.atan2(dy, dx) + Math.PI / 2;
     ang = ((ang % m) + m) % m;
-    const t2 = ang > hm ? m - ang : ang;                              // ramené sur le demi-secteur
-    return R * ri * Math.sin(hm) / (R * Math.sin(t2) + ri * Math.sin(hm - t2));
+    const t2 = ang > hm ? m - ang : ang;
+    return r * ri * Math.sin(hm) / (r * Math.sin(t2) + ri * Math.sin(hm - t2));
   };
-  const inStar = (dx, dy, R, k, inner) => Math.hypot(dx, dy) <= starR(dx, dy, R, k, inner);
-  const all = String(f.c || 'W').split('');
-  const em = f.e || '';
-  const ec = em ? all[all.length - 1] : '';
-  const b = em ? all.slice(0, -1) : all;
-  const n = b.length || 1;
+  const inStar = (dx, dy, r, k, inner) => Math.hypot(dx, dy) <= starR(dx, dy, r, k || 5, inner || 0.382);
+  const inDisc = (dx, dy, r) => dx * dx + dy * dy <= r * r;
+  const inRing = (dx, dy, r, th) => { const d = Math.hypot(dx, dy); return d <= r && d >= r - th; };
+  // Écusson : haut droit, flancs qui se resserrent, pointe en bas. C'est l'approximation
+  // ASSUMÉE de toutes les armoiries — aucune n'est dessinable à cette échelle, mais leur
+  // silhouette, elle, se lit et distingue enfin l'Espagne du Portugal ou la Serbie de la Russie.
+  const inShield = (dx, dy, hw, hh) => {
+    if (Math.abs(dx) > hw || dy < -hh || dy > hh) return false;
+    if (dy <= hh * 0.1) return true;
+    const k2 = (dy - hh * 0.1) / (hh * 0.9);
+    return Math.abs(dx) <= hw * (1 - k2 * k2 * 0.92);
+  };
+  // Feuille d'érable : une tige et une silhouette à cinq pointes, légèrement aplatie.
+  // ⚠ C'est une ÉTOILE à creux profonds (`inner` 0,45) et non une grappe de disques : à
+  // 30 rangées, une union de disques donnait un trèfle bosselé sans une seule pointe franche,
+  // alors que la feuille canadienne ne se reconnaît QUE par ses pointes.
+  const inMaple = (dx, dy, r) => {
+    if (dy > r * 0.52) return Math.abs(dx) < r * 0.11 && dy < r * 1.05;   // la tige
+    return Math.hypot(dx, dy * 1.1) <= starR(dx, dy * 1.1, r * 0.95, 5, 0.45);
+  };
+  const inCedar = (dx, dy, r) => {                     // 🇱🇧 trois étages et un tronc
+    const ax = Math.abs(dx) / r, ay = dy / r;
+    if (ay > 0.55) return ax < 0.12;
+    for (const [oy, w2] of [[-0.62, 0.34], [-0.18, 0.52], [0.24, 0.70]]) {
+      if (ay > oy - 0.06 && ay < oy + 0.34 && ax < w2 * (1 - (ay - oy) / 0.44) + 0.06) return true;
+    }
+    return false;
+  };
+  const bandes = String(f.c || 'W').split('');
+  const n = bandes.length || 1;
   const l = f.l || 'h';
-  const out = new Array(FLAG_COLS * FLAG_ROWS);
-  for (let y = 0; y < FLAG_ROWS; y++) {
-    for (let x = 0; x < FLAG_COLS; x++) {
-      const u = (x + 0.5) / FLAG_COLS, v = (y + 0.5) / FLAG_ROWS;   // 0..1
+  const em = String(f.e || '');
+  const ek = String(f.k || '');
+  const out = new Array(C * R0);
+  // Repères de position, en cellules depuis le centre.
+  const cantonX = -C * 0.29, cantonY = -R0 * 0.25;     // centre du canton (u<0.42, v<0.5)
+  const hoistX = -C * 0.21;                            // centre de l'écusson au guindant
+  for (let y = 0; y < R0; y++) {
+    for (let x = 0; x < C; x++) {
+      const u = (x + 0.5) / C, v = (y + 0.5) / R0;
       const du = Math.abs(u - 0.5), dv = Math.abs(v - 0.5);
+      const cx = x + 0.5 - C / 2, cy = y + 0.5 - R0 / 2;
       let col;
-      if (l === 'v') col = b[Math.min(n - 1, Math.floor(u * n))];
+      if (l === 'v') col = bandes[Math.min(n - 1, Math.floor(u * n))];
       else if (l === 'x') {                       // croix scandinave (décalée vers le guindant)
         const au = Math.abs(u - 0.36);
-        if (au > 0.13 && dv > 0.20) col = b[0];
-        else if (b[2]) col = (au <= 0.05 || dv <= 0.08) ? b[2] : b[1];
-        else col = b[1];
+        if (au > 0.13 && dv > 0.20) col = bandes[0];
+        else if (bandes[2]) col = (au <= 0.05 || dv <= 0.08) ? bandes[2] : bandes[1];
+        else col = bandes[1];
       } else if (l === 'p') {                     // croix centrée qui ne touche pas les bords
-        col = ((du < 0.10 && dv < 0.33) || (dv < 0.15 && du < 0.23)) ? b[1] : b[0];
+        col = ((du < 0.10 && dv < 0.33) || (dv < 0.15 && du < 0.23)) ? bandes[1] : bandes[0];
       } else if (l === 'z') {                     // sautoir (diagonales)
-        col = (Math.abs(u - v) < 0.10 || Math.abs(u + v - 1) < 0.10) ? b[1] : b[0];
+        col = (Math.abs(u - v) < 0.10 || Math.abs(u + v - 1) < 0.10) ? bandes[1] : bandes[0];
       } else if (l === 'w') {                     // 4 quartiers : haut-g, haut-d, bas-g, bas-d
-        col = b[(v < 0.5 ? 0 : 2) + (u < 0.5 ? 0 : 1)] || b[0];
+        col = bandes[(v < 0.5 ? 0 : 2) + (u < 0.5 ? 0 : 1)] || bandes[0];
       } else if (l === 'u') {                     // Union Jack : champ, sautoir, croix
-        if (du < 0.09 || dv < 0.13) col = b[2];
-        else if (Math.abs(u - v) < 0.045 || Math.abs(u + v - 1) < 0.045) col = b[2];
-        else if (du < 0.14 || dv < 0.20) col = b[1];
-        else if (Math.abs(u - v) < 0.11 || Math.abs(u + v - 1) < 0.11) col = b[1];
-        else col = b[0];
+        if (du < 0.09 || dv < 0.13) col = bandes[2];
+        else if (Math.abs(u - v) < 0.045 || Math.abs(u + v - 1) < 0.045) col = bandes[2];
+        else if (du < 0.14 || dv < 0.20) col = bandes[1];
+        else if (Math.abs(u - v) < 0.11 || Math.abs(u + v - 1) < 0.11) col = bandes[1];
+        else col = bandes[0];
       } else if (l === 'd') {                     // bande diagonale : champ haut, bande, champ bas
         const t2 = u + v - 1;
-        col = t2 < -0.16 ? b[0] : t2 > 0.16 ? (b[2] || b[0]) : b[1];
-      } else if (l === 'g') {                     // partage diagonal net, sans bande
-        col = (u + v - 1) < 0 ? b[0] : b[1];
-      } else col = b[Math.min(n - 1, Math.floor(v * n))];   // 'h' par défaut
-      if (em) {
-        // ⚠ Disque et croissant sont calculés en COORDONNÉES DE CELLULES (et non en 0..1) :
-        // la grille n'est pas carrée, un rayon en fraction de largeur donnerait une ellipse.
-        const cx = x + 0.5 - FLAG_COLS / 2, cy = y + 0.5 - FLAG_ROWS / 2;
-        const R = FLAG_ROWS * 0.27;             // rayon de référence : le disque d'avant, à l'échelle
-        if (em === 'o') { if (cx * cx + cy * cy <= R * R) col = ec; }
-        else if (em === 'q') {                  // disque décalé vers le guindant (Palaos)
-          const ox = cx + FLAG_COLS * 0.09;
-          if (ox * ox + cy * cy <= R * R) col = ec;
-        } else if (em === 'c' || em === 'n') {
-          // Croissant : disque plein moins un disque décalé. ⚠ Le décalage suit `rows` lui
-          // aussi, sinon la lune serait pleine sur une grille et fine sur l'autre.
-          const ro = FLAG_ROWS * 0.29, ri = FLAG_ROWS * 0.245, dx2 = FLAG_ROWS * 0.115;
-          const inner = (cx - dx2) * (cx - dx2) + cy * cy;
-          if (cx * cx + cy * cy <= ro * ro && inner > ri * ri) col = ec;
-          // … et son étoile, logée dans l'ouverture : c'est elle qui distingue la Turquie de
-          // la Mauritanie, deux croissants nus dans l'ancien rendu.
-          if (em === 'n' && inStar(cx - FLAG_ROWS * 0.32, cy, FLAG_ROWS * 0.155, 5, 0.382)) col = ec;
-        } else if (em === '*') { if (inStar(cx, cy, FLAG_ROWS * 0.32, 5, 0.382)) col = ec; }
-        else if (em === 'h') { if (inStar(cx, cy, FLAG_ROWS * 0.32, 6, 0.577)) col = ec; }
-        else if (em === 'y') {                  // soleil COMPACT : disque plein + couronne de rayons
-          const d2 = Math.hypot(cx, cy), ang = Math.atan2(cy, cx);
-          if (d2 <= R * (0.72 + 0.42 * Math.pow(Math.cos(ang * 8), 8))) col = ec;
-        } else if (em === 'z') {
-          // Grand soleil à 8 rayons DROITS qui courent jusqu'aux bords (Macédoine du Nord).
-          // ⚠ Distinct du 'y' compact : les deux drapeaux sont un soleil jaune sur fond rouge,
-          // et rendus pareil ils s'annulaient l'un l'autre au dédoublonnage.
-          const m2 = Math.PI / 4, a3o = Math.atan2(cy, cx);
-          const a3 = ((a3o % m2) + m2) % m2;
-          if (Math.hypot(cx, cy) <= R * 0.6 || Math.min(a3, m2 - a3) < 0.13) col = ec;
-        } else if (em === 'x') {                // quatre étoiles en losange (Micronésie)
-          const rr = FLAG_ROWS * 0.16;
-          for (const [ox, oy] of [[0, -R], [0, R], [-R * 1.6, 0], [R * 1.6, 0]]) {
-            if (inStar(cx - ox, cy - oy, rr, 5, 0.382)) { col = ec; break; }
+        col = t2 < -0.16 ? bandes[0] : t2 > 0.16 ? (bandes[2] || bandes[0]) : bandes[1];
+      } else if (l === 'g') {                     // partage diagonal net
+        col = (u + v - 1) < 0 ? bandes[0] : bandes[1];
+      } else col = bandes[Math.min(n - 1, Math.floor(v * n))];   // 'h' par défaut
+      for (let i = 0; i < em.length; i++) {
+        const code = em[i], ec = ek[i] || ek[ek.length - 1] || 'W';
+        if (gros && !FLAG_EM_GROS.has(code)) continue;
+        let on = false;
+        if (code === 'o') on = inDisc(cx, cy, R);
+        else if (code === '.') on = inDisc(cx, cy, R * 0.46);        // petit disque, à poser DANS un grand
+        else if (code === '4') on = inStar(cx + C * 0.30, cy, R0 * 0.16);   // l'étoile au cœur du triangle du guindant
+        else if (code === 'q') on = inDisc(cx + C * 0.09, cy, R);
+        else if (code === 'c' || code === 'n') {
+          // ⚠ Le croissant est plus PETIT que le disque de référence : la Tunisie et les
+          // Maldives le posent DANS une rondelle blanche, et à taille égale il en débordait.
+          const ro = R0 * 0.245, ri = R0 * 0.205, dx2 = R0 * 0.098;
+          on = inDisc(cx, cy, ro) && !inDisc(cx - dx2, cy, ri);
+          if (code === 'n' && inStar(cx - R0 * 0.27, cy, R0 * 0.13)) on = true;
+        }
+        else if (code === '*') on = inStar(cx, cy, R0 * 0.32);
+        else if (code === 'h') on = inStar(cx, cy, R0 * 0.32, 6, 0.577);
+        else if (code === 'y') { const d2 = Math.hypot(cx, cy), a2 = Math.atan2(cy, cx); on = d2 <= R * (0.72 + 0.42 * Math.pow(Math.cos(a2 * 8), 8)); }
+        else if (code === 'z' || code === '8') {
+          const m2 = Math.PI / 4, a2 = Math.atan2(cy, cx), a3 = ((a2 % m2) + m2) % m2;
+          on = Math.hypot(cx, cy) <= R * (code === '8' ? 0.34 : 0.6) || Math.min(a3, m2 - a3) < 0.13;
+        }
+        else if (code === 'x') { const rr = R0 * 0.11; on = [[0, -R], [0, R], [-R * 1.6, 0], [R * 1.6, 0]].some(([ox, oy]) => inStar(cx - ox, cy - oy, rr)); }
+        else if (code === 't') on = u < 0.42 && Math.abs(v - 0.5) <= 0.5 * (1 - u / 0.42);
+        else if (code === 'k') on = u < 0.42 && v < 0.5;
+        else if (code === 's') on = u < 0.33;
+        else if (code === 'e') on = inShield(cx - hoistX, cy, R0 * 0.14, R0 * 0.20);
+        else if (code === 'b') on = inShield(cx, cy, R0 * 0.15, R0 * 0.22);
+        else if (code === 'j') on = inDisc(cx - cantonX, cy - cantonY, R0 * 0.12);
+        else if (code === '5') on = inStar(cx - cantonX, cy - cantonY, R0 * 0.17);
+        else if (code === 'g') {                  // grille d'étoiles au canton (🇺🇸)
+          for (let gy = 0; gy < 4 && !on; gy++) for (let gx = 0; gx < 5 && !on; gx++) {
+            on = inStar(cx - (cantonX + (gx - 2) * C * 0.055), cy - (cantonY + (gy - 1.5) * R0 * 0.085), R0 * 0.045);
           }
-        } else if (em === 't') { if (u < 0.42 && Math.abs(v - 0.5) <= 0.5 * (1 - u / 0.42)) col = ec; }
-        else if (em === 'k') { if (u < 0.42 && v < 0.5) col = ec; }
-        else if (em === 's') { if (u < 0.33) col = ec; }
+        }
+        else if (code === 'r') {                  // anneau d'étoiles (🇪🇺)
+          for (let k3 = 0; k3 < 8 && !on; k3++) { const a2 = k3 / 8 * Math.PI * 2; on = inStar(cx - Math.cos(a2) * R * 1.05, cy - Math.sin(a2) * R * 1.05, R0 * 0.055); }
+        }
+        else if (code === '3') {                  // arc d'étoiles au-dessus de l'emblème
+          for (let k3 = 0; k3 < 6 && !on; k3++) { const a2 = -Math.PI * 0.78 + k3 / 5 * Math.PI * 0.56; on = inStar(cx - Math.cos(a2) * R * 1.5, cy - Math.sin(a2) * R * 1.5 - R0 * 0.06, R0 * 0.05); }
+        }
+        else if (code === '2') on = [-1, 1].some(sg => inStar(cx - sg * R0 * 0.18, cy, R0 * 0.13));
+        else if (code === 'w') {                  // roue à rayons (🇮🇳)
+          const d2 = Math.hypot(cx, cy), a2 = Math.atan2(cy, cx);
+          on = inRing(cx, cy, R * 0.78, R0 * 0.035) || (d2 < R * 0.78 && Math.abs(Math.cos(a2 * 12)) > 0.94) || d2 < R * 0.12;
+        }
+        else if (code === 'm') on = inMaple(cx, cy, R0 * 0.30);
+        else if (code === 'f') on = inCedar(cx, cy, R0 * 0.28);
+        else if (code === 'a') on = inRing(cx - (0.4 - 0.5) * C, cy, R * 0.85, R0 * 0.05) || Math.abs(cx - (0.4 - 0.5) * C) < R0 * 0.03 && Math.abs(cy) < R * 0.85;
+        else if (code === '+') on = u < 0.42 && v < 0.5 && (Math.abs(u - 0.21) < 0.035 || Math.abs(v - 0.25) < 0.052);
+        else if (code === 'p') on = du < 0.045 || dv < 0.068;        // croix centrée, de bord à bord
+        else if (code === '#') on = u < 0.035 || u > 0.965 || v < 0.052 || v > 0.948;
+        else if (code === 'T') {                  // moitié basse du taegeuk (🇰🇷) : posée sur un disque
+          on = inDisc(cx, cy, R) && (inDisc(cx, cy - R / 2, R / 2) || (cy > 0 && !inDisc(cx, cy + R / 2, R / 2)));
+        }
+        if (on) col = ec;
       }
-      out[y * FLAG_COLS + x] = col || 'W';
+      out[y * C + x] = col || 'W';
     }
   }
   return out;
 }
-// Catalogue mondial. ⚠ Les gabarits sont des APPROXIMATIONS assumées (cf. note ci-dessus) ;
-// l'ordre compte, c'est le premier de deux drapeaux au rendu identique qui est gardé.
+// Catalogue mondial. ⚠ 10.7.4 — TOUS les drapeaux ont été repris (demande utilisateur) : les
+// proportions de bandes sont celles des vrais drapeaux (plus de bandes égales par défaut) et
+// chacun porte désormais ses emblèmes — étoiles, croissants, soleils, roues, cèdres, feuilles,
+// et l'écusson pour toutes les armoiries, qu'aucune grille ne saura jamais dessiner mais dont
+// la SILHOUETTE, elle, distingue enfin l'Espagne du Portugal et la Serbie de la Russie.
+// ⚠ Format : [nom, gabarit, bandes, emblèmes, couleurs des emblèmes]. Les emblèmes s'appliquent
+// DANS L'ORDRE, chacun par-dessus le précédent — c'est ce qui permet de les composer.
+// ⚠ L'ordre de la liste compte : c'est le premier de deux drapeaux au rendu identique qui gagne.
 const FLAG_DATA = [
   // ── Europe
   ['France','v','BWR'], ['Allemagne','h','KRY'], ['Italie','v','GWR'], ['Belgique','v','KYR'],
-  ['Pays-Bas','h','RWB'], ['Espagne','h','RYYR'], ['Portugal','v','GR'], ['Irlande','v','GWO'],
-  ['Royaume-Uni','u','BWR'], ['Suisse','p','RW'], ['Autriche','h','RWR'], ['Pologne','h','WR'],
-  ['Danemark','x','RW'], ['Suède','x','BY'], ['Norvège','x','RWB'], ['Finlande','x','WB'],
-  ['Islande','x','BWR'], ['Grèce','h','CWCWCWCWCC','k'], ['Hongrie','h','RWG'], ['Roumanie','v','BYR'],
-  ['Bulgarie','h','WGR'], ['Croatie','h','RWBR','o'], ['Serbie','h','RBW'], ['Slovaquie','h','WBRR','o'],
-  ['Slovénie','h','WBRC','o'], ['Bosnie-Herzégovine','h','BY','t'], ['Albanie','v','RK','o'],
-  ['Macédoine du Nord','h','RY','z'], ['Monténégro','h','RM','o'], ['Kosovo','h','BY','o'],
-  ['Russie','h','WBR'], ['Ukraine','h','BY'], ['Biélorussie','h','RGW','s'], ['Moldavie','v','BYRM','o'],
-  ['Lituanie','h','YGR'], ['Lettonie','h','MMWMM'], ['Estonie','h','BKW'], ['République tchèque','h','WRB','t'],
-  ['Luxembourg','h','RWC'], ['Liechtenstein','h','BR'], ['Malte','v','WR'], ['Chypre','h','WO','o'],
-  ['Saint-Marin','h','WC'], ['Andorre','v','BYRR','o'], ['Vatican','v','YW'],
+  ['Pays-Bas','h','RWB'], ['Espagne','h','RYYR','e','M'], ['Portugal','v','GGRRR','a','Y'],
+  ['Irlande','v','GWO'], ['Royaume-Uni','u','BWR'], ['Suisse','p','RW'], ['Autriche','h','RWR'],
+  ['Pologne','h','WR'], ['Danemark','x','RW'], ['Suède','x','BY'], ['Norvège','x','RWB'],
+  ['Finlande','x','WB'], ['Islande','x','BWR'], ['Grèce','h','CWCWCWCWC','k+','CW'],
+  ['Hongrie','h','RWG'], ['Roumanie','v','BYR'], ['Bulgarie','h','WGR'],
+  ['Croatie','h','RWB','b','R'], ['Serbie','h','RBW','e','Y'], ['Slovaquie','h','WBR','e','R'],
+  ['Slovénie','h','WBR','e','C'], ['Bosnie-Herzégovine','h','B','t3','YW'],
+  ['Albanie','h','R','b','K'], ['Macédoine du Nord','h','R','z','Y'],
+  ['Monténégro','h','R','#b','YY'], ['Kosovo','h','B','o3','YW'],
+  ['Russie','h','WBR'], ['Ukraine','h','BY'], ['Biélorussie','h','RRG','s','W'],
+  ['Moldavie','v','BYR','b','M'], ['Lituanie','h','YGR'], ['Lettonie','h','MMWMM'],
+  ['Estonie','h','BKW'], ['République tchèque','h','WR','t','B'], ['Luxembourg','h','RWC'],
+  ['Liechtenstein','h','BR','j','Y'], ['Malte','v','WR','j','K'], ['Chypre','h','W','o','O'],
+  ['Saint-Marin','h','WC','b','Y'], ['Andorre','v','BYR','b','R'], ['Vatican','v','YW','b','Y'],
+  ['Union européenne','h','B','r','Y'],
   // ── Amériques
-  ['États-Unis','h','RWRWRWRWRWRWRB','k'], ['Canada','v','RWWRR','o'], ['Mexique','v','GWRM','o'],
-  ['Brésil','h','GY','o'], ['Argentine','h','CWCY','y'], ['Chili','h','WRB','k'], ['Pérou','v','RWR'],
-  ['Colombie','h','YYBR'], ['Équateur','h','YYBRW','o'], ['Venezuela','h','YBR'], ['Bolivie','h','RYG'],
-  ['Paraguay','h','RWBY','o'], ['Uruguay','h','WCWCWCWCWY','k'], ['Guyana','h','GY','t'],
-  ['Suriname','h','GGWRRRRWGG'], ['Cuba','h','BWBWBR','t'], ['Haïti','h','BRW','o'], ['République dominicaine','w','BRRB'],
-  ['Jamaïque','z','GY'], ['Bahamas','h','CYCK','t'], ['Barbade','v','BYB'], ['Trinité-et-Tobago','d','RKR'],
-  ['Panama','w','WRBW'], ['Costa Rica','h','BBWWRRRRWWBB'], ['Nicaragua','h','BWBC','o'], ['Honduras','h','CWC'],
-  ['Salvador','h','BWB'], ['Guatemala','v','CWC'], ['Belize','h','RBR'], ['Grenade','w','YGGY'],
-  ['Sainte-Lucie','h','CY','t'], ['Saint-Vincent-et-les-Grenadines','v','CYG'], ['Saint-Kitts-et-Nevis','d','GKR'],
-  ['Antigua-et-Barbuda','h','KCW','t'], ['Dominique','p','GY'],
+  ['États-Unis','h','RWRWRWRWRWRWR','kg','BW'], ['Canada','v','RWWRR','m','R'],
+  ['Mexique','v','GWR','b','M'], ['Brésil','h','G','o.','YB'], ['Argentine','h','CWC','y','Y'],
+  ['Chili','h','WWRR','k5','BW'], ['Pérou','v','RWR'], ['Colombie','h','YYBR'],
+  ['Équateur','h','YYBR','b','M'], ['Venezuela','h','YBR','3','W'], ['Bolivie','h','RYG'],
+  ['Paraguay','h','RWB','o','C'], ['Uruguay','h','WCWCWCWCW','ky','WY'],
+  ['Guyana','h','GG','t','Y'], ['Suriname','h','GGWRRRRWGG','*','Y'],
+  ['Cuba','h','BWBWB','t4','RW'], ['Haïti','h','BR','b','W'],
+  ['République dominicaine','w','BRRB','p','W'], ['Jamaïque','z','GY'],
+  ['Bahamas','h','CYC','t','K'], ['Barbade','v','BYB','b','K'],
+  ['Trinité-et-Tobago','d','RKR'], ['Panama','w','WRBW','2','BR'],
+  ['Costa Rica','h','BBWWRRRRWWBB'], ['Nicaragua','h','CWC','o','C'], ['Honduras','h','CWC','x','C'],
+  ['Salvador','h','BWB','o','Y'], ['Guatemala','v','CWC','b','K'], ['Belize','h','RBBBBR','o','W'],
+  ['Grenade','w','YGGY','o','R'], ['Sainte-Lucie','h','C','t','K'],
+  ['Saint-Vincent-et-les-Grenadines','v','CYYG','2','GG'], ['Saint-Kitts-et-Nevis','d','GKR','2','WW'],
+  ['Antigua-et-Barbuda','h','KCW','ty','KY'], ['Dominique','p','GY','o','R'],
   // ── Afrique
-  ['Maroc','h','RG','*'], ['Algérie','v','GWR','n'], ['Tunisie','h','RW','o'], ['Libye','h','RKGW','n'],
-  ['Égypte','h','RWKY','o'], ['Soudan','h','RWKG','t'], ['Soudan du Sud','h','KWRWGC','t'], ['Éthiopie','h','GYRB','o'],
-  ['Érythrée','h','GCR','t'], ['Djibouti','h','CGW','t'], ['Somalie','h','CW','*'], ['Kenya','h','KKKWRRWGGG'],
-  ['Ouganda','h','KYRKYRW','o'], ['Rwanda','h','CYGY','o'], ['Burundi','z','RW'], ['Tanzanie','d','GKB'],
-  ['Mozambique','h','GWKWYR','t'], ['Zimbabwe','h','GYRKRYGW','t'], ['Zambie','v','GGGR'], ['Malawi','h','KRGR','o'],
-  ['Angola','h','RKY','o'], ['Namibie','d','BRG'], ['Botswana','h','CCCWKKWCCC'], ['Afrique du Sud','h','RBG','t'],
-  ['Lesotho','h','BWGK','o'], ['Eswatini','h','CYRYC'], ['Madagascar','h','WRGW','s'], ['Maurice','h','RBYG'],
-  ['Seychelles','v','BYRWG'], ['Comores','h','YWRBG','t'], ['Nigeria','v','GWG'], ['Ghana','h','RYGK','o'],
-  ['Côte d\'Ivoire','v','OWG'], ['Sénégal','v','GYRG','o'], ['Mali','v','GYR'], ['Guinée','v','RYG'],
-  ['Burkina Faso','h','RGY','o'], ['Niger','h','OWGO','o'], ['Tchad','v','BYRC','o'], ['Cameroun','v','GRY'],
-  ['Gabon','h','GYB'], ['Congo','d','GYR'], ['République démocratique du Congo','d','CYC'],
-  ['Centrafrique','h','BWGY'], ['Bénin','h','GYRG','s'], ['Togo','h','GYGYGR','k'], ['Sierra Leone','h','GWC'],
-  ['Liberia','h','RWRWRWRWRWRB','k'], ['Guinée-Bissau','h','YGR','s'], ['Gambie','h','RRRWBBWGGG'],
-  ['Mauritanie','h','RGRY','n'], ['Guinée équatoriale','h','GWRC','t'], ['São Tomé-et-Príncipe','h','GYGR','t'],
-  ['Cap-Vert','h','BWRWBY','o'], ['Sahara occidental','h','KWGR','o'],
+  ['Maroc','h','R','*','G'], ['Algérie','v','GW','n','R'], ['Tunisie','h','R','on','WR'],
+  ['Libye','h','RRKKKKGG','n','W'], ['Égypte','h','RWK','b','Y'], ['Soudan','h','RWK','t','G'],
+  ['Soudan du Sud','h','KWRWG','t4','BY'], ['Éthiopie','h','GYR','o','B'],
+  ['Érythrée','h','GR','t','C'], ['Djibouti','h','CG','t4','WR'], ['Somalie','h','C','*','W'],
+  ['Kenya','h','KKKWRRWGGG','b','R'], ['Ouganda','h','KYRKYRW','o','W'],
+  ['Rwanda','h','CCYG','q','Y'], ['Burundi','z','RW','o','W'], ['Tanzanie','d','GKB'],
+  ['Mozambique','h','GWKWY','t','R'], ['Zimbabwe','h','GYRKRYG','t4','WR'],
+  ['Zambie','v','GGGR','o','O'], ['Malawi','h','KRG','y','R'], ['Angola','h','RK','o','Y'],
+  ['Namibie','d','BRG','y','Y'], ['Botswana','h','CCCWKKWCCC'],
+  ['Afrique du Sud','h','RWBWG','t','Y'], ['Lesotho','h','BWWG','b','K'],
+  ['Eswatini','h','CYRYC','b','K'], ['Madagascar','h','RG','s','W'],
+  ['Maurice','h','RBYG'], ['Seychelles','v','BYRWG'], ['Comores','h','YWRB','tn','GW'],
+  ['Nigeria','v','GWG'], ['Ghana','h','RYG','*','K'], ['Côte d\'Ivoire','v','OWG'],
+  ['Sénégal','v','GYR','*','G'], ['Mali','v','GYR'], ['Guinée','v','RYG'],
+  ['Burkina Faso','h','RG','*','Y'], ['Niger','h','OWG','o','O'], ['Tchad','v','BYR'],
+  ['Cameroun','v','GRY','*','Y'], ['Gabon','h','GYB'], ['Congo','d','GYR'],
+  ['République démocratique du Congo','d','CYC','5','Y'], ['Centrafrique','h','BWGY','5','R'],
+  ['Bénin','h','YR','s','G'], ['Togo','h','GYGYG','k*','RW'], ['Sierra Leone','h','GWC'],
+  ['Liberia','h','RWRWRWRWRWR','k5','BW'], ['Guinée-Bissau','h','YG','s5','RK'],
+  ['Gambie','h','RRRWBBWGGG'], ['Mauritanie','h','RGGGGR','n','Y'],
+  ['Guinée équatoriale','h','GWR','tb','CK'], ['São Tomé-et-Príncipe','h','GYYG','t2','RKK'],
+  ['Cap-Vert','h','BBWRWBB','r','Y'], ['Sahara occidental','h','KWG','tn','RR'],
   // ── Asie
-  ['Japon','h','WR','o'], ['Chine','h','RY','k'], ['Corée du Sud','h','WB','o'], ['Corée du Nord','h','BWRWBW','o'],
-  ['Inde','h','OWGB','o'], ['Pakistan','h','WG','s'], ['Bangladesh','h','GR','o'], ['Sri Lanka','v','GYM'],
-  ['Népal','h','RB','t'], ['Bhoutan','g','YO'], ['Maldives','h','RGW','o'], ['Birmanie','h','YGRW','o'],
-  ['Thaïlande','h','RRWWBBBBWWRR'], ['Viêt Nam','h','RY','*'], ['Laos','h','RBRW','o'], ['Cambodge','h','BRBW','o'],
-  ['Malaisie','h','RWRWRWRWRWRWRWB','k'], ['Singapour','h','RWW','k'], ['Indonésie','h','RW'], ['Monaco','h','RWK','o'],
-  ['Philippines','h','BRW','t'], ['Brunei','d','YKY'], ['Timor oriental','h','RK','t'], ['Mongolie','v','RBR'],
-  ['Kazakhstan','h','CY','y'], ['Ouzbékistan','h','CWG'], ['Turkménistan','h','GR','s'],
-  ['Kirghizistan','h','RY','y'], ['Tadjikistan','h','RWGY','o'], ['Afghanistan','v','KRG'],
-  ['Iran','h','GWRR','o'], ['Irak','h','RWKG','o'], ['Syrie','h','RWKR','o'], ['Liban','h','RWRG','o'],
-  ['Israël','h','WWCWWWWCWWC','h'], ['Palestine','h','KWGR','t'], ['Jordanie','h','KWGRW','t'],
-  ['Arabie saoudite','v','GW','o'], ['Yémen','h','RWK'], ['Oman','h','WRGR','s'], ['Émirats arabes unis','h','RGWK','s'],
-  ['Qatar','v','WM'], ['Bahreïn','v','WRR','o'], ['Koweït','h','GWRK','t'], ['Turquie','h','RW','n'],
-  ['Arménie','h','RBO'], ['Géorgie','p','WR'], ['Azerbaïdjan','h','CRGW','n'],
+  ['Japon','h','W','o','R'], ['Chine','h','R','5','Y'], ['Corée du Sud','h','W','oT','RB'],
+  ['Corée du Nord','h','BWRRRWB','q','W'], ['Inde','h','OWG','w','B'],
+  ['Pakistan','h','G','sn','WW'], ['Bangladesh','h','G','q','R'], ['Sri Lanka','v','GYM','#','Y'],
+  ['Népal','h','R','t','B'], ['Bhoutan','g','YO'], ['Maldives','h','R','oc','GW'],
+  ['Birmanie','h','YGR','*','W'], ['Thaïlande','h','RRWWBBBBWWRR'], ['Viêt Nam','h','R','*','Y'],
+  ['Laos','h','RBBR','o','W'], ['Cambodge','h','BRRB','b','W'],
+  ['Malaisie','h','RWRWRWRWRWRWRW','kn','BY'], ['Singapour','h','RW','n','W'],
+  ['Indonésie','h','RW'], ['Monaco','h','RW','#','K'], ['Philippines','h','BR','t4','WY'],
+  ['Brunei','d','YKY','o','R'], ['Timor oriental','g','RK','t','Y'], ['Mongolie','v','RBR','s','Y'],
+  ['Kazakhstan','h','C','y','Y'], ['Ouzbékistan','h','CWG','5','W'],
+  ['Turkménistan','h','G','s','M'], ['Kirghizistan','h','R','8','Y'],
+  ['Tadjikistan','h','RWWG','y','Y'], ['Afghanistan','v','KRG','o','W'],
+  ['Liban','h','RWWR','f','G'], ['Iran','h','GWR','b','R'], ['Irak','h','RWK','*','G'], ['Syrie','h','RWK','2','GG'],
+  ['Israël','h','WWCWWWWCWW','h','C'], ['Palestine','h','KWG','t','R'],
+  ['Jordanie','h','KWG','t4','RW'], ['Arabie saoudite','h','G','s','W'], ['Yémen','h','RWK'],
+  ['Oman','h','WRG','s','R'], ['Émirats arabes unis','h','GWK','s','R'], ['Qatar','v','WM'],
+  ['Bahreïn','v','WRRR'], ['Koweït','h','GWR','t','K'], ['Turquie','h','R','n','W'],
+  ['Arménie','h','RBO'], ['Géorgie','p','WR','x','R'], ['Azerbaïdjan','h','CRG','n','W'],
   // ── Océanie
-  ['Australie','h','BW','k'], ['Nouvelle-Zélande','h','BC','k'], ['Papouasie-Nouvelle-Guinée','g','RK'],
-  ['Fidji','h','CW','k'], ['Îles Salomon','d','BYG'], ['Vanuatu','h','RGK','t'], ['Samoa','h','RB','k'],
-  ['Tonga','h','RW','k'], ['Nauru','h','BYB'], ['Kiribati','h','RCB'], ['Tuvalu','h','CY','k'],
-  ['Îles Marshall','d','BWB'], ['Micronésie','h','CW','x'], ['Palaos','h','CY','q'],
+  ['Australie','h','B','+x','WW'], ['Nouvelle-Zélande','h','B','+x','WR'],
+  ['Papouasie-Nouvelle-Guinée','g','RK','x','W'], ['Fidji','h','C','k+b','BWW'],
+  ['Îles Salomon','d','BYG','x','W'], ['Vanuatu','h','RGK','t','K'], ['Samoa','h','R','k5','BW'],
+  ['Tonga','h','R','k+','WR'], ['Nauru','h','BYB','5','W'], ['Kiribati','h','RCB','y','Y'],
+  ['Tuvalu','h','C','k+x','BWY'], ['Îles Marshall','d','BWB','5','W'],
+  ['Micronésie','h','C','x','W'], ['Palaos','h','C','q','Y'],
 ];
 // ⚠ DÉDOUBLONNAGE À LA CONSTRUCTION : deux drapeaux qui ne se distinguent que par un
 // emblème non dessiné (Roumanie/Tchad, Autriche/Lettonie, Monaco/Indonésie, Égypte/Yémen…)
@@ -13881,11 +13970,13 @@ const FLAG_DATA = [
 const FLAGS = (() => {
   const seen = new Set(), out = [];
   for (const d of FLAG_DATA) {
-    const f = { n:d[0], l:d[1], c:d[2], e:d[3] || '' };
+    const f = { n:d[0], l:d[1], c:d[2], e:d[3] || '', k:d[4] || '' };
     f.cells = flagCells(f, FLAG_COLS, FLAG_ROWS);
     // ⚠ La grille grossière est calculée ICI, une fois pour toutes, et non à chaque frame de
     // Doodle Jump : la dalle 🚩 en redemande soixante fois par seconde.
-    f.cellsLo = flagCells(f, FLAG_COLS_LO, FLAG_ROWS_LO);
+    // ⚠ `true` = grille GROSSIÈRE : elle ne reçoit que les emblèmes larges. Une étoile de
+    // 3 cellules ou un écusson y seraient deux pixels sales sur les 28 × 18 px de la dalle.
+    f.cellsLo = flagCells(f, FLAG_COLS_LO, FLAG_ROWS_LO, true);
     const sig = f.cells.join('');
     if (seen.has(sig)) continue;
     seen.add(sig);
