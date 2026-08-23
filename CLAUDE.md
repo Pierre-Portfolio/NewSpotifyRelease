@@ -215,7 +215,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 | **To do** | `TodoPanel`, vert | `spotifyplus_todos`, `_todos_done` | 7 rubriques en carrousel. Dans `daily` et `cecile` le × **valide** au lieu de supprimer ; appui long 3 s dans `daily` = supprimer la récurrence |
 | **TV Time** | `TvTimePanel`, ambre | `spotifyplus_tvtime`, `_tvtime_eps` | Séries/films (TMDB), chaînes YouTube, livres (Google Books + Open Library). Source de vérité = `tvWatchedSet`. Lecteur plein écran `YtFullscreenPlayer`. Synchro quotidienne `tvSyncDaily` reprenable |
 | **Vêtement** | `VetementPanel`, `#f59a2e` | `spotifyplus_vetements` | 35 types en sous-catégories, fiches + marques. **Photos sur Google Drive**, jamais en local. Barre de filtres + recherche par image (IA) |
-| **Stats** | `StatsPanel` | (lecture seule) | Collapses imbriqués : API · Musiques · To do · Films · Maps · Santé · Remembers · Jeux · GitHub |
+| **Stats** | `StatsPanel` | (lecture seule) | Collapses imbriqués, **titres en ordre alphabétique** : Alertes · API · Collection · Films · GitHub · Jeux · Maps · Musiques · Santé · To do |
 | **À propos** | `VosEcoutesPanel` | — | Paramétrage · Lancement automatique · Exporter · Sauvegardes cloud · Restaurer · Réinit quota · Purger · Déconnecter |
 
 **Layout** : `WebApp` (desktop, onglets en haut) · `MobileApp` (barre haut : profil + menu ⋯) · `CompactPlayer` (viewport court) · `HubHome` (accueil, grille dérivée de `TOGGLE_MODULES`, ordre alphabétique) · `Home` (login).
