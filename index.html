@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.10.4';
+const APP_VERSION = '10.10.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6901,7 +6901,7 @@ function doodlePerkRaise(s, cible) {
 const D_BAMB_N = 3;
 const D_BAMB_CLEAR = ['roll', 'mim', 'gvx', 'vy2', 'y0', 'span2', 'ax', 'ay', 'boo', 'conf',
   'fade', 'fuse', 'tent', 'pcool', 'steam', 'lava', 'laz', 'grap', 'grapCool', 'egg', 'ori',
-  'lit', 'tama', 'armed', 'sink', 'stal', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
+  'lit', 'tama', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
 function doodleBambooify(s, p) {
   s.bambLeft--;
   p.type = 'bambooed';
@@ -7377,14 +7377,35 @@ const D_MUM_LOOT = 2;
 // dont on paie le prix seulement si l'on redescend.
 // ⚠ Une seule fois par dalle (`p.stal`) : des piques repoussant à chaque passage auraient fait
 // de la dalle un raseur permanent de la colonne.
+// ⚠ 10.10.5 — LE TIR ET LE REBOND NE FONT PLUS LA MÊME CHOSE (demande utilisateur).
+//   • REBOND : les piques restantes décrochent TOUTES, et chacune rase la colonne entière —
+//     tout ce qu'elle rencontre en tombant part dans le vide. C'est la tuile telle qu'elle était.
+//   • TIR : il faut D_STAL_SHOTS balles pour décrocher UNE pique, soit 9 pour les trois, et une
+//     pique tombée au tir n'emporte QU'UNE dalle avant de se briser.
+// ⚠ La différence tient en un seul champ porté par la pique, `take` : le nombre de dalles
+// qu'elle peut encore emporter. `Infinity` pour le rebond, 1 pour le tir — et `--st.take`
+// laisse Infinity intact, donc un seul test suffit pour les deux cas.
+// ⚠ `p.stalLeft` compte les piques ENCORE PENDUES et c'est lui qui décide du dessin : sans
+// lui, une dalle à moitié vidée aurait continué d'afficher ses trois piques.
 const D_STAL_N = 3, D_STAL_G = 0.34, D_STAL_VMAX = 9.5, D_STAL_W = 9, D_STAL_H = 17;
+const D_STAL_SHOTS = 3;
 const D_PLAT_FALL_G = 0.42, D_PLAT_FALL_VMAX = 11;
-function doodleStalDrop(s, p) {
+// Décroche `n` piques de la dalle (au plus ce qu'il en reste), chacune autorisée à emporter
+// `take` dalles. Renvoie le nombre réellement parti.
+// ⚠ Les piques partent DE GAUCHE À DROITE, dans l'ordre où le dessin les montre : tirer au
+// hasard aurait fait disparaître une pique là où on n'avait pas visé.
+function doodleStalDrop(s, p, n, take) {
   s.stals = s.stals || [];
-  for (let i = 0; i < D_STAL_N; i++) {
+  const left = p.stalLeft == null ? D_STAL_N : p.stalLeft;
+  const k = Math.max(0, Math.min(n, left));
+  for (let j = 0; j < k; j++) {
+    const i = D_STAL_N - left + j;
     s.stals.push({ x: p.x + (i + 0.5) * p.w / D_STAL_N - D_STAL_W / 2, y: p.y + p.h,
-                   w: D_STAL_W, h: D_STAL_H, vy: 1.2 + i * 0.25 });
+                   w: D_STAL_W, h: D_STAL_H, vy: 1.2 + i * 0.25, take: take });
   }
+  p.stalLeft = left - k;
+  if (p.stalLeft <= 0) p.stal = true;   // la dalle est vidée : elle ne mange plus les balles
+  return k;
 }
 function doodleMumDrop(s, W) {
   s.mums = s.mums || [];
@@ -7431,7 +7452,7 @@ const D_BIOMES = [
   { k:'glacier', name:'Glacier',  icon:'🧊', paper:'#e8f4fa', rule:'#c2dfef', marge:'#8fc5e6',
     tiles:[
       { k:'gust',     icon:'❄️', name:'Plaque de glace', txt:'on glisse dessus, et longtemps — le rebond, lui, est ordinaire' },
-      { k:'stalac',   icon:'🧊', name:'Stalactite',    own:true, txt:'trois piques de glace pendent dessous : s\'y poser LES DÉCROCHE, et leur tirer dessus aussi. Tout ce qu\'elles rencontrent en tombant part dans le vide. Une seule fois par dalle' },
+      { k:'stalac',   icon:'🧊', name:'Stalactite',    own:true, txt:'trois piques de glace pendent dessous. T\'y POSER les décroche toutes d\'un coup, et chacune rase la colonne : tout ce qu\'elle rencontre en tombant part dans le vide. LEUR TIRER DESSUS est bien plus mesuré — ' + D_STAL_SHOTS + ' balles pour décrocher une pique (donc ' + (D_STAL_SHOTS * D_STAL_N) + ' pour les trois), et une pique tombée au tir n\'emporte QU\'UNE dalle avant de se briser' },
       { k:'snow',     icon:'🌨️', name:'Congère',      own:true, txt:'un souffle glacé : tous tes bonus et améliorations sont gelés pendant ' + Math.round(D_FROST_LIFE / 60) + ' secondes' },
     ],
     mobs:[{ k:'penguin', icon:'🐧', w:34, h:32, vx:1.1, drawn:true },
@@ -9114,22 +9135,34 @@ function doodleTileDraw(ctx, p, t) {
   // 🧊 Stalactite : une dalle de glace bleue d'où pendent trois piques — tant qu'elles sont là.
   // Décrochée (`p.stal`), il ne reste que les moignons brisés à sa sous-face : la dalle dit
   // qu'elle a déjà tiré son coup.
+  // ⚠ 10.10.5 — Le dessin lit `p.stalLeft` : chaque pique décrochée laisse un MOIGNON à sa
+  // place, et les autres continuent de pendre. Une dalle à moitié vidée qui aurait continué
+  // d'afficher ses trois piques aurait menti sur ce qu'il reste à en tirer.
+  // ⚠ Les piques partent de GAUCHE À DROITE, donc les moignons occupent les premiers indices.
   if (p.type === 'stalac') {
-    const gone = !!p.stal;
-    if (!gone) for (let i = 0; i < D_STAL_N; i++) {
+    const left = p.stalLeft == null ? D_STAL_N : p.stalLeft;
+    const gone = D_STAL_N - left;                                     // combien sont déjà tombées
+    for (let i = gone; i < D_STAL_N; i++) {                           // celles qui pendent encore
       const cx2 = x + (i + 0.5) * w / D_STAL_N;
       doodleIcicle(ctx, cx2, y + h - 1, D_STAL_W, D_STAL_H + Math.sin(t * 0.06 + i) * 1.2);
     }
-    doodleRR(ctx, x, y, w, h, 5, gone ? '#a8c8d8' : '#cfeaf8');
-    ctx.fillStyle = gone ? '#6f93a6' : '#7fc9e0'; ctx.fillRect(x, y + h - 4, w, 4);
+    doodleRR(ctx, x, y, w, h, 5, left ? '#cfeaf8' : '#a8c8d8');
+    ctx.fillStyle = left ? '#7fc9e0' : '#6f93a6'; ctx.fillRect(x, y + h - 4, w, 4);
     ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.6;   // les fêlures de la glace
     ctx.beginPath(); ctx.moveTo(x + 9, y + 9); ctx.lineTo(x + 19, y + 3); ctx.moveTo(x + 32, y + 10); ctx.lineTo(x + 47, y + 3); ctx.stroke();
-    if (gone) {                                                       // les moignons brisés
-      ctx.fillStyle = '#9fd8ee'; ctx.strokeStyle = '#4f93b5'; ctx.lineWidth = 1;
-      for (let i = 0; i < D_STAL_N; i++) {
-        const cx2 = x + (i + 0.5) * w / D_STAL_N;
-        ctx.beginPath(); ctx.moveTo(cx2 - 4, y + h); ctx.lineTo(cx2 + 4, y + h); ctx.lineTo(cx2 + 1, y + h + 3.5); ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Les balles encaissées fêlent la glace un peu plus à chaque coup : le compteur se voit.
+    const fel = (p.stalHits || 0) % D_STAL_SHOTS;
+    if (fel && left) {
+      ctx.strokeStyle = 'rgba(79,147,181,0.85)'; ctx.lineWidth = 1.1;
+      for (let i = 0; i < fel; i++) {
+        const fx = x + 14 + i * 12;
+        ctx.beginPath(); ctx.moveTo(fx, y + 2); ctx.lineTo(fx + 3, y + h / 2); ctx.lineTo(fx - 2, y + h - 3); ctx.stroke();
       }
+    }
+    ctx.fillStyle = '#9fd8ee'; ctx.strokeStyle = '#4f93b5'; ctx.lineWidth = 1;   // les moignons brisés
+    for (let i = 0; i < gone; i++) {
+      const cx2 = x + (i + 0.5) * w / D_STAL_N;
+      ctx.beginPath(); ctx.moveTo(cx2 - 4, y + h); ctx.lineTo(cx2 + 4, y + h); ctx.lineTo(cx2 + 1, y + h + 3.5); ctx.closePath(); ctx.fill(); ctx.stroke();
     }
     return;
   }
@@ -12380,9 +12413,16 @@ function GameDoodle() {
         for (const q of s.platforms) {
           if (q.type !== 'stalac' || q.stal || q.dead) continue;
           if (b.x < q.x || b.x > q.x + q.w || b.y < q.y - 6 || b.y > q.y + q.h + D_STAL_H) continue;
-          q.stal = true;
-          doodleStalDrop(s, q);
-          s.toast = { txt: '🧊 Les stalactites décrochent !', life: D_TOAST_LIFE };
+          q.stalHits = (q.stalHits || 0) + 1;
+          // ⚠ Une pique ne part qu'à la D_STAL_SHOTS-ième balle : les deux premières FÊLENT la
+          // glace, et c'est tout. Sans ce compteur, tirer revenait à sauter dessus.
+          if (q.stalHits % D_STAL_SHOTS === 0) {
+            doodleStalDrop(s, q, 1, 1);   // ⚠ `take: 1` — une pique tombée au tir n'emporte QU'UNE dalle
+            const reste = q.stalLeft;
+            s.toast = { txt: reste > 0 ? `🧊 Une pique décroche — ${reste} encore` : '🧊 Dernière pique décrochée', life: D_TOAST_LIFE };
+          } else {
+            s.toast = { txt: `🧊 La glace se fêle — ${D_STAL_SHOTS - (q.stalHits % D_STAL_SHOTS)} tir(s) pour décrocher une pique`, life: D_TOAST_LIFE };
+          }
           for (let k = 0; k < 14; k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 3; s.parts.push({ x: b.x, y: b.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 0.5, life: 22, max: 22, sz: 2.5, c: k % 2 ? '#bfe4f5' : '#ffffff' }); }
           return false;
         }
@@ -12468,13 +12508,21 @@ function GameDoodle() {
             q.fvy = 1.5;                       // elle DÉCROCHE : on doit la voir partir
             q.vx = 0; q.gvx = null; q.vy2 = null;
             for (let k = 0; k < 8; k++) s.parts.push({ x: q.x + Math.random() * q.w, y: q.y, vx: (Math.random() - 0.5) * 3, vy: 0.5 + Math.random() * 2, life: 20, max: 20, sz: 2.5, c: k % 2 ? '#bfe4f5' : '#ffffff' });
+            // ⚠ `--st.take` laisse Infinity intact : la pique du REBOND ne s'arrête jamais et
+            // rase la colonne, celle du TIR se brise sur la dalle qu'elle vient d'emporter.
+            if (--st.take <= 0) {
+              st.done = true;
+              for (let k = 0; k < 10; k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 2.5; s.parts.push({ x: st.x + st.w / 2, y: q.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 0.5, life: 18, max: 18, sz: 2, c: k % 2 ? '#eaf8ff' : '#9fd8ee' }); }
+              break;
+            }
           }
+          if (st.done) continue;
           for (const m of s.monsters) {
             if (!m.alive || st.x + st.w < m.x || st.x > m.x + m.w || st.y + st.h < m.y || st.y > m.y + m.h) continue;
             doodleKillMonster(s, m, true);     // ⚠ vraie mise à mort : la créature lâche son coffre comme d'une balle
           }
         }
-        s.stals = s.stals.filter(st => st.y < H + 40);
+        s.stals = s.stals.filter(st => !st.done && st.y < H + 40);
       }
       // Les dalles décrochées : elles accélèrent vers le bas jusqu'à sortir de l'écran, où le
       // filtre de fin de boucle les emporte. ⚠ Elles restent SOLIDES pendant la chute : une
@@ -12647,10 +12695,10 @@ function GameDoodle() {
               s.toast = { txt: `🌨️ Bonus gelés ${Math.round(D_FROST_LIFE / 60)} s`, life: D_TOAST_LIFE };
               for (let k = 0; k < 20; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y, vx: (Math.random() - 0.5) * 3, vy: -0.5 - Math.random() * 2.5, life: 30, max: 30, sz: 2.5, c: k % 2 ? '#ffffff' : '#dcf0fa' });
             }
-            else if (p.type === 'stalac' && !p.stal) {                                       // 🧊 Stalactite : les piques décrochent
-              p.stal = true;
-              doodleStalDrop(s, p);
-              s.toast = { txt: '🧊 Les stalactites décrochent !', life: D_TOAST_LIFE };
+            else if (p.type === 'stalac' && !p.stal) {                                       // 🧊 Stalactite : TOUT ce qui pend décroche
+              const k = doodleStalDrop(s, p, D_STAL_N, Infinity);
+              p.stal = true;                                                                 // ⚠ même s'il ne restait rien : le rebond épuise la dalle
+              s.toast = { txt: k > 1 ? `🧊 Les ${k} stalactites décrochent — la colonne y passe !` : '🧊 La stalactite décroche — la colonne y passe !', life: D_TOAST_LIFE };
               for (let k = 0; k < 12; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y + p.h, vx: (Math.random() - 0.5) * 3, vy: 1 + Math.random() * 2, life: 22, max: 22, sz: 2.5, c: k % 2 ? '#bfe4f5' : '#ffffff' });
             }
             else if (p.type === 'geyser') {                                                  // 🌋 projection sans contrôle, et un panache de vapeur
