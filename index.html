@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '10.8.8';
+const APP_VERSION = '10.8.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5684,7 +5684,35 @@ function doodleBiomePal(s, tier) {
 // Toutes les tuiles de biome acquises jusqu'au palier `tier`, dans l'ordre de découverte.
 // ⚠ Dédoublonnée : deux paliers peuvent tirer le même biome à distance, sa tuile ne doit pas
 // pour autant peser double dans le tirage.
+// ⚠ 10.8.9 — LES BIOMES NE S'EMPILENT PLUS (demande utilisateur). Le vivier des tuiles de
+// biome d'un palier, c'est celui du biome COURANT — et rien d'autre. De 9.5.4 à 10.8.8 toutes
+// les tuiles traversées restaient en jeu : au sixième palier, dix-huit tuiles se partageaient
+// la même bande de tirage et aucun biome n'avait plus d'identité propre.
 function doodleBiomeTilesAt(s, tier) {
+  return D_BIOMES[doodleBiomeAt(s, tier)].tiles.map(t => t.k);
+}
+// … à une exception près : LE VESTIGE. À chaque changement de biome, UNE tuile du biome qu'on
+// quitte est tirée au sort et reste tirable dans le suivant, à taux faible (D_RELIC_SHARE de
+// la bande des tuiles de biome, soit moins de 1 % des rangées). Le biome qu'on vient de
+// traverser laisse donc une trace, sans noyer celui où l'on est.
+// ⚠ Il est MÉMORISÉ par palier, comme le biome lui-même : le retirer à chaque frame le ferait
+// changer d'une dalle à l'autre, et ce ne serait plus un vestige mais un tirage de plus.
+// ⚠ Il ne vaut QUE pour le palier suivant : au palier d'après, c'est le vestige de CE
+// palier-là qui prend sa place. Rien ne s'accumule.
+const D_RELIC_SHARE = 0.15;
+function doodleBiomeRelic(s, tier) {
+  if (tier <= 0 || doodleClassic(s)) return null;
+  if (!s.relics) s.relics = [];
+  if (s.relics[tier] === undefined) {
+    const prev = D_BIOMES[doodleBiomeAt(s, tier - 1)].tiles;
+    s.relics[tier] = prev.length ? prev[Math.floor(Math.random() * prev.length)].k : null;
+  }
+  return s.relics[tier];
+}
+// Toutes les tuiles de biome DÉJÀ VUES dans la partie. ⚠ Ne sert PAS au tirage des rangées
+// (voir ci-dessus) : seulement aux systèmes qui rejouent un effet déjà rencontré, comme le
+// vivier de la 🌈 Peinture instable.
+function doodleBiomeSeen(s, tier) {
   const out = [];
   for (let k = 0; k <= tier; k++) {
     for (const t of D_BIOMES[doodleBiomeAt(s, k)].tiles) if (out.indexOf(t.k) < 0) out.push(t.k);
@@ -6700,7 +6728,7 @@ function doodlePaintChaosPick(s) {
   // ⚠ Les tuiles de BIOME déjà traversées comptent autant que les débloquées : plusieurs
   // effets du vivier (🫧 Bulle, 🦑 Tentacule…) ont quitté D_TILES pour un biome, et les lire
   // sur `s.tiles` seul aurait vidé l'Instable de la moitié de ses tours.
-  const seen = (s.tiles || []).concat(doodleBiomeTilesAt(s, doodleTier(s.score || 0)));
+  const seen = (s.tiles || []).concat(doodleBiomeSeen(s, doodleTier(s.score || 0)));
   const pool = seen.filter(k => D_PAINT_CHAOS.indexOf(k) >= 0);
   return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
 }
@@ -11059,12 +11087,13 @@ function doodleSpawnRow(s, ny, risky) {
   // rangée ni à une case (due), ni à une multicolore, ni à une tuile débloquée. « Peu courante »
   // = ~5 % des rangées, et jamais deux spéciales de suite comme partout ailleurs.
   else if ((type === 'green' || type === 'blue') && !D_SPECIAL.has(s.lastType) && Math.random() < D_BIOME_TILE_P * calm) {
-    // ⚠ 9.5.4 — TOUTES les tuiles de biome déjà traversées restent dans le tirage, pas seulement
-    // celle du biome courant : les biomes s'empilent au lieu de se remplacer. La bande de tirage
-    // ne change pas, elle se PARTAGE — sinon chaque palier ajouterait 6 % de tuiles spéciales et
-    // il ne resterait plus une seule plateforme ordinaire au bout de cinq biomes.
-    const pool = doodleBiomeTilesAt(s, doodleTier(s.score));
-    if (pool.length) type = pool[Math.floor(Math.random() * pool.length)];   // ⚠ le décor normal n'a pas de tuile : la rangée reste ordinaire
+    // ⚠ 10.8.9 — Le vivier est celui du biome COURANT, plus celui de tous les biomes traversés.
+    // Le palier précédent n'y laisse qu'UNE tuile, le vestige, et pour une part faible de la
+    // bande — le reste va aux tuiles du biome où l'on se trouve.
+    const tier = doodleTier(s.score);
+    const pool = doodleBiomeTilesAt(s, tier), relic = doodleBiomeRelic(s, tier);
+    if (relic && (!pool.length || Math.random() < D_RELIC_SHARE)) type = relic;
+    else if (pool.length) type = pool[Math.floor(Math.random() * pool.length)];   // ⚠ le décor normal n'a pas de tuile : la rangée reste ordinaire
   }
   const p = { x, y: ny, w, h: D_PLAT_H, type, dead: false };
   // 🃏 Casino : CHAQUE dalle tire son effet à la naissance, parmi les tuiles déjà débloquées —
@@ -11211,7 +11240,7 @@ function doodleRules() {
       { i:'☠️', n:'Case malchance', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}) et mêmes garde-fous, mais comptés séparément : ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
       { i:'💀', n:'Case cauchemardesque', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}), à partir de ${D_BOSS_FROM} points, UNE SEULE fois par partie.` },
       { i:'🔓', n:'Tuiles débloquées', d:`une nouvelle tous les ${D_TILE_STEP} points ; elles se partagent ensuite ${doodlePct(D_TILE_P)} des rangées.` },
-      { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_P)} des rangées, partagées entre TOUTES les tuiles de biome déjà traversées — elles ne disparaissent plus au palier suivant.` },
+      { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_P)} des rangées, partagées entre les tuiles du biome COURANT. Au changement de biome, une seule tuile du précédent est tirée au sort et reste jouable ici — le « vestige » — pour ${doodlePct(D_RELIC_SHARE)} de cette bande, soit ${doodlePct(D_BIOME_TILE_P * D_RELIC_SHARE)} des rangées. Rien d'autre ne s'accumule d'un palier à l'autre.` },
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
@@ -11240,7 +11269,7 @@ function doodleRules() {
       ...odds.map(l => ({ i:l.icon, n:l.label, d:`${l.txt} — ${pOf(l.k)} du contenu d'un coffre, ` + (l.max === 1 ? 'une seule fois par partie.' : l.max > 1 && l.max < 99 ? `cumulable jusqu'à ${l.max}.` : 'répétable.') })),
     ] },
     { t:`Tuiles débloquées (une par palier de ${D_TILE_STEP} points)`, c:'#2f7fbf', rows: D_TILES.map(t => ({ i:t.icon, n:t.name, d:t.txt })) },
-    { t:'Tuiles de biome (un biome tiré au hasard tous les 1000 points, les biomes se cumulent)', c:'#41b0d8', rows: D_BIOME_TILE_LIST.map(t => ({ i:t.icon, n:`${t.name} — ${t.biome.name}`, d:t.txt })) },
+    { t:'Tuiles de biome (un biome tiré au hasard tous les 1000 points ; seul un « vestige » du précédent reste)', c:'#41b0d8', rows: D_BIOME_TILE_LIST.map(t => ({ i:t.icon, n:`${t.name} — ${t.biome.name}`, d:t.txt })) },
     { t:`Teintes de la 🖌️ Peinture fraîche (chaque dalle affiche la sienne, et ne la donne qu'une fois)`, c:'#b06fd8', rows: D_PAINTS.map(pt => ({ i:pt.icon, n:pt.name, d:pt.txt + (pt.life ? ` — ${Math.round(pt.life / 60)} s.` : ' — jusqu\'à ce qu\'elle serve.') })) },
   ];
 }
@@ -11381,7 +11410,7 @@ function GameDoodle() {
       clones: [], confs: [], tshots: [], slays: [], drops: [], spirits: [], boss: null, bossHide: false, bossDone: false, bossFloorY: 0, bossShots: [], bossSpikes: [], bossBeam: null, bossLoot: 0, climb: 0, score: 0, fly: 0, flyType: null, inv: 0, booms: [], perks: doodlePerkBlank(), armorLeft: 0, nextPerk: D_PERK_STEP, nextTile: D_TILE_STEP, perkPending: false, toast: null, tiles: [], slip: 0, slipVx: 0, faceTimer: 0, prevFeet: H - 92 + D_FEET, t: 0, dir: 0, targetX: null, lastType: 'green', lastTileK: null, quests: [], questKills: 0, mobRate: 1, lastShot: -99, lastPlat: null, bounceStreak: 0,
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, big: 0, shTime: 0, shHit: 0, shFall: 0, shVoid: 0, shRam: 0 }, shTimeLeft: 0, lastMissile: -99, lastAuto: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, unluckyLeft: D_LUCKY_MAX, unluckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
-      biome: 0, biomes: [0], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
+      biome: 0, biomes: [0], relics: [], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
       vine: null, tride: null, zip: null, zipCool: 0, grab: null, beltVx: 0, beltLeft: 0, beltSoap: false, tmag: 0, tmagX: 0, tmagY: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, shroom: 0, hall: [], neg: 0, blind: false, notif: null, wat: 0, watX: 0, tw: 0, acc: null, rebLeft: 0, slotRoll: null, slotPending: false, banRoll: null, banned: [], nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, skin: null, bolts: [], trail: [], mode };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
@@ -13111,7 +13140,13 @@ function GameDoodle() {
       if (nb !== s.biome) {
         s.biome = nb; setBiomeIdx(nb);
         const b = D_BIOMES[nb];
-        s.banner = { txt: `${b.icon} ${b.name}`, sub: b.tiles.length ? b.tiles.map(t => `${t.icon} ${t.name}`).join(' · ') : 'décor de départ — ni créature ni tuile propre', life: D_BANNER_LIFE };
+        // ⚠ Le VESTIGE est annoncé avec les tuiles du biome : c'est une dalle qu'on va croiser
+        // ici et nulle part ailleurs, et rien d'autre à l'écran ne dit d'où elle sort.
+        const rk = doodleBiomeRelic(s, doodleTier(s.score)), rd = rk ? doodleBiomeTileDef(rk) : null;
+        const list = b.tiles.map(t => `${t.icon} ${t.name}`).join(' · ');
+        s.banner = { txt: `${b.icon} ${b.name}`,
+                     sub: (b.tiles.length ? list : 'décor de départ — ni créature ni tuile propre') + (rd ? `${b.tiles.length ? ' · ' : ''}vestige ${rd.icon} ${rd.name}` : ''),
+                     life: D_BANNER_LIFE };
       }
       if (s.toast && --s.toast.life <= 0) s.toast = null;
       if (s.banner && --s.banner.life <= 0) s.banner = null;
