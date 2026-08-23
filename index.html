@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.1.5';
+const APP_VERSION = '11.1.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -19947,7 +19947,20 @@ const VET_BRAND_ARTICLES = ['Haut', 'Pantalon', 'Jean', 'Short', 'Veste', 'Mante
 // Valeur sentinelle du <select> MARQUE d'une fiche : ouvre la saisie d'une nouvelle marque.
 // ⚠ Doit rester impossible à confondre avec un vrai nom de marque.
 const VET_BRAND_NEW = '__vet_new_brand__';
-const vetBlankBrand = () => ({ id: vetNewId(), name: '', articles: [] });
+// ── 8.9.11 · SOUS-SECTIONS DE « MES MARQUES » (demande utilisateur) ──
+// Une marque vit dans UNE section : les sous-catégories de vêtements (mêmes clés et mêmes
+// libellés que VET_GROUPS — un seul endroit à toucher pour en ajouter une) ou « Possédé »,
+// la section historique où atterrit tout ce qui n'a jamais été rangé.
+// ⚠ `groupe:''` = Possédé, la valeur des marques d'AVANT cette version : c'est le défaut,
+// il n'y a donc aucune migration à jouer. Ne jamais renommer une clé de VET_GROUPS, elle
+// est désormais persistée ici aussi.
+// ⚠ Possédé est rendu EN DERNIER (les sous-catégories au-dessus) : c'est le réservoir d'où
+// l'on tire les marques à ranger, pas la première chose à lire.
+// ⚠ La section n'a AUCUN effet sur les fiches : `brandOptions` propose toujours TOUTES les
+// marques dans le <select> d'un vêtement, rangées ou non, possédées ou non.
+const VET_BRAND_GROUPS = [...VET_GROUPS, ['', '📦 Possédé']];
+const vetBrandGroup = b => (VET_GROUP_KEYS.includes(b && b.groupe) ? b.groupe : '');
+const vetBlankBrand = g => ({ id: vetNewId(), name: '', articles: [], groupe: VET_GROUP_KEYS.includes(g) ? g : '' });
 const vetTypeLabel = t => (VET_TYPES.find(x => x[0] === t) || [,'Vêtement'])[1];
 const vetNewId = () => Date.now() + '' + Math.floor(Math.random() * 1000);
 const vetBlankItem = t => ({ id: vetNewId(), name: '', type: t, marque: '', couleur: '', tissu: '', taille: '', prix: '', photo: null, etat: 'Bon état', lieu: VET_LIEUX[0], destin: null });
@@ -19988,7 +20001,7 @@ function vetLoad() {
       const items = Array.isArray(d.items) ? d.items.slice() : [];
       const counts = d.counts || {};
       const brands = Array.isArray(d.brands)
-        ? d.brands.filter(b => b && typeof b === 'object').map(b => ({ id: b.id || vetNewId(), name: b.name || '', articles: Array.isArray(b.articles) ? b.articles : [] }))
+        ? d.brands.filter(b => b && typeof b === 'object').map(b => ({ id: b.id || vetNewId(), name: b.name || '', articles: Array.isArray(b.articles) ? b.articles : [], groupe: vetBrandGroup(b) }))
         : [];
       // Migration : un compteur d'inventaire sans autant de fiches → on complète avec des
       // fiches vides du type (les anciens inventaires deviennent des lignes du 2e collapse).
@@ -20328,6 +20341,13 @@ function VetementPanel() {
   const [data, setData]     = React.useState(() => vetLoad());
   const [confirmId, setConfirmId] = React.useState(null);   // fiche en attente de confirmation de suppression
   const [editBrandId, setEditBrandId] = React.useState(null); // marque dont le formulaire d'édition est déplié
+  // Glisser-déposer d'une marque entre les sections (8.9.11). `dragBrandRef` porte l'id
+  // pendant tout le geste : `dataTransfer.getData()` est INTERDIT hors du drop (spec HTML),
+  // or `onDragOver` en a besoin pour savoir s'il doit accepter. Le state, lui, ne sert qu'à
+  // l'affichage (ligne estompée + section surlignée).
+  const dragBrandRef = React.useRef(null);
+  const [dragBrand, setDragBrand] = React.useState(null);   // id de la marque en cours de glissé
+  const [dropGroup, setDropGroup] = React.useState(null);   // section survolée
   // Filtres de « Mes vêtements » (non persistés : on repart d'une garde-robe complète à
   // chaque ouverture — un filtre oublié donnerait l'impression d'avoir perdu des vêtements).
   const [flt, setFlt] = React.useState({ q:'', type:'', couleur:'', tissu:'', etat:'', lieu:'', destin:'', ids:null });
@@ -20374,16 +20394,29 @@ function VetementPanel() {
   // Les fiches sont la source de vérité ; le compteur d'inventaire en est le simple décompte.
   // ⚠ On conserve toujours `brands` (les marques ne dépendent pas des fiches d'inventaire).
   const saveItems = items => save({ ...data, counts: vetCounts(items), items });
-  // ── Marques aimées (nom + types d'articles) ──
+  // ── Marques aimées (nom + types d'articles + section 8.9.11) ──
   const saveBrands = brands => save({ ...data, brands });
-  // Ajouter une marque : crée la fiche ET ouvre directement son formulaire d'édition (ligne dépliée).
-  const addBrand = () => { const nb = vetBlankBrand(); saveBrands([...(data.brands || []), nb]); setEditBrandId(nb.id); };
+  // Ajouter une marque DANS une section : crée la fiche ET ouvre directement son formulaire
+  // d'édition (ligne dépliée). ⚠ Aucun vêtement n'est requis — une marque qu'on aime sans
+  // rien en posséder est exactement ce que les sous-sections servent à noter.
+  const addBrand = g => { const nb = vetBlankBrand(g); saveBrands([...(data.brands || []), nb]); setEditBrandId(nb.id); };
   const updBrand = (id, patch) => saveBrands((data.brands || []).map(b => b.id === id ? { ...b, ...patch } : b));
   const delBrand = id => { setEditBrandId(e => e === id ? null : e); saveBrands((data.brands || []).filter(b => b.id !== id)); };
   const toggleBrandArticle = (id, art) => {
     const b = (data.brands || []).find(x => x.id === id); if (!b) return;
     const has = b.articles.includes(art);
     updBrand(id, { articles: has ? b.articles.filter(a => a !== art) : [...b.articles, art] });
+  };
+  // Ranger une marque dans une section (glisser-déposer OU puce du formulaire).
+  // ⚠ Le formulaire d'édition se referme : la marque part dans un AUTRE collapse, souvent
+  // replié — laisser un formulaire ouvert dans un sous-arbre démonté donnerait l'impression
+  // que le clic n'a rien fait (le compteur du titre de la section, lui, bouge tout de suite).
+  const moveBrand = (id, g) => {
+    if (!id) return;
+    const b = (data.brands || []).find(x => x.id === id);
+    if (!b || vetBrandGroup(b) === g) return;
+    setEditBrandId(e => e === id ? null : e);
+    updBrand(id, { groupe: VET_GROUP_KEYS.includes(g) ? g : '' });
   };
   // +1 dans l'inventaire → crée une fiche (une ligne dans le 2e collapse) ; −1 → retire la
   // fiche la plus récente de ce type.
@@ -20427,6 +20460,64 @@ function VetementPanel() {
     const brands = known ? (data.brands || []) : [...(data.brands || []), { ...vetBlankBrand(), name }];
     save({ ...data, brands, counts: vetCounts(data.items),
            items: data.items.map(x => x.id === it.id ? { ...x, marque: name } : x) });
+  };
+  // ── Une marque = une LIGNE FINE (nom + types + boutons, façon TV Time) ; le formulaire
+  // d'édition (nom + section + puces d'articles) ne s'ouvre qu'au clic sur ✏️. Extrait en
+  // helper (8.9.11) parce qu'il est rendu par CHACUNE des sous-sections.
+  const brandRow = b => {
+    const arts = b.articles || [];
+    const chipS = on => ({ background: on ? `${VETEMENT_COLOR}22` : 'none', border:`1px solid ${on ? VETEMENT_COLOR : C.border}`,
+      color: on ? VETEMENT_COLOR : C.muted, borderRadius:999, padding:'4px 10px', fontSize:11,
+      fontWeight: on ? 700 : 500, cursor:'pointer', fontFamily:'inherit' });
+    const capS = { fontSize:9.5, color:C.dim, fontWeight:800, letterSpacing:'0.06em' };
+    if (editBrandId !== b.id) {
+      // Ligne fine repliée. ⚠ Seule ELLE est `draggable` : posé sur le formulaire, l'attribut
+      // volerait la sélection de texte du champ « nom » (le navigateur démarre un glissé au
+      // lieu de sélectionner).
+      return (
+        <div key={b.id} draggable
+          onDragStart={e => { dragBrandRef.current = b.id; setDragBrand(b.id); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', b.id); } catch {} }}
+          onDragEnd={() => { dragBrandRef.current = null; setDragBrand(null); setDropGroup(null); }}
+          style={{ display:'flex', alignItems:'center', gap:8, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8,
+                   padding:'8px 10px', opacity: dragBrand === b.id ? 0.45 : 1, cursor:'grab' }}>
+          <span title="Glisser vers une autre section" style={{ flexShrink:0, fontSize:13, color:C.dim, lineHeight:1 }}>⠿</span>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{b.name || 'Sans nom'}</div>
+            <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{arts.length ? arts.join(' · ') : 'aucun type'}</div>
+          </div>
+          <button onClick={() => setEditBrandId(b.id)} title="Éditer cette marque"
+            style={{ flexShrink:0, background:'none', border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:6, padding:'6px 10px', fontSize:12, color:VETEMENT_COLOR, cursor:'pointer' }}>✏️</button>
+          <button onClick={() => delBrand(b.id)} title="Supprimer cette marque"
+            style={{ flexShrink:0, background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'6px 10px', fontSize:12, color:'#e05050', cursor:'pointer' }}>✕</button>
+        </div>
+      );
+    }
+    // Formulaire d'édition déplié
+    return (
+      <div key={b.id} style={{ background:C.surface, border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <input type="text" value={b.name} placeholder="Nom de la marque (ex. Nike)" autoFocus onChange={e => updBrand(b.id, { name: e.target.value })}
+            style={{ flex:1, minWidth:0, ...selStyle }} />
+          <button onClick={() => setEditBrandId(null)} title="Terminer l'édition"
+            style={{ flexShrink:0, background:`${VETEMENT_COLOR}22`, border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:6, padding:'6px 10px', fontSize:12, color:VETEMENT_COLOR, fontWeight:700, cursor:'pointer' }}>✓ OK</button>
+          <button onClick={() => delBrand(b.id)} title="Supprimer cette marque"
+            style={{ flexShrink:0, background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'6px 10px', fontSize:12, color:'#e05050', cursor:'pointer' }}>✕</button>
+        </div>
+        {/* SECTION — l'équivalent tactile du glisser-déposer (choix unique). */}
+        <div style={{ display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+          <span style={capS}>SECTION</span>
+          {VET_BRAND_GROUPS.map(([g, gl]) => (
+            <button key={g} onClick={() => moveBrand(b.id, g)} style={chipS(vetBrandGroup(b) === g)}>{gl}</button>
+          ))}
+        </div>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+          <span style={capS}>ARTICLES</span>
+          {VET_BRAND_ARTICLES.map(art => (
+            <button key={art} onClick={() => toggleBrandArticle(b.id, art)} style={chipS(arts.includes(art))}>{art}</button>
+          ))}
+        </div>
+      </div>
+    );
   };
   const delItem = id => {
     setConfirmId(null);
@@ -20916,56 +21007,32 @@ function VetementPanel() {
         })}
       </StatsCollapse>
 
-      {/* 3. Mes marques — liste des marques aimées + les types d'articles concernés */}
+      {/* 3. Mes marques — une sous-section par catégorie de vêtement, puis « 📦 Possédé » (8.9.11) */}
       <StatsCollapse title={`❤️ MES MARQUES${(data.brands && data.brands.length) ? ' · ' + data.brands.length : ''}`} color={VETEMENT_COLOR} defaultOpen={false}>
-        <div style={{ fontSize:11, color:C.dim, marginBottom:8 }}>Les marques que tu aimes bien, et sur quels types d'articles (haut, pantalon, short, bob, sac…).</div>
-        {(!data.brands || !data.brands.length) && <div style={{ fontSize:11, color:C.dim, marginBottom:8 }}>Aucune marque pour l'instant.</div>}
-        {/* Chaque marque = une LIGNE FINE (nom + types + boutons, façon TV Time) ; le formulaire
-            d'édition (nom + chips d'articles) ne s'ouvre qu'au clic sur ✏️. */}
-        <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-          {sortedBrands.map(b => {
-            const arts = b.articles || [];
-            if (editBrandId !== b.id) {
-              // Ligne fine repliée
-              return (
-                <div key={b.id} style={{ display:'flex', alignItems:'center', gap:8, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:'8px 10px' }}>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:12, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{b.name || 'Sans nom'}</div>
-                    <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{arts.length ? arts.join(' · ') : 'aucun type'}</div>
-                  </div>
-                  <button onClick={() => setEditBrandId(b.id)} title="Éditer cette marque"
-                    style={{ flexShrink:0, background:'none', border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:6, padding:'6px 10px', fontSize:12, color:VETEMENT_COLOR, cursor:'pointer' }}>✏️</button>
-                  <button onClick={() => delBrand(b.id)} title="Supprimer cette marque"
-                    style={{ flexShrink:0, background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'6px 10px', fontSize:12, color:'#e05050', cursor:'pointer' }}>✕</button>
-                </div>
-              );
-            }
-            // Formulaire d'édition déplié
-            return (
-              <div key={b.id} style={{ background:C.surface, border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
-                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                  <input type="text" value={b.name} placeholder="Nom de la marque (ex. Nike)" autoFocus onChange={e => updBrand(b.id, { name: e.target.value })}
-                    style={{ flex:1, minWidth:0, ...selStyle }} />
-                  <button onClick={() => setEditBrandId(null)} title="Terminer l'édition"
-                    style={{ flexShrink:0, background:`${VETEMENT_COLOR}22`, border:`1px solid ${VETEMENT_COLOR}66`, borderRadius:6, padding:'6px 10px', fontSize:12, color:VETEMENT_COLOR, fontWeight:700, cursor:'pointer' }}>✓ OK</button>
-                  <button onClick={() => delBrand(b.id)} title="Supprimer cette marque"
-                    style={{ flexShrink:0, background:'none', border:'1px solid #e0505055', borderRadius:6, padding:'6px 10px', fontSize:12, color:'#e05050', cursor:'pointer' }}>✕</button>
-                </div>
-                <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
-                  {VET_BRAND_ARTICLES.map(art => {
-                    const on = arts.includes(art);
-                    return (
-                      <button key={art} onClick={() => toggleBrandArticle(b.id, art)}
-                        style={{ background: on ? `${VETEMENT_COLOR}22` : 'none', border:`1px solid ${on ? VETEMENT_COLOR : C.border}`, color: on ? VETEMENT_COLOR : C.muted,
-                          borderRadius:999, padding:'4px 10px', fontSize:11, fontWeight: on ? 700 : 500, cursor:'pointer', fontFamily:'inherit' }}>{art}</button>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <button onClick={addBrand} style={{ marginTop:10, background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:8, padding:'8px 12px', fontSize:12, fontWeight:700, cursor:'pointer' }}>+ Ajouter une marque</button>
+        <div style={{ fontSize:11, color:C.dim }}>Les marques que tu aimes bien, rangées par catégorie, et sur quels types d'articles. Une marque peut vivre ici sans qu'aucun vêtement ne lui soit associé : toutes restent proposées dans la fiche d'un vêtement.</div>
+        <div style={{ fontSize:10, color:C.muted }}>Glisse une ligne d'une section à l'autre (ordinateur), ou ouvre-la avec ✏️ et choisis sa section (tactile).</div>
+        {VET_BRAND_GROUPS.map(([g, gLbl]) => {
+          const list = sortedBrands.filter(b => vetBrandGroup(b) === g);
+          const over = dropGroup === g;
+          return (
+            // ⚠ La zone de dépôt EMBALLE le collapse : son en-tête reste rendu même replié,
+            // on peut donc ranger une marque dans une section fermée — sinon il faudrait
+            // l'ouvrir d'abord, et la section de départ se refermerait sous le doigt.
+            // ⚠ `outline` et non `border` : une bordure ajouterait 2 px au survol et ferait
+            // sauter toute la liste à chaque passage du curseur.
+            <div key={g}
+              onDragOver={e => { if (!dragBrandRef.current) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dropGroup !== g) setDropGroup(g); }}
+              onDragLeave={() => setDropGroup(d => (d === g ? null : d))}
+              onDrop={e => { e.preventDefault(); const id = dragBrandRef.current; dragBrandRef.current = null; setDragBrand(null); setDropGroup(null); moveBrand(id, g); }}
+              style={{ borderRadius:11, outline: over ? `2px dashed ${VETEMENT_COLOR}` : '2px dashed transparent', outlineOffset:1 }}>
+              <StatsCollapse title={`${gLbl}${list.length ? ' · ' + list.length : ''}`} color={VETEMENT_COLOR} defaultOpen={false}>
+                {!list.length && <div style={{ fontSize:11, color:C.dim }}>{g ? 'Aucune marque ici — glisses-en une depuis « 📦 Possédé », ou ajoute-la directement.' : "Aucune marque pour l'instant."}</div>}
+                {list.map(brandRow)}
+                <button onClick={() => addBrand(g)} style={{ background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:8, padding:'8px 12px', fontSize:12, fontWeight:700, cursor:'pointer' }}>+ Ajouter une marque</button>
+              </StatsCollapse>
+            </div>
+          );
+        })}
       </StatsCollapse>
     </div>
   );
