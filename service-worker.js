@@ -125,7 +125,7 @@
 // s'applique plus que dans le module Musique.
 // v255 : bump de cache — Vêtement : flèches ‹ › dans la visionneuse photo (changer de
 // vêtement dans la même catégorie, avec retour au début aux extrémités).
-const CACHE  = 'spotifyplus-v302';
+const CACHE  = 'spotifyplus-v303';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
