@@ -214,7 +214,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 | **Sport** | `SportPanel`, `#c3d93f` | `spotifyplus_sport` | 9 groupes musculaires × 70 exercices illustrés (images Wikimedia Commons), appui long → fiche animée |
 | **To do** | `TodoPanel`, vert | `spotifyplus_todos`, `_todos_done` | 7 rubriques en carrousel. Dans `daily` et `cecile` le × **valide** au lieu de supprimer ; appui long 3 s dans `daily` = supprimer la récurrence |
 | **TV Time** | `TvTimePanel`, ambre | `spotifyplus_tvtime`, `_tvtime_eps` | Séries/films (TMDB), chaînes YouTube, livres (Google Books + Open Library). Source de vérité = `tvWatchedSet`. Lecteur plein écran `YtFullscreenPlayer`. Synchro quotidienne `tvSyncDaily` reprenable |
-| **Vêtement** | `VetementPanel`, `#f59a2e` | `spotifyplus_vetements` | 35 types en sous-catégories, fiches + marques. **Photos sur Google Drive**, jamais en local. Barre de filtres + recherche par image (IA) |
+| **Vêtement** | `VetementPanel`, `#f59a2e` | `spotifyplus_vetements`, `_vetement_prix`, `_vetement_img` | 35 types en sous-catégories, fiches + marques. **Photos sur Google Drive**, jamais en local. Barre de filtres + recherche par image (IA). Deux réglages d'AFFICHAGE persistés au titre du module : 💶 masque les prix, 🖼️ remplace les fiches par une grille de photos sous le collapse de sous-catégorie (`'on'` = images, absent = liste) |
 | **Stats** | `StatsPanel` | (lecture seule) | Collapses imbriqués, **titres en ordre alphabétique** : Alertes · API · Collection · Films · GitHub · Jeux · Maps · Musiques · Santé · To do |
 | **À propos** | `VosEcoutesPanel` | — | Paramétrage · Lancement automatique · Exporter · Sauvegardes cloud · Restaurer · Réinit quota · Purger · Déconnecter |
 
