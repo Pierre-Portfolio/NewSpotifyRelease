@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.9';
+const APP_VERSION = '11.5.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29311,7 +29311,10 @@ const YTSUB_MAX_CHANNELS = 250;                          // garde-fou quota
 const YTSUB_PER_CHANNEL  = 5;                            // vidéos récentes par chaîne
 const YTSUB_PAGE         = 12;                           // pas du lazyload infini
 const YTSUB_MAX_SHOW     = 100;                           // jusqu'à 100 vidéos longues ET 100 Shorts (par type)
-const YTSUB_CACHE_V      = 3;                            // v3 = 100 vidéos + 100 Shorts (cap par type). v2 = 100 au total
+const YTSUB_CACHE_V      = 4;                            // v4 = `channelId` sur chaque vidéo. v3 = 100 vidéos + 100 Shorts (cap par type)
+// ⚠ 11.5.0 (demande utilisateur) — une vidéo lue depuis Actu compte VUE à la MOITIÉ, pas
+// seulement au bout : « si j'ai vu 50% de la video depuis actu => met la dans le hub tv time ».
+const ACTU_SEEN_RATIO    = 0.5;
 
 let _ytSubsCache;
 function loadYtSubs() {
@@ -29635,7 +29638,10 @@ async function ytSubsFetchVideos(force) {
         const th = sn.thumbnails || {};
         const date = (e.contentDetails && e.contentDetails.videoPublishedAt) || sn.publishedAt || '';
         if (!date) continue;                 // vidéo privée/programmée non publiée
-        vids.push({ id: vid, title: sn.title || '(sans titre)', channel: ch.title, date,
+        // ⚠ `channelId` : c'est l'id (UC…) que porte AUSSI l'item TV Time d'une chaîne
+        // suivie — sans lui, impossible de savoir chez qui classer une vidéo qui n'est pas
+        // encore dans la liste de cette chaîne (cf. `ytSeenMarkAnywhere`).
+        vids.push({ id: vid, title: sn.title || '(sans titre)', channel: ch.title, channelId: ch.id, date,
           thumb: (th.medium || th.default || {}).url || null });
       }
     }
@@ -29684,10 +29690,34 @@ function ytSubIsShort(v) { return !!v.durSec && v.durSec < YT_MIN_MINUTES * 60; 
 //     la dernière (seuil `ytCountedTotal`, donc hors vidéos 🙈 mises de côté) ;
 //   · suivie nulle part → pseudo-chaîne « Hub Pierre », classée à l'année de VISIONNAGE.
 // Idempotent : renvoie false si la vidéo était déjà cochée.
+// Une chaîne/playlist TV Time accepte-t-elle ce format de vidéo ? Même règle que le filtre
+// de `ytBuildItem` : `shortsOnly` = uniquement < 3 min · `keepShorts` = tout · défaut = ≥ 3 min.
+// ⚠ Durée en MINUTES arrondies, et une durée INCONNUE (0) compte comme un Short — c'est la
+// convention de tout le module (`ytIsShortEntry`, `ytShortsQueue`).
+function ytItemAcceptsVideo(item, v) {
+  const short = ((v && v.dur) || 0) < YT_MIN_MINUTES;
+  if (item && item.shortsOnly) return short;
+  if (item && item.keepShorts) return true;
+  return !short;
+}
 function ytSeenMarkAnywhere(v) {
   if (!v || !v.id) return false;
   const items = loadTvItems();
-  const owner = items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id));
+  const found = items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id));
+  // ⚠ 11.5.0 — À DÉFAUT, LA CHAÎNE DU VIDÉASTE SI ELLE EST SUIVIE (demande utilisateur :
+  // « OU SUR LE YOUTUBEUR si je suis sa chaîne »). Les vidéos listées par Actu sont les
+  // toutes DERNIÈRES sorties des abonnements : la chaîne suivie dans TV Time ne les a
+  // souvent pas encore (son refresh a un TTL de 6 h), donc la recherche par vidéo échouait
+  // et le visionnage partait dans « Hub Pierre » alors que la chaîne est bien suivie.
+  // Cocher un id absent de `videos` est SANS DANGER : `ytOrphanSeen` le compte déjà dans le
+  // dénominateur, et le prochain refresh fait apparaître la vidéo, déjà cochée.
+  // ⚠ …À CONDITION que la chaîne accepte ce format : cocher un Short chez une chaîne qui
+  // ne suit QUE les vidéos longues (ou l'inverse) y laisserait un « orphelin » définitif,
+  // compté au numérateur ET au dénominateur, que jamais aucun refresh ne viendrait ranger.
+  const owner = found || (v.channelId
+    ? items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && it.id === v.channelId
+        && !it.dropped && ytItemAcceptsVideo(it, v))
+    : null);
   if (owner) {
     if ((owner.watchedIds || []).includes(v.id)) return false;
     saveTvItems(items.map(it => {
@@ -29815,9 +29845,9 @@ function ActuYoutubeSection() {
     setWlBusy(null);
   };
 
-  // Vidéo arrivée au bout → elle est VUE : classée dans TV Time (sa chaîne si elle y est
-  // suivie, sinon la pseudo-chaîne « Hub Pierre ») et retirée de la playlist « Hub Pierre »
-  // si elle y attendait. Idempotent grâce à `seenRef`.
+  // Vidéo comptée VUE (à `ACTU_SEEN_RATIO` de sa durée, ou à la fin) : classée dans TV Time
+  // — chez le vidéaste si sa chaîne y est suivie, sinon dans la pseudo-chaîne « Hub Pierre »
+  // — et retirée de la playlist « Hub Pierre » si elle y attendait. Idempotent (`seenRef`).
   const markSeen = React.useCallback(v => {
     if (!v || !v.id || seenRef.current.has(v.id)) return;
     seenRef.current.add(v.id);
@@ -29961,7 +29991,7 @@ function ActuYoutubeSection() {
             ? <a href={'https://www.youtube.com/playlist?list=' + encodeURIComponent(localStorage.getItem(YTSUB_WL_ID_LS))} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a>
             : <span>« {YTSUB_WL_NAME} »</span>}
           {' '}de TON compte YouTube (créée privée au 1er ajout — l'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native).
-          {' '}Une vidéo lue ici <b>jusqu'au bout</b> est comptée <b>vue</b> dans TV Time (dans sa chaîne si tu la suis, sinon dans « {YT_UNSAVED_TITLE} ») et quitte la playlist d'attente.
+          {' '}Une vidéo lue ici <b>à moitié</b> ({Math.round(ACTU_SEEN_RATIO * 100)} %) est comptée <b>vue</b> dans TV Time (chez le vidéaste si tu suis sa chaîne, sinon dans « {YT_UNSAVED_TITLE} ») et quitte la playlist d'attente.
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:8 }}>
           <span style={{ fontSize:9, color:C.dim }}>{data && data.fetched_at ? `Mis à jour ${actuAgo(new Date(data.fetched_at).toISOString())}` : ''}</span>
@@ -29981,6 +30011,7 @@ function ActuYoutubeSection() {
       onIndex={i => setPlayer(p => (p ? { ...p, i } : p))}
       onClose={() => setPlayer(null)}
       onEnded={markSeen}
+      onProgress={(v, t, d) => { if (d > 0 && t / d >= ACTU_SEEN_RATIO) markSeen(v); }}
       autoNext={ytTab === 'short'} />}
   </>);
 }
