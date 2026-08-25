@@ -81,7 +81,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 | Compte Spotify | Bouton vert de connexion | Musique |
 | Clé TMDB | TV Time (⚙) ou module API | Séries et films |
 | Clé YouTube | TV Time (⚙) ou module API | Chaînes YouTube |
-| Clé Gemini (et éventuellement Groq, OpenRouter, Mistral…) | Module API | Tous les assistants IA (Frigo, Santé, Collection, Histoire, Revente, Bon Plan) |
+| Clé Gemini (et éventuellement Groq, OpenRouter, Mistral…) | Module API | Tous les assistants IA (Frigo, Santé, Collection, Histoire, Revente, Bon Plan, Actu, TV Time, Vêtement) |
 | SteamID64 (+ clé Web API) | Bon Plan ou module API | Liste de souhaits, bibliothèque, statistiques |
 | Client ID pCloud | Carte pCloud d'À propos | Sauvegarde pCloud |
 
@@ -90,6 +90,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 - **Spotify ne répond pas ?** Ta session est conservée : un bouton **« 📴 Continuer hors ligne »** te fait entrer dans le hub avec ton profil mémorisé. Tout ce qui est local fonctionne normalement.
 - **Google Drive** se connecte par **fenêtre pop-up** (pense à les autoriser). ⚠️ Depuis l'**app installée**, Google refuse de renvoyer le jeton : connecte-toi **une fois depuis un onglet Chrome normal**, la connexion est ensuite partagée avec l'app.
 - **YouTube se connecte séparément de Drive** (Google interdit de demander les deux ensemble) : bouton dédié dans Actu → Vidéos YouTube.
+- **Choisir quelle IA sert quel module** : À propos → ⚙️ *Paramétrage* → bouton **🤖** de la ligne du module (grisé si le module ne se sert pas de l'IA). Les IA cochées sont essayées **de haut en bas** jusqu'à ce que l'une réponde : décocher ne retire aucune fonction, ça raccourcit la liste de secours. Réglage inclus dans l'export/import.
 
 ---
 
