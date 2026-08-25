@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.5.0';
+const APP_VERSION = '11.5.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -36617,6 +36617,12 @@ const YT_END_NEXT_MS    = 5000; // inactivité après la FIN d'une vidéo avant 
 const YT_JSAPI_HELLO_MS = 600;  // cadence du handshake `listening` (le player n'est pas prêt tout de suite)
 const YT_JSAPI_HELLO_N  = 15;   // nb de handshakes (~9 s) avant d'abandonner
 const YT_COUNT_ON       = '#e05050'; // bord du compteur SÉLECTIONNÉ dans la barre du lecteur
+// ↕ 11.5.1 — PARTAGE VIDÉO / RÉSUMÉ RÉGLABLE (demande utilisateur) : la valeur est le
+// pourcentage de la hauteur laissé à la VIDÉO, le reste va à la feuille « Résumé IA ». Elle
+// vit MODULE-LEVEL pour survivre au changement de vidéo comme à la fermeture du lecteur
+// (aucune clé de stockage : c'est un réglage de confort, pas une donnée à sauvegarder).
+const YT_SPLIT_MIN = 15, YT_SPLIT_MAX = 85, YT_SPLIT_DEF = 60;
+let _ytSumSplit = YT_SPLIT_DEF;
 // Une entrée de file est un Short si sa durée est sous YT_MIN_MINUTES. ⚠ `dur` est en
 // MINUTES ARRONDIES dans TV Time et une durée INCONNUE vaut 0 : elle compte donc comme un
 // Short — même convention que ytShortsQueue et le tag `shortsOnly` d'ytBuildItem.
@@ -36634,6 +36640,11 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // (cf. YtSummarySheet : une pop-up portalée sur `document.body` est invisible en plein
   // écran natif, c'est ce qui faisait « il ne se passe rien »).
   const [showSum, setShowSum] = React.useState(false);
+  // ↕ 11.5.1 — Le lecteur POSSÈDE le partage, même si la barre est rendue par la feuille :
+  // c'est l'iframe qu'il faut rétrécir en face, sinon la feuille se contenterait de
+  // RECOUVRIR le bas de la vidéo (les contrôles YouTube compris) au lieu de la partager.
+  const [sumSplit, setSumSplit] = React.useState(_ytSumSplit);
+  const applySplit = p => { _ytSumSplit = Math.min(YT_SPLIT_MAX, Math.max(YT_SPLIT_MIN, p)); setSumSplit(_ytSumSplit); };
   // Compteur de la barre : 'queue' = position dans TOUTE la file (26/27, mode par défaut,
   // bord rouge) · 'short' = position parmi les SHORTS encore à regarder. Cliquer la
   // pastille non sélectionnée bascule de mode (demande utilisateur).
@@ -36978,7 +36989,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       <iframe key={v.id} ref={frameRef}
         src={`${YT_EMBED_ORIGIN}/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}`}
         title={v.title || 'Vidéo YouTube'} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowFullScreen
-        style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
+        style={{ position:'absolute', inset:0, width:'100%', height: showSum ? `${sumSplit}%` : '100%', border:'none' }} />
       {/* Couche de capture du SWIPE (7.7.2, sens inversé en 7.7.8), posée SUR l'iframe mais SOUS la barre d'actions
           (ordre du DOM) → les boutons du haut restent cliquables. `touchAction:'none'` évite
           que le navigateur interprète le geste (retour arrière, pull-to-refresh). */}
@@ -37103,7 +37114,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
           couche de capture du swipe n'est PAS rendue (sinon lire les commentaires ferait
           défiler la file) et l'auto-avance est suspendue. */}
       {showComments && <YtCommentsPanel video={v} onClose={() => setShowComments(false)} />}
-      {showSum && <YtSummarySheet video={v} mod="tvtime" onClose={() => setShowSum(false)} />}
+      {showSum && <YtSummarySheet video={v} mod="tvtime" split={sumSplit} onSplit={applySplit} onClose={() => setShowSum(false)} />}
     </div>
   );
 }
@@ -37119,9 +37130,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
 // Disposition demandée : 40 % du bas de l'écran · le prompt envoyé à l'IA en bulle « MOI » ·
 // une bulle « IA » en attente puis remplacée par la réponse · une barre en bas pour
 // continuer à poser des questions (comme la dernière section du module Histoire).
-// ⤢ agrandit à 75 % — 40 % reste le défaut (11.4.4, demande utilisateur : la feuille
-// doit prendre 40 % de la hauteur de l'écran dès qu'elle est active).
-function YtSummarySheet({ video, mod, onClose }) {
+// ↕ 11.5.1 — La séparation vidéo / résumé est DÉPLAÇABLE (barre en haut de la feuille,
+// souris ou doigt) : la vidéo est rétrécie d'autant, elle n'est plus recouverte. 40 % reste
+// le défaut et le ⤢ n'est qu'un raccourci vers les deux positions usuelles (40 % / 75 %).
+function YtSummarySheet({ video, mod, split, onSplit, onClose }) {
   const vid = video ? video.id : null;
   const title = (video && video.title) || '';
   const [st, setSt]   = React.useState({ state:'loading', txt:'', cached:false, err:'' });
@@ -37129,8 +37141,10 @@ function YtSummarySheet({ video, mod, onClose }) {
   const [q, setQ]     = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState('');
-  const [big, setBig] = React.useState(false);
   const endRef = React.useRef(null);
+  // ↕ 11.5.1 — Glissé de la barre de séparation. `drag` sert AUSSI de repère visuel (la
+  // poignée s'éclaire) ; le partage lui-même appartient au lecteur (prop `onSplit`).
+  const [drag, setDrag] = React.useState(false);
   const hasKey = aiAnyKey(false, mod || 'tvtime');
   const run = React.useCallback(async (force) => {
     setSt({ state:'loading', txt:'', cached:false, err:'' });
@@ -37152,6 +37166,13 @@ function YtSummarySheet({ video, mod, onClose }) {
     } catch (e) { setErr(ytSumErrMsg(e)); setQ(question); }
     setBusy(false);
   };
+  // ⚠ Le lecteur est en `position:fixed; inset:0` ⇒ `clientY / innerHeight` EST déjà le
+  // pourcentage cherché (aucun `getBoundingClientRect`). `setPointerCapture` garde le geste
+  // quand la souris ou le doigt sort de la barre — sans lui le glissé s'arrête dès ses 16 px
+  // de haut, l'iframe cross-origin avalant tout le reste des événements (piège n° 13).
+  const dragDown = e => { setDrag(true); try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} };
+  const dragMove = e => { if (!drag) return; onSplit(e.clientY / (window.innerHeight || 1) * 100); };
+  const dragUp   = e => { if (!drag) return; setDrag(false); try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {} };
   const hbtn = { background:'none', border:'1px solid #ffffff33', borderRadius:16, color:'#fff',
     fontSize:11, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace', flexShrink:0 };
   // Bulle : `me` = à droite, gris ; IA = à gauche, teintée.
@@ -37165,14 +37186,29 @@ function YtSummarySheet({ video, mod, onClose }) {
     </div>
   );
   return (
-    <div style={{ position:'absolute', left:0, right:0, bottom:0, top: big ? '25%' : '60%',
+    <div style={{ position:'absolute', left:0, right:0, bottom:0, top: `${split}%`,
       background:'rgba(8,8,10,0.97)', borderTop:'2px solid #8b6ee8', display:'flex', flexDirection:'column', overflow:'hidden' }}>
+      {/* ↕ 11.5.1 — BARRE DE SÉPARATION DÉPLAÇABLE (demande utilisateur) : glisser vers le
+          haut donne la place au résumé, vers le bas à la vidéo (double-clic = 60 %, le
+          réglage par défaut). `touchAction:'none'` est obligatoire, sinon le navigateur voit
+          le glissé comme un défilement (ou un pull-to-refresh) et le geste n'arrive jamais. */}
+      <div onPointerDown={dragDown} onPointerMove={dragMove} onPointerUp={dragUp} onPointerCancel={dragUp}
+        onDoubleClick={() => onSplit(YT_SPLIT_DEF)}
+        title="Glisse pour partager la hauteur entre la vidéo et le résumé (double-clic : 60 %)"
+        aria-label="Redimensionner le résumé"
+        style={{ height:16, flexShrink:0, cursor:'row-resize', touchAction:'none', userSelect:'none',
+          WebkitUserSelect:'none', display:'flex', alignItems:'center', justifyContent:'center',
+          background: drag ? '#8b6ee833' : '#8b6ee81a' }}>
+        <div style={{ width:48, height:4, borderRadius:2, background: drag ? '#d7c9ff' : '#8b6ee8aa' }} />
+      </div>
       <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 12px', borderBottom:'1px solid #ffffff1a', flexShrink:0 }}>
         <GeminiIcon size={14} />
         <div style={{ flex:1, minWidth:0, fontSize:11.5, fontWeight:700, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
           Résumé IA{st.state === 'ok' && aiLastProvider() ? ` · ${aiLabel(aiLastProvider())}` : ''}
         </div>
-        <button onClick={() => setBig(b => !b)} title={big ? 'Réduire la feuille' : 'Agrandir la feuille'} style={hbtn}>{big ? '⤡' : '⤢'}</button>
+        <button onClick={() => onSplit(split > 40 ? 25 : YT_SPLIT_DEF)}
+          title={split > 40 ? 'Agrandir le résumé (ou glisse la barre ↕)' : 'Réduire le résumé (ou glisse la barre ↕)'}
+          style={hbtn}>{split > 40 ? '⤢' : '⤡'}</button>
         {st.state === 'ok' && <button onClick={() => run(true)} title="Refaire le résumé (ignore celui gardé en mémoire)" style={hbtn}>↻</button>}
         <button onClick={onClose} title="Fermer" aria-label="Fermer le résumé"
           style={{ ...hbtn, border:'1px solid #e0505088', color:'#e05050' }}>✕</button>
