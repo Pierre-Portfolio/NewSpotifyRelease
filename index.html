@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.6';
+const APP_VERSION = '11.4.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -34875,6 +34875,38 @@ function ytUnsavedReconcile(items) {
   return out;
 }
 
+// ── ✅ UNE CHAÎNE AJOUTÉE HÉRITE DE TOUT CE QUI EST DÉJÀ VU (11.4.7, demande utilisateur) ─
+// `ytUnsavedReconcile` ne récupère QUE les visionnages de la pseudo-chaîne « Hub Pierre ».
+// Or la même vidéo peut déjà être cochée AILLEURS : dans une playlist suivie, dans une autre
+// chaîne, dans un best-of… En ajoutant enfin la chaîne du vidéaste, elle y repartait « à
+// voir » alors qu'elle est vue. On coche donc dans le nouvel item toute vidéo déjà cochée
+// dans un autre item YouTube, et la chaîne bascule dans les VUS si tout l'est (même règle
+// qu'`ytSeenMarkAnywhere`, donc `ytCountedTotal` — les vidéos 🙈 mises de côté ne comptent pas).
+// ⚠ À n'appeler QUE sur un item qu'on vient d'ajouter : sur un item déjà suivi, ce serait
+// cocher dans son dos des vidéos que l'utilisateur a pu décocher exprès.
+// Renvoie `items` inchangé PAR IDENTITÉ quand il n'y a rien à reprendre.
+function ytInheritWatched(items, newId) {
+  const target = items.find(it => it.type === 'youtube' && it.id === newId);
+  if (!target || !(target.videos || []).length) return items;
+  const seen = new Set();
+  for (const it of items) {
+    if (it.type !== 'youtube' || it.id === newId) continue;
+    for (const id of (it.watchedIds || [])) seen.add(id);
+  }
+  if (!seen.size) return items;
+  const already = new Set(target.watchedIds || []);
+  const gained = (target.videos || []).filter(v => seen.has(v.id) && !already.has(v.id)).map(v => v.id);
+  if (!gained.length) return items;
+  const watched = [...already, ...gained];
+  return items.map(it => {
+    if (it !== target) return it;
+    const nx = { ...it, watchedIds: watched };
+    const tot = ytCountedTotal(nx);
+    if (tot > 0 && watched.length >= tot && it.status !== 'done') { nx.status = 'done'; nx.doneAt = Date.now(); }
+    return nx;
+  });
+}
+
 // Chaînes YouTube réellement interrogeables par le check de nouveautés.
 // ⚠ `force` (8.9.1, bouton ↻ manuel) lève le SEUL garde-fou de fraîcheur — les deux autres
 // exclusions restent absolues : la pseudo-chaîne « Hub Pierre » n'a aucun id YouTube à
@@ -37309,11 +37341,21 @@ function TvTimePanel() {
     } else {
       // ⚠ 7.6.88 : la chaîne récupère au passage les vidéos que j'avais déjà regardées via
       // « Hub Pierre » — elles sont cochées vues chez elle et quittent la pseudo-chaîne.
-      const next = ytUnsavedReconcile([built, ...items]);
+      // ⚠ 11.4.7 : puis `ytInheritWatched` fait la même chose depuis TOUS les autres items
+      // YouTube suivis (playlists, autre chaîne…), que la pseudo-chaîne ne couvrait pas.
+      const next = ytInheritWatched(ytUnsavedReconcile([built, ...items]), built.id);
       update(next);
       const claimed = (next.find(x => x.type === 'youtube' && x.id === built.id) || {}).watchedIds || [];
+      // Une vidéo déjà vue n'a plus rien à faire dans la playlist d'attente « Hub Pierre »
+      // du compte YouTube. ⚠ On ne retire QUE celles que le mémo local sait en attente, et
+      // UNE PAR UNE : `claimed` peut compter des centaines d'ids, en lancer autant d'un coup
+      // ferait fondre le quota YouTube pour des vidéos qui n'y sont même pas. Best effort et
+      // silencieux — un échec laisse simplement la vidéo en attente.
+      const pending = new Set(loadYtWlAdded());
+      const toDrop = claimed.filter(id => pending.has(id));
+      if (toDrop.length) (async () => { for (const id of toDrop) await ytWlDropSeen(id); setWlAdded(new Set(loadYtWlAdded())); })();
       setYtMsg(`Ajouté : ${built.title} (${built.totalEps} vidéos)`
-        + (claimed.length ? ` · ${claimed.length} déjà vue(s) via « ${YTSUB_WL_NAME} »` : ''));
+        + (claimed.length ? ` · ${claimed.length} déjà vue(s) ailleurs, cochée(s) et retirée(s) de l'attente` : ''));
     }
     setYtInput('');
   };
