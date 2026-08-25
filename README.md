@@ -96,7 +96,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 
 - **Export / import JSON**, complet ou par section (Musique, TV Time, Santé, Note, Collection, Vêtement, Comptes & clés…)
 - **Trois destinations cloud** au choix : ☁︎ Dropbox, △ Google Drive, ◲ pCloud — sauvegarde et restauration en un bouton
-- **Fusion intelligente** à la restauration : rien n'est écrasé bêtement, les compteurs sont repris au maximum (un ré-import ne double jamais tes statistiques)
+- **Fusion intelligente** à la restauration : rien n'est écrasé bêtement, les compteurs sont repris au maximum (un ré-import ne double jamais tes statistiques) ; si le stockage local est plein, la restauration te le dit au lieu de faire semblant d'avoir réussi
 - Proposition de sauvegarde hebdomadaire, réinitialisation mois/année automatique
 - Les photos et les caches rechargeables ne sont volontairement pas embarqués dans les sauvegardes (les photos vivent sur ton Drive)
 

@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.1.9';
+const APP_VERSION = '11.2.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -25244,6 +25244,17 @@ function mergeTvImport(current, incoming) {
   return [...byKey.values()];
 }
 
+// Message d'alerte quand des sections n'ont PAS pu être écrites (localStorage plein).
+// ⚠ Ne jamais annoncer « ✓ restauré » dans ce cas : c'est le rechargement qui révélait
+// la perte (TV Time revenu à 0 Short alors que l'import s'était dit réussi).
+function restoreFailMsg(res) {
+  const f = (res && res.failed) || [];
+  if (!f.length) return '';
+  const nom = k => ({ 'spotifyplus_tvtime':'TV Time', 'spotifyplus_maps':'Maps', 'spotifyplus_todos':'To do',
+    'spotifyplus_notes':'Note', 'spotifyplus_mdp_vault':'Mot de passe' })[k] || k.replace('spotifyplus_', '');
+  return `⚠ Stockage local saturé : ${f.length} section(s) NON restaurée(s) — ${[...new Set(f.map(nom))].join(', ')}.`
+    + ' Libère de la place (purge tes écoutes, allège un import Maps) puis relance la restauration.';
+}
 // Restaure une sauvegarde produite par buildBackup() (export local ou Dropbox).
 // - artists_scraped : UPSERT prudent — la date de scan locale n'est JAMAIS régressée
 //   (MAX des deux), les cumuls scan_count/total_tracks_added sont fusionnés au MAX.
@@ -25315,7 +25326,12 @@ function applyBackup(data) {
       musicRestored++;
     } catch {}
   }
-  const put = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  // ⚠ Un localStorage SATURÉ ne se voit pas : `setItem` jette ici, `lsSet` renvoie false
+  // ailleurs, et tout était avalé — la restauration se déclarait réussie sans avoir rien
+  // écrit, et l'appareil retrouvait ses anciennes données au premier F5. On collecte donc
+  // les sections non écrites pour que l'appelant les dise à l'utilisateur.
+  const failed = [];
+  const put = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { failed.push(k); return false; } };
   if (Array.isArray(data.todos))      put('spotifyplus_todos', data.todos);
   if (Array.isArray(data.todos_done)) put('spotifyplus_todos_done', data.todos_done);
   // Journal d'écoutes (graphique) — FUSIONNÉ : union des timestamps (dédup), tri, cap 5000
@@ -25333,8 +25349,13 @@ function applyBackup(data) {
   if (Array.isArray(data.remembers))  put('spotifyplus_remember_custom', data.remembers);
   // TV Time — FUSIONNÉ avec la liste locale (union par type+id, progression la plus avancée conservée)
   if (Array.isArray(data.tvtime)) {
-    try { saveTvItems(mergeTvImport(loadTvItems(), data.tvtime)); }
-    catch { put('spotifyplus_tvtime', data.tvtime); _tvItemsCache = null; } // écriture directe → invalide le cache mémoire
+    // ⚠ C'est LE plus gros objet de la sauvegarde (chaque chaîne YouTube porte sa liste de
+    // vidéos, Shorts compris) : c'est donc lui qui sature le quota en premier. En cas d'échec
+    // on REMET LE CACHE MÉMOIRE À NULL — sinon l'écran affiche la fusion pendant que le disque
+    // a gardé l'ancienne liste, et l'utilisateur ne découvre la perte qu'au rechargement.
+    let ok = false;
+    try { ok = saveTvItems(mergeTvImport(loadTvItems(), data.tvtime)); } catch {}
+    if (!ok) { _tvItemsCache = null; failed.push('spotifyplus_tvtime'); }
   }
   // Clé API TMDB : chaîne brute (PAS de JSON.stringify — tmdbKey() la lit telle quelle)
   if (typeof data.tmdb_key === 'string' && data.tmdb_key.trim()) {
@@ -25432,7 +25453,7 @@ function applyBackup(data) {
     saveVaultBlob(data.mdp_vault);
   }
   // putRaw : écrit une chaîne brute (clés/pseudos) sans JSON.stringify (lecture via getItem brut).
-  const putRaw = (k, v) => { if (typeof v === 'string' && v) { try { localStorage.setItem(k, v); } catch {} } };
+  const putRaw = (k, v) => { if (typeof v === 'string' && v) { try { localStorage.setItem(k, v); } catch { failed.push(k); } } };
   // Frigo / Emploi / Sport — REMPLACÉS si présents (snapshots simples, comme Maps)
   if (data.frigo && typeof data.frigo === 'object')  put('spotifyplus_frigo', data.frigo);
   if (data.emploi && typeof data.emploi === 'object') put('spotifyplus_emploi', data.emploi);
@@ -25530,7 +25551,7 @@ function applyBackup(data) {
     putRaw(FIN_AUTO_LS, data.prefs.finance_auto);
     putRaw(TV_AUTO_LS, data.prefs.tvtime_auto);
   }
-  return { artistsRestored, statsRestored, musicRestored };
+  return { artistsRestored, statsRestored, musicRestored, failed };
 }
 
 // Section repliable (collapse) réutilisable pour VosEcoutesPanel
@@ -26229,7 +26250,9 @@ function DropboxSync({ mode = 'save' }) {
   const restore = async () => {
     if (!confirm('↥ Restaurer depuis Dropbox\n\nCela applique la dernière sauvegarde Dropbox sur cet appareil (les dates de scan ne régressent jamais, l\'historique finance/écoutes est fusionné, le reste est remplacé).\n\nContinuer ?')) return;
     setBusy(true); setMsg('');
-    try { const data = await dropboxDownload(); await restoreBackup(data); setMsg('✓ Restauré depuis Dropbox'); }
+    try { const data = await dropboxDownload(); const res = await restoreBackup(data);
+      const warn = restoreFailMsg(res); if (warn) alert(warn);
+      setMsg(warn ? '⚠ Restauré en partie — stockage saturé' : '✓ Restauré depuis Dropbox'); }
     catch (e) { setMsg('✗ Échec : ' + ((e && e.message) || 'erreur')); }
     setBusy(false);
   };
@@ -26305,7 +26328,9 @@ function PCloudSync({ mode = 'save' }) {
   const restore = async () => {
     if (!confirm('↥ Restaurer depuis pCloud\n\nCela applique la dernière sauvegarde pCloud sur cet appareil (les dates de scan ne régressent jamais, l\'historique finance/écoutes est fusionné, le reste est remplacé).\n\nContinuer ?')) return;
     setBusy(true); setMsg('');
-    try { const data = await pcloudDownload(); await restoreBackup(data); setMsg('✓ Restauré depuis pCloud'); }
+    try { const data = await pcloudDownload(); const res = await restoreBackup(data);
+      const warn = restoreFailMsg(res); if (warn) alert(warn);
+      setMsg(warn ? '⚠ Restauré en partie — stockage saturé' : '✓ Restauré depuis pCloud'); }
     catch (e) {
       const m = (e && e.message) || 'erreur';
       if (m.indexOf('expirée') !== -1) { pcloudLogout(); setConnected(false); }
@@ -26372,7 +26397,9 @@ function GoogleDriveSync({ mode = 'save' }) {
     if (!gdriveToken()) { setConnected(false); setMsg('✗ Session Google expirée — reconnecte-toi'); return; }
     if (!confirm('↥ Restaurer depuis Google Drive\n\nCela applique la dernière sauvegarde Drive sur cet appareil (les dates de scan ne régressent jamais, l\'historique finance/écoutes est fusionné, le reste est remplacé).\n\nContinuer ?')) return;
     setBusy(true); setMsg('');
-    try { const data = await gdriveDownload(); await restoreBackup(data); setMsg('✓ Restauré depuis Google Drive'); }
+    try { const data = await gdriveDownload(); const res = await restoreBackup(data);
+      const warn = restoreFailMsg(res); if (warn) alert(warn);
+      setMsg(warn ? '⚠ Restauré en partie — stockage saturé' : '✓ Restauré depuis Google Drive'); }
     catch (e) {
       if (String(e && e.message).indexOf('expirée') !== -1) { setConnected(false); setMsg('✗ ' + e.message); }
       else setMsg('✗ Échec : ' + ((e && e.message) || 'erreur'));
@@ -27929,7 +27956,8 @@ function VosEcoutesPanel() {
         const when = data.exported_at ? new Date(data.exported_at).toLocaleDateString('fr-FR') : '?';
         if (!confirm(`Restaurer la sauvegarde du ${when} ?\n\n· ${n} artiste(s) — dates de scan fusionnées (jamais régressées)\n· Stats d'écoute — fusion prudente\n· To do / Alertes / TV Time / Maps / Coffre MDP — REMPLACÉS par la sauvegarde (seulement s'ils sont présents dans le fichier)`)) return;
         const res = await restoreBackup(data);
-        alert(`✓ Sauvegarde restaurée : ${res.artistsRestored} artiste(s)${res.musicRestored ? ` + ${res.musicRestored} piste(s)` : ''}${res.statsRestored ? ' + stats' : ''} + to do / remember.\nRecharge la page pour voir les to do / rappels restaurés.`);
+        const warn = restoreFailMsg(res);
+        alert(`${warn ? warn + '\n\n' : '✓ '}Sauvegarde restaurée : ${res.artistsRestored} artiste(s)${res.musicRestored ? ` + ${res.musicRestored} piste(s)` : ''}${res.statsRestored ? ' + stats' : ''} + to do / remember.\nRecharge la page pour voir les to do / rappels restaurés.`);
       } catch (e) { alert('Fichier illisible ou invalide.'); }
     };
     r.readAsText(f);
@@ -33687,7 +33715,11 @@ function loadTvItems() {
   _tvItemsCache = _tvItemsCache.map(it => (ytIsUnsaved(it) && it.title !== YT_UNSAVED_TITLE) ? { ...it, title: YT_UNSAVED_TITLE } : it);
   return _tvItemsCache;
 }
-function saveTvItems(items) { _tvItemsCache = items; lsSet(TVTIME_LS_KEY, JSON.stringify(items)); }
+// ⚠ RENVOIE le booléen de `lsSet` (piège n°14) : sur un localStorage plein rien n'est
+// écrit et `lsSet` ne LÈVE PAS d'erreur. Sans ce retour, `applyBackup` annonçait
+// « ✓ restauré » alors que le cache mémoire seul avait bougé — TV Time repartait à zéro
+// au rechargement (les Shorts d'un import qui avait pourtant l'air d'avoir marché).
+function saveTvItems(items) { _tvItemsCache = items; return lsSet(TVTIME_LS_KEY, JSON.stringify(items)); }
 
 // GET https://api.themoviedb.org/3{path} — retourne le JSON ou null (erreur / clé absente)
 async function tmdbGet(path, params = {}) {

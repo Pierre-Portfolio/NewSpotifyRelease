@@ -176,6 +176,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 - Remplacés : todos, rappels, remembers, maps, modules, home_modules, prefs, mdp_vault (backup dans `spotifyplus_mdp_vault_prev`), clés/pseudos si non vides.
 - Dates d'artistes **jamais régressées** ; `music` : `listened`/`liked` au MAX.
 - `food.weights` fusionné par `weightMerge` (doublons jour+poids ignorés).
+- ⚠ **Un `localStorage` plein ne lève RIEN** (`lsSet` renvoie `false`, `put` avale le throw) : la restauration s'annonçait réussie sans rien écrire, et tout repartait au F5 (TV Time revenu à 0 Short). `applyBackup` renvoie donc `failed[]` (clés non écrites) → `restoreFailMsg(res)` prévient dans les 4 UI de restauration, et `_tvItemsCache` est remis à `null` pour ne pas afficher une fusion absente du disque. TV Time est le plus gros objet du backup (listes de vidéos) : c'est lui qui sature en premier.
 
 **⚠ Volontairement EXCLUS** : tous les caches re-fetchables (actu, indices, cours, Steam, LoL, chess, speedrun, github, yt_subs, delta playlist, displate, clés de jour des synchros auto) et **toutes les images** (photos Vêtement/Revente/Collection, images TierList, composition des repas). Les data URLs saturent le quota localStorage (~5 Mo partagé par tout le Hub).
 
