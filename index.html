@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.0';
+const APP_VERSION = '11.4.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -31348,6 +31348,65 @@ function CmpStar({ watched, onClick }) {
   );
 }
 
+// 🛒 11.4.1 (demande utilisateur) — TOUTES LES OFFRES D'UN JEU, en tableau.
+// `/deals` renvoie UNE LIGNE PAR BOUTIQUE : le même jeu revenait donc 2, 3, 4 fois dans la
+// liste. On n'affiche plus que la MEILLEURE, et cette pop-up (clic sur la vignette) montre
+// le détail boutique par boutique.
+// ⚠ `createPortal(document.body)` : la liste vit dans un `StatsCollapse`, et un ancêtre
+// `transform` piégerait le `position:fixed` (piège n° 9).
+function CmpDealsModal({ group, stores, px, onClose }) {
+  React.useEffect(() => {
+    const k = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', k, true);
+    const ov = document.body.style.overflow; document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', k, true); document.body.style.overflow = ov; };
+  }, [onClose]);
+  const th = { textAlign:'left', fontSize:9, fontWeight:800, letterSpacing:'0.06em', color:C.dim,
+    padding:'0 8px 5px', borderBottom:`1px solid ${C.border}`, fontFamily:'DM Mono,monospace' };
+  const td = { padding:'7px 8px', borderBottom:`1px solid ${C.border}55`, fontSize:11.5 };
+  return ReactDOM.createPortal(
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:450, background:'rgba(0,0,0,0.72)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, width:'min(460px, 100%)', maxHeight:'82vh', display:'flex', flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'12px 14px', borderBottom:`1px solid ${C.border}` }}>
+          {group.thumb && <img src={group.thumb} alt="" style={{ width:60, height:28, objectFit:'cover', borderRadius:5, flexShrink:0, background:'#111' }} />}
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:13, fontWeight:800, color:C.text, lineHeight:1.3 }}>{group.title}</div>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:2 }}>{group.offers.length} offre(s) en cours</div>
+          </div>
+          <button onClick={onClose} title="Fermer (Échap)" aria-label="Fermer"
+            style={{ background:'none', border:'1px solid #e0505066', borderRadius:8, color:'#e05050', fontSize:14, lineHeight:1, padding:'3px 9px', cursor:'pointer', flexShrink:0 }}>✕</button>
+        </div>
+        <div style={{ overflowY:'auto', padding:'8px 6px 4px' }}>
+          {/* ⚠ Un tableau large doit scroller DANS son conteneur, jamais pousser la page. */}
+          <div style={{ overflowX:'auto' }}>
+            <table style={{ width:'100%', borderCollapse:'collapse' }}>
+              <thead><tr><th style={th}>SITE</th><th style={{ ...th, textAlign:'right' }}>PRIX</th></tr></thead>
+              <tbody>
+                {group.offers.map((d, i) => (
+                  <tr key={d.dealID || i}>
+                    <td style={td}>
+                      <a href={cmpDealUrl(d.dealID)} target="_blank" rel="noopener noreferrer" style={{ color:C.text, textDecoration:'none' }}>
+                        {stores[d.storeID] || ('Boutique ' + d.storeID)} <span style={{ color:COMPARE_COLOR, fontSize:10 }}>↗</span>
+                      </a>
+                    </td>
+                    <td style={{ ...td, textAlign:'right', fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>
+                      {d.__normal > d.__sale && <span style={{ color:C.dim, textDecoration:'line-through', fontSize:9.5, marginRight:6 }}>{px(d.__normal)}</span>}
+                      <span style={{ color: i === 0 ? '#45c552' : COMPARE_COLOR, fontWeight:700 }}>{px(d.__sale)}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div style={{ fontSize:9, color:C.dim, padding:'6px 14px 12px', lineHeight:1.45 }}>
+          Prix CheapShark, du moins cher au plus cher · un clic sur une boutique ouvre son offre.
+        </div>
+      </div>
+    </div>, document.body);
+}
+
 // 🔥 Promos du moment — meilleures offres PC (filtres rapides client)
 function CompareDeals({ isWatched, toggleWatch }) {
   const [deals, setDeals]     = React.useState(null);
@@ -31355,6 +31414,7 @@ function CompareDeals({ isWatched, toggleWatch }) {
   const [eur, setEur]         = React.useState(null);
   const [filter, setFilter]   = React.useState('all');   // all | m50 | m75 | aaa
   const [loading, setLoading] = React.useState(true);
+  const [pop, setPop]         = React.useState(null);    // groupe dont le tableau d'offres est ouvert
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -31370,14 +31430,36 @@ function CompareDeals({ isWatched, toggleWatch }) {
   // pour un cache localStorage encore dans son TTL.
   const dSale   = d => +(d.salePrice   ?? d.price);
   const dNormal = d => +(d.normalPrice ?? d.retailPrice);
-  // Tri : la plus grosse promo (% de réduction) en tête, décroissant (demande utilisateur).
-  const visible = (deals || []).filter(d => {
+  const kept = (deals || []).filter(d => {
     const save = Math.round(+d.savings || 0);
     if (filter === 'm50') return save >= 50;
     if (filter === 'm75') return save >= 75;
     if (filter === 'aaa') return dNormal(d) >= 29;
     return true;
-  }).sort((a, b) => (+b.savings || 0) - (+a.savings || 0));
+  });
+  // ⚠ 11.4.1 — `/deals` renvoie UNE LIGNE PAR BOUTIQUE : le même jeu revenait plusieurs fois
+  // dans la liste. On REGROUPE par jeu (`gameID`, à défaut le titre normalisé) et on
+  // n'affiche que la MEILLEURE offre ; les autres vivent dans la pop-up du tableau.
+  // ⚠ Les prix sont figés sur chaque offre (`__sale`/`__normal`) : la pop-up n'a alors plus
+  // besoin de connaître les noms de champs de l'endpoint, qui diffèrent de ceux de `/games`.
+  // Tri : la plus grosse promo (% de réduction) en tête, décroissant (demande utilisateur).
+  const visible = React.useMemo(() => {
+    const by = new Map();
+    for (const d of kept) {
+      const key = String(d.gameID || '') || ('t:' + String(d.title || '').trim().toLowerCase());
+      const off = { ...d, __sale: dSale(d), __normal: dNormal(d) };
+      const g = by.get(key);
+      if (g) g.offers.push(off);
+      else by.set(key, { key, gameID: d.gameID, title: d.title, thumb: d.thumb, offers: [off] });
+    }
+    const out = [];
+    for (const g of by.values()) {
+      g.offers.sort((a, b) => (a.__sale || 0) - (b.__sale || 0));
+      g.best = g.offers[0];
+      out.push(g);
+    }
+    return out.sort((a, b) => (+b.best.savings || 0) - (+a.best.savings || 0));
+  }, [deals, filter]);
   const usd = v => '$' + (+v).toFixed(2);
   const px = v => eur ? cmpFmtEur(+v * eur) : usd(v);
   return (
@@ -31393,28 +31475,42 @@ function CompareDeals({ isWatched, toggleWatch }) {
       {loading && <div style={{ fontSize:11, color:C.dim }}>Chargement des promos…</div>}
       {!loading && deals === null && <div style={{ fontSize:11, color:'#e05050' }}>CheapShark injoignable — réessaie plus tard.</div>}
       {!loading && deals !== null && !visible.length && <div style={{ fontSize:11, color:C.dim }}>Aucune promo ne passe ce filtre.</div>}
-      {visible.map(d => {
+      {/* ⚠ La ligne n'est plus un `<a>` englobant : la vignette est un BOUTON (tableau des
+          offres) et un bouton dans un lien serait du HTML invalide autant qu'inutilisable. */}
+      {visible.map(g => {
+        const d = g.best;
         const save = Math.round(+d.savings || 0);
+        const many = g.offers.length > 1;
         return (
-          <a key={d.dealID} href={cmpDealUrl(d.dealID)} target="_blank" rel="noopener noreferrer"
-            style={{ display:'flex', gap:8, alignItems:'center', padding:'6px 0', borderBottom:`1px solid ${C.border}55`, textDecoration:'none' }}>
-            {d.thumb && <img src={d.thumb} alt="" loading="lazy" style={{ width:44, height:20, objectFit:'cover', borderRadius:4, flexShrink:0, background:'#111' }} />}
-            <div style={{ flex:1, minWidth:0 }}>
+          <div key={g.key} style={{ display:'flex', gap:8, alignItems:'center', padding:'6px 0', borderBottom:`1px solid ${C.border}55` }}>
+            <button onClick={() => setPop(g)}
+              title={many ? `Voir les ${g.offers.length} offres de « ${d.title} » (site et prix)` : `Voir l'offre de « ${d.title} »`}
+              style={{ position:'relative', width:44, height:20, flexShrink:0, padding:0, border:'none', borderRadius:4, background:'#111', cursor:'pointer', display:'block', overflow:'hidden' }}>
+              {d.thumb
+                ? <img src={d.thumb} alt="" loading="lazy" style={{ width:44, height:20, objectFit:'cover', display:'block' }} />
+                : <span style={{ fontSize:11, color:C.dim, lineHeight:'20px' }}>🎮</span>}
+            </button>
+            <a href={cmpDealUrl(d.dealID)} target="_blank" rel="noopener noreferrer"
+              style={{ flex:1, minWidth:0, textDecoration:'none' }}>
               <div style={{ fontSize:12, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.title}</div>
-              <div style={{ fontSize:9, color:C.dim }}>{stores[d.storeID] || ('Boutique ' + d.storeID)}{d.steamRatingPercent > 0 ? ` · 👍 ${d.steamRatingPercent}%` : ''}</div>
-            </div>
+              <div style={{ fontSize:9, color:C.dim }}>
+                {stores[d.storeID] || ('Boutique ' + d.storeID)}{d.steamRatingPercent > 0 ? ` · 👍 ${d.steamRatingPercent}%` : ''}
+                {many && <span style={{ color:COMPARE_COLOR }}> · {g.offers.length} offres</span>}
+              </div>
+            </a>
             {save > 0 && <span style={{ fontSize:10, color:'#45c552', fontWeight:700, fontFamily:'DM Mono,monospace', flexShrink:0 }}>−{save}%</span>}
             <div style={{ textAlign:'right', flexShrink:0 }}>
-              {dNormal(d) > dSale(d) && <div style={{ fontSize:9, color:C.dim, textDecoration:'line-through', fontFamily:'DM Mono,monospace' }}>{px(dNormal(d))}</div>}
-              <div style={{ fontSize:11.5, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace' }}>{px(dSale(d))}</div>
+              {d.__normal > d.__sale && <div style={{ fontSize:9, color:C.dim, textDecoration:'line-through', fontFamily:'DM Mono,monospace' }}>{px(d.__normal)}</div>}
+              <div style={{ fontSize:11.5, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace' }}>{px(d.__sale)}</div>
             </div>
-            <CmpStar watched={isWatched(d.gameID)} onClick={() => toggleWatch({ gameID: d.gameID, title: d.title, thumb: d.thumb, price: dSale(d) })} />
-          </a>
+            <CmpStar watched={isWatched(d.gameID)} onClick={() => toggleWatch({ gameID: d.gameID, title: d.title, thumb: d.thumb, price: d.__sale })} />
+          </div>
         );
       })}
+      {pop && <CmpDealsModal group={pop} stores={stores} px={px} onClose={() => setPop(null)} />}
       {!loading && deals !== null && (
         <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
-          Meilleures offres PC du moment (CheapShark, tri « deal rating »{eur ? ` — USD converti ≈ EUR au taux BCE ${eur.toFixed(4)}` : ''}) · clic = ouvrir l'offre · ☆ = suivre
+          Meilleures offres PC du moment (CheapShark{eur ? ` — USD converti ≈ EUR au taux BCE ${eur.toFixed(4)}` : ''}) · un jeu vendu par plusieurs boutiques n'apparaît qu'une fois, au <b style={{ color:C.muted }}>meilleur prix</b> · clic sur la <b style={{ color:C.muted }}>vignette</b> = toutes ses offres (site et prix) · clic sur le titre = ouvrir l'offre · ☆ = suivre
         </div>
       )}
     </div>
