@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.3.5';
+const APP_VERSION = '11.3.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29379,6 +29379,7 @@ async function ytWatchLaterRemove(videoId) {
 // donc INJOUABLES) sont écartées. Coût quota : 1 unité par page de 50.
 // Retourne { ok, playlistId, videos:[{ id, title, channel, date, thumb }] } ou { __error }.
 const YTSUB_WL_LIST_MAX = 200;
+const YTSUB_WL_PAGES = 5;                    // pages de 50 lues au maximum (partagé avec ytWlIdSet)
 const YTSUB_WL_DEAD_TITLES = ['private video', 'deleted video', 'vidéo privée', 'vidéo supprimée'];
 async function ytWlListVideos() {
   const pid = await ytWlPlaylistId(false, false);
@@ -29386,7 +29387,7 @@ async function ytWlListVideos() {
   if (!pid || typeof pid !== 'string') return { ok: true, playlistId: null, videos: [] };
   const out = [];
   let pageToken = '';
-  for (let i = 0; i < 5 && out.length < YTSUB_WL_LIST_MAX; i++) {
+  for (let i = 0; i < YTSUB_WL_PAGES && out.length < YTSUB_WL_LIST_MAX; i++) {
     const d = await ytSubApi('playlistItems', { part: 'snippet,contentDetails', playlistId: pid, maxResults: '50', ...(pageToken ? { pageToken } : {}) });
     if (d.__error) {
       // id caché périmé (playlist supprimée / recréée à la main) → il sera re-cherché au prochain appel
@@ -29420,6 +29421,36 @@ async function ytWlListVideos() {
     for (const v of vids) { const sec = map.get(v.id); if (sec !== undefined) { v.durSec = sec; v.dur = Math.round(sec / 60); } }
   }
   return { ok: true, playlistId: pid, videos: vids };
+}
+
+// ── IDS de la playlist « Hub Pierre », sans le reste (11.3.6) ──────────────────────────
+// `playlistItems` part=contentDetails : 1 unité de quota par page de 50, contre 1 + 1/50
+// pour `ytWlListVideos` (qui va en plus chercher les durées). Sert à répondre à « est-ce
+// que cette vidéo est dans ma playlist ? » SANS une requête par vidéo — cocher une saison
+// entière en aurait sinon déclenché une par épisode.
+// ⚠ Renvoie `null` en cas d'échec = **INCONNU**, jamais « playlist vide » : l'appelant doit
+// retomber sur son mémo local plutôt que de conclure qu'il n'y a rien à retirer.
+// ⚠ Cache court : la playlist bouge à chaque validation, d'où `wlIdsInvalidate()` après
+// toute écriture.
+const YTSUB_WL_IDS_TTL = 5 * 60 * 1000;
+let _wlIds = { at: 0, set: null };
+function wlIdsInvalidate() { _wlIds = { at: 0, set: null }; }
+async function ytWlIdSet() {
+  if (_wlIds.set && Date.now() - _wlIds.at < YTSUB_WL_IDS_TTL) return _wlIds.set;
+  const pid = await ytWlPlaylistId(false, false);
+  if (pid && pid.__error) return null;
+  if (!pid || typeof pid !== 'string') { _wlIds = { at: Date.now(), set: new Set() }; return _wlIds.set; }
+  const out = new Set();
+  let pageToken = '';
+  for (let i = 0; i < YTSUB_WL_PAGES; i++) {
+    const d = await ytSubApi('playlistItems', { part: 'contentDetails', playlistId: pid, maxResults: '50', ...(pageToken ? { pageToken } : {}) });
+    if (d.__error) { if (d.__error === 'NOTFOUND') { try { localStorage.removeItem(YTSUB_WL_ID_LS); } catch {} } return null; }
+    for (const it of (d.items || [])) { const id = it.contentDetails && it.contentDetails.videoId; if (id) out.add(id); }
+    pageToken = d.nextPageToken || '';
+    if (!pageToken) break;
+  }
+  _wlIds = { at: Date.now(), set: out };
+  return out;
 }
 
 // Toutes les chaînes suivies → [{ id, title }] (paginé, cap YTSUB_MAX_CHANNELS)
@@ -37030,6 +37061,7 @@ function TvTimePanel() {
     const r = await ytWatchLaterAdd(v.id);
     setWlBusyValid(null);
     if (r && r.__error) { wlAlert(r.__error); return; }
+    wlIdsInvalidate();
     const added = new Set(loadYtWlAdded()); added.add(v.id);
     setWlAdded(new Set(added)); saveYtWlAdded([...added]);
   };
@@ -37041,6 +37073,7 @@ function TvTimePanel() {
     const r = await ytWatchLaterRemove(v.id);
     setWlBusyValid(null);
     if (r && r.__error) { wlAlert(r.__error, 'Retrait'); return; }
+    wlIdsInvalidate();
     setWlPop(p => (p ? { ...p, videos: (p.videos || []).filter(x => x.id !== v.id) } : p));
     setWlValidated(m => { if (!m.has(v.id)) return m; const n = new Map(m); n.delete(v.id); return n; });
     const stored = new Set(loadYtWlAdded()); stored.delete(v.id);
@@ -37168,11 +37201,27 @@ function TvTimePanel() {
     // qui contient des vidéos absentes du mémo local (ajoutées depuis un autre appareil,
     // localStorage vidé, cap de 500 atteint, ou ajoutées à la main sur YouTube) → la vidéo
     // n'était jamais retirée et réapparaissait à chaque réouverture.
-    const todo = [...new Set(ids)].filter(id => force || wlAdded.has(id));
+    let todo = [...new Set(ids)].filter(id => force || wlAdded.has(id));
+    // ⚠ 11.3.6 (demande utilisateur) — COCHER UNE VIDÉO DANS SA SAISON DOIT AUSSI LA SORTIR
+    // DE LA PLAYLIST, même si ce n'est pas le Hub qui l'y avait mise (autre appareil, ajout
+    // à la main sur YouTube, localStorage vidé) : le mémo `wlAdded` ne connaît que SES
+    // ajouts. On confronte donc les ids restants au CONTENU RÉEL de la playlist — une
+    // liste paginée mémorisée 5 min, et non une requête par vidéo, sinon cocher une saison
+    // entière serait parti en autant d'allers-retours qu'il y a d'épisodes.
+    // ⚠ `ytWlIdSet()` peut renvoyer `null` (échec réseau / quota) = INCONNU : on s'en tient
+    // alors au mémo local, on ne conclut jamais « elle n'y est pas ».
+    if (!force) {
+      const rest = [...new Set(ids)].filter(id => !wlAdded.has(id));
+      if (rest.length) {
+        const real = await ytWlIdSet();
+        if (real) todo = [...new Set([...todo, ...rest.filter(id => real.has(id))])];
+      }
+    }
     if (!todo.length) return;
     const okIds = [];
     for (const id of todo) { const r = await ytWatchLaterRemove(id); if (r && r.ok) okIds.push(id); else break; }
     if (!okIds.length) return;
+    wlIdsInvalidate();                        // la playlist vient de changer
     setWlAdded(prev => { const n = new Set(prev); for (const id of okIds) n.delete(id); return n; });
     const stored = new Set(loadYtWlAdded());
     for (const id of okIds) stored.delete(id);
@@ -37187,6 +37236,7 @@ function TvTimePanel() {
     const r = await ytWatchLaterAdd(v.id);
     setWlBusyId(null);
     if (r && r.__error) { wlAlert(r.__error); return; }
+    wlIdsInvalidate();
     const done = new Set(wlAdded); done.add(v.id);
     setWlAdded(done); saveYtWlAdded([...done]);
   };
