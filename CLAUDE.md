@@ -199,7 +199,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 | Module | Composant / couleur | Stockage | Notes |
 |---|---|---|---|
 | **Musique** | `MusiquePanel`, violet | (base SQLite) | 6 collapses, tous `defaultOpen={false}` : ⚙ Scrapping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta Playlist |
-| **Actu** | `ActuPanel`, bleu-indigo | caches 30 min | Collapses en ordre alphabétique. Sous-sections : Actualité (9), Cartographie (iframes `MapFrame`), Fuites de données, Vidéos YouTube (OAuth séparé). Priorité `data/actu.json`, repli proxies CORS |
+| **Actu** | `ActuPanel`, bleu-indigo | caches 30 min | Collapses en ordre alphabétique. Sous-sections : Actualité (9), Cartographie (iframes `MapFrame`), Fuites de données, Vidéos YouTube (OAuth séparé ; une vidéo lue **jusqu'au bout** dans l'embed → `ytSeenMarkAnywhere` la classe dans TV Time + `ytWlDropSeen` la sort de la playlist). Priorité `data/actu.json`, repli proxies CORS |
 | **Alertes** | `RappelPanel`, `#6f7bf5` | `spotifyplus_rappels`, `_rappels_time`, `_remember_custom` | Rubriques fixes + rappels persos + sections auto (Frigo, Steam). `RAPPEL_RECUR` = récurrences en mois ; `rappelNextDate` calcule la prochaine occurrence (la date stockée reste celle d'origine). Calendrier mensuel 🗓 |
 | **API** | `APIPanel`, `#6a78f2` | `spotifyplus_api_export`, `_api_calls` | Liste locale de toutes les API (`API_LIST`, miroir de `connect-src`), éditeur de clés inline (`API_KEY_LS`, valeur = chaîne **ou tableau** pour 2 champs), ligne rouge si clé manquante, export JSON |
 | **Bon Plan** | `ComparePanel`, bleu-indigo | `spotifyplus_cmp_watch` | Ma liste · Promos (CheapShark) · Bibliothèque Steam · Recherche jeux · Tous produits (IA + recherche web) |

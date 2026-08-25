@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.3.7';
+const APP_VERSION = '11.3.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29544,6 +29544,102 @@ function ytParseDurationSec(iso) {
 // Short = durée CONNUE et < YT_MIN_MINUTES. Une durée inconnue (0) reste une vidéo longue.
 function ytSubIsShort(v) { return !!v.durSec && v.durSec < YT_MIN_MINUTES * 60; }
 
+// ── ✅ « VUE » DEPUIS N'IMPORTE OÙ (11.3.8, demande utilisateur) ───────────────────────
+// Marque une vidéo YouTube comme vue dans TV Time SANS passer par son panneau : Actu n'a
+// aucun accès à son état React (l'onglet n'est même pas monté). On écrit donc directement
+// dans le localStorage, qui EST la source de vérité (TV Time le relit à son montage).
+// Même logique que `ytMarkVideoSeen` / `markUnsaved` du panneau :
+//   · vidéo suivie dans une chaîne/playlist → cochée LÀ, avec la bascule « Vus » si c'était
+//     la dernière (seuil `ytCountedTotal`, donc hors vidéos 🙈 mises de côté) ;
+//   · suivie nulle part → pseudo-chaîne « Hub Pierre », classée à l'année de VISIONNAGE.
+// Idempotent : renvoie false si la vidéo était déjà cochée.
+function ytSeenMarkAnywhere(v) {
+  if (!v || !v.id) return false;
+  const items = loadTvItems();
+  const owner = items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id));
+  if (owner) {
+    if ((owner.watchedIds || []).includes(v.id)) return false;
+    saveTvItems(items.map(it => {
+      if (it.type !== 'youtube' || it.id !== owner.id) return it;
+      const clean = [...new Set([...(it.watchedIds || []), v.id])];
+      const nx = { ...it, watchedIds: clean };
+      const tot = ytCountedTotal(nx);
+      if (tot > 0 && clean.length >= tot && it.status !== 'done') { nx.status = 'done'; nx.doneAt = Date.now(); }
+      return nx;
+    }));
+    return true;
+  }
+  const next = ytUnsavedAdd(items, { ...v, pubDate: v.pubDate || v.date || '' });
+  if (next === items) return false;
+  saveTvItems(next);
+  return true;
+}
+// Une vidéo vue sort AUSSI de la playlist « Hub Pierre » si elle y était en attente.
+// ⚠ Best effort et silencieux : on ne va sur le réseau que si le mémo local ou le contenu
+// réel (mémorisé) la connaît, et un échec laisse simplement la vidéo en attente.
+async function ytWlDropSeen(id) {
+  if (!id) return false;
+  if (!new Set(loadYtWlAdded()).has(id)) {
+    const real = await ytWlIdSet();
+    if (!real || !real.has(id)) return false;
+  }
+  const r = await ytWatchLaterRemove(id);
+  if (!r || r.__error) return false;
+  wlIdsInvalidate();
+  const stored = new Set(loadYtWlAdded()); stored.delete(id);
+  saveYtWlAdded([...stored]);
+  return true;
+}
+
+// ── ▶ Lecture EN PLACE dans Actu, AVEC détection de fin (11.3.8) ──────────────────────
+// Jusqu'ici l'embed d'Actu était une iframe muette : regarder une vidéo en entier ne la
+// comptait nulle part (« N'ajoute RIEN dans TV Time »). Elle parle maintenant le même
+// protocole que le lecteur plein écran de TV Time — `enablejsapi=1` + `origin=` dans
+// l'URL, handshake `listening`, puis écoute des `infoDelivery`.
+// ⚠ `postMessage` n'est PAS soumis à `connect-src` : aucune origine à ajouter à la CSP.
+// ⚠ `onEnded` ne part QU'UNE FOIS par vidéo (`doneRef`) — YouTube répète l'état 0 en boucle.
+// ⚠ `endRef` : l'écouteur est posé une fois par vidéo, il ne doit pas figer un `onEnded`
+// périmé (piège des refs anti-closure).
+function ActuYtPlayer({ v, onEnded }) {
+  const frameRef = React.useRef(null);
+  const doneRef  = React.useRef(false);
+  const endRef   = React.useRef(onEnded);
+  endRef.current = onEnded;
+  React.useEffect(() => {
+    doneRef.current = false;
+    const frameWin = () => { const f = frameRef.current; return (f && f.contentWindow) || null; };
+    let hellos = 0, helloTimer = null, talking = false;
+    const hello = () => {
+      const w = frameWin();
+      if (w) { try { w.postMessage(JSON.stringify({ event:'listening', id:'hub-actu', channel:'widget' }), YT_EMBED_ORIGIN); } catch {} }
+      if (talking || ++hellos >= YT_JSAPI_HELLO_N) { clearInterval(helloTimer); helloTimer = null; }
+    };
+    const fin = () => { if (doneRef.current) return; doneRef.current = true; endRef.current(); };
+    const onMsg = e => {
+      const w = frameWin();
+      if (!w || e.source !== w) return;              // ne lit QUE les messages de NOTRE iframe
+      let d = e.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
+      const info = d && d.info;
+      if (!info) return;
+      talking = true;
+      if (info.playerState === 0) fin();
+      // Filet : certains embeds n'annoncent pas l'état 0 mais continuent de donner la position.
+      else if (typeof info.playerState !== 'number' && info.duration > 0 && info.currentTime >= info.duration - 0.25) fin();
+    };
+    window.addEventListener('message', onMsg);
+    hello();
+    helloTimer = setInterval(hello, YT_JSAPI_HELLO_MS);
+    return () => { window.removeEventListener('message', onMsg); if (helloTimer) clearInterval(helloTimer); };
+  }, [v.id]);
+  return (
+    <iframe ref={frameRef}
+      src={`${YT_EMBED_ORIGIN}/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}`}
+      title={v.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen
+      style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
+  );
+}
+
 // Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » de la section Actu.
 // Onglets Vidéo / Short en tête (40% de large chacun), lazyload infini par onglet.
 // N'ajoute RIEN dans TV Time.
@@ -29558,6 +29654,9 @@ function ActuYoutubeSection() {
   const [ytTab, setYtTab]     = React.useState('video');   // 'video' (≥ 3 min) | 'short' (< 3 min)
   const [connected]           = React.useState(() => ytgConnected());   // jeton YouTube dédié (7.6.67)
   const [playingId, setPlayingId] = React.useState(null);  // vidéo lue en place (embed iframe)
+  // Vidéos regardées EN ENTIER pendant cette session (11.3.8) → pastille « ✓ vue ». Le
+  // classement, lui, est écrit dans TV Time tout de suite ; ce Set n'est que l'affichage.
+  const [seenIds, setSeenIds] = React.useState(() => new Set());
   const sentinelRef           = React.useRef(null);
 
   const refresh = React.useCallback(async (force) => {
@@ -29622,6 +29721,15 @@ function ActuYoutubeSection() {
     setWlBusy(null);
   };
 
+  // Vidéo arrivée au bout dans l'embed → elle est VUE : classée dans TV Time (sa chaîne si
+  // elle y est suivie, sinon la pseudo-chaîne « Hub Pierre ») et retirée de la playlist
+  // « Hub Pierre » si elle y attendait. Idempotent.
+  const onVideoEnded = React.useCallback(v => {
+    setSeenIds(prev => (prev.has(v.id) ? prev : new Set(prev).add(v.id)));
+    ytSeenMarkAnywhere(v);
+    ytWlDropSeen(v.id).then(dropped => { if (dropped) setAdded(new Set(loadYtWlAdded())); });
+  }, []);
+
   // Badge de durée façon YouTube — en SECONDES (« 0:25 » pour un Short, « 22:04 », « 1:08:00 »)
   const fmtDurBadge = sec => {
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -29634,15 +29742,14 @@ function ActuYoutubeSection() {
     const watch = `https://www.youtube.com/watch?v=${encodeURIComponent(v.id)}`;
     const hq = `https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg`;
     const playing = playingId === v.id;
+    const watched = seenIds.has(v.id);
     return (
       <div key={v.id} style={{ padding:'12px 0', borderBottom:`1px solid ${C.border}44` }}>
         {/* Clic sur la miniature → lecture EN PLACE (iframe YouTube). Le bouton ↗ ouvre dans
             un nouvel onglet du navigateur. */}
         <div style={{ position:'relative', borderRadius:12, overflow:'hidden', background:'#000', aspectRatio:'16 / 9' }}>
           {playing ? (
-            <iframe src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(v.id)}?autoplay=1`}
-              title={v.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen
-              style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
+            <ActuYtPlayer v={v} onEnded={() => onVideoEnded(v)} />
           ) : (
             <button onClick={() => setPlayingId(v.id)} title="Lire la vidéo ici"
               style={{ display:'block', width:'100%', height:'100%', padding:0, border:'none', background:'none', cursor:'pointer', position:'relative' }}>
@@ -29667,7 +29774,7 @@ function ActuYoutubeSection() {
               style={{ fontSize:13.5, fontWeight:600, color:C.text, lineHeight:1.32, textDecoration:'none',
                 display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{v.title}</a>
             <div style={{ fontSize:11.5, color:C.dim, marginTop:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-              {v.channel} · {actuAgo(v.date)}
+              {watched ? <span style={{ color:'#4caf50', fontWeight:600 }}>✓ vue · </span> : null}{v.channel} · {actuAgo(v.date)}
             </div>
           </div>
           {/* ⚠ 9.2.0 — résumé Gemini : sur les vidéos NON-Short seulement (un Short de
@@ -29754,6 +29861,7 @@ function ActuYoutubeSection() {
             ? <a href={'https://www.youtube.com/playlist?list=' + encodeURIComponent(localStorage.getItem(YTSUB_WL_ID_LS))} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a>
             : <span>« {YTSUB_WL_NAME} »</span>}
           {' '}de TON compte YouTube (créée privée au 1er ajout — l'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native).
+          {' '}Une vidéo lue ici <b>jusqu'au bout</b> est comptée <b>vue</b> dans TV Time (dans sa chaîne si tu la suis, sinon dans « {YT_UNSAVED_TITLE} ») et quitte la playlist d'attente.
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:8 }}>
           <span style={{ fontSize:9, color:C.dim }}>{data && data.fetched_at ? `Mis à jour ${actuAgo(new Date(data.fetched_at).toISOString())}` : ''}</span>
