@@ -66,7 +66,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 | **🩺 Santé** | Calories par repas (base Open Food Facts, estimation IA, **photo de ton assiette**), macros, besoin quotidien calculé, **aliments favoris** (☆ sur un résultat, puis leur propre barre de recherche), journal de pesées avec courbes |
 | **🏋️ Sport** | 9 groupes musculaires, 70 exercices illustrés avec démonstration animée, machines Basic-Fit |
 | **✅ To do** | 7 rubriques (quotidien, aujourd'hui, semaine, mois, année, un jour, à deux), favorites, validation quotidienne |
-| **🎬 TV Time** | Séries et films (TMDB), chaînes YouTube (vidéos et Shorts comptés séparément, lecteur plein écran avec file d'attente), livres. Progression épisode par épisode, synchronisation quotidienne automatique |
+| **🎬 TV Time** | Séries et films (TMDB), chaînes YouTube (vidéos et Shorts comptés séparément, lecteur plein écran avec file d'attente, **résumé IA de la vidéo + fil de questions** en bas de l'écran), livres. Progression épisode par épisode, synchronisation quotidienne automatique |
 | **👕 Vêtement** | Garde-robe par type et sous-catégorie, fiches détaillées (marque, couleur, tissu, taille, prix, état, lieu), photos stockées sur ton Google Drive, galerie, filtres, recherche par image, mode 🖼️ (rien que les photos, par sous-catégorie) et 💶 (masquer les prix). Tes marques préférées se rangent en sections (Hauts, Bas, Chapeaux… ou « Possédé ») par glisser-déposer, même sans vêtement associé |
 | **📊 Stats** | Écoutes, tâches, films et séries, trajets, poids, alertes, jeux (Steam, League of Legends, chess.com, Clash Royale, CS2, speedrun, GitHub) et appels API |
 

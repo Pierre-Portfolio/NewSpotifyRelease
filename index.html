@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.3.9';
+const APP_VERSION = '11.4.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -19166,6 +19166,34 @@ const YT_SUM_ERRS = {
   NO_KEY: 'Aucune clé Gemini enregistrée. Ajoute-la dans le module 🔌 API (ligne « Gemini ») — c\'est la même clé que le Frigo et Santé.',
   NO_YOUTUBE: 'Le résumé de vidéo n\'existe QUE chez Gemini : les autres IA de secours ne savent pas regarder une vidéo. Renseigne une clé Gemini dans le module 🔌 API.',
 };
+// ── 💬 FIL DE QUESTIONS SUR LA VIDÉO (11.4.0, demande utilisateur) ────────────────────
+// Même esprit que le fil de l'Histoire : on RAPPELLE toujours le contexte (titre + résumé
+// déjà produit + les derniers échanges) avant la question, sinon le modèle répond dans le
+// vide — il n'a aucune mémoire d'un appel à l'autre.
+function ytSumChatPrompt(title, resume, history, question) {
+  return [
+    'Tu réponds à une question sur une vidéo YouTube que tu viens de résumer.',
+    title ? 'Titre de la vidéo : « ' + title + ' ».' : '',
+    resume ? 'Résumé déjà produit :\n' + resume : '',
+    ...(history || []).slice(-4).flatMap(m => ['Question précédente : ' + m.q, 'Ta réponse : ' + m.a]),
+    'Nouvelle question : ' + question,
+    'Réponds EN FRANÇAIS, en texte simple (pas de Markdown, pas de gras), en 5 phrases au plus.',
+    'Si la vidéo ne permet pas de répondre, dis-le simplement plutôt que d\'inventer.',
+  ].filter(Boolean).join('\n');
+}
+async function ytSumAsk(id, title, resume, history, question, mod) {
+  const parts = [{ text: ytSumChatPrompt(title, resume, history, question) }];
+  try {
+    // 1er essai AVEC la vidéo : la réponse est alors ancrée sur ce qui s'y passe vraiment.
+    return await aiGenerate(mod || 'tvtime', [...parts, { file_data: { file_uri: 'https://www.youtube.com/watch?v=' + id } }]);
+  } catch (e) {
+    // ⚠ Seul Gemini sait REGARDER une vidéo (`NO_YOUTUBE`). Sans lui, on rejoue avec le seul
+    // résumé pour contexte : la chaîne de replis peut alors répondre, en le disant.
+    if (String((e && e.message) || '') !== 'NO_YOUTUBE') throw e;
+    return await aiGenerate(mod || 'tvtime', parts);
+  }
+}
+
 function ytSumErrMsg(e) {
   const m = (e && e.message) || '';
   if (YT_SUM_ERRS[m]) return YT_SUM_ERRS[m];
@@ -36297,6 +36325,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   const frameRef = React.useRef(null);
   // 💬 Feuille de commentaires (7.9.9), ouverte par le bouton en HAUT À DROITE.
   const [showComments, setShowComments] = React.useState(false);
+  // ✨ Feuille « Résumé IA » (11.4.0), ouverte par le bouton ✨ — rendue EN ENFANT du lecteur
+  // (cf. YtSummarySheet : une pop-up portalée sur `document.body` est invisible en plein
+  // écran natif, c'est ce qui faisait « il ne se passe rien »).
+  const [showSum, setShowSum] = React.useState(false);
   // Compteur de la barre : 'queue' = position dans TOUTE la file (26/27, mode par défaut,
   // bord rouge) · 'short' = position parmi les SHORTS encore à regarder. Cliquer la
   // pastille non sélectionnée bascule de mode (demande utilisateur).
@@ -36352,7 +36384,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   React.useEffect(() => {
     const onKey = e => {
       // Échap ferme d'abord les commentaires (7.9.9), sinon le lecteur.
-      if (e.key === 'Escape') { if (showComments) setShowComments(false); else if (!document.fullscreenElement) closePlayer(); }
+      if (e.key === 'Escape') { if (showSum) setShowSum(false); else if (showComments) setShowComments(false); else if (!document.fullscreenElement) closePlayer(); }
+      // ⚠ Pas de navigation au clavier pendant qu'on écrit dans la feuille : les flèches
+      // appartiennent alors au champ de saisie.
+      else if (showSum) return;
       else if (e.key === 'ArrowRight') go(+1);
       else if (e.key === 'ArrowLeft') go(-1);
     };
@@ -36392,7 +36427,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     if (!vid) return;
     // ⚠ Commentaires ouverts = l'utilisateur EST en train de faire quelque chose : aucune
     // auto-avance, sinon la vidéo changerait sous ses yeux pendant qu'il lit (7.9.9).
-    const armable = autoNext && !showComments && index < queue.length - 1;
+    const armable = autoNext && !showComments && !showSum && index < queue.length - 1;
     const clear = () => {
       if (endTimerRef.current) { clearInterval(endTimerRef.current); endTimerRef.current = null; }
       setEndWait(0);
@@ -36628,7 +36663,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       {/* Couche de capture du SWIPE (7.7.2, sens inversé en 7.7.8), posée SUR l'iframe mais SOUS la barre d'actions
           (ordre du DOM) → les boutons du haut restent cliquables. `touchAction:'none'` évite
           que le navigateur interprète le geste (retour arrière, pull-to-refresh). */}
-      {queue.length > 1 && !showComments && (
+      {queue.length > 1 && !showComments && !showSum && (
         <div onPointerDown={onSwipeDown} onPointerUp={onSwipeUp} onPointerCancel={() => { swipeRef.current = null; }}
           onWheel={onWheel}
           style={{ position:'absolute', left:0, right:0, top:0, bottom:YT_SWIPE_BOTTOM, touchAction:'none',
@@ -36716,9 +36751,16 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         {/* ⚠ `pointerEvents:'auto'` OBLIGATOIRE : la barre est en `none` (elle ne doit pas
             voler les clics à la vidéo) et chaque bouton le réactive — cf. `obtn`. Sans ça le
             bouton s'affiche mais reste totalement inerte. */}
-        {!ytIsShortEntry(v) && <GeminiSumBtn id={v.id} title={v.title} size={22} mod="tvtime"
-          style={{ pointerEvents:'auto', background:'rgba(0,0,0,0.66)', borderColor:'#ffffff55', backdropFilter:'blur(2px)' }} />}
-        <button onClick={() => setShowComments(o => !o)}
+        {!ytIsShortEntry(v) && (
+          <button onClick={() => { setShowSum(o => !o); setShowComments(false); }}
+            title={showSum ? 'Masquer le résumé IA' : 'Résumer cette vidéo avec l’IA (et lui poser des questions)'}
+            aria-label="Résumé IA de la vidéo"
+            style={{ ...obtn(YT_COLOR, false), ...(showSum ? { background:'#8b6ee8dd', border:'1px solid #8b6ee8' } : null),
+              display:'flex', alignItems:'center', justifyContent:'center' }}>
+            <GeminiIcon size={13} />
+          </button>
+        )}
+        <button onClick={() => { setShowComments(o => !o); setShowSum(false); }}
           title={showComments ? 'Masquer les commentaires' : 'Voir les commentaires de la vidéo'}
           style={{ ...obtn(YT_COLOR, false),
             ...(showComments ? { background:YT_COLOR + 'dd', border:`1px solid ${YT_COLOR}` } : null) }}>💬</button>
@@ -36730,7 +36772,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         <div style={{ fontSize:10, color:'#ffffffaa', fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
           {v.channel ? v.channel + ' · ' : ''}{v.date || ''}{v.dur ? ` · ${v.dur} min` : ''}
         </div>
-        {queue.length > 1 && !showComments && (
+        {queue.length > 1 && !showComments && !showSum && (
           <div style={{ fontSize:9, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:3 }}>
             👉 glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante · double tap : à droite = +{YT_SEEK_STEP} s, à gauche = −{YT_SEEK_STEP} s, au centre = pause
           </div>
@@ -36742,6 +36784,115 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
           couche de capture du swipe n'est PAS rendue (sinon lire les commentaires ferait
           défiler la file) et l'auto-avance est suspendue. */}
       {showComments && <YtCommentsPanel video={v} onClose={() => setShowComments(false)} />}
+      {showSum && <YtSummarySheet video={v} mod="tvtime" onClose={() => setShowSum(false)} />}
+    </div>
+  );
+}
+
+// ── ✨ FEUILLE « RÉSUMÉ IA » DU LECTEUR PLEIN ÉCRAN (11.4.0, demande utilisateur) ──────
+// ⚠ POURQUOI ELLE REMPLACE LA POP-UP `YtSummaryModal` ICI, ET SEULEMENT ICI : le bouton ✨
+// du lecteur « ne faisait rien ». La pop-up existait bien, mais elle est rendue par
+// `createPortal(document.body)` — or le lecteur demande le PLEIN ÉCRAN NATIF sur sa boîte,
+// et un navigateur en plein écran ne peint QUE le sous-arbre de l'élément plein écran.
+// La pop-up s'ouvrait donc hors champ, invisible. D'où une feuille rendue EN ENFANT du
+// lecteur (`position:absolute`), exactement comme `YtCommentsPanel`, qui n'a jamais eu ce
+// problème pour la même raison.
+// Disposition demandée : 25 % du bas de l'écran · le prompt envoyé à l'IA en bulle « MOI » ·
+// une bulle « IA » en attente puis remplacée par la réponse · une barre en bas pour
+// continuer à poser des questions (comme la dernière section du module Histoire).
+// ⤢ agrandit à 60 % — 25 % reste le défaut.
+function YtSummarySheet({ video, mod, onClose }) {
+  const vid = video ? video.id : null;
+  const title = (video && video.title) || '';
+  const [st, setSt]   = React.useState({ state:'loading', txt:'', cached:false, err:'' });
+  const [chat, setChat] = React.useState([]);        // [{ q, a }] — volatil, non persisté
+  const [q, setQ]     = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const [big, setBig] = React.useState(false);
+  const endRef = React.useRef(null);
+  const hasKey = aiAnyKey(false, mod || 'tvtime');
+  const run = React.useCallback(async (force) => {
+    setSt({ state:'loading', txt:'', cached:false, err:'' });
+    setChat([]);
+    try { const r = await ytSummarize(vid, title, force, mod); setSt({ state:'ok', txt:r.txt, cached:r.cached, err:'' }); }
+    catch (e) { setSt({ state:'err', txt:'', cached:false, err: ytSumErrMsg(e) }); }
+  }, [vid, title, mod]);
+  React.useEffect(() => { run(false); }, [run]);
+  // Le fil se déroule vers le bas : on colle au dernier message à chaque ajout.
+  React.useEffect(() => { const el = endRef.current; if (el && el.scrollIntoView) el.scrollIntoView({ block:'end' }); }, [chat, st.state, busy]);
+  const ready = !busy && !!q.trim() && hasKey && st.state === 'ok';
+  const send = async () => {
+    if (!ready) return;
+    const question = q.trim();
+    setQ(''); setErr(''); setBusy(true);
+    try {
+      const a = await ytSumAsk(vid, title, st.txt, chat, question, mod);
+      setChat(c => [...c, { q: question, a: String(a || '').trim() || '(réponse vide)' }]);
+    } catch (e) { setErr(ytSumErrMsg(e)); setQ(question); }
+    setBusy(false);
+  };
+  const hbtn = { background:'none', border:'1px solid #ffffff33', borderRadius:16, color:'#fff',
+    fontSize:11, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace', flexShrink:0 };
+  // Bulle : `me` = à droite, gris ; IA = à gauche, teintée.
+  const bubble = (label, body, me, key) => (
+    <div key={key} style={{ display:'flex', justifyContent: me ? 'flex-end' : 'flex-start' }}>
+      <div style={{ maxWidth:'88%', background: me ? '#ffffff12' : '#8b6ee826',
+        border:`1px solid ${me ? '#ffffff22' : '#8b6ee855'}`, borderRadius:10, padding:'7px 10px' }}>
+        <div style={{ fontSize:8.5, fontWeight:800, letterSpacing:'0.06em', color: me ? '#ffffff77' : '#b9a4ff', marginBottom:3, fontFamily:'DM Mono,monospace' }}>{label}</div>
+        <div style={{ fontSize:11.5, color:'#fff', lineHeight:1.55, whiteSpace:'pre-wrap' }}>{body}</div>
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ position:'absolute', left:0, right:0, bottom:0, top: big ? '40%' : '75%',
+      background:'rgba(8,8,10,0.97)', borderTop:'2px solid #8b6ee8', display:'flex', flexDirection:'column', overflow:'hidden' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 12px', borderBottom:'1px solid #ffffff1a', flexShrink:0 }}>
+        <GeminiIcon size={14} />
+        <div style={{ flex:1, minWidth:0, fontSize:11.5, fontWeight:700, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+          Résumé IA{st.state === 'ok' && aiLastProvider() ? ` · ${aiLabel(aiLastProvider())}` : ''}
+        </div>
+        <button onClick={() => setBig(b => !b)} title={big ? 'Réduire la feuille' : 'Agrandir la feuille'} style={hbtn}>{big ? '⤡' : '⤢'}</button>
+        {st.state === 'ok' && <button onClick={() => run(true)} title="Refaire le résumé (ignore celui gardé en mémoire)" style={hbtn}>↻</button>}
+        <button onClick={onClose} title="Fermer" aria-label="Fermer le résumé"
+          style={{ ...hbtn, border:'1px solid #e0505088', color:'#e05050' }}>✕</button>
+      </div>
+      <div style={{ flex:1, minHeight:0, overflowY:'auto', padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+        {/* Le PROMPT réellement envoyé, tel quel — demandé pour savoir ce que l'IA a reçu. */}
+        {bubble('MOI · prompt envoyé', ytSumPrompt(title), true, 'prompt')}
+        {st.state === 'loading' && bubble('IA · en attente', '⏳ L’IA regarde la vidéo… (ça peut prendre une minute sur une vidéo longue)', false, 'wait')}
+        {st.state === 'err' && (
+          <div style={{ fontSize:11, color:'#e05050', lineHeight:1.55, background:'#e0505014', border:'1px solid #e0505044', borderRadius:10, padding:'8px 10px' }}>
+            ⚠ {st.err}
+            <div style={{ marginTop:6 }}>
+              <a href={`https://www.youtube.com/watch?v=${encodeURIComponent(vid || '')}`} target="_blank" rel="noopener noreferrer" style={{ color:'#ffffff88', fontSize:10 }}>↗ Ouvrir la vidéo sur YouTube</a>
+            </div>
+          </div>
+        )}
+        {st.state === 'ok' && bubble(st.cached ? 'IA · résumé gardé en mémoire' : 'IA · résumé', st.txt, false, 'sum')}
+        {chat.map((m, i) => (
+          <React.Fragment key={i}>
+            {bubble('MOI', m.q, true)}
+            {bubble('IA', m.a, false)}
+          </React.Fragment>
+        ))}
+        {busy && bubble('IA · en attente', '⏳ …', false, 'busy')}
+        {err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
+        <div ref={endRef} />
+      </div>
+      {/* Barre de questions — active seulement une fois le résumé obtenu (elle s'appuie dessus). */}
+      <div style={{ display:'flex', gap:6, alignItems:'center', padding:'8px 10px', borderTop:'1px solid #ffffff1a', flexShrink:0 }}>
+        <input value={q} onChange={e => setQ(e.target.value)}
+          onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') send(); }}
+          disabled={busy || !hasKey || st.state !== 'ok'}
+          placeholder={!hasKey ? 'Aucune IA disponible (module 🔌 API)' : st.state !== 'ok' ? 'Résumé en cours…' : 'Ta question sur cette vidéo…'}
+          style={{ flex:1, minWidth:0, background:'#ffffff0f', border:`1px solid ${q.trim() ? '#8b6ee888' : '#ffffff22'}`,
+            borderRadius:8, padding:'7px 10px', fontSize:11.5, color:'#fff', outline:'none', fontFamily:'inherit' }} />
+        <button onClick={send} disabled={!ready}
+          style={{ background: ready ? '#8b6ee833' : 'none', border:`1px solid ${ready ? '#8b6ee888' : '#ffffff22'}`,
+            borderRadius:8, color: ready ? '#b9a4ff' : '#ffffff55', fontSize:12, fontWeight:700,
+            padding:'7px 12px', cursor: ready ? 'pointer' : 'default', flexShrink:0, fontFamily:'inherit' }}>{busy ? '⏳' : '➤'}</button>
+      </div>
     </div>
   );
 }

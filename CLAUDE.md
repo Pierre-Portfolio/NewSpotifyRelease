@@ -239,7 +239,7 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 6. **Refs anti-closure** obligatoires dans les boucles `rAF`/`setInterval` et les écouteurs posés par élément (sinon index/filtres figés).
 7. **Un nouvel onglet mobile DOIT avoir son bloc de rendu dans `MobileApp`** (sinon page noire), en plus de l'entrée dans `allOverflowTabs` — et les anciennes valeurs de `spotifyplus_active_tab`/`_view` doivent être remappées.
 8. `selfHeading:true` dans `SECTION` **et** heading retiré de `MobileApp`, sinon le titre s'affiche en double.
-9. **`position:fixed` est piégé par tout ancêtre `transform`** → `ReactDOM.createPortal(document.body)`.
+9. **`position:fixed` est piégé par tout ancêtre `transform`** → `ReactDOM.createPortal(document.body)`. ⚠ **Réciproque** : en **plein écran NATIF**, le navigateur ne peint QUE le sous-arbre de l'élément plein écran → un portal sur `document.body` y est **invisible** (le ✨ du lecteur « ne faisait rien ») : rendre la feuille **en enfant** du lecteur, comme `YtCommentsPanel` / `YtSummarySheet`.
 10. **`useImmersiveLock(active)`** sur tout overlay plein écran : sans lui, une rotation fait chuter `innerHeight`, `Shell` remplace `MobileApp` par `CompactPlayer` et **démonte l'overlay**. `MOBILE_LOCK_TABS` = les onglets qui héritent du mode compact (aujourd'hui `musique` seul).
 11. **Appui long** : ref `{timer, fired}`, `fired` neutralise le `click` qui suit le relâchement ; bloquer `onContextMenu` + `userSelect`/`WebkitTouchCallout` sur mobile.
 12. **Un swipe et un défilement se terminent par un `click` synthétique** → garde `moved` (8 px sur l'un ou l'autre axe) avant d'agir.
