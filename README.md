@@ -87,7 +87,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 
 **Bon à savoir**
 - **Erreur 403 à la connexion Spotify** : ton compte doit être déclaré dans le [Dashboard développeur](https://developer.spotify.com/dashboard) → ton appli → *User Management*. Le Hub affiche désormais la cause exacte de tout échec de connexion.
-- **Spotify ne répond pas ?** Ta session est conservée : un bouton **« 📴 Continuer hors ligne »** te fait entrer dans le hub avec ton profil mémorisé. Tout ce qui est local fonctionne normalement.
+- **Pas envie de Spotify (ou Spotify ne répond pas) ?** Le bouton **« 📴 Continuer sans Spotify »**, toujours proposé sous le bouton vert, ouvre directement le hub (avec ton profil mémorisé s'il y en a un). Tout ce qui est local fonctionne normalement ; seule la Musique a besoin de la connexion.
 - **Google Drive** se connecte par **fenêtre pop-up** (pense à les autoriser). ⚠️ Depuis l'**app installée**, Google refuse de renvoyer le jeton : connecte-toi **une fois depuis un onglet Chrome normal**, la connexion est ensuite partagée avec l'app.
 - **YouTube se connecte séparément de Drive** (Google interdit de demander les deux ensemble) : bouton dédié dans Actu → Vidéos YouTube.
 - **Choisir quelle IA sert quel module** : À propos → ⚙️ *Paramétrage* → bouton **🤖** de la ligne du module (grisé si le module ne se sert pas de l'IA). Les IA cochées sont essayées **de haut en bas** jusqu'à ce que l'une réponde : décocher ne retire aucune fonction, ça raccourcit la liste de secours. Réglage inclus dans l'export/import.
