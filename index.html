@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.1';
+const APP_VERSION = '11.4.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -22814,19 +22814,70 @@ async function collPhotoAnalyze(kind, img) {
     meta: { ai: aiLastProvider(), photo: true, confiance: String(j.confiance || ''), note: String(j.note || '').slice(0, 200) },
   };
 }
-// Bloc « 📷 Estimer par photo » ajouté sous la recherche d'une sous-collection (`sub.photo`).
+// ── 11.4.2 (demande utilisateur) — « FAIRE UNE ESTIMATION » → PHOTOS ou GALERIE ────────
+// ⚠ Aucun attribut HTML n'affiche un sélecteur « appareil photo ou galerie » : sur mobile,
+// `accept="image/*"` seul ouvre la GALERIE et `capture="environment"` va DROIT à l'appareil
+// photo. La seule façon fiable d'offrir le choix est de rendre DEUX entrées distinctes —
+// c'est déjà ce que fait `VetPhotoPick` (Vêtement) ; ici elles vivent dans une pop-up.
+// ⚠ Chaque choix est un `<label>` contenant son `<input type="file">` : le dialogue natif
+// n'ouvre que sur un GESTE utilisateur, `input.click()` différé serait bloqué.
+// ⚠ `capture` est ignoré sur desktop : les deux entrées y ouvrent le même explorateur, ce
+// qui est le comportement attendu.
+function CollEstimatePick({ onFile, onClose }) {
+  React.useEffect(() => {
+    const k = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', k, true);
+    const ov = document.body.style.overflow; document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', k, true); document.body.style.overflow = ov; };
+  }, [onClose]);
+  const choice = (cap, icon, label, hint) => (
+    <label style={{ display:'flex', alignItems:'center', gap:11, background:C.surfaceHigh,
+      border:`1px solid ${COLLECTION_COLOR}44`, borderRadius:10, padding:'12px 13px', cursor:'pointer' }}>
+      <span style={{ fontSize:22, flexShrink:0 }}>{icon}</span>
+      <span style={{ flex:1, minWidth:0 }}>
+        <span style={{ display:'block', fontSize:12.5, fontWeight:700, color:C.text }}>{label}</span>
+        <span style={{ display:'block', fontSize:9.5, color:C.dim, marginTop:2 }}>{hint}</span>
+      </span>
+      <input type="file" accept="image/*" {...(cap ? { capture:'environment' } : {})}
+        onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) { onFile(f); onClose(); } }}
+        style={{ display:'none' }} />
+    </label>
+  );
+  return ReactDOM.createPortal(
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:450, background:'rgba(0,0,0,0.72)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, width:'min(380px, 100%)', display:'flex', flexDirection:'column' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 14px', borderBottom:`1px solid ${C.border}` }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.06em', color:COLLECTION_COLOR }}>FAIRE UNE ESTIMATION</div>
+            <div style={{ fontSize:11, color:C.dim, marginTop:2 }}>D'où vient la photo ?</div>
+          </div>
+          <button onClick={onClose} title="Fermer (Échap)" aria-label="Fermer"
+            style={{ background:'none', border:'1px solid #e0505066', borderRadius:8, color:'#e05050', fontSize:14, lineHeight:1, padding:'3px 9px', cursor:'pointer' }}>✕</button>
+        </div>
+        <div style={{ display:'flex', flexDirection:'column', gap:8, padding:'12px 14px' }}>
+          {choice(true,  '📷', 'Photos',  'Ouvre l’appareil photo et prend le cliché maintenant')}
+          {choice(false, '🖼️', 'Galerie', 'Choisit une photo déjà présente sur l’appareil')}
+          <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:2 }}>
+            L'estimation part dès que la photo est choisie. La photo n'est ni enregistrée ni envoyée ailleurs qu'au modèle.
+          </div>
+        </div>
+      </div>
+    </div>, document.body);
+}
+
+// Bloc « ✨ Faire une estimation » ajouté sous la recherche d'une sous-collection (`sub.photo`).
 // ⚠ L'aperçu est un object URL RÉVOQUÉ dès qu'on quitte la photo — rien ne survit au rendu.
 function CollPhotoEstimate({ kind, onAdd }) {
   const [prev, setPrev] = React.useState('');
   const [st, setSt] = React.useState({ busy: false, r: null, err: '' });
   const urlRef = React.useRef('');
-  const fileRef = React.useRef(null);
+  const [pick2, setPick2] = React.useState(false);   // pop-up « Photos / Galerie » ouverte
   const hasKey = aiAnyKey(true, 'collection');   // photo → fournisseur avec vision obligatoire
   const drop = () => { if (urlRef.current) { try { URL.revokeObjectURL(urlRef.current); } catch {} urlRef.current = ''; } setPrev(''); };
   React.useEffect(() => drop, []);
-  const pick = async e => {
-    const f = e.target.files && e.target.files[0];
-    e.target.value = '';
+  // Reçoit le fichier choisi dans la pop-up (appareil photo ou galerie) et lance l'analyse.
+  const pick = async f => {
     if (!f) return;
     drop();
     try { urlRef.current = URL.createObjectURL(f); setPrev(urlRef.current); } catch {}
@@ -22843,15 +22894,15 @@ function CollPhotoEstimate({ kind, onAdd }) {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:7, background:C.surfaceHigh, borderRadius:10, padding:'9px 11px' }}>
       <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={st.busy || !hasKey}
-          title={hasKey ? 'Prendre ou choisir une photo — la photo n’est jamais enregistrée' : 'Renseigne la clé Gemini dans le module API'}
+        <button onClick={() => setPick2(true)} disabled={st.busy || !hasKey}
+          title={hasKey ? 'Choisir entre l’appareil photo et la galerie — la photo n’est jamais enregistrée' : 'Renseigne une clé IA avec vision dans le module API'}
           style={{ background: hasKey ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${hasKey ? COLLECTION_COLOR + '66' : C.border}`, borderRadius:6,
             color: hasKey ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'5px 11px',
             cursor: st.busy || !hasKey ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
-          {st.busy ? '⏳ Analyse…' : '📷 Estimer par photo'}
+          {st.busy ? '⏳ Analyse…' : '✨ Faire une estimation'}
         </button>
         <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>la photo n'est jamais enregistrée</span>
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={pick} style={{ display:'none' }} />
+        {pick2 && <CollEstimatePick onFile={pick} onClose={() => setPick2(false)} />}
       </div>
       {prev && <img src={prev} alt="" style={{ width:88, height:88, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}` }} />}
       {!hasKey && <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>Estimation par photo indisponible : aucune clé Gemini. L'ajout à la main fonctionne sans clé.</div>}
