@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.2.1';
+const APP_VERSION = '11.2.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5580,7 +5580,12 @@ const D_MISSILE_AUTO_GAP = 110;
 function doodleMobOnScreen(s, H) { return s.monsters.some(m => m.alive && m.y > -20 && m.y < H + 20); }
 // Cible = le monstre VIVANT le plus proche, réévalué à chaque frame : celui qu'on visait peut
 // mourir d'une balle partie après le missile, qui doit alors se reporter sur un autre.
+// ⚠ 11.2.2 — DANS L'ARÈNE, LA SEULE CIBLE EST LE BOSS. L'arène est vidée de ses créatures,
+// donc sans ce court-circuit le missile ne trouvait plus rien et repartait tout droit — un
+// 🚀 inutile pendant le seul combat où il compte. La boîte renvoyée a la forme d'un monstre
+// (`x/y/w/h` coin haut-gauche) : `doodleMissileSteer` vise son centre sans rien savoir du boss.
 function doodleMissileTarget(s, b) {
+  if (s.boss) return { x: s.boss.x - D_BOSS_W / 2, y: D_BOSS_Y - D_BOSS_H / 2, w: D_BOSS_W, h: D_BOSS_H };
   let best = null, bd = Infinity;
   for (const m of s.monsters) {
     if (!m.alive) continue;
@@ -7804,6 +7809,16 @@ function doodleBossStart(s, W, H) {
   const hp = doodleBossHp(s.score);
   s.boss = { kind: kind.k, hp, hpMax: hp, x: W / 2, vx: 1.15, timer: D_BOSS_ATK_GAP, seq: 0, cur: null, tel: 0, hurt: 0, sh: 0, shHit: 0 };
   s.bossShots = []; s.bossSpikes = []; s.bossBeam = null; s.bossLoot = 0;
+  // ⚠ 11.2.2 — LE MONDE HOSTILE EST EFFACÉ, PAS SEULEMENT MASQUÉ. Le dessin cachait déjà
+  // créatures, météorites et compagnie derrière `bossHide`, et trois commentaires du moteur
+  // affirmaient que « les monstres sont suspendus pendant le combat » — c'était FAUX : rien
+  // ne vidait ces tableaux. Une case 💀 déclenchée avec des créatures à l'écran laissait donc
+  // une couche invisible bien vivante DANS l'arène : les missiles la prenaient pour cible au
+  // lieu du boss, les balles s'y arrêtaient avant de l'atteindre, et chaque créature abattue
+  // hors champ lâchait son coffre. Les momies en chute sont vidées AUSSI : en se posant elles
+  // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
+  // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
+  s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = [];
   s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.zip = null; s.grab = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
@@ -12799,9 +12814,11 @@ function GameDoodle() {
         for (const c of s.chests) if (!c.taken) { suck(c); c.landed = false; c.vy = 0; }
       }
       // 🚀 Missile autonome (2e palier) : il part seul tant qu'une créature est à l'écran.
-      // ⚠ Pas pendant un combat de boss (`bossHide`) : la liste des monstres y est vide, la
-      // tourelle n'aurait de toute façon rien à viser dans l'arène.
-      if (!s.bossHide && doodleWpnOf(s, 'missile') >= 2 && s.t - (s.lastAuto == null ? -99 : s.lastAuto) >= D_MISSILE_AUTO_GAP && doodleMobOnScreen(s, H)) {
+      // ⚠ 11.2.2 — ET SUR LE BOSS. L'ancienne garde `!s.bossHide` le taisait pendant tout le
+      // combat au motif que l'arène n'a pas de créature à viser — mais elle a le boss, et
+      // `doodleMissileTarget` l'y envoie désormais. C'est le seul palier d'arme qui restait
+      // muet dans l'arène.
+      if ((s.boss || (!s.bossHide && doodleMobOnScreen(s, H))) && doodleWpnOf(s, 'missile') >= 2 && s.t - (s.lastAuto == null ? -99 : s.lastAuto) >= D_MISSILE_AUTO_GAP) {
         s.lastAuto = s.t; s.bullets.push(doodleMissile(s));
       }
       // — balles —
@@ -12814,9 +12831,9 @@ function GameDoodle() {
         b.x += (b.vx || 0) * sf; b.y += b.vy * sf;
       });
       s.bullets = s.bullets.filter(b => {
-        // 💀 Le boss encaisse une balle par point de vie. ⚠ Testé AVANT les monstres : ceux-ci
-        // sont suspendus pendant le combat, mais une balle qui les traverserait quand même
-        // aurait pu être consommée avant d'atteindre l'arène.
+        // 💀 Le boss encaisse une balle par point de vie. ⚠ Testé AVANT les monstres : depuis
+        // 11.2.2 l'arène les efface vraiment (`doodleBossStart`), mais garder cet ordre reste
+        // la ceinture — une créature qui réapparaîtrait ne volerait pas les balles du boss.
         if (s.boss && Math.abs(b.x - s.boss.x) < D_BOSS_W / 2 && Math.abs(b.y - D_BOSS_Y) < D_BOSS_H / 2) {
           // 🛡️ Le bouclier encaisse D_BOSS_SH balles avant de céder, et AUCUN point de vie ne
           // tombe tant qu'il tient. ⚠ La balle est consommée dans les deux cas : une perforante
