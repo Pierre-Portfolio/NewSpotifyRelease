@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.7';
+const APP_VERSION = '11.4.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -31411,6 +31411,62 @@ async function cmpRefreshWatch(list) {
 }
 const cmpDealUrl = dealID => 'https://www.cheapshark.com/redirect?dealID=' + encodeURIComponent(dealID || '');
 
+// ── 🎁 FUSION DES ÉDITIONS D'UN MÊME JEU (11.4.8, demande utilisateur) ─────────────────
+// 11.4.1 avait regroupé les LIGNES PAR BOUTIQUE d'un même `gameID`. Restait le doublon
+// d'à côté : « … Deluxe Edition » et « … Ultimate Edition » sont deux `gameID` DIFFÉRENTS
+// chez CheapShark, donc deux lignes voisines pour le même jeu. On les rassemble sur une
+// seule ligne, l'ULTIMATE en tête (c'est elle qui donne titre, vignette et prix affiché),
+// et la pop-up des offres dit à quelle édition va chaque prix.
+// ⚠ On ne touche PAS au jeu de base : seules les entrées PORTANT un nom d'édition sont
+// fusionnées, et seulement quand il y en a au moins deux. Sinon un jeu de base à 3 € se
+// verrait remplacé dans la liste par son édition Ultimate à 60 €, ce qui n'est pas une promo.
+const CMP_EDITIONS = [[/\bultimate\b/i, 2, 'Ultimate'], [/\bdeluxe\b/i, 1, 'Deluxe']];
+function cmpEdition(title) {
+  for (const [re, rank, label] of CMP_EDITIONS) if (re.test(String(title || ''))) return { rank, label };
+  return { rank: 0, label: '' };
+}
+// Titre débarrassé du nom d'édition — c'est la clé de famille. Ponctuation et accents de
+// « Édition » compris : « Jeu - Deluxe Edition » et « Jeu : Ultimate Édition » doivent tomber
+// sur la MÊME clé, sinon rien ne se fusionne.
+function cmpBaseTitle(title) {
+  return String(title || '')
+    .replace(/\b(ultimate|deluxe)\b/ig, ' ')
+    .replace(/\b(edition|édition)\b/ig, ' ')
+    .replace(/[-–—:,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim().toLowerCase();
+}
+// `groups` = les groupes déjà agrégés par jeu (offres triées du moins cher au plus cher).
+// La ligne fusionnée prend la PLACE DE LA PREMIÈRE de la famille pour ne pas bousculer
+// l'ordre d'affichage — qui est de toute façon retrié juste après par % de réduction.
+function cmpMergeEditions(groups) {
+  const fam = new Map();
+  for (const g of groups) {
+    const ed = cmpEdition(g.title);
+    const base = ed.rank ? cmpBaseTitle(g.title) : '';
+    if (!base) continue;
+    g.__ed = ed;
+    if (!fam.has(base)) fam.set(base, []);
+    fam.get(base).push(g);
+  }
+  const done = new Set();
+  const out = [];
+  for (const g of groups) {
+    if (done.has(g)) continue;
+    const family = g.__ed ? fam.get(cmpBaseTitle(g.title)) : null;
+    if (!family || family.length < 2) { out.push(g); continue; }
+    for (const f of family) done.add(f);
+    // Ultimate d'abord, puis Deluxe ; à rang égal, la moins chère devant.
+    const sorted = [...family].sort((a, b) => (b.__ed.rank - a.__ed.rank) || ((a.best.__sale || 0) - (b.best.__sale || 0)));
+    const offers = sorted.flatMap(f => f.offers.map(o => ({ ...o, __edition: f.__ed.label })));
+    const head = sorted[0];
+    out.push({ key: 'ed:' + cmpBaseTitle(head.title), gameID: head.gameID, title: head.title,
+      thumb: head.thumb || (sorted.find(f => f.thumb) || {}).thumb || null,
+      offers, best: offers[0], editions: sorted.map(f => f.__ed.label) });
+  }
+  return out;
+}
+
 // Recherche directe par boutique (simples liens de navigation — AUCUNE de ces boutiques
 // n'a d'API publique keyless : Steam n'envoie pas de CORS, G2A/Instant Gaming/Eneba/
 // Kinguin/CDKeys sont des marketplaces sans API ouverte). CheapShark ne couvre pas les
@@ -31475,7 +31531,9 @@ function CmpDealsModal({ group, stores, px, onClose }) {
           {group.thumb && <img src={group.thumb} alt="" style={{ width:60, height:28, objectFit:'cover', borderRadius:5, flexShrink:0, background:'#111' }} />}
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:13, fontWeight:800, color:C.text, lineHeight:1.3 }}>{group.title}</div>
-            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:2 }}>{group.offers.length} offre(s) en cours</div>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:2 }}>
+              {group.offers.length} offre(s) en cours{group.editions ? ` · ${group.editions.join(' + ')}` : ''}
+            </div>
           </div>
           <button onClick={onClose} title="Fermer (Échap)" aria-label="Fermer"
             style={{ background:'none', border:'1px solid #e0505066', borderRadius:8, color:'#e05050', fontSize:14, lineHeight:1, padding:'3px 9px', cursor:'pointer', flexShrink:0 }}>✕</button>
@@ -31491,6 +31549,7 @@ function CmpDealsModal({ group, stores, px, onClose }) {
                     <td style={td}>
                       <a href={cmpDealUrl(d.dealID)} target="_blank" rel="noopener noreferrer" style={{ color:C.text, textDecoration:'none' }}>
                         {stores[d.storeID] || ('Boutique ' + d.storeID)} <span style={{ color:COMPARE_COLOR, fontSize:10 }}>↗</span>
+                        {d.__edition ? <span style={{ color:C.dim, fontSize:9.5, fontFamily:'DM Mono,monospace' }}> · {d.__edition}</span> : null}
                       </a>
                     </td>
                     <td style={{ ...td, textAlign:'right', fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>
@@ -31561,7 +31620,8 @@ function CompareDeals({ isWatched, toggleWatch }) {
       g.best = g.offers[0];
       out.push(g);
     }
-    return out.sort((a, b) => (+b.best.savings || 0) - (+a.best.savings || 0));
+    // ⚠ 11.4.8 — 2e passe : Deluxe + Ultimate du même jeu ne font plus qu'une ligne.
+    return cmpMergeEditions(out).sort((a, b) => (+b.best.savings || 0) - (+a.best.savings || 0));
   }, [deals, filter]);
   const usd = v => '$' + (+v).toFixed(2);
   const px = v => eur ? cmpFmtEur(+v * eur) : usd(v);
