@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.5';
+const APP_VERSION = '11.4.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18861,6 +18861,7 @@ const GEMINI_LS = 'spotifyplus_gemini_key';
 // (et Flash-Lite) restent au palier gratuit, les Pro sont payants depuis avril 2026.
 const GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-flash-latest', 'gemini-2.5-flash'];
 let _gemModel = GEMINI_MODELS[0];          // celui qui a répondu (mémoire de session)
+const GEMINI_5XX_WAIT_MS = 1000;           // pause avant le SEUL rejeu d'un 500/503 (panne Google)
 function geminiModel() { return _gemModel; }
 function geminiKey() { try { return localStorage.getItem(GEMINI_LS) || ''; } catch { return ''; } }
 
@@ -19049,8 +19050,19 @@ async function geminiCall(parts, opts) {
   const fails = [];
   for (const m of models) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(key)}`;
-    const r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
-    if (r.status === 404 || r.status === 403) { fails.push(`${m} → ${r.status}`); continue; }
+    let r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+    // ⚠ 11.4.6 — UN 500/503 N'EST PAS UNE ERREUR DE NOTRE CÔTÉ : c'est une panne passagère
+    // de Google, et elle tombe surtout sur le RÉSUMÉ DE VIDÉO (« Erreur IA (HTTP 500) »
+    // signalé par l'utilisateur) — ingérer une vidéo YouTube est ce que l'API fait de plus
+    // lourd, elle lâche donc régulièrement au 1er essai. On rejoue UNE fois le même modèle
+    // après une seconde, puis on descend la liste comme pour un 404/403 : un autre modèle
+    // n'a pas forcément la même panne. La clé, elle, n'y est pour rien → surtout ne pas
+    // renvoyer « clé invalide ».
+    if (r.status >= 500) {
+      await new Promise(ok => setTimeout(ok, GEMINI_5XX_WAIT_MS));
+      r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+    }
+    if (r.status === 404 || r.status === 403 || r.status >= 500) { fails.push(`${m} → ${r.status}`); continue; }
     if (!r.ok) {
       if (r.status === 400) throw new Error('Clé Gemini invalide ou non autorisée.');
       if (r.status === 429) throw new Error('Quota Gemini atteint — réessaie plus tard.');
@@ -19063,8 +19075,16 @@ async function geminiCall(parts, opts) {
     _gemModel = m;                          // mémorisé : les appels suivants partent direct dessus
     return txt;
   }
+  // ⚠ Le message NOMME la cause probable : c'est lui que l'utilisateur lit dans la feuille
+  // de résumé, et un 500 ne se règle pas du tout comme un 404.
+  if (fails.every(f => / → 5\d\d$/.test(f))) {
+    throw new Error('Gemini est en panne pour le moment (HTTP ' + fails[0].split('→ ')[1]
+      + ') — ça vient de Google, pas de ta clé. Réessaie dans quelques minutes '
+      + '(sur une vidéo, le ↻ de la feuille suffit).');
+  }
   throw new Error('Aucun modèle Gemini ne répond (' + fails.join(', ') + ') — 404 = retiré par Google '
-    + '(mettre à jour GEMINI_MODELS), 403 = clé restreinte ou modèle hors palier gratuit.');
+    + '(mettre à jour GEMINI_MODELS), 403 = clé restreinte ou modèle hors palier gratuit, '
+    + '5xx = panne passagère chez Google.');
 }
 
 // FAÇADE — le nom est conservé pour que les ~15 appelants restent inchangés.
