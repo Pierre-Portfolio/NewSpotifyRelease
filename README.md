@@ -48,7 +48,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 
 | Module | Ce qu'il fait |
 |---|---|
-| **📰 Actu** | Actualité (monde, régional, Wikipédia, LinkedIn, bourse, IA, cyber, insolite, jeux), cartes interactives (aurores, séismes, guerre, qualité de l'air et de l'eau, transports, espèces animales…), fuites de données, vidéos de tes abonnements YouTube |
+| **📰 Actu** | Actualité (monde, régional, Wikipédia, LinkedIn, bourse, IA, cyber, insolite, jeux), cartes interactives (aurores, séismes, guerre, qualité de l'air et de l'eau, transports, espèces animales…), fuites de données, vidéos de tes abonnements YouTube (même lecteur plein écran que TV Time) |
 | **🔔 Alertes** | Échéances par rubrique (administratif, anniversaires, logement, véhicule, santé, travail, finance, jeux…), rappels persos, récurrences, calendrier mensuel, alertes automatiques Frigo et Steam |
 | **🔌 API** | Liste locale de toutes les API utilisées par le Hub, saisie des clés, compteur d'appels par API, export JSON |
 | **🏷️ Bon Plan** | Ta liste de jeux suivis avec prix cible, promos du moment, bibliothèque et liste de souhaits Steam, recherche de bons plans par IA |

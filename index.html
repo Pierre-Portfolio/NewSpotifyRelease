@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.4.8';
+const APP_VERSION = '11.4.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29722,59 +29722,18 @@ async function ytWlDropSeen(id) {
   return true;
 }
 
-// ── ▶ Lecture EN PLACE dans Actu, AVEC détection de fin (11.3.8) ──────────────────────
-// Jusqu'ici l'embed d'Actu était une iframe muette : regarder une vidéo en entier ne la
-// comptait nulle part (« N'ajoute RIEN dans TV Time »). Elle parle maintenant le même
-// protocole que le lecteur plein écran de TV Time — `enablejsapi=1` + `origin=` dans
-// l'URL, handshake `listening`, puis écoute des `infoDelivery`.
-// ⚠ `postMessage` n'est PAS soumis à `connect-src` : aucune origine à ajouter à la CSP.
-// ⚠ `onEnded` ne part QU'UNE FOIS par vidéo (`doneRef`) — YouTube répète l'état 0 en boucle.
-// ⚠ `endRef` : l'écouteur est posé une fois par vidéo, il ne doit pas figer un `onEnded`
-// périmé (piège des refs anti-closure).
-function ActuYtPlayer({ v, onEnded }) {
-  const frameRef = React.useRef(null);
-  const doneRef  = React.useRef(false);
-  const endRef   = React.useRef(onEnded);
-  endRef.current = onEnded;
-  React.useEffect(() => {
-    doneRef.current = false;
-    const frameWin = () => { const f = frameRef.current; return (f && f.contentWindow) || null; };
-    let hellos = 0, helloTimer = null, talking = false;
-    const hello = () => {
-      const w = frameWin();
-      if (w) { try { w.postMessage(JSON.stringify({ event:'listening', id:'hub-actu', channel:'widget' }), YT_EMBED_ORIGIN); } catch {} }
-      if (talking || ++hellos >= YT_JSAPI_HELLO_N) { clearInterval(helloTimer); helloTimer = null; }
-    };
-    const fin = () => { if (doneRef.current) return; doneRef.current = true; endRef.current(); };
-    const onMsg = e => {
-      const w = frameWin();
-      if (!w || e.source !== w) return;              // ne lit QUE les messages de NOTRE iframe
-      let d = e.data;
-      if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
-      const info = d && d.info;
-      if (!info) return;
-      talking = true;
-      if (info.playerState === 0) fin();
-      // Filet : certains embeds n'annoncent pas l'état 0 mais continuent de donner la position.
-      else if (typeof info.playerState !== 'number' && info.duration > 0 && info.currentTime >= info.duration - 0.25) fin();
-    };
-    window.addEventListener('message', onMsg);
-    hello();
-    helloTimer = setInterval(hello, YT_JSAPI_HELLO_MS);
-    return () => { window.removeEventListener('message', onMsg); if (helloTimer) clearInterval(helloTimer); };
-  }, [v.id]);
-  return (
-    <iframe ref={frameRef}
-      src={`${YT_EMBED_ORIGIN}/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}`}
-      title={v.title} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowFullScreen
-      style={{ position:'absolute', inset:0, width:'100%', height:'100%', border:'none' }} />
-  );
-}
-
 // Carte « ▶️ VIDÉOS YOUTUBE · Abonnements » de la section Actu.
 // Onglets Vidéo / Short en tête (40% de large chacun), lazyload infini par onglet.
-// N'ajoute RIEN dans TV Time.
 // 🕒 = ajout direct dans la playlist YouTube « Hub Pierre » du compte.
+// ⚠ 11.4.9 (demande utilisateur) — LA LECTURE PASSE PAR `YtFullscreenPlayer`, le lecteur
+// plein écran de TV Time : « mettre la même interface que si je regardais depuis TV Time ».
+// L'iframe muette posée dans la vignette (`ActuYtPlayer`) a donc disparu, et avec elle son
+// protocole postMessage en double — le lecteur de TV Time parle déjà le même. On y gagne
+// swipe/molette/double tap, ⏮ ⏭, pause, 💬 commentaires, ✨ résumé IA et le compteur de file.
+// ⚠ La file est TOUT l'onglet courant (Vidéo ou Shorts), pas seulement les vignettes déjà
+// chargées par le lazyload : ⏭ doit pouvoir dépasser le bas de la liste visible.
+// ⚠ `itemId` = le NOM de la chaîne : c'est ce qui alimente le 2e compteur du lecteur
+// (« 🎥 3/7 » = où j'en suis chez ce vidéaste dans la file).
 function ActuYoutubeSection() {
   const [data, setData]       = React.useState(() => loadYtSubs());
   const [added, setAdded]     = React.useState(() => new Set(loadYtWlAdded()));
@@ -29784,10 +29743,14 @@ function ActuYoutubeSection() {
   const [visible, setVisible] = React.useState(YTSUB_PAGE);
   const [ytTab, setYtTab]     = React.useState('video');   // 'video' (≥ 3 min) | 'short' (< 3 min)
   const [connected]           = React.useState(() => ytgConnected());   // jeton YouTube dédié (7.6.67)
-  const [playingId, setPlayingId] = React.useState(null);  // vidéo lue en place (embed iframe)
-  // Vidéos regardées EN ENTIER pendant cette session (11.3.8) → pastille « ✓ vue ». Le
+  const [player, setPlayer]   = React.useState(null);      // { queue, i } — lecteur plein écran
+  // Vidéos comptées vues pendant cette session (11.3.8) → pastille « ✓ vue ». Le
   // classement, lui, est écrit dans TV Time tout de suite ; ce Set n'est que l'affichage.
   const [seenIds, setSeenIds] = React.useState(() => new Set());
+  // ⚠ Miroir en REF de `seenIds` : le lecteur rapporte sa position plusieurs fois par
+  // seconde, et relire l'état React ferait repartir `ytSeenMarkAnywhere` (donc tout le
+  // localStorage de TV Time) à chaque rapport. La ref tranche AVANT.
+  const seenRef = React.useRef(new Set());
   const sentinelRef           = React.useRef(null);
 
   const refresh = React.useCallback(async (force) => {
@@ -29852,14 +29815,25 @@ function ActuYoutubeSection() {
     setWlBusy(null);
   };
 
-  // Vidéo arrivée au bout dans l'embed → elle est VUE : classée dans TV Time (sa chaîne si
-  // elle y est suivie, sinon la pseudo-chaîne « Hub Pierre ») et retirée de la playlist
-  // « Hub Pierre » si elle y attendait. Idempotent.
-  const onVideoEnded = React.useCallback(v => {
-    setSeenIds(prev => (prev.has(v.id) ? prev : new Set(prev).add(v.id)));
+  // Vidéo arrivée au bout → elle est VUE : classée dans TV Time (sa chaîne si elle y est
+  // suivie, sinon la pseudo-chaîne « Hub Pierre ») et retirée de la playlist « Hub Pierre »
+  // si elle y attendait. Idempotent grâce à `seenRef`.
+  const markSeen = React.useCallback(v => {
+    if (!v || !v.id || seenRef.current.has(v.id)) return;
+    seenRef.current.add(v.id);
+    setSeenIds(prev => new Set(prev).add(v.id));
     ytSeenMarkAnywhere(v);
     ytWlDropSeen(v.id).then(dropped => { if (dropped) setAdded(new Set(loadYtWlAdded())); });
   }, []);
+
+  // Ouvre le lecteur plein écran sur `v`, avec TOUT l'onglet courant en file.
+  // ⚠ La file est construite ici (et non dans le rendu) : `YtFullscreenPlayer` garde son
+  // index, un nouveau tableau à chaque render ferait repartir ses effets sans arrêt.
+  const openPlayer = React.useCallback(v => {
+    const queue = list.map(x => ({ ...x, itemId: x.channel || '' }));
+    const i = Math.max(0, queue.findIndex(x => x.id === v.id));
+    setPlayer({ queue, i });
+  }, [list]);
 
   // Badge de durée façon YouTube — en SECONDES (« 0:25 » pour un Short, « 22:04 », « 1:08:00 »)
   const fmtDurBadge = sec => {
@@ -29872,32 +29846,27 @@ function ActuYoutubeSection() {
   const vidCard = (v, saved, onAction, actionColor, busy) => {
     const watch = `https://www.youtube.com/watch?v=${encodeURIComponent(v.id)}`;
     const hq = `https://i.ytimg.com/vi/${encodeURIComponent(v.id)}/hqdefault.jpg`;
-    const playing = playingId === v.id;
     const watched = seenIds.has(v.id);
     return (
       <div key={v.id} style={{ padding:'12px 0', borderBottom:`1px solid ${C.border}44` }}>
-        {/* Clic sur la miniature → lecture EN PLACE (iframe YouTube). Le bouton ↗ ouvre dans
-            un nouvel onglet du navigateur. */}
+        {/* Clic sur la miniature → LECTEUR PLEIN ÉCRAN de TV Time (11.4.9). Le bouton ↗
+            ouvre toujours la vidéo dans un nouvel onglet du navigateur. */}
         <div style={{ position:'relative', borderRadius:12, overflow:'hidden', background:'#000', aspectRatio:'16 / 9' }}>
-          {playing ? (
-            <ActuYtPlayer v={v} onEnded={() => onVideoEnded(v)} />
-          ) : (
-            <button onClick={() => setPlayingId(v.id)} title="Lire la vidéo ici"
-              style={{ display:'block', width:'100%', height:'100%', padding:0, border:'none', background:'none', cursor:'pointer', position:'relative' }}>
-              <img src={hq} alt="" loading="lazy"
-                onError={e => { if (v.thumb && e.target.src !== v.thumb) e.target.src = v.thumb; else e.target.style.display = 'none'; }}
-                style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
-              <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none' }}>
-                <span style={{ width:56, height:40, background:'rgba(0,0,0,.72)', borderRadius:11, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:17, paddingLeft:3 }}>▶</span>
+          <button onClick={() => openPlayer(v)} title="Lire la vidéo en plein écran"
+            style={{ display:'block', width:'100%', height:'100%', padding:0, border:'none', background:'none', cursor:'pointer', position:'relative' }}>
+            <img src={hq} alt="" loading="lazy"
+              onError={e => { if (v.thumb && e.target.src !== v.thumb) e.target.src = v.thumb; else e.target.style.display = 'none'; }}
+              style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+            <span style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none' }}>
+              <span style={{ width:56, height:40, background:'rgba(0,0,0,.72)', borderRadius:11, display:'flex', alignItems:'center', justifyContent:'center', color:'#fff', fontSize:17, paddingLeft:3 }}>▶</span>
+            </span>
+            {v.durSec || v.dur ? (
+              <span style={{ position:'absolute', right:8, bottom:8, background:'rgba(0,0,0,.82)', color:'#fff',
+                fontSize:11, fontWeight:600, padding:'1px 5px', borderRadius:5, fontFamily:'DM Mono,monospace', letterSpacing:.2 }}>
+                {fmtDurBadge(v.durSec || v.dur * 60)}
               </span>
-              {v.durSec || v.dur ? (
-                <span style={{ position:'absolute', right:8, bottom:8, background:'rgba(0,0,0,.82)', color:'#fff',
-                  fontSize:11, fontWeight:600, padding:'1px 5px', borderRadius:5, fontFamily:'DM Mono,monospace', letterSpacing:.2 }}>
-                  {fmtDurBadge(v.durSec || v.dur * 60)}
-                </span>
-              ) : null}
-            </button>
-          )}
+            ) : null}
+          </button>
         </div>
         <div style={{ display:'flex', gap:8, marginTop:9, alignItems:'flex-start' }}>
           <div style={{ flex:1, minWidth:0 }}>
@@ -30003,6 +29972,16 @@ function ActuYoutubeSection() {
         </div>
       </>)}
     </StatsCollapse>
+    {/* Lecteur plein écran — le MÊME que TV Time (11.4.9). ⚠ `onPlaying` n'est PAS fourni :
+        lancer une vidéo ne la compte pas vue, c'est la progression qui décide. `onValidate`
+        non plus — la file d'Actu ne vient pas de la playlist « Hub Pierre », il n'y a donc
+        ni bouton « ✓ Valider » ni validation au changement de vidéo.
+        `autoNext` sur l'onglet Shorts seulement, comme la file 🩳 de TV Time. */}
+    {player && <YtFullscreenPlayer queue={player.queue} index={player.i}
+      onIndex={i => setPlayer(p => (p ? { ...p, i } : p))}
+      onClose={() => setPlayer(null)}
+      onEnded={markSeen}
+      autoNext={ytTab === 'short'} />}
   </>);
 }
 
@@ -36611,7 +36590,11 @@ const YT_COUNT_ON       = '#e05050'; // bord du compteur SÉLECTIONNÉ dans la b
 // MINUTES ARRONDIES dans TV Time et une durée INCONNUE vaut 0 : elle compte donc comme un
 // Short — même convention que ytShortsQueue et le tag `shortsOnly` d'ytBuildItem.
 const ytIsShortEntry = e => !!e && (e.dur || 0) < YT_MIN_MINUTES;
-function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds, autoNext }) {
+// ⚠ 11.4.9 — `onEnded` / `onProgress` (facultatifs) ouvrent le lecteur à un appelant qui
+// n'est PAS TV Time : la section Actu s'en sert pour compter une vidéo vue. Ils sont lus par
+// une REF (`hooksRef`) et non par la closure de l'écouteur `message`, qui n'est réattaché
+// qu'au changement de vidéo — sans ça il figerait les callbacks du 1er rendu (piège n° 6).
+function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValidate, validatedIds, autoNext, onEnded, onProgress }) {
   const boxRef = React.useRef(null);
   const frameRef = React.useRef(null);
   // 💬 Feuille de commentaires (7.9.9), ouverte par le bouton en HAUT À DROITE.
@@ -36638,8 +36621,11 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // regarder la vidéo, et sans ce verrou la chute d'`innerHeight` remplaçait la page
   // par CompactPlayer (contrôles Spotify) → lecteur démonté, vidéo quittée.
   useImmersiveLock(true);
+  // Callbacks de l'appelant + vidéo courante, toujours à jour pour l'écouteur `message`.
+  const hooksRef = React.useRef(null);
+  hooksRef.current = { onEnded, onProgress, v };
   // Marque vue à chaque vidéo lancée (changement d'index compris)
-  React.useEffect(() => { if (v) onPlaying(v); }, [vid]);
+  React.useEffect(() => { if (v && onPlaying) onPlaying(v); }, [vid]);
   // Plein écran NATIF, best effort : refusé hors geste utilisateur et absent sur iOS →
   // l'échec est sans conséquence, l'overlay couvre déjà tout le viewport.
   React.useEffect(() => {
@@ -36723,6 +36709,15 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       if (endTimerRef.current) { clearInterval(endTimerRef.current); endTimerRef.current = null; }
       setEndWait(0);
     };
+    // ⚠ `once` : YouTube répète l'état 0 en boucle — `leaveCurrent` est idempotent, mais
+    // `onEnded` ne doit partir QU'UNE FOIS par vidéo (même garde que l'ancien `doneRef`
+    // du lecteur d'Actu). La variable vit dans l'effet, donc elle se réarme à chaque vidéo.
+    let once = false;
+    const fin = () => {
+      leaveRef.current();
+      if (!once) { once = true; const h = hooksRef.current; if (h.onEnded) h.onEnded(h.v); }
+      if (armable) arm();
+    };
     const arm = () => {
       if (endTimerRef.current) return;   // déjà armé : `infoDelivery` répète l'état en boucle
       let left = Math.round(YT_END_NEXT_MS / 1000);
@@ -36759,6 +36754,8 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         // ⏱ 11.3.9 — mémorisée pour la pop-up 📺 (« où j'en suis »). Écriture throttlée à
         // 5 s : `infoDelivery` arrive plusieurs fois par seconde.
         ytProgTouch(vid, timeRef.current.t, timeRef.current.d);
+        const h = hooksRef.current;
+        if (h.onProgress) h.onProgress(h.v, timeRef.current.t, timeRef.current.d);
       }
       // ⚠ 11.3.5 (demande utilisateur) — LA FIN DE LA VIDÉO VAUT VALIDATION pour une vidéo
       // venue de la playlist « Hub Pierre » : elle sort de la playlist YouTube et rejoint
@@ -36768,11 +36765,11 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       // file playlist → les autres files sont inchangées. Le retour en arrière reste la
       // coche verte de la pop-up, qui la remet EN FIN de playlist.
       // ⚠ Indépendant d'`armable` : l'auto-avance, elle, reste réservée aux files 🩳.
-      if (info.playerState === 0) { leaveRef.current(); if (armable) arm(); }
+      if (info.playerState === 0) fin();
       else if (typeof info.playerState === 'number') clear();
       // Filet : certains embeds ne renvoient pas l'état 0 mais continuent d'annoncer la
       // position — arrivé au bout, on considère la vidéo terminée.
-      else if (info.duration > 0 && info.currentTime >= info.duration - 0.25) { leaveRef.current(); if (armable) arm(); }
+      else if (info.duration > 0 && info.currentTime >= info.duration - 0.25) fin();
     };
     window.addEventListener('message', onMsg);
     hello();
