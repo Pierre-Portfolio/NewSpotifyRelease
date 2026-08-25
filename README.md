@@ -51,7 +51,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 | **📰 Actu** | Actualité (monde, régional, Wikipédia, LinkedIn, bourse, IA, cyber, insolite, jeux), cartes interactives (aurores, séismes, guerre, qualité de l'air et de l'eau, transports, espèces animales…), fuites de données, vidéos de tes abonnements YouTube (même lecteur plein écran que TV Time ; une vidéo vue à moitié est comptée vue chez le vidéaste si tu suis sa chaîne) |
 | **🔔 Alertes** | Échéances par rubrique (administratif, anniversaires, logement, véhicule, santé, travail, finance, jeux…), rappels persos, récurrences, calendrier mensuel, alertes automatiques Frigo et Steam |
 | **🔌 API** | Liste locale de toutes les API utilisées par le Hub, saisie des clés, compteur d'appels par API, export JSON |
-| **🏷️ Bon Plan** | Ta liste de jeux suivis avec prix cible, promos du moment, bibliothèque et liste de souhaits Steam, recherche de bons plans par IA |
+| **🏷️ Bon Plan** | Ta liste de jeux suivis avec prix cible, promos du moment (CheapShark **+ Steam + Epic**, jeu offert de la semaine compris), bibliothèque et liste de souhaits Steam, recherche de bons plans par IA |
 | **🗃️ Collection** | Cartes (Pokémon, Magic), Displate, Funko Pop, jeux vidéo, pierres, montres, vins. Recherche par catalogue, ajout manuel, estimation par photo, scan d'une photo pour ajouter plusieurs pièces |
 | **💼 Emploi** | Ton salaire comparé à ton secteur + offres du moment |
 | **💹 Finance** | Cours (crypto, indices, or, devises, actions) en mode Light ou Full, historique de prix constitué jour après jour, calculatrice, tableau de bord BullRun, et **Mes Actifs** (lecture de ton classeur Google Drive : patrimoine, portefeuille crypto converti en BTC) |
