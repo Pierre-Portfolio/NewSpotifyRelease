@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.3.2';
+const APP_VERSION = '11.3.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -23569,8 +23569,142 @@ function HistImg({ im }) {
     </a>
   );
 }
+// ── 💬 QUESTIONS À L'IA — un fil de discussion PAR FICHE ────────────────────────
+// Après « À SAVOIR », l'utilisateur continue d'interroger le modèle sur CETTE œuvre.
+// ⚠ Le prompt commence TOUJOURS par la ville puis le nom de l'œuvre, avant la question :
+// sans ce cadrage, une question courte (« qui l'a payée ? ») part sans sujet et le modèle
+// répond à côté. Le fil est stocké DANS la fiche (`chat`) → suivi par `histSave`, donc
+// présent dans les sauvegardes, et borné pour ne pas gonfler le quota localStorage.
+const HISTOIRE_CHAT_MAX  = 24;   // échanges conservés dans une fiche
+const HISTOIRE_CHAT_CTX  = 4;    // échanges précédents renvoyés au modèle (contexte du fil)
+
+function histChatPrompt(f, question, history) {
+  const ident = [f.type, f.auteur, f.epoque].filter(Boolean).join(' · ');
+  const L = [];
+  L.push(`Ville : ${f.ville}`);
+  L.push(`Œuvre : ${f.oeuvre}${ident ? ` (${ident})` : ''}${f.lieu ? ` — ${f.lieu}` : ''}`);
+  L.push(`Ma question : ${question}`);
+  L.push('');
+  L.push("Tu es historien de l'art et guide-conférencier, spécialiste du patrimoine local. Tu réponds en français, au sujet de CETTE œuvre dans CETTE ville.");
+  if (f.resume) L.push(`Fiche déjà rédigée — résumé : ${f.resume}`);
+  if (f.lien)   L.push(`Fiche déjà rédigée — lien avec la ville : ${f.lien}`);
+  (history || []).forEach(m => { L.push(`Question précédente : ${m.q}`); L.push(`Ta réponse : ${histTxt(m.a, 700)}`); });
+  L.push('Réponds en 2 à 6 phrases, en texte simple : ni Markdown, ni titre, ni liste à puces.');
+  L.push("N'INVENTE RIEN : ni date, ni nom, ni anecdote. Si tu ne sais pas, dis-le franchement.");
+  return L.join('\n');
+}
+
+// Même repli que `histAnalyze` : recherche web ancrée si le fournisseur la gère, sinon 2e
+// appel sans outil et la réponse est marquée « non ancrée ».
+async function histAsk(f, question, history) {
+  const parts = [{ text: histChatPrompt(f, question, history) }];
+  let txt, grounded = true;
+  try {
+    txt = await geminiGenerate(parts, { tools: [{ google_search: {} }] });
+  } catch (e) {
+    if (String((e && e.message) || '').includes('NO_KEY')) throw e;
+    grounded = false;
+    txt = await geminiGenerate(parts);
+  }
+  const a = histTxt(txt, 2500);
+  return a ? { a, grounded } : null;
+}
+
+const histChatHeure = ts => { try { return new Date(ts).toLocaleTimeString('fr-FR', { hour:'2-digit', minute:'2-digit' }); } catch { return ''; } };
+
+// `onPatch(id, patch)` renvoie le booléen de `histSave` : une réponse non écrite doit être
+// signalée, sinon elle s'affiche comme enregistrée et disparaît au rechargement.
+function HistoireChat({ f, onPatch }) {
+  const [q, setQ]       = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr]   = React.useState('');
+  const hasKey = aiAnyKey();
+  const chat   = Array.isArray(f.chat) ? f.chat : [];
+  const ready  = !!q.trim() && !busy && hasKey;
+
+  const send = async () => {
+    const question = q.trim();
+    if (!question || busy) return;
+    setBusy(true); setErr(''); setQ('');
+    try {
+      const r = await histAsk(f, question, chat.slice(-HISTOIRE_CHAT_CTX));
+      if (!r) { setErr("Réponse vide de l'IA — reformule ta question."); setQ(question); }
+      else {
+        const next = chat.concat([{ q: histTxt(question, 400), a: r.a, grounded: r.grounded, at: Date.now() }]).slice(-HISTOIRE_CHAT_MAX);
+        if (!onPatch(f.id, { chat: next })) setErr('Réponse affichée mais NON enregistrée (stockage local plein) : elle disparaîtra au rechargement.');
+      }
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      setErr(m.includes('NO_KEY')
+        ? "Aucune clé Gemini enregistrée — ajoute-la dans le module API (ligne « gemini »)."
+        : m);
+      setQ(question);
+    }
+    setBusy(false);
+  };
+  const clearChat = () => { if (chat.length) onPatch(f.id, { chat: [] }); };
+
+  const bubble = (who, txt, mine) => (
+    <div style={{ display:'flex', flexDirection:'column', alignItems: mine ? 'flex-end' : 'flex-start', gap:2 }}>
+      <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{who}</div>
+      <div style={{ maxWidth:'88%', background: mine ? `${HISTOIRE_COLOR}22` : C.surface,
+        border:`1px solid ${mine ? HISTOIRE_COLOR + '55' : C.border}`, borderRadius:10,
+        padding:'7px 10px', fontSize:12, color:C.text, lineHeight:1.6, whiteSpace:'pre-wrap' }}>{txt}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ background:C.surfaceHigh, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <div style={{ flex:1, minWidth:0, fontSize:10, fontWeight:800, color:HISTOIRE_COLOR, letterSpacing:'0.06em' }}>💬 POSER UNE QUESTION</div>
+        {!!chat.length && (
+          <button onClick={clearChat} title="Effacer la discussion"
+            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted,
+              fontSize:9.5, padding:'2px 7px', cursor:'pointer', flexShrink:0, fontFamily:'inherit' }}>🗑️ Effacer</button>
+        )}
+      </div>
+
+      {!chat.length && !busy && (
+        <div style={{ fontSize:10.5, color:C.dim, fontStyle:'italic', lineHeight:1.55 }}>
+          Demande ce que tu veux sur cette œuvre — la ville et son nom sont rappelés au modèle à chaque question.
+        </div>
+      )}
+
+      {!!chat.length && (
+        <div style={{ display:'flex', flexDirection:'column', gap:9 }}>
+          {chat.map((m, i) => (
+            <React.Fragment key={m.at ? `${m.at}-${i}` : i}>
+              {bubble(`MOI · ${histChatHeure(m.at)}`, m.q, true)}
+              {bubble(m.grounded ? 'IA · avec recherche web' : 'IA · sans recherche web', m.a, false)}
+            </React.Fragment>
+          ))}
+        </div>
+      )}
+
+      {busy && <div style={{ fontSize:11, color:HISTOIRE_COLOR }}>⏳ L'IA réfléchit…</div>}
+
+      <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+        <input value={q} onChange={e => setQ(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') send(); }}
+          disabled={busy || !hasKey}
+          placeholder={hasKey ? 'Ta question sur cette œuvre…' : 'Clé IA manquante (module API)'}
+          style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${q.trim() ? HISTOIRE_COLOR + '88' : C.border}`,
+            borderRadius:6, padding:'7px 10px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit' }} />
+        <button onClick={send} disabled={!ready}
+          style={{ background: ready ? `${HISTOIRE_COLOR}22` : 'none', border:`1px solid ${ready ? HISTOIRE_COLOR + '88' : C.border}`,
+            borderRadius:6, color: ready ? HISTOIRE_COLOR : C.dim, fontSize:12, fontWeight:700,
+            padding:'7px 12px', cursor: ready ? 'pointer' : 'default', flexShrink:0, fontFamily:'inherit' }}>
+          {busy ? '⏳' : '➤'}
+        </button>
+      </div>
+      {err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.55 }}>⚠ {err}</div>}
+    </div>
+  );
+}
+
 // Une fiche rendue en entier (résumé + lien avec la ville).
-function HistoireFiche({ f }) {
+// `onPatch` (facultatif) active le fil de questions à l'IA sous « À savoir ».
+function HistoireFiche({ f, onPatch }) {
   const meta = [f.type, f.auteur, f.epoque, f.lieu].filter(Boolean);
   const block = (title, body) => (
     <div style={{ background:C.surfaceHigh, borderRadius:10, padding:'10px 12px' }}>
@@ -23608,6 +23742,7 @@ function HistoireFiche({ f }) {
           </div>
         </div>
       )}
+      {!!onPatch && <HistoireChat f={f} onPatch={onPatch} />}
       {f.confiance && <div style={{ fontSize:10, color:C.muted, fontStyle:'italic', lineHeight:1.55 }}>🎯 {f.confiance}</div>}
       {!!(f.sources || []).length && (
         <div style={{ display:'flex', gap:5, flexWrap:'wrap', alignItems:'center' }}>
@@ -23660,10 +23795,14 @@ function HistoirePanel() {
   // ⚠ On repart de `histLoad()` (le disque) et non du state : la recherche d'images est
   // asynchrone et peut aboutir APRÈS un autre enregistrement — sinon on réécrirait une
   // liste périmée, comme dans Collection 8.1.4.
+  // Renvoie le booléen de `histSave` : le fil de questions doit prévenir quand le
+  // stockage est plein plutôt que d'afficher une réponse qui disparaîtra au F5.
   const patchFiche = (id, patch) => {
     const next = histLoad().map(f => f.id === id ? { ...f, ...patch } : f);
-    setList(next); histSave(next);
+    setList(next);
+    const ok = histSave(next);
     setRes(r => (r && r.id === id) ? { ...r, ...patch } : r);
+    return ok;
   };
   // UNE requête Google Images par fiche (quota gratuit : 100/jour). Le résultat est
   // mémorisé DANS la fiche (des URL, jamais des images) → rouvrir une fiche ne recoûte rien.
@@ -23760,7 +23899,7 @@ function HistoirePanel() {
 
       {res && (
         <div style={{ background:C.surface, border:`1px solid ${HISTOIRE_COLOR}44`, borderRadius:10, padding:'12px 13px', display:'flex', flexDirection:'column', gap:9 }}>
-          <HistoireFiche f={res} />
+          <HistoireFiche f={res} onPatch={patchFiche} />
           <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
             {imgOn ? (
               <button onClick={() => loadImages(res)} disabled={imgMsg === 'busy'}
