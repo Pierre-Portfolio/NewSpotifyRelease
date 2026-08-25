@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.2.0';
+const APP_VERSION = '11.2.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2487,6 +2487,17 @@ async function dwCaptureFromContext(contextUri, addLog) {
   } catch { return 0; }
 }
 
+// Point de départ d'un artiste DÉJÀ connu qui n'a pas encore de date de scan.
+const DEFAULT_SCRAPE_FROM = '2026-03-15';
+// ⚠ Sentinelle « discographie ENTIÈRE » : posée comme `last_scraped_at` sur la ligne
+// « légère » d'un PREMIER scan. Elle sert de marque-page — si un 429 coupe le scan au
+// milieu, l'artiste existe déjà en base mais reste reconnu comme jamais scanné, et la
+// reprise repart bien sur TOUTE la discographie au lieu des seules sorties récentes.
+// La date définitive (`datetime('now')`) n'est écrite qu'à la fin, artiste terminé.
+const FULL_SCRAPE_FROM = '1900-01-01';
+// Garde-fou de pagination du premier scan (10 albums par page) : 200 pages = 2000 sorties.
+// Ce n'est pas un plafond fonctionnel mais une sécurité contre un `next` qui boucle.
+const FULL_SCRAPE_MAX_PAGES = 200;
 // Une release_date Spotify a une précision variable : 'day' ("2026-05-10"), 'month'
 // ("2026-05") ou 'year' ("2026"). new Date("2026") → 1er janvier : une nouveauté datée à
 // l'année seule passait alors SOUS le cutoff (ex. 2026-03-15) et était ratée. On considère
@@ -3546,9 +3557,17 @@ function StoreProvider({ children }) {
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
+          // PREMIÈRE FOIS qu'on voit cet artiste → on prend 100 % de sa discographie (aucun
+          // cutoff, toutes les pages d'albums). Vaut aussi pour la reprise d'un premier scan
+          // interrompu, reconnaissable à la sentinelle FULL_SCRAPE_FROM laissée par la ligne
+          // « légère ». Un artiste déjà scanné garde son scan incrémental depuis sa date.
+          const prevScraped = scrapedDates[artist.id];
+          const firstScrape = !prevScraped || prevScraped.slice(0, 10) <= FULL_SCRAPE_FROM;
           // Cutoff tronqué au JOUR du dernier scan : une sortie publiée le jour même du scan
           // mais indexée après ne doit pas être ratée (les doublons sont absorbés par INSERT OR IGNORE)
-          const cutoff = new Date((scrapedDates[artist.id] || '2026-03-15').slice(0, 10));
+          const cutoffISO = firstScrape ? FULL_SCRAPE_FROM : (prevScraped || DEFAULT_SCRAPE_FROM).slice(0, 10);
+          const cutoff = new Date(cutoffISO);
+          if (firstScrape) setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name} · discographie complète`, 'pulse');
           const albumsData = await apiGetSafe(
             // ⚠ Migration Spotify fév./mars 2026 : limit max de cet endpoint réduit de 50 à 10
             // (limit=20 → 400 "Invalid limit" depuis le 9 mars 2026, même pour les apps existantes)
@@ -3570,18 +3589,39 @@ function StoreProvider({ children }) {
             saveQuota(dailyCount, 0, scrapAt);
           }
           setDailyScrapings(dailyCount);
+
+          // ⚠ `limit` max = 10 → une page ne couvre que 10 sorties. Pour un artiste déjà
+          // connu ça suffit largement (l'endpoint rend les plus récentes d'abord et le
+          // cutoff coupe tout de suite), mais au PREMIER scan il faut dérouler `next`
+          // jusqu'au bout, sinon « 100 % de la discographie » s'arrêterait à 10 sorties.
+          // Chaque page passe par apiGetSafe → checkpoint (pause + fenêtre 429) respecté.
+          if (firstScrape && albumsData?.items) {
+            let nextAlbums = albumsData.next, albumPages = 1;
+            while (nextAlbums && albumPages < FULL_SCRAPE_MAX_PAGES) {
+              const more = await apiGetSafe(nextAlbums);
+              if (!more?.items?.length) break;
+              albumsData.items = albumsData.items.concat(more.items);
+              nextAlbums = more.next || null;
+              albumPages++;
+              setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name} · ${albumsData.items.length} sorties trouvées`, 'pulse');
+            }
+            log(`★ ${artist.name} · premier scan — discographie complète : ${albumsData.items.length} sortie(s)`, 'info');
+          }
+
           if (albumsData?.items) {
             const inRange = albumsData.items.filter(a => releaseInRange(a.release_date, cutoff, ceiling));
-            if (inRange.length === 0) log(`→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
+            if (inRange.length === 0) log(firstScrape
+              ? `→ ${artist.name} · aucune sortie exploitable dans sa discographie`
+              : `→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
             let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
             const artistFeedItems = []; // #opt : on batche les items de l'artiste → UN seul setFeed
 
             // Ligne "légère" écrite DÈS que les albums sont lus, AVANT la boucle des pistes :
             // l'artiste devient visible dans le panneau même si un 429 coupe le scan plus bas.
-            // ⚠ last_scraped_at posé à la valeur de cutoff (= date existante ou défaut), JAMAIS
-            // avancée ici → aucun titre raté. Statut 'partial' tant que le scan n'est pas fini.
+            // ⚠ last_scraped_at posé à la valeur de `cutoffISO` (date existante, ou la sentinelle
+            // FULL_SCRAPE_FROM au premier scan), JAMAIS avancée ici → aucun titre raté, et une
+            // discographie coupée en route se reprend en ENTIER. Statut 'partial' jusqu'à la fin.
             // ON CONFLICT ne touche QUE les métadonnées (pas last_scraped_at/scan_count/total).
-            const cutoffISO = (scrapedDates[artist.id] || '2026-03-15').slice(0, 10);
             try {
               dbRun(
                 `INSERT INTO artists_scraped
@@ -42755,6 +42795,9 @@ function LikerPanel() {
 function formatListenedAt(s) {
   if (!s) return '';
   const str = String(s).trim();
+  // ⚠ Sentinelle du premier scan : ce n'est pas une date de scan mais un marque-page
+  // « discographie entière à faire » → l'artiste s'affiche « — », pas « il y a 46 000 jours ».
+  if (str === FULL_SCRAPE_FROM) return '';
   // Deux formats possibles : 'YYYY-MM-DD HH:MM:SS' (datetime('now'), UTC) et 'YYYY-MM-DD'
   // seul (last_scraped_at posé par la ligne « légère » d'un scan partiel). Une date sans
   // heure suffixée 'Z' donne Invalid Date → on la parse à midi local (delta en jours correct).

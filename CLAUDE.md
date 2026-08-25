@@ -15,7 +15,7 @@
 
 ## Vue d'ensemble
 
-PWA **sans backend**, hébergée statiquement sur GitHub Pages. Toutes les données sont locales (sql.js SQLite WASM + IndexedDB). Chaque artiste suivi est scrappé depuis **sa propre** `last_scraped_at` (défaut `2026-03-15`). L'utilisateur parcourt son feed, écoute titre par titre ; en fin de titre → marqué écouté + auto-avance + disparition animée. Aucun ajout auto en playlist.
+PWA **sans backend**, hébergée statiquement sur GitHub Pages. Toutes les données sont locales (sql.js SQLite WASM + IndexedDB). Chaque artiste suivi est scrappé depuis **sa propre** `last_scraped_at` ; un artiste **jamais scrappé prend toute sa discographie** (voir Scraping). L'utilisateur parcourt son feed, écoute titre par titre ; en fin de titre → marqué écouté + auto-avance + disparition animée. Aucun ajout auto en playlist.
 
 C'est un **hub perso multi-modules**. Ordre unique (desktop + mobile, onglets/menu/accueil) : Actu, Alertes, API, Bon Plan, Collection, Emploi, Finance, Frigo, Histoire, Jeux, Maps, Météo, Mot de Passe, Musique, Note, Revente, Santé, Sport, To Do, TV Time, Vêtement, Stats, À propos.
 
@@ -108,7 +108,8 @@ Item feed : `{ id, spotifyUri, label, artist, title, subtitle, date, rawDate, im
 **Rate-limit** : sur le **1er 429**, `_rlSet(max(Retry-After, 15 min))` (fenêtre persistée `spotifyplus_blocked_until`, relue au chargement du module → survit au F5 et s'applique à **tous** les appels, player compris) puis throw → `endSync('error')`. Boot pendant la fenêtre : `/me` → `rate_limited` → mode connecté dégradé (`user = null`) au lieu d'éjecter.
 
 **Boucle artiste** :
-- `cutoff = (scrapedDates[id] || '2026-03-15').slice(0,10)`
+- **Premier scan d'un artiste = 100 % de sa discographie** : `firstScrape` (aucune ligne `artists_scraped`, ou `last_scraped_at <= FULL_SCRAPE_FROM`) ⇒ `cutoff = FULL_SCRAPE_FROM` (`'1900-01-01'`) **et** pagination de TOUTES les pages d'albums (`next`, garde-fou `FULL_SCRAPE_MAX_PAGES`). Un artiste déjà connu garde `cutoff = last_scraped_at` et sa **seule 1re page**.
+- ⚠ `FULL_SCRAPE_FROM` est aussi la **sentinelle de reprise** : la ligne « légère » la pose comme `last_scraped_at`, donc un premier scan coupé par un 429 se reprend en ENTIER (poser `DEFAULT_SCRAPE_FROM` = `'2026-03-15'` ferait perdre la discographie à jamais). `formatListenedAt` l'affiche « — ».
 - `/artists/{id}/albums?include_groups=album,single&limit=10&market=FR` — **⚠ `limit` max = 10** depuis fév. 2026 (`limit=20` → 400).
 - Filtre par `releaseInRange` (gère la précision year/month/day)
 - Chaque album → `/albums/{id}/tracks?limit=50`
