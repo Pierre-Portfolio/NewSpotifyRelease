@@ -28,7 +28,7 @@
 // de connexion (mêmes chips animées que les autres modules, cliquables).
 // v34 : bump de cache — nouvelle section Jeux (selectbox 11 mini-jeux, en cours de construction).
 // v35 : bump de cache — les 11 mini-jeux sont développés et jouables (2048, Démineur, Flappy,
-// Go, Inposteur, Morpion, Motus, Osu, Puissance 4, Snake, TierList).
+// Go, Imposteur, Morpion, Motus, Osu, Puissance 4, Snake, TierList).
 // v36 : bump de cache — 2 jeux de plus dans Jeux : Memory (paires) et Bataille navale (vs IA).
 // v37 : bump de cache — module « Nourriture » renommé « Santé » (libellé visible ; id `food` inchangé).
 // v38 : bump de cache — nouveau module « Vêtement » (vide pour le moment).
@@ -125,7 +125,7 @@
 // s'applique plus que dans le module Musique.
 // v255 : bump de cache — Vêtement : flèches ‹ › dans la visionneuse photo (changer de
 // vêtement dans la même catégorie, avec retour au début aux extrémités).
-const CACHE  = 'spotifyplus-v331';
+const CACHE  = 'spotifyplus-v332';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
