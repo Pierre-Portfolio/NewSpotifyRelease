@@ -59,7 +59,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 | **🏛️ Histoire** | Une ville + une photo → l'IA identifie l'œuvre, la résume et explique son lien avec la ville, illustrations à l'appui ; sous la fiche, un fil de questions pour creuser l'œuvre |
 | **🎮 Jeux** | 27 mini-jeux 100 % hors ligne (2048, Doodle Jump, Crossy Road, Flappy, Motus, Démineur, Snake, Osu, Piano Tiles, Guitar Hero, Air Hockey, Blackjack, Poker, Flip 7, Puissance 4, Go, Morpion, Memory, Bataille navale, TierList, et des jeux de soirée à plusieurs sur le même téléphone) |
 | **🗺️ Maps** | Import de ton historique Google Timeline et affichage sur une carte |
-| **🌤️ Météo** | 5 lieux dont ta position, prévisions 3 ou 7 jours, détail heure par heure |
+| **🌤️ Météo** | 5 lieux dont ta position, prévisions 3 ou 7 jours, détail heure par heure, **notification quand il va pleuvoir dans les 2 h** (une seule par épisode de pluie) |
 | **🔐 Mot de passe** | Coffre chiffré AES-GCM 256 (PBKDF2 600 000 itérations), tags, réordonnancement, verrouillage automatique après 10 min |
 | **🗒️ Note** | Notes libres + un espace **crypté** séparé (mot de passe global), notes vocales et photos jointes, sauvegarde automatique à la frappe |
 | **♻️ Revente** | L'IA rédige tes annonces Vinted / Leboncoin / eBay à partir de tes photos et des infos de l'article (titre, description et prix adaptés à chaque plateforme, prêts à copier) |
