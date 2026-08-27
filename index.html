@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.6.6';
+const APP_VERSION = '11.6.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -37016,6 +37016,17 @@ function ytProgClock(sec) {
 // nous-mêmes. ⚠ `textFormat=plainText` : sans lui YouTube renvoie du HTML (liens, <br>) —
 // et il n'est PAS question de l'injecter (`dangerouslySetInnerHTML` proscrit dans ce projet).
 // `order=relevance` = l'ordre « Top » de YouTube.
+// Diagnostic d'une erreur de l'API Data v3 → code de YT_COMMENT_ERRORS, ou message brut.
+// ⚠ Le STATUT ne suffit pas : « commentaires désactivés » et « quota épuisé » sont tous les
+// deux des 403 — c'est `error.errors[0].reason` qui les distingue.
+function ytApiErr(res, body) {
+  const err = body && body.error;
+  const reason = (err && err.errors && err.errors[0] && err.errors[0].reason) || '';
+  if (reason === 'commentsDisabled') return 'DISABLED';
+  if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') return 'QUOTA';
+  if (res.status === 404 || reason === 'videoNotFound' || reason === 'commentNotFound') return 'NOTFOUND';
+  return (err && err.message) || `Erreur ${res.status}`;
+}
 const YT_COMMENTS_MAX = 40;
 async function ytFetchComments(videoId) {
   const key = ytKey();
@@ -37026,16 +37037,7 @@ async function ytFetchComments(videoId) {
   try { res = await fetch(`https://www.googleapis.com/youtube/v3/commentThreads?${q}`); }
   catch { return { error: 'NET' }; }
   const body = await res.json().catch(() => null);
-  const err = body && body.error;
-  if (!res.ok) {
-    // ⚠ Le STATUT ne suffit pas : « commentaires désactivés » et « quota épuisé » sont
-    // tous les deux des 403 — c'est `error.errors[0].reason` qui les distingue.
-    const reason = (err && err.errors && err.errors[0] && err.errors[0].reason) || '';
-    if (reason === 'commentsDisabled') return { error: 'DISABLED' };
-    if (reason === 'quotaExceeded' || reason === 'dailyLimitExceeded') return { error: 'QUOTA' };
-    if (res.status === 404 || reason === 'videoNotFound') return { error: 'NOTFOUND' };
-    return { error: (err && err.message) || `Erreur ${res.status}` };
-  }
+  if (!res.ok) return { error: ytApiErr(res, body) };
   const items = ((body && body.items) || []).map(t => {
     const s = t && t.snippet && t.snippet.topLevelComment && t.snippet.topLevelComment.snippet;
     if (!s) return null;
@@ -37043,6 +37045,35 @@ async function ytFetchComments(videoId) {
       text: s.textOriginal || s.textDisplay || '', likes: +s.likeCount || 0,
       date: s.publishedAt || '', replies: +(t.snippet.totalReplyCount || 0) };
   }).filter(Boolean);
+  return { items };
+}
+// ── Réponses À UN commentaire (dépliées à la demande) ───────────────────────────────
+// ⚠ `commentThreads.list` ne renvoie AUCUNE réponse avec `part=snippet` (et au plus 5 avec
+// `part=replies`, sans pagination) : le seul moyen d'avoir le fil complet est cet appel dédié
+// `comments.list?parentId=` (1 unité de quota), fait UNIQUEMENT au clic sur « 💬 X réponses ».
+// ⚠ `parentId` = l'id du THREAD (= celui du commentaire de premier niveau), pas celui d'une
+// réponse : YouTube ne gère qu'UN niveau d'imbrication, répondre à une réponse la rattache
+// au même thread.
+const YT_REPLIES_MAX = 100;
+async function ytFetchReplies(parentId) {
+  const key = ytKey();
+  if (!key) return { error: 'NOKEY' };
+  const q = new URLSearchParams({ key, part: 'snippet', parentId,
+    maxResults: String(YT_REPLIES_MAX), textFormat: 'plainText' });
+  let res;
+  try { res = await fetch(`https://www.googleapis.com/youtube/v3/comments?${q}`); }
+  catch { return { error: 'NET' }; }
+  const body = await res.json().catch(() => null);
+  if (!res.ok) return { error: ytApiErr(res, body) };
+  const items = ((body && body.items) || []).map(c => {
+    const s = c && c.snippet;
+    if (!s) return null;
+    return { id: c.id, author: s.authorDisplayName || '', avatar: s.authorProfileImageUrl || '',
+      text: s.textOriginal || s.textDisplay || '', likes: +s.likeCount || 0, date: s.publishedAt || '' };
+  }).filter(Boolean);
+  // ⚠ L'ordre de `comments.list` n'est pas documenté (et a déjà changé) : on TRIE nous-mêmes
+  // par date croissante — l'ordre du fil sur le site, et le seul qui se lise.
+  items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   return { items };
 }
 const YT_COMMENT_ERRORS = {
@@ -37057,14 +37088,36 @@ const YT_COMMENT_ERRORS = {
 function YtCommentsPanel({ video, onClose }) {
   const vid = video ? video.id : null;
   const [st, setSt] = React.useState({ state: 'loading', items: [], err: '' });
+  // Réponses dépliées : { [idDuThread]: { state:'loading'|'ok'|'err', items, err } }.
+  // Absent = repliée · présent = dépliée. Le fil n'est demandé QU'UNE FOIS par vidéo
+  // (`repCacheRef`) : replier puis redéplier ne rebrûle pas une unité de quota.
+  const [reps, setReps] = React.useState({});
+  const repCacheRef = React.useRef({});   // id du thread → fil déjà chargé (1 seul appel par fil)
   const load = React.useCallback(async () => {
     if (!vid) return;
     setSt({ state: 'loading', items: [], err: '' });
+    setReps({}); repCacheRef.current = {};
     const r = await ytFetchComments(vid);
     if (r.error) setSt({ state: 'err', items: [], err: YT_COMMENT_ERRORS[r.error] || r.error });
     else setSt({ state: 'ok', items: r.items, err: '' });
   }, [vid]);
   React.useEffect(() => { load(); }, [load]);
+  // Déplie / replie le fil de réponses d'un commentaire.
+  // ⚠ Fonction SIMPLE (pas de `useCallback`) : elle lit `reps` à chaque rendu, donc jamais
+  // de closure figée sur un état périmé — le panneau n'a aucun enfant mémoïsé à préserver.
+  const toggleReplies = async (id) => {
+    if (reps[id]) { setReps(prev => { const n = { ...prev }; delete n[id]; return n; }); return; }
+    const cached = repCacheRef.current[id];
+    if (cached) { setReps(prev => ({ ...prev, [id]: cached })); return; }
+    setReps(prev => ({ ...prev, [id]: { state:'loading', items:[], err:'' } }));
+    const r = await ytFetchReplies(id);
+    const entry = r.error
+      ? { state:'err', items: [], err: YT_COMMENT_ERRORS[r.error] || r.error }
+      : { state:'ok', items: r.items, err: '' };
+    repCacheRef.current[id] = entry;
+    // Replié (ou vidéo changée) pendant la requête → on ne rouvre rien de force.
+    setReps(prev => (id in prev ? { ...prev, [id]: entry } : prev));
+  };
   const hbtn = { background:'none', border:'1px solid #ffffff33', borderRadius:16, color:'#fff',
     fontSize:11, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace', flexShrink:0 };
   return (
@@ -37091,7 +37144,9 @@ function YtCommentsPanel({ video, onClose }) {
         {st.state === 'ok' && !st.items.length && (
           <div style={{ fontSize:11, color:'#ffffff88', lineHeight:1.6 }}>Aucun commentaire sur cette vidéo.</div>
         )}
-        {st.state === 'ok' && st.items.map(c => (
+        {st.state === 'ok' && st.items.map(c => {
+          const rp = reps[c.id];
+          return (
           <div key={c.id} style={{ display:'flex', gap:9, padding:'8px 0', borderBottom:'1px solid #ffffff12' }}>
             {c.avatar
               ? <img src={c.avatar} alt="" loading="lazy" style={{ width:30, height:30, borderRadius:'50%', flexShrink:0, objectFit:'cover' }} />
@@ -37103,12 +37158,52 @@ function YtCommentsPanel({ video, onClose }) {
               </div>
               {/* ⚠ texte BRUT (textFormat=plainText) rendu par React → jamais d'HTML injecté */}
               <div style={{ fontSize:12, color:'#fff', lineHeight:1.5, marginTop:3, whiteSpace:'pre-wrap', wordBreak:'break-word' }}>{c.text}</div>
-              <div style={{ fontSize:10, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:4 }}>
-                👍 {c.likes}{c.replies ? ` · 💬 ${c.replies} réponse${c.replies > 1 ? 's' : ''}` : ''}
+              <div style={{ fontSize:10, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:4, display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+                <span>👍 {c.likes}</span>
+                {/* Compteur de réponses CLIQUABLE (11.6.7) : le fil est chargé à la demande */}
+                {c.replies > 0 && (
+                  <button onClick={() => toggleReplies(c.id)}
+                    style={{ background:'none', border:'none', padding:'2px 0', margin:0, cursor:'pointer',
+                      color: rp ? YT_COLOR : '#7fb8ff', fontSize:10, fontFamily:'DM Mono,monospace', fontWeight:700 }}>
+                    {rp ? '▾' : '▸'} 💬 {c.replies} réponse{c.replies > 1 ? 's' : ''}
+                    {rp && rp.state === 'loading' ? ' ⏳' : ''}
+                  </button>
+                )}
               </div>
+              {rp && rp.state === 'err' && (
+                <div style={{ fontSize:10.5, color:'#ffb0b0', lineHeight:1.5, marginTop:5 }}>⚠ {rp.err}</div>
+              )}
+              {rp && rp.state === 'ok' && !rp.items.length && (
+                <div style={{ fontSize:10.5, color:'#ffffff77', marginTop:5 }}>Réponses indisponibles (supprimées ou masquées).</div>
+              )}
+              {rp && rp.state === 'ok' && rp.items.length > 0 && (
+                <div style={{ marginTop:6, paddingLeft:10, borderLeft:'2px solid #ffffff1f', display:'flex', flexDirection:'column', gap:8 }}>
+                  {rp.items.map(r => (
+                    <div key={r.id} style={{ display:'flex', gap:7 }}>
+                      {r.avatar
+                        ? <img src={r.avatar} alt="" loading="lazy" style={{ width:22, height:22, borderRadius:'50%', flexShrink:0, objectFit:'cover' }} />
+                        : <div style={{ width:22, height:22, borderRadius:'50%', flexShrink:0, background:'#ffffff1a' }} />}
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:10, color:'#ffffffaa', fontFamily:'DM Mono,monospace', display:'flex', gap:6, flexWrap:'wrap' }}>
+                          <span style={{ color:'#fff', fontWeight:700 }}>{r.author}</span>
+                          <span>{actuAgo(r.date)}</span>
+                        </div>
+                        <div style={{ fontSize:11.5, color:'#fff', lineHeight:1.5, marginTop:2, whiteSpace:'pre-wrap', wordBreak:'break-word' }}>{r.text}</div>
+                        <div style={{ fontSize:9.5, color:'#ffffff66', fontFamily:'DM Mono,monospace', marginTop:2 }}>👍 {r.likes}</div>
+                      </div>
+                    </div>
+                  ))}
+                  {rp.items.length >= YT_REPLIES_MAX && (
+                    <div style={{ fontSize:9.5, color:'#ffffff66', fontFamily:'DM Mono,monospace' }}>
+                      {YT_REPLIES_MAX} premières réponses — la suite est sur YouTube.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
-        ))}
+          );
+        })}
         {st.state === 'ok' && st.items.length >= YT_COMMENTS_MAX && (
           <div style={{ fontSize:10, color:'#ffffff66', fontFamily:'DM Mono,monospace', padding:'8px 0' }}>
             {YT_COMMENTS_MAX} commentaires les plus pertinents — la suite est sur YouTube.
