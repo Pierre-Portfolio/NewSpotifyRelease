@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.6.8';
+const APP_VERSION = '11.6.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4270,7 +4270,7 @@ const HUB_FEATURES = [
 
 // ════════════════════════════════════════════════
 // JEUX — petite ludothèque 100% locale (aucun réseau). Un onglet unique « Jeux » avec
-// un menu déroulant (en haut à droite, aligné avec le titre) pour choisir parmi 28 mini-jeux,
+// un menu déroulant (en haut à droite, aligné avec le titre) pour choisir parmi 29 mini-jeux,
 // GROUPÉS par nombre de joueurs (1 / 2 / 3-8). Tout est rendu dans `JeuxPanel` ; chaque jeu
 // est un composant autonome. Accessible aussi sans connexion depuis la page de login (chip « Jeux »).
 // ════════════════════════════════════════════════
@@ -4290,6 +4290,7 @@ const GAMES = [
   { id:'findflag',   label:'Find the Flag',   min:1, max:1 },
   { id:'flappy',     label:'Flappy Bird',     min:1, max:1 },
   { id:'flip7',      label:'Flip 7',          min:1, max:6 },
+  { id:'geometry',   label:'Geometry Dash',   min:1, max:1 },
   { id:'go',         label:'Go',              min:2, max:2 },
   { id:'guitar',     label:'Guitar Hero',     min:1, max:1 },
   { id:'imposteur',  label:'Imposteur',       min:3, max:8 },
@@ -4404,6 +4405,7 @@ function GameHost({ game, label }) {
     case 'findflag':   return <GameFindFlag />;
     case 'flappy':     return <GameFlappy />;
     case 'flip7':      return <GameFlip7 />;
+    case 'geometry':   return <GameGeometry />;
     case 'go':         return <GameGo />;
     case 'guitar':     return <GameGuitarHero />;
     case 'imposteur':  return <GameImposteur />;
@@ -4666,6 +4668,222 @@ function GameDemineur() {
         ))}
       </div>
       {state !== 'play' && <div style={{ fontSize:14, fontWeight:800, color: state === 'won' ? '#3fae6a' : '#e05050' }}>{state === 'won' ? '🎉 Gagné !' : '💥 Perdu !'}</div>}
+    </GameWrap>
+  );
+}
+
+// ════════ Geometry Dash (solo) ════════
+// Le cube avance TOUT SEUL, on ne fait que sauter. Carte GÉNÉRÉE ALÉATOIREMENT et à
+// l'infini : elle est fabriquée COLONNE PAR COLONNE juste devant le cube (`gdEnsure`),
+// jamais d'un bloc au départ — une partie n'a pas de fin, la stocker en entier serait
+// impossible. Score = +1 par CASE PARCOURUE (une case = `GD_TILE` px). Record `gameHi`.
+// ⚠ Le sol est plein d'un bout à l'autre : il n'y a pas de trou où tomber, uniquement
+// des piques et des blocs. Un jeu de saut aveugle a besoin que la mort soit toujours
+// LISIBLE à l'écran, or un trou n'est visible qu'une fois qu'on est dedans.
+const GD_TILE = 24;          // une « case » : le pas du score ET la taille d'un bloc
+const GD_GRAV = 1.0;         // ⚠ ces 3 valeurs sont liées : un saut dure 2·|JUMP|/GRAV = 24
+const GD_JUMP = -12;         //   frames, soit 4,4 cases de portée et 3 cases de hauteur.
+const GD_SPD0 = 4.4;         //   Les motifs ci-dessous sont taillés pour CE saut-là.
+const GD_MAXH = 2;           // hauteur maxi d'un mur, en blocs (3 serait infranchissable)
+const GD_REST_MIN = 6;       // plancher du plat entre deux motifs, en cases (cf. gdEnsure)
+const GD_HI = 'geometry';    // clé du record (`spotifyplus_game_hi_geometry`)
+// Motifs de la carte, par palier de difficulté (`tier`) débloqué tous les 30 points.
+// Chaque motif REPART DU SOL à la fin : un motif ne peut donc jamais en piéger un autre,
+// et l'espace de repos inséré entre deux motifs suffit toujours à préparer le saut.
+// `h` = blocs empilés (0 = sol), `sp` = pique posée au sommet de la pile.
+const GD_PATTERNS = [
+  { tier:0, cols:[{ sp:1 }] },
+  { tier:0, cols:[{ h:1 }] },
+  { tier:0, cols:[{ sp:1 }, { sp:1 }] },
+  { tier:1, cols:[{ h:1 }, { h:1 }] },
+  { tier:1, cols:[{ sp:1 }, { sp:1 }, { sp:1 }] },
+  { tier:1, cols:[{ h:1 }, { h:1 }, { h:2 }, { h:2 }] },
+  { tier:2, cols:[{ h:2 }, { h:2 }] },
+  { tier:2, cols:[{ sp:1 }, {}, {}, { sp:1 }] },
+  { tier:2, cols:[{ h:1 }, {}, {}, { sp:1 }] },
+  { tier:3, cols:[{ sp:1 }, { sp:1 }, {}, { h:1 }, { h:1 }] },
+  { tier:3, cols:[{ h:2 }, { h:2 }, { h:2 }, {}, {}, {}, { sp:1 }] },
+];
+// Fabrique les colonnes manquantes jusqu'à `upto`. Repos DÉCROISSANT avec le score
+// (9 cases au départ) — c'est la montée en difficulté, avec le palier de motifs.
+// ⚠ LE REPOS NE DESCEND JAMAIS SOUS `GD_REST_MIN`, et ce plancher n'est pas un réglage
+// de confort : un saut couvre 4,4 cases, donc sous ~5 cases de plat le cube peut
+// ATTERRIR PILE SUR le motif suivant sans avoir jamais eu de sol pour préparer son saut
+// — la carte devient alors mathématiquement infranchissable (vérifié par simulation :
+// avec un repos de 3, la quasi-totalité des parties butait sur un mur imprenable vers
+// 200 cases). Avec 6, le cube retombe toujours à plat avant l'obstacle et peut attendre
+// le bon moment, puisque courir est toujours possible au sol.
+function gdEnsure(map, upto, score) {
+  const tier = Math.min(3, (score / 30) | 0);
+  const pool = GD_PATTERNS.filter(p => p.tier <= tier);
+  while (map.next <= upto) {
+    const rest = Math.max(GD_REST_MIN, 9 - ((score / 50) | 0));
+    for (let i = 0; i < rest; i++) map.cols[map.next++] = { h:0, sp:0 };
+    for (const c of pool[(Math.random() * pool.length) | 0].cols) map.cols[map.next++] = { h: Math.min(GD_MAXH, c.h || 0), sp: c.sp || 0 };
+  }
+}
+// ⚠ Vitesse CONSTANTE, volontairement. Accélérer allongerait le saut (en pixels) sans
+// allonger le repos (compté en cases) : le plancher `GD_REST_MIN` ne tiendrait plus et la
+// carte redeviendrait infranchissable. La difficulté monte par les motifs et le repos.
+const gdSpeed = () => GD_SPD0;
+const gdRect = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+function gdDraw(ctx, s, W, H) {
+  const gy = s.groundY, sc = s.scroll, t = s.t;
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#141033'); sky.addColorStop(0.65, '#241a4d'); sky.addColorStop(1, '#3a1f5c');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  // Grille de fond en parallaxe (moitié de la vitesse) — le décor signé du jeu.
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+  const bg = (sc * 0.5) % 48;
+  ctx.beginPath();
+  for (let x = -bg; x < W + 48; x += 48) { ctx.moveTo(x, 0); ctx.lineTo(x, gy); }
+  for (let y = gy; y > -48; y -= 48) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+  const c0 = Math.floor(sc / GD_TILE) - 1, c1 = c0 + Math.ceil(W / GD_TILE) + 3;
+  for (let c = c0; c <= c1; c++) {
+    const col = s.map.cols[c]; if (!col) continue;
+    const x = c * GD_TILE - sc, top = gy - col.h * GD_TILE;
+    for (let b = 0; b < col.h; b++) {   // blocs : carré plein + liseré néon
+      const by = gy - (b + 1) * GD_TILE;
+      ctx.fillStyle = '#1b1b2e'; ctx.fillRect(x, by, GD_TILE, GD_TILE);
+      ctx.strokeStyle = GAMES_COLOR; ctx.lineWidth = 2; ctx.strokeRect(x + 1, by + 1, GD_TILE - 2, GD_TILE - 2);
+      ctx.fillStyle = `${GAMES_COLOR}22`; ctx.fillRect(x + 6, by + 6, GD_TILE - 12, GD_TILE - 12);
+    }
+    if (col.sp) {   // pique : triangle magenta, la seule chose qui tue sans qu'on la touche de côté
+      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x + GD_TILE / 2, top - GD_TILE); ctx.lineTo(x + GD_TILE, top); ctx.closePath();
+      ctx.fillStyle = '#e0508a'; ctx.fill();
+      ctx.strokeStyle = '#ffd0e6'; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+  }
+  ctx.fillStyle = '#16122e'; ctx.fillRect(0, gy, W, H - gy);   // sol
+  ctx.fillStyle = GAMES_COLOR; ctx.fillRect(0, gy, W, 2.5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1;
+  const fg = sc % GD_TILE; ctx.beginPath();
+  for (let x = -fg; x < W + GD_TILE; x += GD_TILE) { ctx.moveTo(x, gy + 3); ctx.lineTo(x, H); }
+  ctx.stroke();
+  s.parts.forEach(p => { ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.col; ctx.fillRect(p.x, p.y, p.s, p.s); });
+  ctx.globalAlpha = 1;
+  if (!s.dead) {   // le cube, pivoté autour de son centre
+    const S = s.size;
+    ctx.save(); ctx.translate(s.px + S / 2, s.y + S / 2); ctx.rotate(s.rot);
+    ctx.fillStyle = '#f5b81f'; ctx.fillRect(-S / 2, -S / 2, S, S);
+    ctx.strokeStyle = '#fff3c4'; ctx.lineWidth = 2; ctx.strokeRect(-S / 2 + 1, -S / 2 + 1, S - 2, S - 2);
+    ctx.fillStyle = '#3a2a00'; ctx.fillRect(-S / 4, -S / 4, S / 2, S / 2);
+    ctx.restore();
+  }
+}
+function GameGeometry() {
+  const W = 336, H = 216, S = 20, PX = 56, GY = H - 48;
+  const canvasRef = React.useRef(null);
+  const fresh = () => ({ y: GY - S, v: 0, rot: 0, scroll: 0, t: 0, ground: true, dead: false,
+    px: PX, size: S, groundY: GY, parts: [], map: { cols:{}, next: 0 } });
+  const g = React.useRef(fresh());
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi(GD_HI));
+  const [tries, setTries] = React.useState(0);
+  const [phase, setPhase] = React.useState('ready');
+  // ⚠ Ref anti-closure : la boucle rAF est créée une fois par partie et doit lire l'appui
+  // EN COURS ; maintenir le doigt appuyé fait re-sauter dès l'atterrissage (comme le vrai jeu).
+  const holdRef = React.useRef(false);
+  const reset = () => { g.current = fresh(); gdEnsure(g.current.map, 40, 0); setScore(0); };
+  const press = () => {
+    holdRef.current = true;
+    if (phase === 'playing') { const s = g.current; if (s.ground) { s.v = GD_JUMP; s.ground = false; } }
+    else if (phase === 'ready') { reset(); setTries(n => n + 1); setPhase('playing'); }
+    else { reset(); setTries(n => n + 1); setPhase('playing'); }   // die & retry : une seule touche
+  };
+  const release = () => { holdRef.current = false; };
+  React.useEffect(() => { reset(); }, []);
+  React.useEffect(() => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && phase !== 'playing') gdDraw(ctx, g.current, W, H); }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    const die = () => {
+      if (!alive) return; alive = false; cancelAnimationFrame(raf);
+      const s = g.current; s.dead = true;
+      for (let i = 0; i < 22; i++) s.parts.push({ x: s.px + S / 2, y: s.y + S / 2, vx:(Math.random() - 0.5) * 7, vy:(Math.random() - 0.7) * 7, s: 3 + Math.random() * 3, life: 26, max: 26, col:'#f5b81f' });
+      const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx) gdDraw(ctx, s, W, H);
+      const sc = (s.scroll / GD_TILE) | 0; setScore(sc);
+      setBest(b => { const nb = Math.max(b, sc); setGameHi(GD_HI, nb); return nb; });
+      setPhase('dead');
+    };
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current, ctx = canvasRef.current.getContext('2d');
+      const sc = (s.scroll / GD_TILE) | 0;
+      s.t++; s.scroll += gdSpeed();
+      gdEnsure(s.map, Math.ceil((s.scroll + W) / GD_TILE) + 4, sc);
+      const prevBottom = s.y + S;
+      s.v += GD_GRAV; s.y += s.v;
+      // Colonnes chevauchées par le cube (sa position MONDE, l'écran ne bouge pas).
+      const wx = s.scroll + s.px;
+      const cA = Math.floor(wx / GD_TILE), cB = Math.floor((wx + S - 1) / GD_TILE);
+      let landed = false;
+      for (let c = cA; c <= cB; c++) {
+        const col = s.map.cols[c]; if (!col) continue;
+        const top = GY - col.h * GD_TILE;
+        if (col.h) {
+          const box = { x: c * GD_TILE, y: top, w: GD_TILE, h: col.h * GD_TILE };
+          if (gdRect({ x: wx, y: s.y, w: S, h: S }, box)) {
+            // Venir DE DESSUS en descendant = atterrissage ; tout le reste est un mur.
+            if (s.v >= 0 && prevBottom <= top + 8) { s.y = top - S; s.v = 0; landed = true; }
+            else { die(); return; }
+          }
+        }
+        // Pique : boîte réduite au cœur du triangle, sinon un frôlement du bord tuerait.
+        if (col.sp && gdRect({ x: wx, y: s.y, w: S, h: S }, { x: c * GD_TILE + 6, y: top - GD_TILE + 5, w: GD_TILE - 12, h: GD_TILE - 6 })) { die(); return; }
+      }
+      if (s.y + S >= GY) { s.y = GY - S; s.v = 0; landed = true; }
+      if (landed) {
+        if (!s.ground) s.rot = Math.round(s.rot / (Math.PI / 2)) * (Math.PI / 2);   // le cube se pose à plat
+        s.ground = true;
+        if (holdRef.current) { s.v = GD_JUMP; s.ground = false; }                   // appui maintenu = saut enchaîné
+        if (s.t % 3 === 0) s.parts.push({ x: s.px, y: s.y + S - 3, vx:-2 - Math.random() * 2, vy:-Math.random() * 2, s: 2 + Math.random() * 2, life: 16, max: 16, col:'#ffe08a' });
+      } else { s.ground = false; s.rot += Math.PI / 24; }
+      s.parts.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.25; p.life--; });
+      s.parts = s.parts.filter(p => p.life > 0);
+      const ns = (s.scroll / GD_TILE) | 0; if (ns !== sc) setScore(ns);
+      gdDraw(ctx, s, W, H); raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'dead') return;
+    let raf, on = true;
+    const step = () => {
+      if (!on) return;
+      const s = g.current, ctx = canvasRef.current && canvasRef.current.getContext('2d');
+      s.parts.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.25; p.life--; });
+      s.parts = s.parts.filter(p => p.life > 0);
+      if (ctx) gdDraw(ctx, s, W, H);
+      if (s.parts.length) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => { on = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  React.useEffect(() => {
+    const down = e => { if (e.code === 'Space' || e.key === ' ' || e.key === 'ArrowUp') { e.preventDefault(); if (!e.repeat) press(); } };
+    const up = e => { if (e.code === 'Space' || e.key === ' ' || e.key === 'ArrowUp') release(); };
+    window.addEventListener('keydown', down); window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+  }, [phase]);
+  return (
+    <GameWrap hint="Touche l'écran (ou Espace) pour sauter — maintiens pour enchaîner les sauts. La carte est tirée au hasard à l'infini : +1 point par case parcourue."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b>{tries > 0 ? <> · Essai <b style={{ color:C.text }}>{tries}</b></> : null}</span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:W }}>
+        <canvas ref={canvasRef} width={W} height={H}
+          onPointerDown={press} onPointerUp={release} onPointerLeave={release} onPointerCancel={release}
+          onContextMenu={e => e.preventDefault()}
+          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'manipulation', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={press} onPointerUp={release}
+            style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? `💥 ${score} case${score > 1 ? 's' : ''}` : '🟨 Geometry Dash'}</div>
+            <div style={{ fontSize:12, background:'#00000099', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'réessayer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
     </GameWrap>
   );
 }
@@ -43020,6 +43238,7 @@ const GAMES_HUB_STATS = [
   { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
   { id:'flip7',  label:'Flip 7',      icon:'🃏', metric:'meilleur score' },
+  { id:'geometry', label:'Geometry Dash', icon:'🟨', metric:'cases parcourues' },
   { id:'findflag', label:'Find the Flag', icon:'🏳️', metric:'série de drapeaux' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
   { id:'guitar', label:'Guitar Hero', icon:'🎸', metric:'meilleur score' },

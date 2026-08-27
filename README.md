@@ -57,7 +57,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 | **💹 Finance** | Cours (crypto, indices, or, devises, actions) en mode Light ou Full, historique de prix constitué jour après jour, calculatrice, tableau de bord BullRun, et **Mes Actifs** (lecture de ton classeur Google Drive : patrimoine, portefeuille crypto converti en BTC) |
 | **🧊 Frigo** | Contenu par compartiment + dates de péremption, et un assistant IA : photo → liste d'ingrédients, recettes réalisables avec ce que tu as, recette d'un plat |
 | **🏛️ Histoire** | Une ville + une photo → l'IA identifie l'œuvre, la résume et explique son lien avec la ville, illustrations à l'appui ; sous la fiche, un fil de questions pour creuser l'œuvre |
-| **🎮 Jeux** | 28 mini-jeux 100 % hors ligne (2048, Sudoku, Doodle Jump, Crossy Road, Flappy, Motus, Démineur, Snake, Osu, Piano Tiles, Guitar Hero, Air Hockey, Blackjack, Poker, Flip 7, Puissance 4, Go, Morpion, Memory, Bataille navale, TierList, et des jeux de soirée à plusieurs sur le même téléphone) |
+| **🎮 Jeux** | 29 mini-jeux 100 % hors ligne (2048, Sudoku, Geometry Dash, Doodle Jump, Crossy Road, Flappy, Motus, Démineur, Snake, Osu, Piano Tiles, Guitar Hero, Air Hockey, Blackjack, Poker, Flip 7, Puissance 4, Go, Morpion, Memory, Bataille navale, TierList, et des jeux de soirée à plusieurs sur le même téléphone) |
 | **🗺️ Maps** | Import de ton historique Google Timeline et affichage sur une carte |
 | **🌤️ Météo** | 5 lieux dont ta position, prévisions 3 ou 7 jours, détail heure par heure, **notification quand il va pleuvoir dans les 2 h** (une seule par épisode de pluie) |
 | **🔐 Mot de passe** | Coffre chiffré AES-GCM 256 (PBKDF2 600 000 itérations), tags, réordonnancement, verrouillage automatique après 10 min |
