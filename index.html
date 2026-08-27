@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.6.7';
+const APP_VERSION = '11.6.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4270,7 +4270,7 @@ const HUB_FEATURES = [
 
 // ════════════════════════════════════════════════
 // JEUX — petite ludothèque 100% locale (aucun réseau). Un onglet unique « Jeux » avec
-// un menu déroulant (en haut à droite, aligné avec le titre) pour choisir parmi 27 mini-jeux,
+// un menu déroulant (en haut à droite, aligné avec le titre) pour choisir parmi 28 mini-jeux,
 // GROUPÉS par nombre de joueurs (1 / 2 / 3-8). Tout est rendu dans `JeuxPanel` ; chaque jeu
 // est un composant autonome. Accessible aussi sans connexion depuis la page de login (chip « Jeux »).
 // ════════════════════════════════════════════════
@@ -4304,6 +4304,7 @@ const GAMES = [
   { id:'puissance4', label:'Puissance 4',     min:2, max:2 },
   { id:'snake',      label:'Snake',           min:1, max:1 },
   { id:'chrono',     label:'Stop Chrono',     min:2, max:8 },
+  { id:'sudoku',     label:'Sudoku',          min:1, max:1 },
   { id:'tierlist',   label:'TierList',        min:1, max:1 },
   { id:'undercover', label:'UnderCoverDraw',  min:3, max:8 },
 ];
@@ -4417,6 +4418,7 @@ function GameHost({ game, label }) {
     case 'puissance4': return <GamePuissance4 />;
     case 'snake':      return <GameSnake />;
     case 'chrono':     return <GameChrono />;
+    case 'sudoku':     return <GameSudoku />;
     case 'tierlist':   return <GameTierList />;
     case 'undercover': return <GameUnderCover />;
     default:           return <GameComingSoon label={label} />;
@@ -4664,6 +4666,212 @@ function GameDemineur() {
         ))}
       </div>
       {state !== 'play' && <div style={{ fontSize:14, fontWeight:800, color: state === 'won' ? '#3fae6a' : '#e05050' }}>{state === 'won' ? '🎉 Gagné !' : '💥 Perdu !'}</div>}
+    </GameWrap>
+  );
+}
+
+// ════════ Sudoku (solo) ════════
+// Grille 9×9 générée À CHAQUE PARTIE (aucune banque de grilles embarquée) : une solution
+// complète est tirée par backtracking mélangé, puis on retire des cases une à une — un
+// retrait n'est CONSERVÉ que si la grille garde UNE SEULE solution.
+// ⚠ Une grille à solutions multiples n'est pas un sudoku : on ne pourrait plus signaler
+// une erreur ni proposer d'indice, d'où le test d'unicité `sudCount(g, 2) === 1` à chaque
+// retrait (il s'arrête dès la 2e solution trouvée, sinon le comptage serait interminable).
+const SUD_LEVELS = [
+  { id:'facile',    label:'Facile',    holes:38 },
+  { id:'moyen',     label:'Moyen',     holes:46 },
+  { id:'difficile', label:'Difficile', holes:52 },
+  { id:'expert',    label:'Expert',    holes:56 },
+];
+const SUD_LEVEL_LS = 'spotifyplus_game_sudoku_level';
+// Les 20 cases « voisines » de i (sa ligne + sa colonne + son bloc 3×3, sans i) : c'est le
+// seul test dont tout le jeu a besoin (validité, conflits, nettoyage des notes). Précalculé
+// une fois au niveau du module — le recalculer à chaque nœud du backtracking coûterait cher.
+function sudPeers(i) {
+  const r = (i / 9) | 0, c = i % 9, br = r - r % 3, bc = c - c % 3, out = [];
+  for (let k = 0; k < 9; k++) { const a = r * 9 + k, b = k * 9 + c; if (a !== i) out.push(a); if (b !== i) out.push(b); }
+  for (let dr = 0; dr < 3; dr++) for (let dc = 0; dc < 3; dc++) { const p = (br + dr) * 9 + bc + dc; if (p !== i && out.indexOf(p) < 0) out.push(p); }
+  return out;
+}
+const SUD_PEERS = Array.from({ length:81 }, (_, i) => sudPeers(i));
+const sudOk = (g, i, v) => !SUD_PEERS[i].some(p => g[p] === v);
+const sudShuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = a[i]; a[i] = a[j]; a[j] = t; } return a; };
+// Backtracking « case la plus contrainte d'abord » : sans cette heuristique le remplissage
+// d'une grille vide part régulièrement dans des branches mortes de plusieurs secondes.
+function sudSolve(g) {
+  let best = -1, bestN = 10;
+  for (let i = 0; i < 81; i++) if (!g[i]) {
+    let n = 0; for (let v = 1; v <= 9; v++) if (sudOk(g, i, v)) n++;
+    if (n < bestN) { bestN = n; best = i; if (n <= 1) break; }
+  }
+  if (best < 0) return true;
+  for (const v of sudShuffle([1,2,3,4,5,6,7,8,9])) if (sudOk(g, best, v)) { g[best] = v; if (sudSolve(g)) return true; g[best] = 0; }
+  return false;
+}
+// Nombre de solutions, ABANDONNÉ dès que `limit` est atteint (on n'appelle qu'avec 2).
+function sudCount(g, limit) {
+  let best = -1, bestN = 10;
+  for (let i = 0; i < 81; i++) if (!g[i]) {
+    let n = 0; for (let v = 1; v <= 9; v++) if (sudOk(g, i, v)) n++;
+    if (n === 0) return 0;                       // impasse : cette branche ne donne rien
+    if (n < bestN) { bestN = n; best = i; }
+  }
+  if (best < 0) return 1;
+  let total = 0;
+  for (let v = 1; v <= 9; v++) if (sudOk(g, best, v)) {
+    g[best] = v; total += sudCount(g, limit - total); g[best] = 0;
+    if (total >= limit) break;
+  }
+  return total;
+}
+// `holes` est un OBJECTIF, pas une garantie : un retrait qui casserait l'unicité est annulé,
+// donc une grille « Expert » peut finir avec quelques cases de plus. C'est voulu.
+function sudGenerate(holes) {
+  const sol = new Array(81).fill(0); sudSolve(sol);
+  const puz = sol.slice();
+  let removed = 0;
+  for (const i of sudShuffle(Array.from({ length:81 }, (_, k) => k))) {
+    if (removed >= holes) break;
+    const keep = puz[i]; puz[i] = 0;
+    if (sudCount(puz.slice(), 2) !== 1) puz[i] = keep; else removed++;
+  }
+  return { sol, puz };
+}
+const sudTime = s => `${(s / 60) | 0}:${String(s % 60).padStart(2, '0')}`;
+function GameSudoku() {
+  const [level, setLevel] = React.useState(() => {
+    try { const v = localStorage.getItem(SUD_LEVEL_LS); const i = SUD_LEVELS.findIndex(l => l.id === v); if (i >= 0) return i; } catch {}
+    return 0;
+  });
+  // Une seule partie = un seul objet d'état : la solution, la grille de départ (= les cases
+  // NON modifiables), les valeurs saisies et les notes (masque de bits 1..9 par case).
+  const newGame = lv => { const gen = sudGenerate(SUD_LEVELS[lv].holes); return { sol:gen.sol, puz:gen.puz, cells:gen.puz.slice(), notes:new Array(81).fill(0) }; };
+  const [st, setSt] = React.useState(() => newGame(level));
+  const [sel, setSel] = React.useState(-1);
+  const [noteMode, setNoteMode] = React.useState(false);
+  const [hints, setHints] = React.useState(0);
+  const [secs, setSecs] = React.useState(0);
+  const [pick, setPick] = React.useState(false);
+  const won = st.cells.every((v, i) => v === st.sol[i]);
+  // Chronomètre arrêté net à la résolution (et remis à 0 par ↻ / changement de niveau).
+  React.useEffect(() => { if (won) return; const id = setInterval(() => setSecs(s => s + 1), 1000); return () => clearInterval(id); }, [won, st]);
+  // Doublons dans une ligne / colonne / bloc → case en rouge. On ne compare JAMAIS à la
+  // solution : signaler « faux » sur un chiffre simplement mal placé donnerait la réponse.
+  const conflict = React.useMemo(() => {
+    const bad = new Array(81).fill(false);
+    for (let i = 0; i < 81; i++) { const v = st.cells[i]; if (v && SUD_PEERS[i].some(p => st.cells[p] === v)) bad[i] = true; }
+    return bad;
+  }, [st]);
+  const left = React.useMemo(() => { const n = new Array(10).fill(9); st.cells.forEach(v => { if (v) n[v]--; }); return n; }, [st]);
+  const place = v => {
+    if (won || sel < 0 || st.puz[sel]) return;
+    setSt(s => {
+      const cells = s.cells.slice(), notes = s.notes.slice();
+      if (noteMode) { cells[sel] = 0; notes[sel] = notes[sel] ^ (1 << (v - 1)); }
+      else {
+        cells[sel] = cells[sel] === v ? 0 : v; notes[sel] = 0;
+        // Poser un chiffre efface la note correspondante chez tous ses voisins (confort).
+        if (cells[sel]) SUD_PEERS[sel].forEach(p => { notes[p] &= ~(1 << (v - 1)); });
+      }
+      return { ...s, cells, notes };
+    });
+  };
+  const erase = () => {
+    if (won || sel < 0 || st.puz[sel]) return;
+    setSt(s => { const cells = s.cells.slice(), notes = s.notes.slice(); cells[sel] = 0; notes[sel] = 0; return { ...s, cells, notes }; });
+  };
+  // 💡 remplit la case sélectionnée si elle est fausse/vide, sinon une case au hasard.
+  const hint = () => {
+    if (won) return;
+    const todo = []; st.cells.forEach((v, i) => { if (v !== st.sol[i]) todo.push(i); });
+    if (!todo.length) return;
+    const i = (sel >= 0 && st.cells[sel] !== st.sol[sel]) ? sel : todo[(Math.random() * todo.length) | 0];
+    setSt(s => {
+      const cells = s.cells.slice(), notes = s.notes.slice();
+      cells[i] = s.sol[i]; notes[i] = 0; SUD_PEERS[i].forEach(p => { notes[p] &= ~(1 << (s.sol[i] - 1)); });
+      return { ...s, cells, notes };
+    });
+    setHints(h => h + 1); setSel(i);
+  };
+  const restart = lv => { setSt(newGame(lv == null ? level : lv)); setSel(-1); setHints(0); setSecs(0); setNoteMode(false); };
+  const chooseLevel = i => { setLevel(i); setPick(false); try { localStorage.setItem(SUD_LEVEL_LS, SUD_LEVELS[i].id); } catch {} restart(i); };
+  // ⚠ Ref anti-closure : l'écouteur clavier n'est posé qu'une fois, il doit voir l'état
+  // courant (sélection, mode notes) et non celui du premier rendu.
+  const keyRef = React.useRef(null);
+  keyRef.current = e => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key >= '1' && e.key <= '9') { e.preventDefault(); place(+e.key); return; }
+    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === '0') { e.preventDefault(); erase(); return; }
+    const d = { ArrowUp:-9, ArrowDown:9, ArrowLeft:-1, ArrowRight:1 }[e.key];
+    if (d != null) { e.preventDefault(); setSel(p => { const n = (p < 0 ? 0 : p) + d; return n >= 0 && n < 81 ? n : (p < 0 ? 0 : p); }); }
+  };
+  React.useEffect(() => { const h = e => keyRef.current && keyRef.current(e); window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, []);
+
+  const selVal = sel >= 0 ? st.cells[sel] : 0;
+  const thick = `${GAMES_COLOR}99`, thin = `${C.border}`;
+  return (
+    <GameWrap hint="Choisis une case puis un chiffre. ✏️ passe en mode notes, 💡 dévoile une case. Les doublons d'une ligne, d'une colonne ou d'un bloc s'affichent en rouge."
+      bar={<><button onClick={() => setPick(p => !p)} title="Choisir la difficulté"
+          style={gameBtn(pick ? { background:`${GAMES_COLOR}33` } : {})}>🎚️ {SUD_LEVELS[level].label}</button>
+        <span style={{ fontSize:12, color:C.muted }}>⏱ <b style={{ color:C.text }}>{sudTime(secs)}</b>{hints > 0 ? <> · 💡 <b style={{ color:GAMES_COLOR }}>{hints}</b></> : null}</span>
+        <div style={{ display:'flex', gap:6 }}>
+          <button onClick={hint} disabled={won} style={gameBtn(won ? { opacity:0.55, cursor:'default' } : {})}>💡</button>
+          <button onClick={() => restart()} style={gameBtn()}>↻</button>
+        </div></>}>
+      {pick && (
+        <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center', width:'100%', maxWidth:340 }}>
+          {SUD_LEVELS.map((l, i) => (
+            <button key={l.id} onClick={() => chooseLevel(i)}
+              style={gameBtn(i === level ? { background:`${GAMES_COLOR}33`, color:GAMES_COLOR } : {})}>{l.label}</button>
+          ))}
+          <div style={{ width:'100%', textAlign:'center', fontSize:10, color:C.dim }}>changer de difficulté relance une nouvelle grille</div>
+        </div>
+      )}
+      {/* ⚠ Lignes ET colonnes explicites en 1fr : sans les lignes, la hauteur d'une case
+          dépendrait de son contenu (chiffre / notes / vide) et la grille se déformerait
+          au fur et à mesure du remplissage — même piège que le Démineur. */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(9,1fr)', gridTemplateRows:'repeat(9,1fr)', width:'100%', maxWidth:340, aspectRatio:'1',
+        border:`2px solid ${thick}`, borderRadius:8, overflow:'hidden', background:'#15151c', touchAction:'manipulation' }}>
+        {st.cells.map((v, i) => {
+          const r = (i / 9) | 0, c = i % 9;
+          const given = !!st.puz[i], bad = conflict[i], isSel = i === sel;
+          const peer = sel >= 0 && !isSel && SUD_PEERS[sel].indexOf(i) >= 0;
+          const same = !isSel && v && v === selVal;
+          const bg = bad ? '#e0505038' : isSel ? `${GAMES_COLOR}3a` : same ? `${GAMES_COLOR}20`
+            : peer ? 'rgba(255,255,255,0.05)' : given ? '#20202a' : 'transparent';
+          return (
+            <button key={i} onClick={() => setSel(i)}
+              style={{ minWidth:0, minHeight:0, lineHeight:1, overflow:'hidden', padding:0, cursor:'pointer',
+                display:'flex', alignItems:'center', justifyContent:'center', background:bg,
+                /* ⚠ Uniquement des raccourcis PAR CÔTÉ : mélanger `borderTop` et
+                   `borderTopColor` ferait supprimer la propriété longue au re-render. */
+                borderTop: r === 0 ? 'none' : `${r % 3 === 0 ? 2 : 1}px solid ${r % 3 === 0 ? thick : thin}`,
+                borderLeft: c === 0 ? 'none' : `${c % 3 === 0 ? 2 : 1}px solid ${c % 3 === 0 ? thick : thin}`,
+                borderRight:'none', borderBottom:'none',
+                fontWeight: given ? 800 : 600, fontSize:17,
+                color: bad ? '#ff8a80' : given ? C.text : GAMES_COLOR,
+                userSelect:'none', WebkitUserSelect:'none', WebkitTapHighlightColor:'transparent' }}>
+              {v ? v : (st.notes[i] ? (
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gridTemplateRows:'repeat(3,1fr)', width:'100%', height:'100%' }}>
+                  {[1,2,3,4,5,6,7,8,9].map(n => (
+                    <span key={n} style={{ display:'flex', alignItems:'center', justifyContent:'center', fontSize:9, fontWeight:700, color:C.muted }}>{(st.notes[i] >> (n - 1)) & 1 ? n : ''}</span>
+                  ))}
+                </div>
+              ) : '')}
+            </button>
+          );
+        })}
+      </div>
+      {/* Pavé numérique : le chiffre grisé n'a plus aucune case à recevoir (9 posés). */}
+      <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center', width:'100%', maxWidth:340 }}>
+        {[1,2,3,4,5,6,7,8,9].map(n => (
+          <button key={n} onClick={() => place(n)} disabled={won}
+            style={gameBtn({ padding:'8px 0', width:32, textAlign:'center', fontSize:15, opacity: won ? 0.5 : (left[n] <= 0 ? 0.35 : 1), position:'relative' })}>{n}</button>
+        ))}
+        <button onClick={() => setNoteMode(m => !m)} style={gameBtn(noteMode ? { background:`${GAMES_COLOR}33` } : {})}>✏️ {noteMode ? 'ON' : 'OFF'}</button>
+        <button onClick={erase} style={gameBtn()}>⌫</button>
+      </div>
+      {won && <div style={{ fontSize:14, fontWeight:800, color:'#3fae6a' }}>🎉 Résolu en {sudTime(secs)}{hints > 0 ? ` (${hints} indice${hints > 1 ? 's' : ''})` : ''} !</div>}
     </GameWrap>
   );
 }
@@ -25964,7 +26172,7 @@ function buildBackup() {
     games: (() => {
       const hi = {};
       try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.indexOf('spotifyplus_game_hi_') === 0) hi[k.slice('spotifyplus_game_hi_'.length)] = +localStorage.getItem(k) || 0; } } catch {}
-      return { hi, last: lsRaw('spotifyplus_games_last'), gh_level: lsRaw('spotifyplus_game_gh_level'), osu_level: lsRaw('spotifyplus_game_osu_level') };
+      return { hi, last: lsRaw('spotifyplus_games_last'), gh_level: lsRaw('spotifyplus_game_gh_level'), osu_level: lsRaw('spotifyplus_game_osu_level'), sudoku_level: lsRaw(SUD_LEVEL_LS) };
     })(),
     // Préférences d'affichage diverses
     prefs: { tvtime_filter: lsRaw('spotifyplus_tvtime_filter'), tvtime_sort: lsRaw('spotifyplus_tvtime_sort'), loop: lsRaw('spotifyplus_loop'),
@@ -26409,6 +26617,7 @@ function applyBackup(data) {
     putRaw('spotifyplus_games_last', data.games.last);
     putRaw('spotifyplus_game_gh_level', data.games.gh_level);
     putRaw('spotifyplus_game_osu_level', data.games.osu_level);
+    putRaw(SUD_LEVEL_LS, data.games.sudoku_level);
   }
   // API — compteurs d'appels FUSIONNÉS au MAX par API (cf. apiCallsImport : additionner
   // doublerait l'historique déjà présent dans la sauvegarde à chaque ré-import)
