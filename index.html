@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.7.2';
+const APP_VERSION = '11.7.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3874,6 +3874,12 @@ function StoreProvider({ children }) {
   const financeAutoTry = React.useCallback(async () => {
     if (!finAutoDue()) return;
     try { await startFinanceLight(); } catch {}
+    // ⚠ Le Full APRÈS le Light et dans son propre try : un échec Twelve Data ne doit pas faire
+    // perdre les points du Light, déjà posés par `_finNotify`.
+    try { await startFinanceFull(); } catch {}
+    // ⚠ La journée reste marquée sur les seules valeurs LIGHT : exiger le Full ferait retenter
+    // toutes les 10 min pour rien les jours où Twelve Data est à sec, alors que l'essentiel de
+    // l'historique est déjà en place. Un Full manqué se rattrape à la 1re ouverture du module.
     if (finAutoGotData()) finAutoSetDay(tvDayKey());
   }, []);
 
@@ -33746,8 +33752,9 @@ function chartDownsample(pts, maxPts = 400) {
 // ── Historique LOCAL des prix (repli du graphique) ──
 // Les sources d'historique distantes des indices/actions/or (Stooq via proxies CORS)
 // échouent souvent → l'app CONSTITUE elle-même l'historique en échantillonnant les prix
-// affichés, **une seule fois par jour et par donnée**, et **UNIQUEMENT pour les valeurs du
-// mode Light** (les valeurs Full n'enregistrent rien). Stocké dans localStorage
+// affichés, **une seule fois par jour et par donnée** : toutes les valeurs du mode Light, plus
+// les lignes Full des sections INDICES (CAC 40) et STOCK PICKING (Google, Microsoft, Amazon,
+// Tesla). Le RESTE du Full (autres cryptos, argent, sucre) n'enregistre rien. Stocké dans localStorage
 // `spotifyplus_finance_history` (`{ version:1, series: { '<clé>': [{ t, v }, …] } }`, clés =
 // `finHistKey(spec)` : `cg:bitcoin` / `stooq:^spx` / `alpha:WTI` / `fx:EURUSD`). On ne garde
 // pas plus d'~1 an. Quand la source distante ne répond pas, `FinanceChartModal` retombe sur
@@ -33781,9 +33788,13 @@ function finHistRecord(h, key, v) {
 }
 // Snapshot des valeurs LIGHT présentes dans `_finance` → séries locales. Appelé par
 // `_finNotify` (à chaque prix qui arrive) ; n'écrit dans localStorage que si un point a été
-// ajouté (throttle 1/jour par série). **Seules les valeurs du mode Light sont enregistrées**
-// (Bitcoin, PEPE, S&P 500, NASDAQ-100, NVIDIA, Take-Two, Or, Pétrole, EUR/USD) — les valeurs
-// Full (autres cryptos, CAC 40, autres actions, argent, sucre) n'enregistrent RIEN.
+// ajouté (throttle 1/jour par série). Enregistre TOUT le mode Light (Bitcoin, PEPE, S&P 500,
+// NASDAQ-100, NVIDIA, Take-Two, Or, Pétrole, EUR/USD) **plus les lignes Full d'INDICES et de
+// STOCK PICKING** (CAC 40, Google, Microsoft, Amazon, Tesla) — demande utilisateur. Le reste du
+// Full (autres cryptos, argent, sucre) n'enregistre toujours RIEN.
+// ⚠ Une valeur absente ne coûte rien : `finHistRecord` sort sur `v == null`. Le CAC 40 arrive
+// dès le mode Light (`fetchIndicesJSON` le donne avec le S&P et le NASDAQ), les 4 actions Full
+// n'arrivent qu'après `startFinanceFull` — que le relevé quotidien déclenche désormais.
 function finHistSnapshot() {
   try {
     const f = _finance, h = loadFinHist();
@@ -33796,9 +33807,16 @@ function finHistSnapshot() {
     if (f.idx) {
       dirty = finHistRecord(h, 'stooq:^spx', f.idx.spx && f.idx.spx.price) || dirty;   // S&P 500
       dirty = finHistRecord(h, 'stooq:^ndq', f.idx.ndq && f.idx.ndq.price) || dirty;   // NASDAQ-100
+      dirty = finHistRecord(h, 'stooq:^cac', f.idx.cac && f.idx.cac.price) || dirty;   // CAC 40 (Full)
     }
     dirty = finHistRecord(h, 'stooq:nvda.us', f.stocks.nvda && f.stocks.nvda.price) || dirty;   // NVIDIA
     dirty = finHistRecord(h, 'stooq:ttwo.us', f.stocks.ttwo && f.stocks.ttwo.price) || dirty;   // Take-Two
+    // STOCK PICKING du mode Full — mêmes clés que les specs de graphique des lignes (`finHistKey`),
+    // sinon le repli local ne serait jamais retrouvé au clic sur la ligne.
+    dirty = finHistRecord(h, 'stooq:googl.us', f.stocks.googl && f.stocks.googl.price) || dirty;  // Google
+    dirty = finHistRecord(h, 'stooq:msft.us',  f.stocks.msft && f.stocks.msft.price) || dirty;    // Microsoft
+    dirty = finHistRecord(h, 'stooq:amzn.us',  f.stocks.amzn && f.stocks.amzn.price) || dirty;    // Amazon
+    dirty = finHistRecord(h, 'stooq:tsla.us',  f.stocks.tsla && f.stocks.tsla.price) || dirty;    // Tesla
     dirty = finHistRecord(h, 'stooq:xauusd',  f.gold && f.gold.price) || dirty;   // Or
     dirty = finHistRecord(h, 'alpha:WTI',     f.oil && f.oil.price) || dirty;     // Pétrole WTI
     dirty = finHistRecord(h, 'fx:EURUSD',     f.eurusd) || dirty;                 // EUR/USD
@@ -34254,9 +34272,11 @@ async function startFinanceLight() {
 // par `_finNotify`, donc UNIQUEMENT quand des prix arrivent — c'est-à-dire, jusqu'ici,
 // seulement les jours où on ouvrait le module Finance. Un jour sans ouverture = un TROU
 // définitif dans les courbes. C'est ce trou que ce déclencheur comble.
-// ⚠ On appelle `startFinanceLight` et **PAS** `startFinanceFull` : le snapshot n'enregistre
-// QUE les valeurs du mode Light (c'est documenté dans `finHistSnapshot`) — charger le Full
-// coûterait du quota Alpha Vantage / Twelve Data sans rien ajouter à l'historique.
+// ⚠ 11.7.3 — Le relevé charge Light **PUIS** Full (demande utilisateur : « sauve une fois par
+// jour les indices et le stock picking du Full »). Le Full n'est plus gratuit en quota (4 actions
+// Twelve Data, espacées de 8 s, + argent et sucre qui viennent avec `startFinanceFull` sans être
+// échantillonnés) mais c'était le seul moyen d'avoir les 4 actions : le CAC 40, lui, arrive déjà
+// avec le Light. Ce qui est enregistré reste décidé par `finHistSnapshot`, pas ici.
 // ⚠ `startFinanceHoldings` (badge « portefeuille en BTC ») est volontairement EXCLU : son
 // cache n'est pas sauvegardé (re-fetchable), sa cadence est mensuelle (le 5) et il exige un
 // jeton Google Drive obtenu par un geste de l'utilisateur.
