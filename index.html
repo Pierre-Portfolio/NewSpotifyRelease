@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.7.7';
+const APP_VERSION = '11.7.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5235,20 +5235,38 @@ function GameBounce() {
 }
 
 // ════════ Plox (d'après le jeu de l'appli Plato — ici en SOLO) ════════
-// Règles de Plato : une pièce de 3 blocs colorés tombe ; on TAPE pour permuter ses couleurs, on
-// glisse à gauche/droite pour la déplacer et vers le bas pour la lâcher. Aligner 3 blocs de la
-// même couleur ou plus — à l'horizontale, à la verticale OU en diagonale — les fait disparaître,
-// et ce qui est au-dessus retombe (d'où les enchaînements). À deux, le premier dont les blocs
-// débordent du haut du plateau a perdu ; en solo (demande utilisateur) c'est simplement la fin de
-// la partie : la pile a DÉPASSÉ LA HAUTEUR.
+// Une pièce de 3 blocs colorés tombe ; on la déplace, on la TOURNE, on la lâche. Aligner 3 blocs
+// de la même couleur ou plus — à l'horizontale, à la verticale OU EN DIAGONALE (les deux
+// diagonales) — les fait disparaître, et ce qui est au-dessus retombe : d'où les enchaînements,
+// qui multiplient les points de chaque passe. La partie s'arrête quand la pile DÉPASSE LA HAUTEUR.
 // ⚠ Les 4 directions se testent en ne comptant une suite QU'À SON DÉBUT (la case précédente doit
 // être d'une autre couleur), sinon une suite de 4 serait comptée quatre fois.
+// ⚠ TOURNER ≠ permuter les couleurs : la pièce a QUATRE états, parcourus dans cet ordre à chaque
+// appui — verticale → horizontale → verticale RETOURNÉE → horizontale RETOURNÉE (donc au 3e clic
+// on est sur l'horizontale retournée), puis retour à la verticale. « Retournée » inverse l'ordre
+// des trois couleurs ; c'est la même pièce lue à l'envers.
 const PLOX_HI = 'plox';
 const PLOX_COLS = ['#e0443c', '#3b82f6', '#2fbf5e', '#e0b02a', '#8b5cf0'];
-const PX_COLS = 7, PX_ROWS = 14, PX_CELL = 30;
+// ⚠ Cases VOLONTAIREMENT grandes (48 px contre 30 avant) : à 7 colonnes le plateau occupe alors
+// toute la largeur d'un téléphone au lieu d'un timbre-poste au milieu de l'écran.
+const PX_COLS = 7, PX_ROWS = 13, PX_CELL = 48;
 const PX_W = PX_COLS * PX_CELL, PX_H = PX_ROWS * PX_CELL;
 const PX_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
 const ploxDrop = sc => Math.max(150, 620 - ((sc / 400) | 0) * 45);   // la pièce tombe plus vite
+// Les 3 cases occupées par la pièce, avec leur couleur. `o` : 0 verticale · 1 horizontale ·
+// 2 verticale retournée · 3 horizontale retournée.
+function ploxCells(p) {
+  const rev = p.o >= 2, hor = p.o % 2 === 1;
+  const out = [];
+  for (let i = 0; i < 3; i++) {
+    const v = p.k[rev ? 2 - i : i];
+    out.push(hor ? { c: p.c + i, r: p.r, v } : { c: p.c, r: p.r + i, v });
+  }
+  return out;
+}
+const ploxFree = (g, c, r) => c >= 0 && c < PX_COLS && r >= 0 && r < PX_ROWS && !g[r * PX_COLS + c];
+// La pièce tient-elle à (c, r) dans l'orientation `o` ?
+const ploxFits = (g, c, r, o) => ploxCells({ c, r, o, k:[1, 1, 1] }).every(x => ploxFree(g, x.c, x.r));
 // Toutes les cases membres d'une suite de 3+ de la même couleur (les 4 directions).
 function ploxMatches(g) {
   const hit = new Set();
@@ -5276,14 +5294,19 @@ function ploxGravity(g) {
     for (let r = w; r >= 0; r--) g[r * PX_COLS + c] = 0;
   }
 }
-// Efface, tasse, recommence : un enchaînement (`chain`) multiplie les points de chaque passe.
-function ploxResolve(g) {
+// Efface, tasse, recommence. `boom` reçoit une bulle par case détruite : la grille, elle, est
+// nettoyée TOUT DE SUITE — l'animation ne fait que survivre à la case qu'elle représente, donc
+// elle ne peut jamais bloquer ni retarder le jeu.
+function ploxResolve(g, boom) {
   let pts = 0, chain = 0;
   for (;;) {
     const hit = ploxMatches(g);
     if (!hit.size) break;
     chain++;
-    hit.forEach(i => { g[i] = 0; });
+    hit.forEach(i => {
+      if (boom) boom.push({ c: i % PX_COLS, r: (i / PX_COLS) | 0, v: g[i], t: 0, delay: (chain - 1) * 6 });
+      g[i] = 0;
+    });
     pts += hit.size * 10 * chain;
     ploxGravity(g);
   }
@@ -5291,30 +5314,75 @@ function ploxResolve(g) {
 }
 function ploxNewPiece() {
   const rnd = () => 1 + ((Math.random() * PLOX_COLS.length) | 0);
-  return { c: (PX_COLS / 2) | 0, r: 0, k: [rnd(), rnd(), rnd()] };
+  return { c: 2, r: 0, o: 0, k: [rnd(), rnd(), rnd()] };
 }
-const ploxFree = (g, c, r) => c >= 0 && c < PX_COLS && r >= 0 && r < PX_ROWS && !g[r * PX_COLS + c];
-const ploxFits  = (g, c, r) => ploxFree(g, c, r) && ploxFree(g, c, r + 1) && ploxFree(g, c, r + 2);
+// ── Dessin ──
+function ploxRound(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+}
+// Un bloc ARRONDI, avec un reflet en haut et un liseré sombre : `s` met à l'échelle (l'animation
+// de destruction s'en sert pour faire enfler la case avant qu'elle ne s'efface).
+function ploxBlock(ctx, c, r, v, alpha, scale) {
+  if (r < 0) return;
+  const m = 3, sc = scale === undefined ? 1 : scale;
+  const w = (PX_CELL - m * 2) * sc, rad = Math.max(6, w * 0.3);
+  const x = c * PX_CELL + PX_CELL / 2 - w / 2, y = r * PX_CELL + PX_CELL / 2 - w / 2;
+  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  ploxRound(ctx, x, y, w, w, rad);
+  ctx.fillStyle = PLOX_COLS[v - 1]; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = '#00000055'; ctx.stroke();
+  ploxRound(ctx, x + w * 0.16, y + w * 0.12, w * 0.68, w * 0.26, rad * 0.5);
+  ctx.fillStyle = '#ffffff44'; ctx.fill();
+  ctx.globalAlpha = 1;
+}
 function ploxDraw(ctx, s) {
-  ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, PX_W, PX_H);
+  ctx.save();
+  // Secousse : elle ne dure que quelques images après un lâcher, pour donner du poids au geste.
+  if (s.shake > 0) ctx.translate((Math.random() - 0.5) * s.shake, (Math.random() - 0.5) * s.shake);
+  ctx.fillStyle = '#0b0e14'; ctx.fillRect(-12, -12, PX_W + 24, PX_H + 24);
   ctx.strokeStyle = '#1b2130'; ctx.lineWidth = 1;
   for (let c = 1; c < PX_COLS; c++) { ctx.beginPath(); ctx.moveTo(c * PX_CELL, 0); ctx.lineTo(c * PX_CELL, PX_H); ctx.stroke(); }
   for (let r = 1; r < PX_ROWS; r++) { ctx.beginPath(); ctx.moveTo(0, r * PX_CELL); ctx.lineTo(PX_W, r * PX_CELL); ctx.stroke(); }
   // Ligne de débordement : la 1re rangée est celle qui met fin à la partie.
   ctx.strokeStyle = '#e0443c55';
   ctx.beginPath(); ctx.moveTo(0, PX_CELL); ctx.lineTo(PX_W, PX_CELL); ctx.stroke();
-  const block = (c, r, v) => {
-    if (r < 0) return;
-    const x = c * PX_CELL + 2, y = r * PX_CELL + 2, w = PX_CELL - 4;
-    ctx.fillStyle = PLOX_COLS[v - 1];
-    ctx.fillRect(x, y, w, w);
-    ctx.fillStyle = '#ffffff33';
-    ctx.fillRect(x, y, w, 5);
-  };
-  for (let r = 0; r < PX_ROWS; r++) for (let c = 0; c < PX_COLS; c++) {
-    const v = s.g[r * PX_COLS + c]; if (v) block(c, r, v);
+  // Traînée du lâcher : une comète derrière chaque bloc, de son point de départ jusqu'à l'arrivée.
+  if (s.slam) {
+    const a = Math.max(0, 1 - s.slam.t / 14);
+    for (const x of s.slam.cells) {
+      const g = ctx.createLinearGradient(0, s.slam.from * PX_CELL, 0, (x.r + 1) * PX_CELL);
+      g.addColorStop(0, PLOX_COLS[x.v - 1] + '00'); g.addColorStop(1, PLOX_COLS[x.v - 1] + 'cc');
+      ctx.globalAlpha = a * 0.75; ctx.fillStyle = g;
+      ploxRound(ctx, x.c * PX_CELL + 10, s.slam.from * PX_CELL, PX_CELL - 20, Math.max(0, (x.r - s.slam.from + 1) * PX_CELL), 8);
+      ctx.fill();
+    }
+    // Éclair d'impact sous la pièce
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#ffffff';
+    for (const x of s.slam.cells) ctx.fillRect(x.c * PX_CELL + 4, (x.r + 1) * PX_CELL - 3, PX_CELL - 8, 3);
+    ctx.globalAlpha = 1;
   }
-  if (s.p) for (let i = 0; i < 3; i++) block(s.p.c, s.p.r + i, s.p.k[i]);
+  for (let r = 0; r < PX_ROWS; r++) for (let c = 0; c < PX_COLS; c++) {
+    const v = s.g[r * PX_COLS + c]; if (v) ploxBlock(ctx, c, r, v);
+  }
+  if (s.p) for (const x of ploxCells(s.p)) ploxBlock(ctx, x.c, x.r, x.v);
+  // Destruction : la case enfle, blanchit et se disloque en éclats.
+  for (const b of s.boom) {
+    if (b.t < b.delay) continue;
+    const k = (b.t - b.delay) / 18;
+    if (k > 1) continue;
+    ploxBlock(ctx, b.c, b.r, b.v, 1 - k, 1 + k * 0.7);
+    ctx.globalAlpha = Math.max(0, 1 - k) * 0.9;
+    ctx.fillStyle = '#ffffff';
+    const cx = (b.c + 0.5) * PX_CELL, cy = (b.r + 0.5) * PX_CELL, d = k * PX_CELL * 1.1;
+    for (let i = 0; i < 6; i++) {
+      const a = i * 1.047 + b.c;
+      ctx.fillRect(cx + Math.cos(a) * d - 2.5, cy + Math.sin(a) * d - 2.5, 5, 5);
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
 }
 function GamePlox() {
   const canvasRef = React.useRef(null);
@@ -5322,40 +5390,65 @@ function GamePlox() {
   const [score, setScore] = React.useState(0);
   const [best, setBest] = React.useState(() => gameHi(PLOX_HI));
   const [phase, setPhase] = React.useState('ready');   // ready | playing | dead
+  const blank = () => ({ g: new Int8Array(PX_COLS * PX_ROWS), p: null, score: 0, last: 0, boom: [], slam: null, shake: 0 });
   const start = () => {
-    g.current = { g: new Int8Array(PX_COLS * PX_ROWS), p: ploxNewPiece(), score: 0, last: 0 };
-    setScore(0); setPhase('playing');
+    const s = blank(); s.p = ploxNewPiece();
+    g.current = s; setScore(0); setPhase('playing');
   };
   const paint = () => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && g.current) ploxDraw(ctx, g.current); };
-  React.useEffect(() => { if (!g.current) g.current = { g: new Int8Array(PX_COLS * PX_ROWS), p: null, score: 0, last: 0 }; paint(); }, [phase]);
+  React.useEffect(() => { if (!g.current) g.current = blank(); paint(); }, [phase]);
   // ⚠ Refs anti-closure : `step`/`act` sont appelées depuis la boucle rAF et depuis des
   // écouteurs posés une fois — elles lisent TOUT dans `g.current`, jamais dans un state.
   const overRef = React.useRef(null);
-  const step = React.useCallback(() => {
-    const s = g.current; if (!s || !s.p) return;
-    if (ploxFree(s.g, s.p.c, s.p.r + 3)) { s.p.r++; return; }
-    for (let i = 0; i < 3; i++) s.g[(s.p.r + i) * PX_COLS + s.p.c] = s.p.k[i];
-    const r = ploxResolve(s.g);
-    if (r.pts) { s.score += r.pts; setScore(s.score); }
+  // Pose la pièce, résout les alignements, fait naître la suivante. `from` = rangée de départ du
+  // lâcher (pour la traînée) ou null quand la pièce s'est simplement posée toute seule.
+  const lock = React.useCallback((s, from) => {
+    const cells = ploxCells(s.p);
+    for (const x of cells) s.g[x.r * PX_COLS + x.c] = x.v;
+    if (from !== null && from !== undefined && from < s.p.r) { s.slam = { cells, from, t: 0 }; s.shake = 9; }
+    // ⚠ Tassement DÈS LA POSE, avant même de chercher les alignements : une pièce HORIZONTALE
+    // posée à cheval sur deux colonnes de hauteurs différentes laisserait sinon des blocs en
+    // suspension au-dessus du vide — impossible avec l'ancienne pièce verticale, et contraire à
+    // la règle « ce qui est au-dessus retombe ».
+    ploxGravity(s.g);
+    const r = ploxResolve(s.g, s.boom);
+    if (r.pts) { s.score += r.pts; setScore(s.score); if (r.chain > 1) s.shake = Math.max(s.shake, 5 + r.chain * 2); }
     // Fin de partie : un bloc reste sur la 1re rangée, ou la pièce suivante n'a plus la place
     // de naître — dans les deux cas la pile a dépassé la hauteur du plateau.
     let over = false;
     for (let c = 0; c < PX_COLS; c++) if (s.g[c]) over = true;
     const np = ploxNewPiece();
-    if (!ploxFits(s.g, np.c, np.r)) over = true;
+    if (!ploxFits(s.g, np.c, np.r, np.o)) over = true;
     if (over) { s.p = null; overRef.current && overRef.current(); return; }
     s.p = np;
   }, []);
+  const step = React.useCallback(() => {
+    const s = g.current; if (!s || !s.p) return;
+    if (ploxFits(s.g, s.p.c, s.p.r + 1, s.p.o)) { s.p.r++; return; }
+    lock(s, null);
+  }, [lock]);
   const act = React.useCallback(kind => {
     const s = g.current; if (!s || !s.p) return;
     const p = s.p;
-    if (kind === 'left'  && ploxFits(s.g, p.c - 1, p.r)) p.c--;
-    if (kind === 'right' && ploxFits(s.g, p.c + 1, p.r)) p.c++;
-    if (kind === 'rot')   p.k = [p.k[2], p.k[0], p.k[1]];
+    if (kind === 'left'  && ploxFits(s.g, p.c - 1, p.r, p.o)) p.c--;
+    if (kind === 'right' && ploxFits(s.g, p.c + 1, p.r, p.o)) p.c++;
+    if (kind === 'rot') {
+      // ⚠ Décalages de rattrapage : passer de la verticale à l'horizontale demande 2 colonnes de
+      // plus. Sans eux, tourner serait REFUSÉ contre le bord droit et le cycle des 4 états
+      // (« au 3e clic, l'horizontale retournée ») ne serait plus tenu là où on en a le plus besoin.
+      const o = (p.o + 1) % 4;
+      for (const [dc, dr] of [[0, 0], [-1, 0], [-2, 0], [1, 0], [0, -1], [-1, -1]]) {
+        if (ploxFits(s.g, p.c + dc, p.r + dr, o)) { p.c += dc; p.r += dr; p.o = o; break; }
+      }
+    }
     if (kind === 'down')  step();
-    if (kind === 'drop')  { while (ploxFree(s.g, p.c, p.r + 3)) p.r++; step(); }
+    if (kind === 'drop')  {
+      const from = p.r;
+      while (ploxFits(s.g, p.c, p.r + 1, p.o)) p.r++;
+      lock(s, from);
+    }
     paint();
-  }, [step]);
+  }, [step, lock]);
   React.useEffect(() => {
     if (phase !== 'playing') return;
     let raf, alive = true;
@@ -5372,6 +5465,11 @@ function GamePlox() {
       if (!s.last) s.last = t;
       if (t - s.last >= ploxDrop(s.score)) { s.last = t; step(); }
       if (!alive) return;                      // `step` a pu terminer la partie
+      // Minuteries des animations (elles vivent leur vie, la grille est déjà à jour)
+      for (const b of s.boom) b.t++;
+      s.boom = s.boom.filter(b => b.t < b.delay + 19);
+      if (s.slam && ++s.slam.t > 14) s.slam = null;
+      if (s.shake > 0) s.shake = Math.max(0, s.shake - 0.7);
       ploxDraw(canvasRef.current.getContext('2d'), s);
       raf = requestAnimationFrame(loop);
     };
@@ -5388,7 +5486,7 @@ function GamePlox() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [phase, act]);
-  // Gestes façon Plato : taper = permuter les couleurs, glisser latéralement = déplacer (case par
+  // Gestes façon Plato : taper = tourner la pièce, glisser latéralement = déplacer (case par
   // case, l'origine se recale à chaque pas), glisser vers le bas = lâcher.
   // ⚠ Garde `moved` : un glissement se termine TOUJOURS par un click synthétique, qui ferait
   // tourner la pièce en plus de l'avoir déplacée (piège n°12).
@@ -5406,7 +5504,7 @@ function GamePlox() {
   };
   const onUp = () => { const d = drag.current; drag.current = null; if (d && !d.moved) act('rot'); };
   return (
-    <GameWrap hint="Aligne 3 blocs de la même couleur ou plus — horizontal, vertical OU diagonale — et ils disparaissent, ce qui est au-dessus retombe (les enchaînements rapportent double, triple…). Tape pour permuter les couleurs de la pièce, glisse à gauche/droite pour la déplacer, vers le bas pour la lâcher. Au clavier : flèches et Espace. Si la pile dépasse la hauteur du plateau, c'est perdu."
+    <GameWrap hint="Aligne 3 blocs de la même couleur ou plus — horizontal, vertical OU EN DIAGONALE — et ils explosent, ce qui est au-dessus retombe (les enchaînements rapportent double, triple…). Tape pour TOURNER la pièce : verticale → horizontale → verticale retournée → horizontale retournée (donc au 3e appui, l'horizontale retournée), puis on recommence. Glisse à gauche/droite pour la déplacer, vers le bas pour la jeter. Au clavier : flèches et Espace. Si la pile dépasse la hauteur du plateau, c'est perdu."
       bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
       <div style={{ position:'relative', width:'100%', maxWidth:PX_W }}>
         <canvas ref={canvasRef} width={PX_W} height={PX_H}
@@ -5415,8 +5513,8 @@ function GamePlox() {
           style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }} />
         {phase !== 'playing' && (
           <div onPointerDown={start} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
-            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? '💥 Ça dépasse !' : '🟪 Plox'}</div>
-            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
+            <div style={{ fontSize:16, fontWeight:800, textShadow:'0 2px 8px #000' }}>{phase === 'dead' ? '💥 Ça dépasse !' : '🟪 Plox'}</div>
+            <div style={{ fontSize:12, background:'#00000099', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
           </div>
         )}
       </div>
