@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.7.3';
+const APP_VERSION = '11.7.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4289,6 +4289,7 @@ const GAMES = [
   { id:'airhockey',  label:'Air Hockey',      min:2, max:2 },
   { id:'bataille',   label:'Bataille navale', min:2, max:2 },
   { id:'blackjack',  label:'Blackjack',       min:1, max:5 },
+  { id:'bounce',     label:'Bounce',          min:1, max:1 },
   { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
   { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
@@ -4306,6 +4307,7 @@ const GAMES = [
   { id:'ordre',      label:'Ordre croissant', min:2, max:8 },
   { id:'osu',        label:'Osu',             min:1, max:1 },
   { id:'piano',      label:'Piano Tiles',     min:1, max:1 },
+  { id:'plox',       label:'Plox',            min:1, max:1 },
   { id:'poker',      label:'Poker',           min:1, max:6 },
   { id:'puissance4', label:'Puissance 4',     min:2, max:2 },
   { id:'simon',      label:'Simon',           min:1, max:1 },
@@ -4404,6 +4406,7 @@ function GameHost({ game, label }) {
     case 'airhockey':  return <GameAirHockey />;
     case 'bataille':   return <GameBataille />;
     case 'blackjack':  return <GameBlackjack />;
+    case 'bounce':     return <GameBounce />;
     case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
     case 'doodle':     return <GameDoodle />;
@@ -4421,6 +4424,7 @@ function GameHost({ game, label }) {
     case 'ordre':      return <GameOrdre />;
     case 'osu':        return <GameOsu />;
     case 'piano':      return <GamePiano />;
+    case 'plox':       return <GamePlox />;
     case 'poker':      return <GamePoker />;
     case 'puissance4': return <GamePuissance4 />;
     case 'simon':      return <GameSimon />;
@@ -4863,6 +4867,363 @@ function GameSimon() {
       </div>
       {(phase === 'ready' || phase === 'over') && (
         <button onClick={start} style={gameBtn({ fontSize:13 })}>{phase === 'over' ? '↻ Rejouer' : '▶ Commencer'}</button>
+      )}
+    </GameWrap>
+  );
+}
+
+// ════════ Bounce (d'après le jeu de l'appli Plato — ici en SOLO) ════════
+// Règles de Plato : on TAPE pour faire rebondir la balle, et elle ne franchit une barre que si
+// sa couleur est la MÊME (bleu / rose / turquoise / jaune) ; les pastilles croisées en chemin la
+// repeignent, et les obstacles se resserrent au fil de la montée. À deux c'est une course et une
+// mauvaise couleur renvoie au checkpoint le plus proche ; en solo il n'y a pas de course, donc
+// (demande utilisateur) toucher une barre d'une autre couleur TERMINE la partie — comme tomber
+// hors de l'écran.
+// ⚠ UNE SEULE COMMANDE (taper), comme dans Plato : c'est le MOMENT du rebond qui décide de la
+// position horizontale — la balle avance en biais et rebondit sur les parois — donc de la
+// pastille qu'on attrape. Sans ce biais, la balle traverserait toutes les pastilles d'affilée et
+// il n'y aurait plus aucun choix à faire.
+const BOUNCE_HI = 'bounce';
+const BOUNCE_COLS = ['#3b82f6', '#ec4899', '#2dd4bf', '#facc15'];   // bleu · rose · turquoise · jaune
+const BO_W = 300, BO_H = 440, BO_R = 11, BO_WALL = 10;
+const BO_GRAV = 0.42, BO_JUMP = -8.4;
+// ⚠ Monde en coordonnées CANVAS (y vers le BAS) : monter = y qui DIMINUE, et la caméra
+// (`cam` = y du monde affiché tout en haut) ne fait que baisser — elle ne redescend jamais,
+// sinon une chute ramènerait le décor en arrière.
+const boSpacing = sc => Math.max(112, 150 - sc * 1.2);       // les barres se resserrent
+const boSpeed   = sc => 1.6 + Math.min(1.4, sc * 0.04);      // et la balle file plus vite
+const boPadCount = sc => 2 + Math.min(2, (sc / 10) | 0);     // + de leurres à attraper
+// Crée les barres manquantes au-dessus de la caméra. Chaque barre a SA couleur et, juste en
+// dessous, une rangée de pastilles dont UNE SEULE porte cette couleur : c'est elle qu'il faut
+// aller chercher avant de franchir la barre.
+function bounceGen(s) {
+  while (s.nextY > s.cam - 260) {
+    const col = BOUNCE_COLS[(Math.random() * BOUNCE_COLS.length) | 0];
+    s.bars.push({ y: s.nextY, col, passed: false });
+    const k = boPadCount(s.score);
+    const good = (Math.random() * k) | 0;
+    const span = BO_W - 2 * BO_WALL - 44;
+    for (let i = 0; i < k; i++) {
+      const x = BO_WALL + 22 + (k === 1 ? span / 2 : span * i / (k - 1));
+      let c = col;
+      if (i !== good) { const o = BOUNCE_COLS.filter(v => v !== col); c = o[(Math.random() * o.length) | 0]; }
+      s.pads.push({ x, y: s.nextY + 62, col: c });
+    }
+    s.nextY -= boSpacing(s.score);
+  }
+}
+function bounceReset() {
+  const s = { x: BO_W / 2, y: 0, vx: boSpeed(0), vy: 0, col: BOUNCE_COLS[0],
+              cam: -BO_H * 0.62, bars: [], pads: [], nextY: -260, score: 0 };
+  bounceGen(s);
+  return s;
+}
+function bounceDraw(ctx, s) {
+  ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, BO_W, BO_H);
+  ctx.fillStyle = '#161b26';
+  ctx.fillRect(0, 0, BO_WALL, BO_H); ctx.fillRect(BO_W - BO_WALL, 0, BO_WALL, BO_H);
+  for (const b of s.bars) {
+    const y = b.y - s.cam;
+    if (y < -20 || y > BO_H + 20) continue;
+    ctx.globalAlpha = b.passed ? 0.22 : 1;
+    ctx.fillStyle = b.col;
+    ctx.fillRect(BO_WALL, y - 5, BO_W - 2 * BO_WALL, 11);
+    ctx.globalAlpha = 1;
+  }
+  for (const p of s.pads) {
+    const y = p.y - s.cam;
+    if (y < -20 || y > BO_H + 20) continue;
+    ctx.beginPath(); ctx.arc(p.x, y, 9, 0, Math.PI * 2);
+    ctx.fillStyle = p.col; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#0b0e14'; ctx.stroke();
+  }
+  const by = s.y - s.cam;
+  ctx.shadowColor = s.col; ctx.shadowBlur = 16;
+  ctx.beginPath(); ctx.arc(s.x, by, BO_R, 0, Math.PI * 2);
+  ctx.fillStyle = s.col; ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.arc(s.x - 3, by - 3, 3.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffffaa'; ctx.fill();
+}
+function GameBounce() {
+  const canvasRef = React.useRef(null);
+  const g = React.useRef(bounceReset());
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi(BOUNCE_HI));
+  const [phase, setPhase] = React.useState('ready');   // ready | playing | dead
+  const [why, setWhy] = React.useState('');
+  const tap = () => {
+    if (phase === 'playing') { g.current.vy = BO_JUMP; return; }
+    g.current = bounceReset(); setScore(0); setWhy(''); setPhase('playing');
+    g.current.vy = BO_JUMP;
+  };
+  // Dessin hors partie (écran d'accueil / de fin) : la boucle rAF ne tourne pas.
+  React.useEffect(() => {
+    const ctx = canvasRef.current && canvasRef.current.getContext('2d');
+    if (ctx && phase !== 'playing') bounceDraw(ctx, g.current);
+  }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    const die = msg => {
+      if (!alive) return;
+      alive = false; cancelAnimationFrame(raf);
+      const sc = g.current.score;
+      setBest(b => { const nb = Math.max(b, sc); setGameHi(BOUNCE_HI, nb); return nb; });
+      setWhy(msg); setPhase('dead');
+    };
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current, ctx = canvasRef.current.getContext('2d');
+      const prevY = s.y;
+      s.vy += BO_GRAV; s.y += s.vy; s.x += s.vx;
+      if (s.x - BO_R < BO_WALL)          { s.x = BO_WALL + BO_R; s.vx = Math.abs(s.vx); }
+      if (s.x + BO_R > BO_W - BO_WALL)   { s.x = BO_W - BO_WALL - BO_R; s.vx = -Math.abs(s.vx); }
+      // Pastilles : simple contact, jamais consommées (repasser dessus en bobbant ne doit pas
+      // punir — la couleur reste simplement celle de la dernière touchée).
+      for (const p of s.pads) {
+        if (Math.abs(p.y - s.y) < BO_R + 9 && Math.abs(p.x - s.x) < BO_R + 9) s.col = p.col;
+      }
+      // Barres : franchies uniquement vers le HAUT. Une barre déjà passée ne tue plus (on peut
+      // retomber dessous puis remonter sans être puni deux fois).
+      for (const b of s.bars) {
+        if (b.passed) continue;
+        if (prevY > b.y && s.y <= b.y) {
+          if (b.col !== s.col) { s.y = b.y; bounceDraw(ctx, s); die('Mauvaise couleur !'); return; }
+          b.passed = true; s.score++; setScore(s.score);
+          s.vx = (s.vx < 0 ? -1 : 1) * boSpeed(s.score);
+        }
+      }
+      const target = s.y - BO_H * 0.62;
+      if (target < s.cam) s.cam = target;
+      if (s.y - s.cam > BO_H + 30) { die('Tombé !'); return; }
+      bounceGen(s);
+      s.bars = s.bars.filter(b => b.y < s.cam + BO_H + 260);
+      s.pads = s.pads.filter(p => p.y < s.cam + BO_H + 260);
+      bounceDraw(ctx, s);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  React.useEffect(() => {
+    const onKey = e => {
+      if (e.repeat) return;
+      if (e.code === 'Space' || e.key === ' ' || e.key === 'ArrowUp') { e.preventDefault(); tap(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+  return (
+    <GameWrap hint="Tape (ou Espace) pour rebondir et monter. Une barre ne se franchit que si la balle a SA couleur : va chercher la bonne pastille avant d'arriver dessus. La balle file en biais et rebondit sur les parois — c'est le moment du rebond qui décide de l'endroit où tu passes."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Barres <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:BO_W }}>
+        <canvas ref={canvasRef} width={BO_W} height={BO_H} onPointerDown={tap}
+          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'manipulation', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={tap} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? `💥 ${why}` : '🔵 Bounce'}</div>
+            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Plox (d'après le jeu de l'appli Plato — ici en SOLO) ════════
+// Règles de Plato : une pièce de 3 blocs colorés tombe ; on TAPE pour permuter ses couleurs, on
+// glisse à gauche/droite pour la déplacer et vers le bas pour la lâcher. Aligner 3 blocs de la
+// même couleur ou plus — à l'horizontale, à la verticale OU en diagonale — les fait disparaître,
+// et ce qui est au-dessus retombe (d'où les enchaînements). À deux, le premier dont les blocs
+// débordent du haut du plateau a perdu ; en solo (demande utilisateur) c'est simplement la fin de
+// la partie : la pile a DÉPASSÉ LA HAUTEUR.
+// ⚠ Les 4 directions se testent en ne comptant une suite QU'À SON DÉBUT (la case précédente doit
+// être d'une autre couleur), sinon une suite de 4 serait comptée quatre fois.
+const PLOX_HI = 'plox';
+const PLOX_COLS = ['#e0443c', '#3b82f6', '#2fbf5e', '#e0b02a', '#8b5cf0'];
+const PX_COLS = 7, PX_ROWS = 14, PX_CELL = 30;
+const PX_W = PX_COLS * PX_CELL, PX_H = PX_ROWS * PX_CELL;
+const PX_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
+const ploxDrop = sc => Math.max(150, 620 - ((sc / 400) | 0) * 45);   // la pièce tombe plus vite
+// Toutes les cases membres d'une suite de 3+ de la même couleur (les 4 directions).
+function ploxMatches(g) {
+  const hit = new Set();
+  for (let r = 0; r < PX_ROWS; r++) for (let c = 0; c < PX_COLS; c++) {
+    const v = g[r * PX_COLS + c];
+    if (!v) continue;
+    for (const [dc, dr] of PX_DIRS) {
+      const pc = c - dc, pr = r - dr;
+      if (pc >= 0 && pc < PX_COLS && pr >= 0 && pr < PX_ROWS && g[pr * PX_COLS + pc] === v) continue;
+      let n = 0, cc = c, rr = r;
+      while (cc >= 0 && cc < PX_COLS && rr >= 0 && rr < PX_ROWS && g[rr * PX_COLS + cc] === v) { n++; cc += dc; rr += dr; }
+      if (n >= 3) { cc = c; rr = r; for (let k = 0; k < n; k++) { hit.add(rr * PX_COLS + cc); cc += dc; rr += dr; } }
+    }
+  }
+  return hit;
+}
+// Tassement colonne par colonne (ce qui flotte après un effacement retombe).
+function ploxGravity(g) {
+  for (let c = 0; c < PX_COLS; c++) {
+    let w = PX_ROWS - 1;
+    for (let r = PX_ROWS - 1; r >= 0; r--) {
+      const v = g[r * PX_COLS + c];
+      if (v) { g[r * PX_COLS + c] = 0; g[w * PX_COLS + c] = v; w--; }
+    }
+    for (let r = w; r >= 0; r--) g[r * PX_COLS + c] = 0;
+  }
+}
+// Efface, tasse, recommence : un enchaînement (`chain`) multiplie les points de chaque passe.
+function ploxResolve(g) {
+  let pts = 0, chain = 0;
+  for (;;) {
+    const hit = ploxMatches(g);
+    if (!hit.size) break;
+    chain++;
+    hit.forEach(i => { g[i] = 0; });
+    pts += hit.size * 10 * chain;
+    ploxGravity(g);
+  }
+  return { pts, chain };
+}
+function ploxNewPiece() {
+  const rnd = () => 1 + ((Math.random() * PLOX_COLS.length) | 0);
+  return { c: (PX_COLS / 2) | 0, r: 0, k: [rnd(), rnd(), rnd()] };
+}
+const ploxFree = (g, c, r) => c >= 0 && c < PX_COLS && r >= 0 && r < PX_ROWS && !g[r * PX_COLS + c];
+const ploxFits  = (g, c, r) => ploxFree(g, c, r) && ploxFree(g, c, r + 1) && ploxFree(g, c, r + 2);
+function ploxDraw(ctx, s) {
+  ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, PX_W, PX_H);
+  ctx.strokeStyle = '#1b2130'; ctx.lineWidth = 1;
+  for (let c = 1; c < PX_COLS; c++) { ctx.beginPath(); ctx.moveTo(c * PX_CELL, 0); ctx.lineTo(c * PX_CELL, PX_H); ctx.stroke(); }
+  for (let r = 1; r < PX_ROWS; r++) { ctx.beginPath(); ctx.moveTo(0, r * PX_CELL); ctx.lineTo(PX_W, r * PX_CELL); ctx.stroke(); }
+  // Ligne de débordement : la 1re rangée est celle qui met fin à la partie.
+  ctx.strokeStyle = '#e0443c55';
+  ctx.beginPath(); ctx.moveTo(0, PX_CELL); ctx.lineTo(PX_W, PX_CELL); ctx.stroke();
+  const block = (c, r, v) => {
+    if (r < 0) return;
+    const x = c * PX_CELL + 2, y = r * PX_CELL + 2, w = PX_CELL - 4;
+    ctx.fillStyle = PLOX_COLS[v - 1];
+    ctx.fillRect(x, y, w, w);
+    ctx.fillStyle = '#ffffff33';
+    ctx.fillRect(x, y, w, 5);
+  };
+  for (let r = 0; r < PX_ROWS; r++) for (let c = 0; c < PX_COLS; c++) {
+    const v = s.g[r * PX_COLS + c]; if (v) block(c, r, v);
+  }
+  if (s.p) for (let i = 0; i < 3; i++) block(s.p.c, s.p.r + i, s.p.k[i]);
+}
+function GamePlox() {
+  const canvasRef = React.useRef(null);
+  const g = React.useRef(null);
+  const [score, setScore] = React.useState(0);
+  const [best, setBest] = React.useState(() => gameHi(PLOX_HI));
+  const [phase, setPhase] = React.useState('ready');   // ready | playing | dead
+  const start = () => {
+    g.current = { g: new Int8Array(PX_COLS * PX_ROWS), p: ploxNewPiece(), score: 0, last: 0 };
+    setScore(0); setPhase('playing');
+  };
+  const paint = () => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && g.current) ploxDraw(ctx, g.current); };
+  React.useEffect(() => { if (!g.current) g.current = { g: new Int8Array(PX_COLS * PX_ROWS), p: null, score: 0, last: 0 }; paint(); }, [phase]);
+  // ⚠ Refs anti-closure : `step`/`act` sont appelées depuis la boucle rAF et depuis des
+  // écouteurs posés une fois — elles lisent TOUT dans `g.current`, jamais dans un state.
+  const overRef = React.useRef(null);
+  const step = React.useCallback(() => {
+    const s = g.current; if (!s || !s.p) return;
+    if (ploxFree(s.g, s.p.c, s.p.r + 3)) { s.p.r++; return; }
+    for (let i = 0; i < 3; i++) s.g[(s.p.r + i) * PX_COLS + s.p.c] = s.p.k[i];
+    const r = ploxResolve(s.g);
+    if (r.pts) { s.score += r.pts; setScore(s.score); }
+    // Fin de partie : un bloc reste sur la 1re rangée, ou la pièce suivante n'a plus la place
+    // de naître — dans les deux cas la pile a dépassé la hauteur du plateau.
+    let over = false;
+    for (let c = 0; c < PX_COLS; c++) if (s.g[c]) over = true;
+    const np = ploxNewPiece();
+    if (!ploxFits(s.g, np.c, np.r)) over = true;
+    if (over) { s.p = null; overRef.current && overRef.current(); return; }
+    s.p = np;
+  }, []);
+  const act = React.useCallback(kind => {
+    const s = g.current; if (!s || !s.p) return;
+    const p = s.p;
+    if (kind === 'left'  && ploxFits(s.g, p.c - 1, p.r)) p.c--;
+    if (kind === 'right' && ploxFits(s.g, p.c + 1, p.r)) p.c++;
+    if (kind === 'rot')   p.k = [p.k[2], p.k[0], p.k[1]];
+    if (kind === 'down')  step();
+    if (kind === 'drop')  { while (ploxFree(s.g, p.c, p.r + 3)) p.r++; step(); }
+    paint();
+  }, [step]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true;
+    overRef.current = () => {
+      if (!alive) return;
+      alive = false; cancelAnimationFrame(raf);
+      const sc = g.current.score;
+      setBest(b => { const nb = Math.max(b, sc); setGameHi(PLOX_HI, nb); return nb; });
+      setPhase('dead');
+    };
+    const loop = t => {
+      if (!alive) return;
+      const s = g.current;
+      if (!s.last) s.last = t;
+      if (t - s.last >= ploxDrop(s.score)) { s.last = t; step(); }
+      if (!alive) return;                      // `step` a pu terminer la partie
+      ploxDraw(canvasRef.current.getContext('2d'), s);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); overRef.current = null; };
+  }, [phase, step]);
+  React.useEffect(() => {
+    const onKey = e => {
+      if (phase !== 'playing') return;
+      const m = { ArrowLeft:'left', ArrowRight:'right', ArrowUp:'rot', ArrowDown:'down' }[e.key];
+      if (m) { e.preventDefault(); act(m); }
+      else if (e.code === 'Space' || e.key === ' ') { e.preventDefault(); act('drop'); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [phase, act]);
+  // Gestes façon Plato : taper = permuter les couleurs, glisser latéralement = déplacer (case par
+  // case, l'origine se recale à chaque pas), glisser vers le bas = lâcher.
+  // ⚠ Garde `moved` : un glissement se termine TOUJOURS par un click synthétique, qui ferait
+  // tourner la pièce en plus de l'avoir déplacée (piège n°12).
+  const drag = React.useRef(null);
+  const onDown = e => {
+    if (phase !== 'playing') { start(); return; }
+    drag.current = { x:e.clientX, y:e.clientY, moved:false };
+    e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onMove = e => {
+    const d = drag.current; if (!d) return;
+    const dx = e.clientX - d.x, dy = e.clientY - d.y;
+    if (dy > 34 && Math.abs(dy) > Math.abs(dx)) { d.moved = true; d.x = e.clientX; d.y = e.clientY; act('drop'); return; }
+    if (Math.abs(dx) >= 22) { d.moved = true; act(dx > 0 ? 'right' : 'left'); d.x = e.clientX; d.y = e.clientY; }
+  };
+  const onUp = () => { const d = drag.current; drag.current = null; if (d && !d.moved) act('rot'); };
+  return (
+    <GameWrap hint="Aligne 3 blocs de la même couleur ou plus — horizontal, vertical OU diagonale — et ils disparaissent, ce qui est au-dessus retombe (les enchaînements rapportent double, triple…). Tape pour permuter les couleurs de la pièce, glisse à gauche/droite pour la déplacer, vers le bas pour la lâcher. Au clavier : flèches et Espace. Si la pile dépasse la hauteur du plateau, c'est perdu."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:PX_W }}>
+        <canvas ref={canvasRef} width={PX_W} height={PX_H}
+          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+          onContextMenu={e => e.preventDefault()}
+          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }} />
+        {phase !== 'playing' && (
+          <div onPointerDown={start} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? '💥 Ça dépasse !' : '🟪 Plox'}</div>
+            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
+      {phase === 'playing' && (
+        <div style={{ display:'flex', gap:6 }}>
+          <button onClick={() => act('left')}  style={gameBtn({ fontSize:15, padding:'7px 15px' })}>←</button>
+          <button onClick={() => act('rot')}   style={gameBtn({ fontSize:13, padding:'7px 15px' })}>↻</button>
+          <button onClick={() => act('right')} style={gameBtn({ fontSize:15, padding:'7px 15px' })}>→</button>
+          <button onClick={() => act('drop')}  style={gameBtn({ fontSize:15, padding:'7px 15px' })}>⤓</button>
+        </div>
       )}
     </GameWrap>
   );
