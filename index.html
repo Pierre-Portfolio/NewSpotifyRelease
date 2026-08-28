@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.8.3';
+const APP_VERSION = '11.8.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2768,6 +2768,9 @@ function StoreProvider({ children }) {
         // ⚠ AVANT notifyDueReminders : les rappels hebdomadaires ne notifient que si leur
         // tâche est présente dans le To do — elle doit donc être créée d'abord.
         try { syncRemembersToTodos(); } catch {}
+        // Speedrun → To do : même chose pour les runs à valider, mais sur le SEUL cache
+        // (aucune requête au boot ; la synchro complète a lieu à l'ouverture d'Alertes).
+        try { syncSpeedrunToTodoFromCache(); } catch {}
         // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
         try { notifyDueReminders(); } catch {}
 
@@ -44220,6 +44223,57 @@ async function srFetchQueue(force) {
   return out;
 }
 
+// To do : une alerte speedrun (runs en attente de validation) pose une tâche dans le
+// carrousel « Aujourd'hui », comme `syncRemembersToTodos` le fait pour les rappels échus.
+// ⚠ Dédoublonnage PAR JOUR (clé locale, jamais `toISOString()`) : supprimée à la main,
+// la tâche ne réapparaît qu'au lendemain (le marqueur du jour reste posé).
+// Tant qu'elle est là, le compte de runs y est RÉÉCRIT (jamais une 2e tâche) ; file vidée
+// ⇒ la tâche disparaît. On cible `srKey` et JAMAIS le texte (qui, lui, bouge).
+const SR_TODO_KEY   = 'speedrun.queue';                  // marqueur porté par la tâche
+const SR_TODO_ADDED = 'spotifyplus_speedrun_todo_added'; // 'YYYY-MM-DD' du dernier ajout
+function syncSpeedrunToTodo(res) {
+  if (!res || res.error) return false;
+  const pending = res.totalPending || 0;
+  const todos = loadTodos();
+  const idx = todos.findIndex(t => t.srKey === SR_TODO_KEY);
+  if (!pending) {                                        // plus rien à valider → on retire la tâche
+    // ⚠ Le marqueur du jour est effacé AVEC elle : c'est NOUS qui retirons la tâche (file
+    // vidée), donc un run arrivé plus tard dans la journée doit pouvoir la recréer. Une
+    // tâche supprimée À LA MAIN, elle, laisse le marqueur en place → pas de retour.
+    try { localStorage.removeItem(SR_TODO_ADDED); } catch {}
+    if (idx < 0) return false;
+    todos.splice(idx, 1);
+    saveTodos(todos);
+    return true;
+  }
+  const text = `🏁 Valider ${pending} run${pending > 1 ? 's' : ''} speedrun`;
+  if (idx >= 0) {                                        // déjà présente → simple rafraîchissement
+    if (todos[idx].text === text) return false;
+    todos[idx] = { ...todos[idx], text };
+    saveTodos(todos);
+    return true;
+  }
+  const day = todoTodayStr();
+  let added = '';
+  try { added = localStorage.getItem(SR_TODO_ADDED) || ''; } catch {}
+  if (added === day) return false;                       // déjà proposée aujourd'hui
+  todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), text, bucket:'today', fav:false, srKey: SR_TODO_KEY });
+  saveTodos(todos);
+  try { localStorage.setItem(SR_TODO_ADDED, day); } catch {}
+  return true;
+}
+// Au boot : on rejoue la synchro sur le SEUL cache (aucune requête — srFetchQueue coûte
+// jusqu'à 80 appels séquentiels), et uniquement s'il est encore dans sa fenêtre de 15 min.
+// Un cache périmé ne dit plus rien de la file : la tâche attendra l'ouverture d'Alertes.
+function syncSpeedrunToTodoFromCache() {
+  const name = srUser();
+  if (!name) return false;
+  let cache = null;
+  try { cache = JSON.parse(localStorage.getItem(SR_CACHE_LS)); } catch {}
+  if (!cache || cache.name !== name || Date.now() - cache.fetchedAt >= SR_TTL) return false;
+  return syncSpeedrunToTodo(cache);
+}
+
 const SR_STATS_LS = 'spotifyplus_speedrun_stats';      // stats speedrun cachées (re-fetchable, TTL 15 min → PAS dans buildBackup)
 const SR_STATS_V  = 2;                                 // v2 = ajoute gameList (liste des jeux courus) → un cache v<2 est périmé
 
@@ -45129,6 +45183,7 @@ function SpeedrunSection() {
     const d = await srFetchQueue(force);
     if (d.error) { setErr(ERR[d.error] || ERR.NET); if (d.error !== 'CONFIG') setData(null); setLoading(false); return; }
     setData(d); setLoading(false);
+    try { syncSpeedrunToTodo(d); } catch {}   // runs à valider → tâche « Aujourd'hui »
   };
   React.useEffect(() => { if (configured) refresh(false); }, []);
 
@@ -45366,7 +45421,9 @@ function RappelPanel() {
         try { const d = await ghFetchDependabot(false); if (!cancelled && d && !d.error && d.totalAlerts > 0) setDepAlert(d); } catch {}
       }
       if (srUser()) {
-        try { const s = await srFetchQueue(false); if (!cancelled && s && !s.error && s.totalPending > 0) setSrAlert(s); } catch {}
+        // ⚠ La synchro To do tourne AUSSI quand la file est vide (elle retire alors la
+        // tâche) et même si le composant est démonté : elle n'écrit qu'en localStorage.
+        try { const s = await srFetchQueue(false); if (s && !s.error) { try { syncSpeedrunToTodo(s); } catch {} if (!cancelled && s.totalPending > 0) setSrAlert(s); } } catch {}
       }
     })();
     return () => { cancelled = true; };
