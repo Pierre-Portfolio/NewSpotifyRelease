@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.7.0';
+const APP_VERSION = '11.7.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -36289,6 +36289,30 @@ function tvEpLocked(date, item, n, e) {
   if (e !== ne.e) return e > ne.e;
   return tvDateLocked(ne.date);
 }
+// ⚠ 11.7.1 — GEL DU SET HÉRITÉ (cause du « l'épisode se coche tout seul à sa sortie ») :
+// `tvWatchedSet` RECONSTITUE le set d'un vieil item à chaque lecture, en marquant les
+// `watchedEps` premiers épisodes de `seasons` — or `seasons` est RÉÉCRIT à chaque refresh
+// TMDB. Dès que le compteur égale ou dépasse le total du moment (le cas de TOUTE série suivie
+// à jour puis mise en pause — et il le dépasse dès que `watchedEps` vient de `totalEps`,
+// qui est le `number_of_episodes` de TMDB et non la somme des `episode_count`), le prochain
+// épisode ajouté par TMDB tombe DANS la fenêtre du compteur : il apparaît coché sans que
+// personne n'y ait touché, sur toutes les séries héritées à la fois.
+// On matérialise donc le set UNE FOIS — et AVANT tout refresh, tant que `seasons` ignore encore
+// le nouvel épisode. Figé dans `watchedSet`, il ne peut plus rien absorber ; `watchedEps` est
+// réaligné sur sa taille (un compteur plus grand que le set est précisément ce qui débordait).
+// ⚠ Rien n'est gelé tant que `seasons` est vide (item jamais rafraîchi, TMDB muet) : le set
+// dérivable serait vide et la progression tomberait à zéro.
+// Renvoie la liste MODIFIÉE, ou `null` s'il n'y avait rien à geler (aucune écriture inutile).
+function tvFreezeWatchedSet(items) {
+  let changed = false;
+  const out = (items || []).map(it => {
+    if (!it || Array.isArray(it.watchedSet) || !(it.seasons || []).length) return it;
+    changed = true;
+    const set = tvWatchedSet(it);
+    return { ...it, watchedSet: set, watchedEps: set.length };
+  });
+  return changed ? out : null;
+}
 // ⚠ 8.7.4 — DÉCOCHE tout ce qui est marqué « vu » alors que ce n'est PAS ENCORE SORTI
 // (demande utilisateur) : le verrou de 8.7.1 empêche d'en cocher de nouveaux, mais les
 // épisodes déjà cochés avant — typiquement par « cocher toute la saison » — restaient verts.
@@ -36530,6 +36554,10 @@ async function tvSyncRun(force) {
   let r = null;
   try {
     r = await tvSyncAll(tvSyncPublish, force);
+    // ⚠ 11.7.1 — AVANT `tvApplyFresh` : c'est lui qui remplace `seasons` par la version TMDB
+    // contenant le nouvel épisode. Gelé après, un set hérité l'aurait déjà avalé.
+    const frozen = tvFreezeWatchedSet(loadTvItems());
+    if (frozen) saveTvItems(frozen);
     tvApplyFresh(r.fresh);
     const fixed = ytAutoDone(loadTvItems());
     if (fixed) saveTvItems(fixed);
@@ -38380,6 +38408,8 @@ function TvTimePanel() {
   // vidéo programmée, donc rendre à la chaîne quelque chose à voir. Dans l'autre ordre, on
   // la passerait en « Vu » juste avant de lui rajouter du non-vu.
   React.useEffect(() => {
+    const frozen = tvFreezeWatchedSet(loadTvItems());
+    if (frozen) { setItems(frozen); saveTvItems(frozen); }
     const fixed = tvUncheckUnaired(loadTvItems());
     if (fixed) { setItems(fixed); saveTvItems(fixed); }
     const done = ytAutoDone(loadTvItems());
