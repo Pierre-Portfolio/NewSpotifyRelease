@@ -114,39 +114,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 
 ## Structure du projet
 
-```
-NewSpotifyRelease/
-  index.html          → App complète (React 18 CDN + sql.js), tout en un fichier
-  manifest.json       → Config PWA
-  service-worker.js   → Cache app shell + vendor (offline, network-first)
-  vendor/             → sql-wasm.js/.wasm, leaflet.js/.css, motus-*.js (auto-hébergés)
-  icon-192.png, icon-512.png
-  data/               → actu.json, indices.json (générés par GitHub Actions)
-  scripts/            → fetch_actu.py, fetch_indices.py, commit_data.sh
-  .github/workflows/  → update-data.yml (cron 2 h, 1 seul commit de données par jour)
-  CLAUDE.md           → Doc technique
-```
-
-## Base locale (sql.js)
-
-```sql
-tracks (id, spotify_uri UNIQUE, artist_name, title, release_title, release_type,
-        release_date, cover_url, duration_ms, listened, liked, listened_at, added_at)
-artists_scraped (spotify_id PK, last_scraped_at, name, image_url, popularity, followers,
-        genres, spotify_url, last_release_count, total_tracks_added, last_scan_status, scan_count)
-stats (id=1, total_listened, listened_this_month, listened_this_year,
-        last_reset_month, last_reset_year, total_listened_ms, total_liked)
-purged_uris (spotify_uri PK)
-```
-
-Requêtes utiles depuis la console DevTools :
-
-```js
-dbAll("SELECT * FROM tracks WHERE listened = 0 ORDER BY id ASC LIMIT 20")
-dbAll("SELECT * FROM tracks WHERE liked = 1 ORDER BY id DESC LIMIT 20")
-dbGet("SELECT * FROM stats WHERE id = 1")
-dbAll("SELECT * FROM artists_scraped ORDER BY last_scraped_at DESC LIMIT 10")
-```
+Tout tient dans `index.html` (l'app complète). Autour : `manifest.json` et `service-worker.js` (PWA, cache offline), `vendor/` (sql.js, Leaflet, données Motus auto-hébergées), `data/` + `scripts/` + `.github/workflows/` (Actu et indices boursiers pré-fetchés par GitHub Actions), et `CLAUDE.md` (doc technique).
 
 ## Aperçu de l'interface
 
