@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.7.5';
+const APP_VERSION = '11.7.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4297,6 +4297,7 @@ const GAMES = [
   { id:'findflag',   label:'Find the Flag',   min:1, max:1 },
   { id:'flappy',     label:'Flappy Bird',     min:1, max:1 },
   { id:'flip7',      label:'Flip 7',          min:1, max:6 },
+  { id:'flipper',    label:'Flipper',         min:1, max:1 },
   { id:'go',         label:'Go',              min:2, max:2 },
   { id:'guitar',     label:'Guitar Hero',     min:1, max:1 },
   { id:'imposteur',  label:'Imposteur',       min:3, max:8 },
@@ -4415,6 +4416,7 @@ function GameHost({ game, label }) {
     case 'findflag':   return <GameFindFlag />;
     case 'flappy':     return <GameFlappy />;
     case 'flip7':      return <GameFlip7 />;
+    case 'flipper':    return <GameFlipper />;
     case 'go':         return <GameGo />;
     case 'guitar':     return <GameGuitarHero />;
     case 'imposteur':  return <GameImposteur />;
@@ -20157,6 +20159,392 @@ function GameSolitaire() {
           </div>
         )}
       </div>
+    </GameWrap>
+  );
+}
+
+// ════════ Flipper (3D Pinball · Space Cadet — celui de Windows) ════════
+// Le flipper livré avec Windows : une table verticale, deux batteurs en bas, un plongeur à
+// ressort à droite, des bumpers ronds, des cibles à éteindre, une rampe et un multiplicateur.
+// Tout est en CANVAS 2D + physique maison — aucune bibliothèque, aucun réseau.
+// ⚠ Le pas de simulation est FIXE (`FL_DT` sous-pas par image) et non basé sur le temps réel :
+// une bille rapide qui avancerait de 20 px d'un coup traverserait un mur sans jamais le toucher
+// (« tunneling »). 4 sous-pas par image bornent le déplacement à ~4 px, sous l'épaisseur de tout
+// obstacle de la table.
+const FLIP_HI = 'flipper';
+const FL_W = 360, FL_H = 620;                 // repère interne, la table est mise à l'échelle en CSS
+const FL_R = 8;                               // rayon de la bille
+// ⚠ Échelle choisie POUR que le batteur puisse renvoyer la bille en haut de table : à
+// 15 px/image de vitesse maxi, il faut g ≈ 0,2 px/image² pour monter les ~450 px utiles
+// (v²/2g). Une gravité « réaliste » plus forte collerait la bille en bas, injouable.
+const FL_GRAV = 0.05, FL_DT = 4, FL_VMAX = 15;   // gravité par sous-pas · sous-pas/image · vitesse maxi
+const FL_WALL = 14;                           // épaisseur des bandes latérales
+const FL_LANE = 30;                           // largeur du couloir du plongeur (à droite)
+const FL_DRAIN = FL_H - 6;                    // sous cette ligne, la bille est perdue
+const FL_BALLS = 3;
+const FL_COL = { ball:'#dfe6f2', deck:'#0a1626', line:'#1d3557', bump:'#39b2d1', bumpOn:'#7ff0ff',
+  targ:'#f5b81f', targOff:'#4a4433', flip:'#e0443c', ramp:'#8b5cf0', post:'#2fbf5e' };
+// ── Décor de la table (coordonnées internes) ──
+// Bumpers ronds : la bille en repart plus vite qu'elle n'est arrivée (c'est ça, un flipper).
+const FL_BUMPERS = [
+  { x:110, y:150, r:19, pts:120 },
+  { x:196, y:118, r:19, pts:120 },
+  { x:152, y:212, r:19, pts:120 },
+  { x: 74, y:258, r:15, pts:80  },
+  { x:236, y:246, r:15, pts:80  },
+];
+// Cibles rectangulaires à éteindre : les 5 allumées d'un même groupe = bonus + multiplicateur.
+const FL_TARGETS = [
+  { x: 42, y:330, w:26, h:9, pts:250 },
+  { x: 42, y:352, w:26, h:9, pts:250 },
+  { x: 42, y:374, w:26, h:9, pts:250 },
+  { x:252, y:330, w:26, h:9, pts:250 },
+  { x:252, y:352, w:26, h:9, pts:250 },
+  { x:252, y:374, w:26, h:9, pts:250 },
+];
+// Plots ronds fixes (rebond doux) et « slingshots » : les deux triangles au-dessus des batteurs.
+const FL_POSTS = [{ x:96, y:430, r:7 }, { x:216, y:430, r:7 }, { x:156, y:78, r:9 }];
+// Murs : segments [x1,y1,x2,y2]. Les bandes du haut de la table + l'entonnoir des batteurs.
+// ⚠ LE RAIL DU HAUT DESCEND VERS LA GAUCHE, et c'est tout le sujet : penché dans l'autre sens,
+// la bille sortie du plongeur y redescendait vers le couloir et retombait le long du bord DROIT
+// sans jamais croiser un seul bumper. Il la dépose au-dessus du bumper de gauche.
+const FL_RAIL_X = FL_W - FL_WALL - FL_LANE;                     // x de la paroi du couloir
+const FL_SEGS = [
+  [FL_WALL, 66, FL_WALL, 452],                                  // bande gauche
+  [FL_RAIL_X, 62, FL_RAIL_X, 452],                              // bande droite (paroi du couloir)
+  [FL_WALL, 66, 96, 16], [96, 16, FL_W - FL_WALL, 16],          // biseau haut-gauche + plafond
+  [FL_RAIL_X, 62, 96, 108],                                     // rail : dépose la bille à gauche
+  [FL_WALL, 452, 90, 522],                                      // entonnoir gauche
+  [FL_W - FL_WALL - FL_LANE, 452, 222, 522],                    // entonnoir droit
+  [90, 522, 90, 546], [222, 522, 222, 546],                     // joues sous les batteurs
+];
+// Couloir du plongeur : la bille y monte, franchit l'arche et redescend dans la table.
+const FL_LANE_X = FL_W - FL_WALL - FL_LANE / 2;
+// Rampe : un couloir étroit le long de la bande gauche qui renvoie la bille dans les bumpers
+// avec un gros bonus. ⚠ Elle ne doit PAS être sous la sortie du rail, sinon chaque lancement la
+// déclencherait et les 1 500 points seraient offerts à chaque bille.
+const FL_RAMP = { x:18, y:150, w:26, h:11, pts:1500 };
+function flipperNew(best) {
+  return { balls:FL_BALLS, score:0, mult:1, bonus:0, ball:null, plunge:0, tilt:0,
+    lit: FL_TARGETS.map(() => true), bumpHit: FL_BUMPERS.map(() => 0), targHit: FL_TARGETS.map(() => 0),
+    rampHit:0, flL:0, flR:0, msg:'', msgT:0, best: best || 0, sparks:[] };
+}
+// Bille neuve : posée dans le couloir du plongeur, en attente du ressort.
+function flipperServe(s) {
+  s.ball = { x:FL_LANE_X, y:FL_H - 60, vx:0, vy:0, lane:true };
+  s.plunge = 0; s.msg = 'Tire le plongeur !'; s.msgT = 120;
+  return s;
+}
+// Rebond sur un segment : projection du centre sur le segment, puis réflexion de la vitesse.
+function flSeg(b, x1, y1, x2, y2, bounce) {
+  const dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((b.x - x1) * dx + (b.y - y1) * dy) / l2)) : 0;
+  const px = x1 + t * dx, py = y1 + t * dy;
+  let nx = b.x - px, ny = b.y - py;
+  const d = Math.hypot(nx, ny);
+  if (d > FL_R || d === 0) return false;
+  nx /= d; ny /= d;
+  b.x = px + nx * FL_R; b.y = py + ny * FL_R;
+  const dot = b.vx * nx + b.vy * ny;
+  if (dot < 0) { b.vx -= (1 + (bounce || 0.55)) * dot * nx; b.vy -= (1 + (bounce || 0.55)) * dot * ny; }
+  return true;
+}
+// Rebond sur un disque. `kick` > 0 = bumper : la bille repart PROPULSÉE, vitesse minimale garantie.
+function flDisc(b, cx, cy, r, bounce, kick) {
+  let nx = b.x - cx, ny = b.y - cy;
+  const d = Math.hypot(nx, ny);
+  if (d > r + FL_R || d === 0) return false;
+  nx /= d; ny /= d;
+  b.x = cx + nx * (r + FL_R); b.y = cy + ny * (r + FL_R);
+  const dot = b.vx * nx + b.vy * ny;
+  if (dot < 0) { b.vx -= (1 + bounce) * dot * nx; b.vy -= (1 + bounce) * dot * ny; }
+  if (kick) {
+    // ⚠ Un léger aléa sur l'angle de sortie : sans lui la table est DÉTERMINISTE et la bille
+    // repart indéfiniment sur la même trajectoire entre deux bumpers.
+    const want = Math.max(Math.hypot(b.vx, b.vy) || 1, kick);
+    const a = Math.atan2(ny, nx) + (Math.random() - 0.5) * 0.5;
+    b.vx = Math.cos(a) * want; b.vy = Math.sin(a) * want;
+  }
+  return true;
+}
+// Un batteur = un segment qui TOURNE. Sa vitesse de rotation est ajoutée à la bille : c'est elle
+// qui envoie la bille en haut de la table, pas le simple rebond.
+// `side` = -1 (gauche) / +1 (droite) · `a` = 0 au repos → 1 levé.
+// ⚠ Les deux batteurs sont EXACTEMENT symétriques (même angle, x renversé) : calculer le droit
+// avec un angle négatif le faisait pointer vers le HAUT au repos. Et l'écartement (`dx`) et la
+// longueur (`len`) sont choisis pour laisser ~30 px entre les deux pointes au repos — sans ce
+// trou, une bille de 16 px de diamètre ne pourrait JAMAIS se perdre et la partie ne finirait pas.
+const FL_FLIP = { y:530, dx:66, len:56, rest:0.42, up:-0.52 };
+function flFlipperSeg(side, a) {
+  const px = 156 + side * FL_FLIP.dx;
+  const ang = FL_FLIP.rest + (FL_FLIP.up - FL_FLIP.rest) * a;
+  return { px, py:FL_FLIP.y, ex: px + Math.cos(ang) * FL_FLIP.len * (side < 0 ? 1 : -1), ey: FL_FLIP.y + Math.sin(ang) * FL_FLIP.len };
+}
+// ⚠ L'impulsion est donnée tant que le batteur MONTE, jamais quand il est déjà levé : sinon
+// une bille posée sur une palette maintenue en l'air serait relancée à chaque sous-pas.
+function flFlipperHit(b, side, a, rising) {
+  const s = flFlipperSeg(side, a);
+  if (!flSeg(b, s.px, s.py, s.ex, s.ey, 0.42)) return false;
+  if (rising) {
+    // Le BOUT du batteur frappe plus fort que le pivot (comme un vrai flipper).
+    const d = Math.min(1, Math.hypot(b.x - s.px, b.y - s.py) / FL_FLIP.len);
+    b.vy -= 9 + 5.5 * d;
+    b.vx += side * (1.4 + 3 * d);
+  }
+  return true;
+}
+function flSpark(s, x, y, col, n) {
+  for (let k = 0; k < (n || 8); k++) s.sparks.push({ x, y, vx:(Math.random() - 0.5) * 5, vy:(Math.random() - 0.5) * 5, life:1, col });
+}
+function flAdd(s, pts) { s.score += pts * s.mult; if (s.score > s.best) s.best = s.score; }
+// ── Un pas de simulation (appelé FL_DT fois par image) ──
+function flipperStep(s, keys) {
+  const b = s.ball; if (!b) return;
+  // Batteurs : la position visée suit la touche, la VITESSE de la palette est la différence.
+  const tL = keys.l ? 1 : 0, tR = keys.r ? 1 : 0;
+  const upL = tL > s.flL + 0.02, upR = tR > s.flR + 0.02;
+  s.flL += (tL - s.flL) * 0.3; s.flR += (tR - s.flR) * 0.3;
+  b.vy += FL_GRAV;
+  // ⚠ `vx`/`vy` sont en pixels par IMAGE : divisés par le nombre de sous-pas, ils bornent le
+  // déplacement d'un sous-pas à ~4 px, bien sous le rayon de la bille (pas de tunneling).
+  b.x += b.vx / FL_DT; b.y += b.vy / FL_DT;
+  // Couloir du plongeur : parois verticales, la bille en sort quand elle passe l'arche.
+  if (b.lane) {
+    const lx = FL_W - FL_WALL - FL_LANE, rx = FL_W - FL_WALL;
+    if (b.x - FL_R < lx) { b.x = lx + FL_R; b.vx = Math.abs(b.vx) * 0.5; }
+    if (b.x + FL_R > rx) { b.x = rx - FL_R; b.vx = -Math.abs(b.vx) * 0.5; }
+    // Portillon anti-retour du haut du couloir : la bille lancée assez fort bascule sur le rail.
+    // Un lancement trop mou ne l'atteint pas — elle retombe et il faut retirer le plongeur.
+    if (b.y < 46) { b.lane = false; b.x = FL_RAIL_X - 10; b.vx = -4.4; b.vy = Math.min(b.vy, 0); }
+    if (b.y > FL_H - 40) { b.y = FL_H - 40; b.vy = 0; } // butée du ressort
+    return;
+  }
+  // Bandes et murs
+  for (const g of FL_SEGS) flSeg(b, g[0], g[1], g[2], g[3], 0.5);
+  if (b.x - FL_R < FL_WALL) { b.x = FL_WALL + FL_R; b.vx = Math.abs(b.vx) * 0.5; }
+  if (b.y - FL_R < 8) { b.y = 8 + FL_R; b.vy = Math.abs(b.vy) * 0.5; }
+  // ⚠ Bord droit de la table : AU-DESSUS de l'arche il n'y a plus la paroi du couloir, et sans
+  // cette butée la bille qui sort du plongeur file hors du plateau.
+  if (b.x + FL_R > FL_W - FL_WALL) { b.x = FL_W - FL_WALL - FL_R; b.vx = -Math.abs(b.vx) * 0.5; }
+  // ⚠ La paroi du couloir n'existe QUE sous l'arche : au-dessus, la bille doit pouvoir passer.
+  if (b.y > 70 && b.x + FL_R > FL_RAIL_X) { b.x = FL_RAIL_X - FL_R; b.vx = -Math.abs(b.vx) * 0.5; }
+  // Bumpers
+  FL_BUMPERS.forEach((p, i) => {
+    if (flDisc(b, p.x, p.y, p.r, 0.55, 5.2)) { s.bumpHit[i] = 12; flAdd(s, p.pts); flSpark(s, p.x, p.y, FL_COL.bumpOn); }
+  });
+  FL_POSTS.forEach(p => flDisc(b, p.x, p.y, p.r, 0.7, 0));
+  // Cibles : une cible éteinte laisse passer (elle s'est couchée).
+  FL_TARGETS.forEach((t, i) => {
+    if (!s.lit[i]) return;
+    if (b.x + FL_R > t.x && b.x - FL_R < t.x + t.w && b.y + FL_R > t.y && b.y - FL_R < t.y + t.h) {
+      s.lit[i] = false; s.targHit[i] = 14; flAdd(s, t.pts); flSpark(s, t.x + t.w / 2, t.y, FL_COL.targ);
+      b.vx = -b.vx * 0.8; b.vy = Math.abs(b.vy) * 0.6 + 1.4;
+      if (s.lit.every(v => !v)) {         // toutes couchées : multiplicateur + tout se relève
+        s.mult = Math.min(9, s.mult + 1); s.bonus += 5000;
+        s.lit = FL_TARGETS.map(() => true);
+        s.msg = `MULTIPLICATEUR ×${s.mult} !`; s.msgT = 150;
+        flSpark(s, FL_W / 2, 360, FL_COL.targ, 26);
+      }
+    }
+  });
+  // Rampe : la bille qui y entre par le haut est relancée dans les bumpers.
+  if (b.x + FL_R > FL_RAMP.x && b.x - FL_R < FL_RAMP.x + FL_RAMP.w && b.y + FL_R > FL_RAMP.y && b.y - FL_R < FL_RAMP.y + FL_RAMP.h && b.vy > 0) {
+    s.rampHit = 20; flAdd(s, FL_RAMP.pts); flSpark(s, FL_RAMP.x + FL_RAMP.w / 2, FL_RAMP.y, FL_COL.ramp, 16);
+    s.msg = 'RAMPE !'; s.msgT = 90;
+    b.x = 150; b.y = 96; b.vx = 1.6; b.vy = 3.4;
+  }
+  // Batteurs
+  flFlipperHit(b, -1, s.flL, upL);
+  flFlipperHit(b, 1, s.flR, upR);
+  // Frottement + vitesse bornée (au-delà, la bille traverserait les obstacles malgré les sous-pas)
+  b.vx *= 0.9985; b.vy *= 0.9985;
+  const sp = Math.hypot(b.vx, b.vy);
+  if (sp > FL_VMAX) { b.vx = b.vx / sp * FL_VMAX; b.vy = b.vy / sp * FL_VMAX; }
+}
+function flipperDraw(ctx, s) {
+  const G = ctx.createLinearGradient(0, 0, 0, FL_H);
+  G.addColorStop(0, '#11203a'); G.addColorStop(1, FL_COL.deck);
+  ctx.fillStyle = G; ctx.fillRect(0, 0, FL_W, FL_H);
+  // Bandes
+  ctx.strokeStyle = FL_COL.line; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  for (const g of FL_SEGS) { ctx.beginPath(); ctx.moveTo(g[0], g[1]); ctx.lineTo(g[2], g[3]); ctx.stroke(); }
+  ctx.strokeRect(FL_WALL - 1.5, 8, FL_W - FL_WALL * 2 + 3, FL_H - 16);
+  // Couloir du plongeur
+  ctx.fillStyle = '#0d1b30'; ctx.fillRect(FL_RAIL_X, 62, FL_LANE, FL_H - 76);
+  // Ressort du plongeur (il se comprime quand on tire)
+  const pl = FL_H - 30 + s.plunge * 22;
+  ctx.strokeStyle = '#8a93a8'; ctx.lineWidth = 2;
+  for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.moveTo(FL_LANE_X - 9, pl + k * 4); ctx.lineTo(FL_LANE_X + 9, pl + k * 4 + 2); ctx.stroke(); }
+  // Rampe
+  ctx.fillStyle = s.rampHit ? FL_COL.ramp : FL_COL.ramp + '55';
+  ctx.fillRect(FL_RAMP.x, FL_RAMP.y, FL_RAMP.w, FL_RAMP.h);
+  ctx.fillStyle = '#ffffffcc'; ctx.font = '700 7px system-ui, sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('RAMPE', FL_RAMP.x + FL_RAMP.w / 2, FL_RAMP.y + 8);
+  // Deux chevrons au-dessus de la fente : ils disent où viser sans écrire une légende de plus.
+  ctx.strokeStyle = FL_COL.ramp; ctx.lineWidth = 2;
+  for (let k = 0; k < 2; k++) {
+    const yy = FL_RAMP.y - 8 - k * 7;
+    ctx.beginPath(); ctx.moveTo(FL_RAMP.x + 4, yy + 4); ctx.lineTo(FL_RAMP.x + FL_RAMP.w / 2, yy); ctx.lineTo(FL_RAMP.x + FL_RAMP.w - 4, yy + 4); ctx.stroke();
+  }
+  // Cibles
+  FL_TARGETS.forEach((t, i) => {
+    ctx.fillStyle = s.targHit[i] ? '#fff' : s.lit[i] ? FL_COL.targ : FL_COL.targOff;
+    ctx.fillRect(t.x, t.y, t.w, t.h);
+  });
+  // Plots
+  ctx.fillStyle = FL_COL.post;
+  for (const p of FL_POSTS) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  // Bumpers
+  FL_BUMPERS.forEach((p, i) => {
+    const on = s.bumpHit[i] > 0;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r + (on ? 2 : 0), 0, 7);
+    ctx.fillStyle = on ? FL_COL.bumpOn : FL_COL.bump; ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = on ? '#ffffff' : '#ffffff44'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.42, 0, 7); ctx.fillStyle = '#0b1220'; ctx.fill();
+  });
+  // Batteurs
+  ctx.lineCap = 'round'; ctx.lineWidth = 11;
+  [[-1, s.flL], [1, s.flR]].forEach(([side, a]) => {
+    const g = flFlipperSeg(side, a);
+    ctx.strokeStyle = FL_COL.flip;
+    ctx.beginPath(); ctx.moveTo(g.px, g.py); ctx.lineTo(g.ex, g.ey); ctx.stroke();
+    ctx.beginPath(); ctx.arc(g.px, g.py, 6, 0, 7); ctx.fillStyle = '#ffffff77'; ctx.fill();
+  });
+  // Étincelles
+  for (const p of s.sparks) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.col; ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+  // Bille
+  if (s.ball) {
+    const b = s.ball;
+    const bg = ctx.createRadialGradient(b.x - 3, b.y - 3, 1, b.x, b.y, FL_R);
+    bg.addColorStop(0, '#ffffff'); bg.addColorStop(1, '#8e9bb4');
+    ctx.beginPath(); ctx.arc(b.x, b.y, FL_R, 0, 7); ctx.fillStyle = bg; ctx.fill();
+  }
+  // Afficheur (haut de table) + message
+  ctx.textAlign = 'left'; ctx.font = '700 12px DM Mono, monospace'; ctx.fillStyle = '#7ff0ffcc';
+  ctx.fillText(String(s.score).padStart(7, '0'), 22, 26);
+  ctx.textAlign = 'right';
+  ctx.fillText('×' + s.mult + '  ' + '●'.repeat(Math.max(0, s.balls)), FL_W - 22, 26);
+  if (s.msgT > 0 && s.msg) {
+    ctx.textAlign = 'center'; ctx.font = '800 15px system-ui, sans-serif';
+    ctx.fillStyle = '#ffffff' + (s.msgT > 30 ? 'ee' : '77');
+    ctx.fillText(s.msg, FL_W / 2, 300);
+  }
+}
+function GameFlipper() {
+  const canvasRef = React.useRef(null);
+  const g = React.useRef(null);
+  const keys = React.useRef({ l:false, r:false, plunge:false });
+  const [score, setScore] = React.useState(0);
+  const [balls, setBalls] = React.useState(FL_BALLS);
+  const [mult, setMult] = React.useState(1);
+  const [best, setBest] = React.useState(() => gameHi(FLIP_HI));
+  const [phase, setPhase] = React.useState('ready');    // ready | playing | dead
+  const start = () => {
+    g.current = flipperServe(flipperNew(gameHi(FLIP_HI)));
+    setScore(0); setBalls(FL_BALLS); setMult(1); setPhase('playing');
+  };
+  // Dessin hors partie (la boucle rAF ne tourne pas) : la table reste visible.
+  React.useEffect(() => {
+    if (!g.current) g.current = flipperNew(gameHi(FLIP_HI));
+    const ctx = canvasRef.current && canvasRef.current.getContext('2d');
+    if (ctx && phase !== 'playing') flipperDraw(ctx, g.current);
+  }, [phase]);
+  React.useEffect(() => {
+    if (phase !== 'playing') return;
+    let raf, alive = true, tick = 0;
+    const loop = () => {
+      if (!alive) return;
+      const s = g.current, ctx = canvasRef.current.getContext('2d');
+      // Plongeur : maintenir comprime le ressort, relâcher tire la bille.
+      if (s.ball && s.ball.lane) {
+        if (keys.current.plunge) s.plunge = Math.min(1, s.plunge + 0.028);
+        else if (s.plunge > 0) { s.ball.vy = -(11 + s.plunge * 10); s.plunge = 0; s.msg = ''; s.msgT = 0; }
+      }
+      for (let k = 0; k < FL_DT; k++) flipperStep(s, keys.current);
+      // Étincelles + minuteries d'éclairage
+      for (let i = s.sparks.length - 1; i >= 0; i--) {
+        const p = s.sparks[i]; p.x += p.vx; p.y += p.vy; p.vy += 0.14; p.life -= 0.045;
+        if (p.life <= 0) s.sparks.splice(i, 1);
+      }
+      s.bumpHit = s.bumpHit.map(v => Math.max(0, v - 1));
+      s.targHit = s.targHit.map(v => Math.max(0, v - 1));
+      if (s.rampHit) s.rampHit--;
+      if (s.msgT > 0) s.msgT--;
+      // Bille perdue
+      if (s.ball && s.ball.y > FL_DRAIN) {
+        s.score += s.bonus; s.bonus = 0;
+        s.balls--; s.ball = null;
+        if (s.balls <= 0) {
+          alive = false; cancelAnimationFrame(raf);
+          flipperDraw(ctx, s);
+          setScore(s.score); setBalls(0);
+          setBest(b => { const nb = Math.max(b, s.score); setGameHi(FLIP_HI, nb); return nb; });
+          setPhase('dead'); return;
+        }
+        s.mult = 1; s.lit = FL_TARGETS.map(() => true);
+        flipperServe(s);
+      }
+      // ⚠ L'affichage n'est rafraîchi que toutes les 6 images, et l'effet ne dépend QUE de
+      // `phase` : mettre `score` dans ses deps relancerait la boucle rAF à chaque bumper touché.
+      if (++tick % 6 === 0) { setScore(s.score); setBalls(s.balls); setMult(s.mult); }
+      flipperDraw(ctx, s);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => { alive = false; cancelAnimationFrame(raf); };
+  }, [phase]);
+  // Clavier : ← / → (ou Q / D) pour les batteurs, Espace ou ↓ pour le plongeur.
+  React.useEffect(() => {
+    const set = (e, v) => {
+      const k = e.key.toLowerCase();
+      if (k === 'arrowleft' || k === 'q' || k === 'a') { keys.current.l = v; e.preventDefault(); }
+      else if (k === 'arrowright' || k === 'd') { keys.current.r = v; e.preventDefault(); }
+      else if (k === ' ' || k === 'arrowdown' || k === 's') { keys.current.plunge = v; e.preventDefault(); }
+      else return;
+      if (v && phase !== 'playing') start();
+    };
+    const dn = e => { if (!e.repeat) set(e, true); }, up = e => set(e, false);
+    window.addEventListener('keydown', dn); window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', dn); window.removeEventListener('keyup', up); };
+  });
+  // Tactile : la MOITIÉ gauche/droite de la table actionne le batteur correspondant, le bouton
+  // du bas tire le plongeur. ⚠ `setPointerCapture` : sans lui, un doigt qui glisse hors du canvas
+  // ne relâcherait JAMAIS le batteur (il resterait levé pour toujours).
+  const hold = (which, v) => e => {
+    if (e) { e.preventDefault(); if (v && e.currentTarget.setPointerCapture) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} } }
+    keys.current[which] = v;
+    if (v && phase !== 'playing') start();
+  };
+  const padStyle = side => ({ position:'absolute', bottom:0, [side]:0, width:'50%', height:'46%', zIndex:2,
+    background:'transparent', border:'none', padding:0, cursor:'pointer', touchAction:'none', WebkitTapHighlightColor:'transparent' });
+  return (
+    <GameWrap hint="Le flipper de Windows. Au doigt : appuie sur la MOITIÉ GAUCHE ou DROITE de la table pour lever le batteur correspondant, et maintiens 🎯 Plongeur puis relâche pour lancer la bille. Au clavier : ← → (ou Q/D) et Espace. Les bumpers propulsent, les 6 cibles jaunes couchées font monter le multiplicateur, et la RAMPE en haut à gauche vaut 1 500 points. 3 billes."
+      bar={<>
+        <span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · ×<b style={{ color:C.text }}>{mult}</b> · Billes <b style={{ color:C.text }}>{balls}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>
+        <button onClick={start} style={gameBtn()}>↻ Nouvelle</button>
+      </>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:FL_W }}>
+        <canvas ref={canvasRef} width={FL_W} height={FL_H}
+          style={{ width:'100%', height:'auto', borderRadius:14, border:`1px solid ${C.border}`, display:'block', touchAction:'none', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }} />
+        {phase === 'playing' && <>
+          <button aria-label="Batteur gauche" onPointerDown={hold('l', true)} onPointerUp={hold('l', false)} onPointerCancel={hold('l', false)} onContextMenu={e => e.preventDefault()} style={padStyle('left')} />
+          <button aria-label="Batteur droit"  onPointerDown={hold('r', true)} onPointerUp={hold('r', false)} onPointerCancel={hold('r', false)} onContextMenu={e => e.preventDefault()} style={padStyle('right')} />
+        </>}
+        {phase !== 'playing' && (
+          <div onPointerDown={start} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', zIndex:3, WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:16, fontWeight:800, textShadow:'0 2px 8px #000' }}>{phase === 'dead' ? `💥 Partie finie — ${score} points` : '🕹️ Flipper'}</div>
+            <div style={{ fontSize:12, background:'#00000099', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'rejouer' : 'jouer'}</div>
+          </div>
+        )}
+      </div>
+      {phase === 'playing' && (
+        <button onPointerDown={hold('plunge', true)} onPointerUp={hold('plunge', false)} onPointerCancel={hold('plunge', false)}
+          onContextMenu={e => e.preventDefault()} style={gameBtn({ fontSize:13, padding:'9px 22px', touchAction:'none' })}>🎯 Plongeur</button>
+      )}
     </GameWrap>
   );
 }
@@ -43921,6 +44309,7 @@ const GAMES_HUB_STATS = [
   { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
   { id:'flip7',  label:'Flip 7',      icon:'🃏', metric:'meilleur score' },
+  { id:'flipper', label:'Flipper',    icon:'🕹️', metric:'meilleur score' },
   { id:'findflag', label:'Find the Flag', icon:'🏳️', metric:'série de drapeaux' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
   { id:'guitar', label:'Guitar Hero', icon:'🎸', metric:'meilleur score' },
