@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.7.6';
+const APP_VERSION = '11.7.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4876,161 +4876,360 @@ function GameSimon() {
   );
 }
 
-// ════════ Bounce (d'après le jeu de l'appli Plato — ici en SOLO) ════════
-// Règles de Plato : on TAPE pour faire rebondir la balle, et elle ne franchit une barre que si
-// sa couleur est la MÊME (bleu / rose / turquoise / jaune) ; les pastilles croisées en chemin la
-// repeignent, et les obstacles se resserrent au fil de la montée. À deux c'est une course et une
-// mauvaise couleur renvoie au checkpoint le plus proche ; en solo il n'y a pas de course, donc
-// (demande utilisateur) toucher une barre d'une autre couleur TERMINE la partie — comme tomber
-// hors de l'écran.
-// ⚠ UNE SEULE COMMANDE (taper), comme dans Plato : c'est le MOMENT du rebond qui décide de la
-// position horizontale — la balle avance en biais et rebondit sur les parois — donc de la
-// pastille qu'on attrape. Sans ce biais, la balle traverserait toutes les pastilles d'affilée et
-// il n'y aurait plus aucun choix à faire.
+// ════════ Bounce — l'ascension (refonte complète) ════════
+// Une seule règle : MONTER. Le score, c'est l'ALTITUDE atteinte et rien d'autre — aucun objet à
+// ramasser, aucun compteur annexe, et redescendre ne rapporte jamais rien (seul le point le plus
+// haut jamais atteint compte).
+// Le parcours n'est pas généré au hasard bloc par bloc : il est fait de 26 ÉPREUVES écrites à la
+// main, chacune haute d'un écran, tirées et empilées dans un ORDRE ALÉATOIRE. Un sac est vidé
+// avant d'être remélangé, donc les 26 défilent toutes avant qu'une seule ne revienne, et jamais
+// deux fois la même à la suite.
+// ⚠ La balle peut toujours reprendre de l'altitude en tapant (un battement toutes les 16 images) :
+// c'est ce qui GARANTIT qu'aucun empilage d'épreuves ne peut devenir infranchissable. Le danger
+// vient des pièges, pas de la géométrie.
 const BOUNCE_HI = 'bounce';
-const BOUNCE_COLS = ['#3b82f6', '#ec4899', '#2dd4bf', '#facc15'];   // bleu · rose · turquoise · jaune
-const BO_W = 300, BO_H = 440, BO_R = 11, BO_WALL = 10;
-const BO_GRAV = 0.42, BO_JUMP = -8.4;
-// ⚠ Monde en coordonnées CANVAS (y vers le BAS) : monter = y qui DIMINUE, et la caméra
-// (`cam` = y du monde affiché tout en haut) ne fait que baisser — elle ne redescend jamais,
-// sinon une chute ramènerait le décor en arrière.
-const boSpacing = sc => Math.max(112, 150 - sc * 1.2);       // les barres se resserrent
-const boSpeed   = sc => 1.6 + Math.min(1.4, sc * 0.04);      // et la balle file plus vite
-const boPadCount = sc => 2 + Math.min(2, (sc / 10) | 0);     // + de leurres à attraper
-// Crée les barres manquantes au-dessus de la caméra. Chaque barre a SA couleur et, juste en
-// dessous, une rangée de pastilles dont UNE SEULE porte cette couleur : c'est elle qu'il faut
-// aller chercher avant de franchir la barre.
-function bounceGen(s) {
-  while (s.nextY > s.cam - 260) {
-    const col = BOUNCE_COLS[(Math.random() * BOUNCE_COLS.length) | 0];
-    s.bars.push({ y: s.nextY, col, passed: false });
-    const k = boPadCount(s.score);
-    const good = (Math.random() * k) | 0;
-    const span = BO_W - 2 * BO_WALL - 44;
-    for (let i = 0; i < k; i++) {
-      const x = BO_WALL + 22 + (k === 1 ? span / 2 : span * i / (k - 1));
-      let c = col;
-      if (i !== good) { const o = BOUNCE_COLS.filter(v => v !== col); c = o[(Math.random() * o.length) | 0]; }
-      s.pads.push({ x, y: s.nextY + 62, col: c });
-    }
-    s.nextY -= boSpacing(s.score);
+const BN_W = 320, BN_H = 480, BN_R = 10, BN_WALL = 12;
+const BN_G = 0.42;                 // gravité
+const BN_FLAP = -7.6;              // battement (taper) — volontairement plus faible qu'un rebond
+const BN_BOUNCE = -10.6;           // rebond sur une plateforme
+const BN_PAD = -16.5;              // tremplin
+const BN_DIVE = 11;                // plongeon vers le bas
+const BN_VMAX = 15, BN_SPEED = 3.4, BN_FLAP_CD = 16;
+const BN_SEG = 480;                // hauteur d'une épreuve
+const BN_COL = { bg1:'#0a1020', bg2:'#0b0e14', plat:'#39b2d1', pad:'#2fbf5e', wall:'#39405a',
+  haz:'#e0443c', ball:'#f5b81f', wallSide:'#161b26' };
+// ── Les 26 épreuves ──
+// Format compact, un tableau par obstacle. `y` est LOCAL au segment, compté vers le BAS depuis
+// son sommet (0 = haut de l'épreuve, 480 = bas). x va de 12 à 308 (les bandes latérales).
+//   ['p', x, y, w]                        plateforme (on la traverse par en dessous, on rebondit dessus)
+//   ['b', x, y, w]                        tremplin (rebond XXL)
+//   ['w', x, y, w, h]                     mur plein (bloque dans tous les sens)
+//   ['h', x, y, w, h]                     piège (mortel au contact)
+//   ['m', x, y, w, ax, ay, sp, ph]        plateforme mobile (amplitude x/y, vitesse, phase)
+//   ['M', x, y, w, h, ax, ay, sp, ph]     piège mobile
+// ⚠ Tout obstacle qui barre la largeur DOIT laisser un trou d'au moins 46 px (le diamètre de la
+// balle est de 20) : sans ce trou l'épreuve serait infranchissable et la partie bloquée.
+const BN_EPREUVES = [
+  { n:'Échelle',        it:[['p',24,400,86],['p',200,325,86],['p',30,250,86],['p',196,175,86],['p',40,95,86]] },
+  { n:'Zigzag',         it:[['p',16,430,64],['p',230,368,62],['p',16,306,64],['p',230,244,62],['p',16,182,64],['p',226,110,66],['p',20,44,70]] },
+  { n:'Colonnes',       it:[['w',100,300,26,170],['w',200,150,26,170],['p',20,420,70],['p',130,340,60],['p',230,260,60],['p',130,180,60],['p',20,90,70]] },
+  { n:'Pics flottants', it:[['p',16,430,80],['h',110,455,100,18],['p',220,360,80],['h',20,385,120,18],['p',16,290,80],['p',220,220,80],['p',16,150,80],['p',200,70,90]] },
+  { n:'Ascenseurs',     it:[['m',40,400,80,0,90,1],['m',190,300,80,0,-90,1,3.14],['p',20,150,80],['p',200,80,80],['p',16,455,90]] },
+  { n:'Pendules',       it:[['M',100,380,50,14,88,0,1],['M',170,260,50,14,88,0,1,2],['p',16,440,80],['p',200,440,80],['p',120,150,80],['p',20,70,80]] },
+  { n:'Tremplin',       it:[['b',130,440,70],['p',30,240,70],['p',220,150,70],['p',120,60,70]] },
+  { n:'Couloir étroit', it:[['w',12,380,120,22],['w',210,380,98,22],['w',12,260,180,22],['w',260,260,48,22],['w',90,140,218,22],['p',20,440,80],['p',20,60,90]] },
+  { n:'La scie',        it:[['M',120,300,70,18,108,0,1.1],['p',16,440,90],['p',200,440,80],['p',20,180,90],['p',210,100,80]] },
+  { n:'Damier',         it:[['p',20,430,56],['p',130,430,56],['p',240,430,56],['p',75,350,56],['p',185,350,56],['p',20,270,56],['p',130,270,56],['p',240,270,56],['p',75,190,56],['p',185,190,56],['p',130,100,56]] },
+  { n:'Stalactites',    it:[['h',90,330,20,90],['h',170,330,20,90],['h',250,330,20,90],['p',16,450,80],['p',210,450,80],['p',16,250,90],['p',210,250,90],['p',110,140,100]] },
+  { n:'Grand écart',    it:[['p',16,450,70],['p',240,340,68],['p',16,230,70],['p',240,120,68]] },
+  { n:'Tapis roulants', it:[['m',115,430,90,80,0,0.8],['m',115,320,90,-80,0,0.8],['m',115,210,90,80,0,0.9],['p',120,100,90]] },
+  { n:'Guillotines',    it:[['M',60,200,40,120,0,150,1.2],['M',200,200,40,120,0,-150,1.2],['p',16,450,90],['p',210,450,90],['p',110,60,100]] },
+  { n:'Le puits',       it:[['w',12,120,80,340],['w',228,120,80,340],['p',100,430,50],['p',170,350,50],['p',100,270,50],['p',170,190,50],['p',100,110,50],['p',16,40,110]] },
+  { n:'Trois portes',   it:[['w',12,400,150,20],['w',210,400,98,20],['w',12,280,60,20],['w',120,280,188,20],['w',12,160,210,20],['w',270,160,38,20],['p',20,450,80],['p',20,60,90]] },
+  { n:'Ressorts',       it:[['b',20,440,70],['b',130,440,70],['b',240,440,68],['h',90,300,50,16],['h',190,300,50,16],['p',20,150,80],['p',210,80,80]] },
+  { n:'La herse',       it:[['h',12,300,120,18],['h',190,300,118,18],['p',16,440,90],['p',210,440,90],['p',20,180,90],['p',210,100,90]] },
+  { n:'Étoile filante', it:[['M',150,250,34,34,120,110,0.9],['p',16,450,90],['p',210,450,90],['p',16,330,80],['p',210,330,80],['p',110,150,100],['p',20,60,80]] },
+  { n:'Escalier double',it:[['p',16,440,60],['p',232,440,60],['p',60,360,60],['p',190,360,60],['p',100,280,110],['p',130,190,70],['p',40,100,80]] },
+  { n:'Îlots',          it:[['p',30,450,44],['p',170,380,44],['p',60,300,44],['p',220,230,44],['p',90,150,44],['p',230,70,44]] },
+  { n:'Sablier',        it:[['w',12,340,90,22],['w',218,340,90,22],['w',12,230,110,22],['w',198,230,110,22],['w',12,120,90,22],['w',218,120,90,22],['p',20,450,80],['p',200,450,80],['p',130,40,70]] },
+  { n:'Carrousel',      it:[['m',130,400,64,100,0,1,0],['m',130,300,64,100,0,1,1.57],['m',130,200,64,100,0,1,3.14],['m',130,100,64,100,0,1,4.71],['p',16,455,90]] },
+  { n:'Le peigne',      it:[['w',70,380,20,90],['w',150,380,20,90],['w',230,380,20,90],['w',30,240,20,90],['w',110,240,20,90],['w',190,240,20,90],['w',270,240,20,90],['p',16,450,90],['p',200,450,90],['p',110,120,100]] },
+  { n:'Chute libre',    it:[['b',120,450,80],['p',16,60,80],['p',220,60,80]] },
+  { n:'Champ de mines', it:[['M',60,380,26,26,0,90,1.1],['M',150,300,26,26,0,-90,1.3,1],['M',240,220,26,26,0,90,0.9,2],['p',16,450,90],['p',210,450,90],['p',16,150,90],['p',200,80,90]] },
+];
+// Un obstacle prêt à simuler. `bx`/`by` = position de repos d'un mobile (il oscille autour).
+function bnItem(a, top, spd) {
+  const k = a[0], x = a[1], y = top + a[2];
+  if (k === 'p' || k === 'b') return { k, x, y, w:a[3], h:10 };
+  if (k === 'w' || k === 'h') return { k, x, y, w:a[3], h:a[4] };
+  if (k === 'm') return { k, x, y, w:a[3], h:10, bx:x, by:y, ax:a[4] || 0, ay:a[5] || 0, sp:(a[6] || 1) * spd, ph:a[7] || 0 };
+  return { k, x, y, w:a[3], h:a[4], bx:x, by:y, ax:a[5] || 0, ay:a[6] || 0, sp:(a[7] || 1) * spd, ph:a[8] || 0 };
+}
+// Sac d'épreuves : les 26 passent toutes avant qu'une seule ne revienne, et jamais deux fois de
+// suite la même (le tirage recommence si la 1re du nouveau sac est celle qui vient d'être jouée).
+function bnBag(last) {
+  const b = BN_EPREUVES.map((_, i) => i);
+  for (let i = b.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = b[i]; b[i] = b[j]; b[j] = t; }
+  if (b[b.length - 1] === last && b.length > 1) { const t = b[b.length - 1]; b[b.length - 1] = b[0]; b[0] = t; }
+  return b;
+}
+// Empile les épreuves manquantes au-dessus de la caméra. Les mobiles accélèrent avec l'altitude.
+function bnBuild(s) {
+  while (s.builtTop > s.cam - BN_SEG) {
+    if (!s.bag.length) s.bag = bnBag(s.last);
+    const id = s.bag.pop(); s.last = id;
+    const e = BN_EPREUVES[id];
+    const top = s.builtTop - BN_SEG;
+    const spd = 1 + Math.min(0.9, s.climb / 14000);
+    for (const it of e.it) s.items.push(bnItem(it, top, spd));
+    s.marks.push({ y: top + BN_SEG - 10, name: e.n, seen: false });
+    s.builtTop = top;
   }
 }
-function bounceReset() {
-  const s = { x: BO_W / 2, y: 0, vx: boSpeed(0), vy: 0, col: BOUNCE_COLS[0],
-              cam: -BO_H * 0.62, bars: [], pads: [], nextY: -260, score: 0 };
-  bounceGen(s);
+function bnReset() {
+  // ⚠ `builtTop` démarre à −140 : la 1re épreuve est empilée AU-DESSUS de la balle. À 0, les
+  // obstacles du bas du segment naissaient pile sur elle et la partie mourait à la 1re image.
+  const s = { x:BN_W / 2, y:0, vx:0, vy:0, cam:-BN_H * 0.62, items:[], marks:[], bag:[], last:-1,
+    builtTop:-140, climb:0, t:0, cd:0, dir:0, banner:'', bannerT:0, parts:[], trail:[] };
+  s.items.push({ k:'p', x:BN_W / 2 - 55, y:24, w:110, h:10 });   // le sol de départ
+  bnBuild(s);
   return s;
 }
-function bounceDraw(ctx, s) {
-  ctx.fillStyle = '#0b0e14'; ctx.fillRect(0, 0, BO_W, BO_H);
-  ctx.fillStyle = '#161b26';
-  ctx.fillRect(0, 0, BO_WALL, BO_H); ctx.fillRect(BO_W - BO_WALL, 0, BO_WALL, BO_H);
-  for (const b of s.bars) {
-    const y = b.y - s.cam;
-    if (y < -20 || y > BO_H + 20) continue;
-    ctx.globalAlpha = b.passed ? 0.22 : 1;
-    ctx.fillStyle = b.col;
-    ctx.fillRect(BO_WALL, y - 5, BO_W - 2 * BO_WALL, 11);
+const bnHit = (bx, by, r, it) => bx + r > it.x && bx - r < it.x + it.w && by + r > it.y && by - r < it.y + it.h;
+// Un pas de simulation. Renvoie 'die' quand la balle touche un piège ou sort par le bas.
+function bnStep(s) {
+  s.t++;
+  if (s.cd > 0) s.cd--;
+  // Mobiles : position = repos + amplitude × sinus. Ils bougent AVANT la balle, donc un piège
+  // qui arrive sur elle la touche dans la même image (pas de traversée fantôme).
+  for (const it of s.items) {
+    if (it.bx === undefined) continue;
+    const a = Math.sin(s.t * 0.02 * it.sp + it.ph);
+    it.x = it.bx + it.ax * a; it.y = it.by + it.ay * a;
+  }
+  s.vy = Math.max(-BN_VMAX, Math.min(BN_VMAX, s.vy + BN_G));
+  s.vx = s.dir * BN_SPEED;
+  // ── Horizontal : bandes latérales + murs pleins ──
+  s.x += s.vx;
+  if (s.x - BN_R < BN_WALL) s.x = BN_WALL + BN_R;
+  if (s.x + BN_R > BN_W - BN_WALL) s.x = BN_W - BN_WALL - BN_R;
+  for (const it of s.items) {
+    if (it.k !== 'w' || !bnHit(s.x, s.y, BN_R, it)) continue;
+    // ⚠ On sort du mur par le côté le plus proche, MAIS jamais en dehors du terrain : un mur
+    // collé à la bande latérale (Le puits, Sablier, Trois portes…) éjectait sinon la balle hors
+    // de l'écran, où la bande la repoussait dans le mur — elle y restait coincée pour toujours.
+    const gL = it.x - BN_R, gR = it.x + it.w + BN_R;
+    const okL = gL >= BN_WALL + BN_R, okR = gR <= BN_W - BN_WALL - BN_R;
+    if (okL && (!okR || s.x < it.x + it.w / 2)) s.x = gL;
+    else if (okR) s.x = gR;
+  }
+  // ── Vertical : plateformes traversées par en dessous, murs pleins ──
+  const py = s.y;
+  s.y += s.vy;
+  for (const it of s.items) {
+    if (it.k === 'w') {
+      if (!bnHit(s.x, s.y, BN_R, it)) continue;
+      if (s.vy > 0) { s.y = it.y - BN_R; s.vy = 0; } else { s.y = it.y + it.h + BN_R; s.vy = 0; }
+      continue;
+    }
+    if (it.k !== 'p' && it.k !== 'b' && it.k !== 'm') continue;
+    // ⚠ Test de TRAVERSÉE (bas de la balle avant/après) et non simple chevauchement : à 15 px
+    // par image la balle sauterait par-dessus une plateforme de 10 px d'épaisseur.
+    if (s.vy <= 0) continue;
+    if (py + BN_R > it.y + 6 || s.y + BN_R < it.y) continue;
+    if (s.x + BN_R * 0.8 < it.x || s.x - BN_R * 0.8 > it.x + it.w) continue;
+    s.y = it.y - BN_R;
+    s.vy = it.k === 'b' ? BN_PAD : BN_BOUNCE;
+    s.cd = 0;
+    if (it.k === 'b') { for (let k = 0; k < 12; k++) s.parts.push({ x:s.x, y:s.y + BN_R, vx:(Math.random() - 0.5) * 5, vy:Math.random() * 3, life:1, col:BN_COL.pad }); }
+  }
+  // ── Pièges ──
+  for (const it of s.items) if ((it.k === 'h' || it.k === 'M') && bnHit(s.x, s.y, BN_R * 0.82, it)) return 'die';
+  // ── Caméra (elle ne redescend JAMAIS) + altitude ──
+  const target = s.y - BN_H * 0.62;
+  if (target < s.cam) s.cam = target;
+  s.climb = Math.max(s.climb, -s.y);
+  if (s.y - s.cam > BN_H + 26) return 'die';
+  // Bannière de l'épreuve franchie
+  for (const m of s.marks) if (!m.seen && s.y < m.y) { m.seen = true; s.banner = m.name; s.bannerT = 110; }
+  if (s.bannerT > 0) s.bannerT--;
+  // Traînée + étincelles
+  s.trail.push({ x:s.x, y:s.y });
+  if (s.trail.length > 12) s.trail.shift();
+  for (let i = s.parts.length - 1; i >= 0; i--) {
+    const p = s.parts[i]; p.x += p.vx; p.y += p.vy; p.vy += 0.22; p.life -= 0.03;
+    if (p.life <= 0) s.parts.splice(i, 1);
+  }
+  bnBuild(s);
+  const floor = s.cam + BN_H + 240;
+  s.items = s.items.filter(it => it.y < floor);
+  s.marks = s.marks.filter(m => m.y < floor);
+  return null;
+}
+const bnScore = s => Math.floor(s.climb / 10);
+function bnRound(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+}
+function bnDraw(ctx, s) {
+  // Fond : il s'éclaircit et vire au violet à mesure qu'on monte (récompense visuelle de l'altitude).
+  const k = Math.min(1, s.climb / 9000);
+  const g = ctx.createLinearGradient(0, 0, 0, BN_H);
+  g.addColorStop(0, `rgb(${(10 + 44 * k) | 0},${(16 + 10 * k) | 0},${(32 + 60 * k) | 0})`);
+  g.addColorStop(1, BN_COL.bg2);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, BN_W, BN_H);
+  // Étoiles (fixes dans le monde : elles défilent, ce qui donne la sensation de monter)
+  ctx.fillStyle = '#ffffff22';
+  for (let i = 0; i < 26; i++) {
+    const sy = ((i * 137 - s.cam * 0.35) % (BN_H + 40) + BN_H + 40) % (BN_H + 40) - 20;
+    ctx.fillRect((i * 61) % (BN_W - 24) + 12, sy, 2, 2);
+  }
+  ctx.fillStyle = BN_COL.wallSide;
+  ctx.fillRect(0, 0, BN_WALL, BN_H); ctx.fillRect(BN_W - BN_WALL, 0, BN_WALL, BN_H);
+  for (const it of s.items) {
+    const y = it.y - s.cam;
+    if (y > BN_H + 40 || y + it.h < -40) continue;
+    if (it.k === 'h' || it.k === 'M') {
+      ctx.fillStyle = BN_COL.haz; bnRound(ctx, it.x, y, it.w, it.h, 4); ctx.fill();
+      // ⚠ Les hachures sont DÉCOUPÉES sur le piège : sans `clip`, leurs diagonales dépassaient
+      // du bloc rouge et dessinaient de faux traits dans le décor.
+      ctx.save(); ctx.clip();
+      ctx.strokeStyle = '#ffffff44'; ctx.lineWidth = 1;
+      for (let d = -it.h; d < it.w; d += 8) { ctx.beginPath(); ctx.moveTo(it.x + d, y + it.h); ctx.lineTo(it.x + d + it.h, y); ctx.stroke(); }
+      ctx.restore();
+    } else if (it.k === 'w') {
+      ctx.fillStyle = '#39405a'; bnRound(ctx, it.x, y, it.w, it.h, 4); ctx.fill();
+      ctx.fillStyle = '#ffffff18'; ctx.fillRect(it.x, y, it.w, 3);
+    } else {
+      const col = it.k === 'b' ? BN_COL.pad : BN_COL.plat;
+      ctx.fillStyle = col; bnRound(ctx, it.x, y, it.w, it.h, 5); ctx.fill();
+      ctx.fillStyle = '#ffffff55'; ctx.fillRect(it.x + 2, y + 1, it.w - 4, 2.5);
+      if (it.k === 'b') {   // ressort du tremplin
+        ctx.strokeStyle = '#ffffffaa'; ctx.lineWidth = 2;
+        for (let d = 6; d < it.w - 6; d += 9) { ctx.beginPath(); ctx.moveTo(it.x + d, y + 9); ctx.lineTo(it.x + d + 5, y + 2); ctx.stroke(); }
+      }
+    }
+  }
+  // Traînée puis balle
+  s.trail.forEach((p, i) => {
+    ctx.globalAlpha = (i / s.trail.length) * 0.32;
+    ctx.beginPath(); ctx.arc(p.x, p.y - s.cam, BN_R * (0.4 + 0.5 * i / s.trail.length), 0, 7);
+    ctx.fillStyle = BN_COL.ball; ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  for (const p of s.parts) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.col; ctx.fillRect(p.x - 2, p.y - s.cam - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  if (!s.dead) {
+    const by = s.y - s.cam;
+    ctx.shadowColor = BN_COL.ball; ctx.shadowBlur = 18;
+    ctx.beginPath(); ctx.arc(s.x, by, BN_R, 0, 7); ctx.fillStyle = BN_COL.ball; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.beginPath(); ctx.arc(s.x - 3, by - 3, 3.4, 0, 7); ctx.fillStyle = '#ffffffcc'; ctx.fill();
+  }
+  // Altitude + nom de l'épreuve
+  ctx.textAlign = 'left'; ctx.font = '800 15px DM Mono, monospace'; ctx.fillStyle = '#ffffffdd';
+  ctx.fillText(bnScore(s) + ' m', BN_WALL + 8, 26);
+  if (s.bannerT > 0 && s.banner) {
+    ctx.textAlign = 'center'; ctx.font = '800 16px system-ui, sans-serif';
+    ctx.globalAlpha = Math.min(1, s.bannerT / 30);
+    ctx.fillStyle = '#ffffff'; ctx.fillText(s.banner, BN_W / 2, BN_H * 0.34);
     ctx.globalAlpha = 1;
   }
-  for (const p of s.pads) {
-    const y = p.y - s.cam;
-    if (y < -20 || y > BO_H + 20) continue;
-    ctx.beginPath(); ctx.arc(p.x, y, 9, 0, Math.PI * 2);
-    ctx.fillStyle = p.col; ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = '#0b0e14'; ctx.stroke();
-  }
-  const by = s.y - s.cam;
-  ctx.shadowColor = s.col; ctx.shadowBlur = 16;
-  ctx.beginPath(); ctx.arc(s.x, by, BO_R, 0, Math.PI * 2);
-  ctx.fillStyle = s.col; ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.beginPath(); ctx.arc(s.x - 3, by - 3, 3.5, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffffaa'; ctx.fill();
 }
 function GameBounce() {
   const canvasRef = React.useRef(null);
-  const g = React.useRef(bounceReset());
+  const g = React.useRef(null);
   const [score, setScore] = React.useState(0);
   const [best, setBest] = React.useState(() => gameHi(BOUNCE_HI));
   const [phase, setPhase] = React.useState('ready');   // ready | playing | dead
-  const [why, setWhy] = React.useState('');
-  const tap = () => {
-    if (phase === 'playing') { g.current.vy = BO_JUMP; return; }
-    g.current = bounceReset(); setScore(0); setWhy(''); setPhase('playing');
-    g.current.vy = BO_JUMP;
-  };
-  // Dessin hors partie (écran d'accueil / de fin) : la boucle rAF ne tourne pas.
+  // ⚠ Refs anti-closure : la boucle rAF et les écouteurs sont posés UNE fois, ils ne doivent lire
+  // que des refs — un state y serait figé à sa valeur du premier rendu.
+  const ctrl = React.useRef({ dir:0, flap:false, dive:false });
+  const start = () => { g.current = bnReset(); ctrl.current = { dir:0, flap:false, dive:false }; setScore(0); setPhase('playing'); };
   React.useEffect(() => {
+    if (!g.current) g.current = bnReset();
     const ctx = canvasRef.current && canvasRef.current.getContext('2d');
-    if (ctx && phase !== 'playing') bounceDraw(ctx, g.current);
+    if (ctx && phase !== 'playing') bnDraw(ctx, g.current);
   }, [phase]);
   React.useEffect(() => {
     if (phase !== 'playing') return;
-    let raf, alive = true;
-    const die = msg => {
-      if (!alive) return;
-      alive = false; cancelAnimationFrame(raf);
-      const sc = g.current.score;
-      setBest(b => { const nb = Math.max(b, sc); setGameHi(BOUNCE_HI, nb); return nb; });
-      setWhy(msg); setPhase('dead');
-    };
+    let raf, alive = true, tick = 0;
     const loop = () => {
       if (!alive) return;
       const s = g.current, ctx = canvasRef.current.getContext('2d');
-      const prevY = s.y;
-      s.vy += BO_GRAV; s.y += s.vy; s.x += s.vx;
-      if (s.x - BO_R < BO_WALL)          { s.x = BO_WALL + BO_R; s.vx = Math.abs(s.vx); }
-      if (s.x + BO_R > BO_W - BO_WALL)   { s.x = BO_W - BO_WALL - BO_R; s.vx = -Math.abs(s.vx); }
-      // Pastilles : simple contact, jamais consommées (repasser dessus en bobbant ne doit pas
-      // punir — la couleur reste simplement celle de la dernière touchée).
-      for (const p of s.pads) {
-        if (Math.abs(p.y - s.y) < BO_R + 9 && Math.abs(p.x - s.x) < BO_R + 9) s.col = p.col;
+      s.dir = ctrl.current.dir;
+      if (ctrl.current.flap && s.cd <= 0) { s.vy = BN_FLAP; s.cd = BN_FLAP_CD; ctrl.current.flap = false; }
+      if (ctrl.current.dive) { s.vy = BN_DIVE; ctrl.current.dive = false; }
+      const r = bnStep(s);
+      if (r === 'die') {
+        alive = false; cancelAnimationFrame(raf);
+        s.dead = true;
+        for (let k = 0; k < 30; k++) s.parts.push({ x:s.x, y:s.y, vx:(Math.random() - 0.5) * 9, vy:(Math.random() - 0.5) * 9, life:1, col: k % 3 ? BN_COL.ball : BN_COL.haz });
+        const sc = bnScore(s);
+        setScore(sc);
+        setBest(b => { const nb = Math.max(b, sc); setGameHi(BOUNCE_HI, nb); return nb; });
+        // Petite explosion avant l'écran de fin (elle tourne hors de la boucle principale).
+        let n = 0;
+        const boom = () => {
+          for (let i = s.parts.length - 1; i >= 0; i--) { const p = s.parts[i]; p.x += p.vx; p.y += p.vy; p.vy += 0.3; p.life -= 0.033; if (p.life <= 0) s.parts.splice(i, 1); }
+          bnDraw(ctx, s);
+          if (++n < 30) requestAnimationFrame(boom); else setPhase('dead');
+        };
+        boom();
+        return;
       }
-      // Barres : franchies uniquement vers le HAUT. Une barre déjà passée ne tue plus (on peut
-      // retomber dessous puis remonter sans être puni deux fois).
-      for (const b of s.bars) {
-        if (b.passed) continue;
-        if (prevY > b.y && s.y <= b.y) {
-          if (b.col !== s.col) { s.y = b.y; bounceDraw(ctx, s); die('Mauvaise couleur !'); return; }
-          b.passed = true; s.score++; setScore(s.score);
-          s.vx = (s.vx < 0 ? -1 : 1) * boSpeed(s.score);
-        }
-      }
-      const target = s.y - BO_H * 0.62;
-      if (target < s.cam) s.cam = target;
-      if (s.y - s.cam > BO_H + 30) { die('Tombé !'); return; }
-      bounceGen(s);
-      s.bars = s.bars.filter(b => b.y < s.cam + BO_H + 260);
-      s.pads = s.pads.filter(p => p.y < s.cam + BO_H + 260);
-      bounceDraw(ctx, s);
+      if (++tick % 5 === 0) setScore(bnScore(s));
+      bnDraw(ctx, s);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => { alive = false; cancelAnimationFrame(raf); };
   }, [phase]);
   React.useEffect(() => {
-    const onKey = e => {
-      if (e.repeat) return;
-      if (e.code === 'Space' || e.key === ' ' || e.key === 'ArrowUp') { e.preventDefault(); tap(); }
+    const dn = e => {
+      const k = e.key.toLowerCase();
+      if (k === 'arrowleft' || k === 'q' || k === 'a') { ctrl.current.dir = -1; e.preventDefault(); }
+      else if (k === 'arrowright' || k === 'd') { ctrl.current.dir = 1; e.preventDefault(); }
+      else if (k === 'arrowdown' || k === 's') { ctrl.current.dive = true; e.preventDefault(); }
+      else if (k === ' ' || k === 'arrowup' || k === 'z' || k === 'w') { if (!e.repeat) ctrl.current.flap = true; e.preventDefault(); }
+      else return;
+      if (phase !== 'playing') start();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    const up = e => {
+      const k = e.key.toLowerCase();
+      if ((k === 'arrowleft' || k === 'q' || k === 'a') && ctrl.current.dir === -1) ctrl.current.dir = 0;
+      if ((k === 'arrowright' || k === 'd') && ctrl.current.dir === 1) ctrl.current.dir = 0;
+    };
+    window.addEventListener('keydown', dn); window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', dn); window.removeEventListener('keyup', up); };
   });
+  // Tactile : le doigt posé sur la MOITIÉ gauche/droite du terrain dirige la balle et la fait
+  // battre des ailes à chaque nouvel appui ; les deux boutons du bas donnent le battement seul
+  // et le plongeon. ⚠ `setPointerCapture` : sans lui, un doigt qui glisse hors du canvas laisse
+  // la direction bloquée pour toujours.
+  const onDown = e => {
+    if (phase !== 'playing') { start(); return; }
+    const r = e.currentTarget.getBoundingClientRect();
+    ctrl.current.dir = (e.clientX - r.left) < r.width / 2 ? -1 : 1;
+    ctrl.current.flap = true;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const onMove = e => {
+    if (phase !== 'playing' || !ctrl.current.dir) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    ctrl.current.dir = (e.clientX - r.left) < r.width / 2 ? -1 : 1;
+  };
+  const onUp = () => { ctrl.current.dir = 0; };
+  const btn = (label, act, title) => (
+    <button title={title} aria-label={title}
+      onPointerDown={e => { e.preventDefault(); if (phase !== 'playing') { start(); return; } ctrl.current[act] = true; }}
+      onContextMenu={e => e.preventDefault()}
+      style={gameBtn({ fontSize:15, padding:'8px 20px', touchAction:'none' })}>{label}</button>
+  );
   return (
-    <GameWrap hint="Tape (ou Espace) pour rebondir et monter. Une barre ne se franchit que si la balle a SA couleur : va chercher la bonne pastille avant d'arriver dessus. La balle file en biais et rebondit sur les parois — c'est le moment du rebond qui décide de l'endroit où tu passes."
-      bar={<span style={{ fontSize:12, color:C.muted }}>Barres <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
-      <div style={{ position:'relative', width:'100%', maxWidth:BO_W }}>
-        <canvas ref={canvasRef} width={BO_W} height={BO_H} onPointerDown={tap}
-          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'manipulation', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none' }} />
+    <GameWrap hint="MONTE, et rien d'autre : le score est ton altitude — le point le plus haut atteint, jamais rien d'autre. Le doigt posé à gauche ou à droite du terrain dirige la balle ET la fait battre ; ⤒ pour un battement seul, ⤓ pour plonger d'un coup. Au clavier : ← → , Espace, ↓. Le parcours est fait de 26 épreuves écrites à la main, empilées dans un ordre tiré au sort. Les plateformes te relancent, les tremplins verts t'expédient très haut, le rouge tue."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Altitude <b style={{ color:C.text }}>{score} m</b> · Record <b style={{ color:GAMES_COLOR }}>{best} m</b></span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:BN_W }}>
+        <canvas ref={canvasRef} width={BN_W} height={BN_H}
+          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+          onContextMenu={e => e.preventDefault()}
+          style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }} />
         {phase !== 'playing' && (
-          <div onPointerDown={tap} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
-            <div style={{ fontSize:16, fontWeight:800 }}>{phase === 'dead' ? `💥 ${why}` : '🔵 Bounce'}</div>
-            <div style={{ fontSize:12, background:'#00000088', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
+          <div onPointerDown={start} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
+            <div style={{ fontSize:16, fontWeight:800, textShadow:'0 2px 8px #000' }}>{phase === 'dead' ? `💥 ${score} m` : '🔵 Bounce'}</div>
+            <div style={{ fontSize:12, background:'#00000099', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'monter'}</div>
           </div>
         )}
       </div>
+      {phase === 'playing' && (
+        <div style={{ display:'flex', gap:6 }}>
+          {btn('⤒', 'flap', 'Battement')}
+          {btn('⤓', 'dive', 'Plongeon')}
+        </div>
+      )}
     </GameWrap>
   );
 }
