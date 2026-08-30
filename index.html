@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.9.7';
+const APP_VERSION = '11.9.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29390,7 +29390,7 @@ function DevStatsSection() {
     return (
       <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
         Stats GitHub via ton <b style={{ color:DEV_COLOR }}>token perso</b> — c'est le même que Dependabot :
-        configure-le dans <b>Alertes → 🛰️ Veilles Techno → 🤖 Dependabot</b> (PAT « classic », scope repo), cette carte s'activera toute seule.
+        configure-le dans <b>Alertes → 🖥️ Dev → 🤖 Dependabot</b> (PAT « classic », scope repo), cette carte s'activera toute seule.
       </div>
     );
   }
@@ -29890,9 +29890,15 @@ function ModuleAiModal({ modId, cfg, onToggle, onClose }) {
 
 // ══════════════════════════════════════════════════════════════════
 // 🔐 AUTORISATIONS EXTERNES (demande utilisateur) — UNE table pour tout ce que le Hub peut
-// demander au navigateur ou à un tiers. « À propos » les affiche TOUTES ; un module n'affiche
-// que les siennes (`only`). Ajouter une autorisation = une ligne ici, et elle apparaît aux
-// deux endroits — c'est ce qui garantit que la liste d'À propos reste exhaustive.
+// demander au navigateur ou à un tiers, affichée en cases à cocher dans « À propos » ET
+// NULLE PART AILLEURS (demande utilisateur : les modules en avaient chacun un extrait, ça
+// faisait deux endroits où chercher le même réglage). Ajouter une autorisation = une ligne
+// ici, et elle apparaît dans la liste.
+//
+// ⚠ Cocher = DEMANDER, décocher = RETIRER — mais seules les 4 connexions OAuth (Drive,
+// YouTube, Dropbox, pCloud) savent se retirer, en effaçant leur jeton local (`revoke`). Une
+// permission NAVIGATEUR (notifications, géoloc, stockage persistant) ne se rend pas depuis
+// la page : sa case reste cochée et verrouillée, avec le chemin des réglages en infobulle.
 //
 // ⚠ AUCUN bouton « tout autoriser » n'est possible, et c'est une limite du navigateur, pas un
 // choix : une popup OAuth doit partir du MÊME tick qu'un clic (cf. gdriveLogin), donc seule
@@ -29910,23 +29916,25 @@ const AUTH_PERMS = [
   { id:'gdrive', icon:'△', label:'Google Drive', color:'#4285f4', where:'À propos · Vêtement · Histoire',
     what:"Sauvegarde et restauration cloud, et les photos de fiches qui vivent dans ton Drive — jamais en local.",
     state: () => !gdriveConfigured() ? AUTH_PERM_NA : (gdriveConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF),
-    ask: () => gdriveLogin() },
+    ask: () => gdriveLogin(), revoke: gdriveLogout },
   { id:'gdrive_read', icon:'△', label:'Google Drive · lecture seule', color:'#4285f4', where:'Finance → Mes Actifs',
     what:"Lit la feuille de calcul de tes actifs. Scope à part (drive.readonly), accordé en même temps que le précédent.",
     state: () => !gdriveConfigured() ? AUTH_PERM_NA : (gdriveHasScope(GDRIVE_SCOPE_READ) ? AUTH_PERM_ON : AUTH_PERM_OFF),
-    ask: () => gdriveLogin({ scopes: GDRIVE_SCOPES }) },
+    // ⚠ Décocher retire TOUT l'accès Drive : les deux scopes voyagent sur le MÊME jeton, il
+    // n'y a pas de moyen d'abandonner `drive.readonly` seul côté navigateur.
+    ask: () => gdriveLogin({ scopes: GDRIVE_SCOPES }), revoke: gdriveLogout },
   { id:'youtube', icon:'▶️', label:'YouTube', color:'#ff4d4d', where:'Actu → Vidéos YouTube · TV Time',
     what:"Tes abonnements et la playlist « Hub Pierre ». ⚠ Consentement SÉPARÉ de Drive : Google refuse de demander les deux ensemble.",
     state: () => !gdriveConfigured() ? AUTH_PERM_NA : (ytgConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF),
-    ask: () => ytgLogin() },
+    ask: () => ytgLogin(), revoke: ytgLogout },
   { id:'dropbox', icon:'☁︎', label:'Dropbox', color:'#0061ff', where:'À propos',
     what:"Sauvegarde et restauration multi-appareils.",
     state: () => dropboxConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF,
-    ask: () => dropboxLogin() },
+    ask: () => dropboxLogin(), revoke: dropboxLogout },
   { id:'pcloud', icon:'◲', label:'pCloud', color:'#20bed6', where:'À propos',
     what:"Sauvegarde et restauration multi-appareils.",
     state: () => pcloudConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF,
-    ask: () => pcloudLogin() },
+    ask: () => pcloudLogin(), revoke: pcloudLogout },
   { id:'notif', icon:'🔔', label:'Notifications', color:'#6f7bf5', where:'Alertes · Météo · Musique',
     what:"Rappels arrivés à échéance, pluie annoncée dans les 2 h, fin de la fenêtre de blocage du scrapping.",
     state: () => !('Notification' in window) ? AUTH_PERM_NA
@@ -29958,12 +29966,7 @@ const AUTH_PERM_TXT = {
   na:     { txt:'Indisponible',   col:'#8a8a8a' },
 };
 
-// `only` = ids à afficher (une page de module) ; absent = TOUTES (À propos).
-// ⚠ `only` est comparé par CONTENU (`join`) et non par référence : un tableau écrit en ligne
-// dans le JSX est recréé à chaque rendu et relancerait l'effet en boucle (piège 2/6).
-function AuthPermsPanel({ only }) {
-  const key = only ? only.join(',') : '';
-  const list = AUTH_PERMS.filter(p => !only || only.indexOf(p.id) !== -1);
+function AuthPermsPanel() {
   const [state, setState] = React.useState({});
   const [busy, setBusy] = React.useState('');
   const refresh = React.useCallback(() => {
@@ -29981,50 +29984,65 @@ function AuthPermsPanel({ only }) {
     const onVis = () => { if (!document.hidden) refresh(); };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [refresh, key]);
+  }, [refresh]);
 
-  const run = async p => {
+  const toggle = async (p, on) => {
+    if (busy) return;
+    if (on) {
+      // Décocher = déconnexion. ⚠ Rechargement ensuite : les panneaux voisins (DropboxSync,
+      // GoogleDriveSync, PCloudSync) lisent leur état de connexion UNE FOIS, à l'initialisation
+      // de leur state — sans reload ils continueraient d'afficher « Sauvegarder » pour un
+      // service qu'on vient de déconnecter.
+      if (!p.revoke) return;
+      if (!window.confirm(`Retirer l'autorisation « ${p.label} » ?\n\nLe jeton stocké sur cet appareil sera effacé. Rien n'est supprimé chez ${p.label}, et tu pourras la redonner d'un clic.`)) return;
+      setBusy(p.id);
+      try { p.revoke(); } catch {}
+      window.location.reload();
+      return;
+    }
     setBusy(p.id);
     try { await p.ask(); } catch {}
     setBusy('');
     refresh();
   };
+
   return (
     <div style={{ display:'flex', flexDirection:'column' }}>
-      {list.map(p => {
+      {AUTH_PERMS.map(p => {
         const st = state[p.id] || AUTH_PERM_NA;
         const info = AUTH_PERM_TXT[st] || AUTH_PERM_TXT.na;
-        const canAsk = st === AUTH_PERM_OFF && busy !== p.id;
+        const on = st === AUTH_PERM_ON;
+        // Case ACTIONNABLE : à cocher (état `off`), ou à décocher si le service sait se
+        // retirer. « Refusé » et « indisponible » restent verrouillés — la page n'y peut rien.
+        const live = !busy && (st === AUTH_PERM_OFF || (on && !!p.revoke));
+        const title = on
+          ? (p.revoke ? 'Décocher pour retirer cette autorisation (le jeton local est effacé)'
+                      : 'Accordée au navigateur : elle ne se retire que dans ses réglages (icône 🔒 de la barre d’adresse → Autorisations du site)')
+          : st === AUTH_PERM_NO ? 'Refusée : seul le navigateur peut revenir en arrière (icône 🔒 de la barre d’adresse → Autorisations du site)'
+          : st === AUTH_PERM_NA ? 'Indisponible sur ce navigateur, ou non configurée'
+          : 'Cocher pour demander cette autorisation';
         return (
           <div key={p.id} style={{ padding:'8px 2px', borderBottom:`1px solid ${C.border}55` }}>
-            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-              <span style={{ fontSize:13, flexShrink:0 }}>{p.icon}</span>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:12, fontWeight:600, color: st === AUTH_PERM_ON ? p.color : C.text }}>{p.label}</div>
-                <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{p.where}</div>
-              </div>
-              <span style={{ fontSize:9.5, fontWeight:700, color:info.col, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', flexShrink:0 }}>
-                {busy === p.id ? '…' : info.txt}
+            <button onClick={() => live && toggle(p, on)} disabled={!live} role="checkbox" aria-checked={on} title={title}
+              style={{ width:'100%', display:'flex', alignItems:'center', gap:8, background:'none', border:'none', padding:0,
+                cursor: live ? 'pointer' : 'default', textAlign:'left', color:'inherit', font:'inherit' }}>
+              <span style={{ fontSize:14, lineHeight:1, flexShrink:0, color: on ? p.color : (live ? C.muted : C.dim), opacity: live || on ? 1 : 0.5 }}>
+                {busy === p.id ? '⏳' : (on ? '☑' : '☐')}
               </span>
-              {st !== AUTH_PERM_ON && (
-                <button onClick={() => canAsk && run(p)} disabled={!canAsk}
-                  title={st === AUTH_PERM_NO ? 'Refusé : seul le navigateur peut revenir en arrière (icône 🔒 de la barre d’adresse → Autorisations du site)'
-                    : st === AUTH_PERM_NA ? 'Indisponible sur ce navigateur / non configuré'
-                    : 'Demander cette autorisation'}
-                  style={{ fontSize:10, fontWeight:700, color: canAsk ? p.color : C.dim, background:'none', border:`1px solid ${canAsk ? p.color + '66' : C.border}`, borderRadius:6, padding:'4px 10px', cursor: canAsk ? 'pointer' : 'default', flexShrink:0, opacity: canAsk ? 1 : 0.45 }}>
-                  Autoriser
-                </button>
-              )}
-            </div>
+              <span style={{ fontSize:13, flexShrink:0 }}>{p.icon}</span>
+              <span style={{ flex:1, minWidth:0 }}>
+                <span style={{ display:'block', fontSize:12, fontWeight:600, color: on ? p.color : C.text }}>{p.label}</span>
+                <span style={{ display:'block', fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{p.where}</span>
+              </span>
+              <span style={{ fontSize:9.5, fontWeight:700, color:info.col, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', flexShrink:0 }}>{info.txt}</span>
+            </button>
             <div style={{ fontSize:10, color:C.muted, lineHeight:1.45, marginTop:3 }}>{p.what}</div>
           </div>
         );
       })}
-      {!only && (
-        <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, marginTop:8 }}>
-          Une autorisation se demande <b>une ligne à la fois</b> : le navigateur exige un clic par fenêtre de consentement, et Google refuse de demander Drive et YouTube ensemble. Un « ✗ Refusé » ne se rattrape que dans les réglages du navigateur (icône 🔒 de la barre d'adresse → Autorisations du site).
-        </div>
-      )}
+      <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, marginTop:8 }}>
+        On coche <b>une ligne à la fois</b> : le navigateur exige un clic par fenêtre de consentement, et Google refuse de demander Drive et YouTube ensemble — il n'existe donc pas de « tout autoriser ». Les 4 connexions cloud se décochent (leur jeton local est effacé) ; les 3 permissions du navigateur (notifications, géolocalisation, stockage) ne se rendent que dans ses réglages : icône 🔒 de la barre d'adresse → Autorisations du site.
+      </div>
     </div>
   );
 }
@@ -30155,12 +30173,12 @@ function VosEcoutesPanel() {
             : 'Désactivé : la vérification n\'a lieu que quand tu ouvres TV Time (et seulement si elle date de plus de 6 h / 24 h), ou quand tu cliques sur le bouton ↻.',
           TVTIME_COLOR)}
       </StatsCollapse>
-      {/* 🔐 AUTORISATIONS — la liste EXHAUSTIVE (demande utilisateur : « 100 % d'entre elles
-          quand je clique sur À propos »). Les modules concernés n'en montrent qu'un extrait,
-          via la même table `AUTH_PERMS` : rien ne peut donc manquer ici. */}
+      {/* 🔐 AUTORISATIONS — la liste EXHAUSTIVE, en cases à cocher, et le SEUL endroit où
+          elle vit (demande utilisateur : les modules en avaient chacun un extrait, ça
+          faisait deux endroits où chercher le même réglage). */}
       <StatsCollapse title="🔐 AUTORISATIONS" color="#8ab4ff">
         <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
-          Tout ce que le Hub peut demander au navigateur ou à un service tiers, au même endroit — état actuel et bouton pour accorder ce qui manque. Chaque module concerné propose aussi la sienne sur sa propre page.
+          Tout ce que le Hub peut demander au navigateur ou à un service tiers. Coche une ligne pour accorder l'autorisation, décoche-la pour la retirer.
         </div>
         <AuthPermsPanel />
       </StatsCollapse>
@@ -34297,9 +34315,6 @@ function MeteoLoc({ loc, full }) {
   );
 }
 
-// ⚠ Tableau CONSTANT (piège 6) : écrit en ligne dans le JSX, il serait recréé à chaque
-// rendu et relancerait l'effet d'`AuthPermsPanel` en boucle.
-const METEO_PERMS = ['geo', 'notif'];
 function MeteoPanel() {
   const [data, setData] = React.useState({}); // key -> { name, days } | { name, error }
   // Light = 3 jours (défaut) · Full = 7 jours (tuiles plus petites). NON persisté.
@@ -34417,14 +34432,6 @@ function MeteoPanel() {
       {full && <MeteoLoc loc={data.courbevoie} full={full} />}
       <MeteoLoc loc={data.boulogne} full={full} />
       <MeteoLoc loc={data.me} full={full} />
-      {/* 🔐 Les deux autorisations dont Météo dépend — la géolocalisation (bloc « Ma
-          position ») et les notifications (alerte pluie). Elles n'avaient aucun point
-          d'entrée : la géoloc n'était demandée qu'implicitement au montage, et l'alerte
-          pluie se taisait sans un mot si les notifications étaient bloquées. Même table
-          qu'À propos (`AUTH_PERMS`), donc jamais deux vérités. */}
-      <StatsCollapse defaultOpen={false} color={METEO_BLUE} title="🔐 AUTORISATIONS">
-        <AuthPermsPanel only={METEO_PERMS} />
-      </StatsCollapse>
     </div>
   );
 }
@@ -44034,7 +44041,7 @@ const REMEMBER_CUSTOM_KEY = 'spotifyplus_remember_custom'; // rappels persos : [
 // ⚠ L'ORDRE DE CE TABLEAU EST L'ORDRE DES COLLAPSES À L'ÉCRAN. Il est ALPHABÉTIQUE avec DEUX
 // exceptions demandées : « 🔔 Mes rappels » est tiré tout en TÊTE (il est rendu avant la boucle,
 // voir RappelPanel) et « 📌 Autre » est tiré tout en FIN, sous Véhicule.
-// ⚠ Les sections qui ne viennent PAS d'ici — 🛰️ Dev, 🧊 Frigo, 🎮 Jeux — sont injectées dans le
+// ⚠ Les sections qui ne viennent PAS d'ici — 🖥️ Dev, 🧊 Frigo, 🎮 Jeux — sont injectées dans le
 // flux par `sec.key` : leur ancre est choisie pour les poser à LEUR place alphabétique, pas par
 // affinité de sujet. Insérer une rubrique de plus se fait donc à sa lettre, et il faut vérifier
 // que les ancres (aujourd'hui `anniversaire` pour Dev, `finance` pour Frigo et Jeux) tombent
@@ -44535,7 +44542,7 @@ function GithubStatsSection() {
     return (
       <div style={{ ...card, fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
         Ces stats réutilisent ton <b style={{ color:DEPENDABOT_COLOR }}>token GitHub</b>.<br/>
-        Renseigne-le dans <b>Alertes → 🛰️ Veilles Techno → 🤖 Dependabot</b> et elles s'afficheront ici automatiquement.
+        Renseigne-le dans <b>Alertes → 🖥️ Dev → 🤖 Dependabot</b> et elles s'afficheront ici automatiquement.
       </div>
     );
   }
@@ -45882,8 +45889,6 @@ function RappelCalendar({ events }) {
   );
 }
 
-// ⚠ Tableau CONSTANT (piège 6) : en ligne dans le JSX il serait recréé à chaque rendu.
-const RAPPEL_PERMS = ['notif'];
 function RappelPanel() {
   const [dates, setDates]   = React.useState(loadRappels);
   const [times, setTimes]   = React.useState(loadRappelTimes);   // heure OPTIONNELLE des items fixes
@@ -46043,13 +46048,6 @@ function RappelPanel() {
         </div>
       </div>
       {showCal && <RappelCalendar events={allDated} />}
-      {/* 🔐 Notifications — l'autorisation dont TOUT ce module dépend : sans elle, un rappel
-          arrivé à échéance ne fait rien sortir du navigateur. Elle n'était demandée qu'au
-          moment d'une notification, donc jamais visible en tant que réglage. Même table
-          qu'À propos (`AUTH_PERMS`). */}
-      <StatsCollapse defaultOpen={false} color={RAPPEL_PURPLE} title="🔐 AUTORISATIONS">
-        <AuthPermsPanel only={RAPPEL_PERMS} />
-      </StatsCollapse>
       {due.length > 0 && (
         <div style={{ background:'#e0505022', border:'1px solid #e0505066', borderRadius:10, padding:'8px 11px', fontSize:11, color:'#ff8a8a', fontWeight:700, lineHeight:1.4 }}>
           🔔 {due.length} rappel{due.length > 1 ? 's' : ''} à traiter : {due.join(', ')}
@@ -46134,10 +46132,10 @@ function RappelPanel() {
             </div>
           ))}
         </StatsCollapse>
-        {/* 🛰️ Dev (ex-« Veilles Techno », renommé en 7.6.54) — ancré après « Anniversaire »,
+        {/* 🖥️ Dev (ex-« Veilles Techno », renommé en 7.6.54 ; icône 🖥️ depuis 11.9.8) — ancré après « Anniversaire »,
             c'est-à-dire à SA place alphabétique, « Autre » étant descendu en avant-dernier. */}
         {sec.key === 'anniversaire' && (
-          <StatsCollapse title="🛰️ Dev" color={RAPPEL_PURPLE}>
+          <StatsCollapse title="🖥️ Dev" color={RAPPEL_PURPLE}>
             <StatsCollapse title="🤖 Dependabot" color={DEPENDABOT_COLOR}>
               <DependabotSection />
             </StatsCollapse>
@@ -47176,12 +47174,6 @@ function MusiquePanel() {
               l'import automatique a été retiré ; les Logs en dessous montrent le résultat. */}
           <DiscoverWeeklyButton />
           <LogsPanel compact={isMobile} />
-          {/* 🔐 Notifications — c'est ce module qui prévient quand la fenêtre de blocage
-              (quota 24 h / 429) expire. L'autorisation n'était demandée qu'au moment où le
-              blocage commençait ; elle est ici en clair. Même table qu'À propos. */}
-          <StatsCollapse defaultOpen={false} color={MUSIQUE_COLOR} title="🔐 AUTORISATIONS">
-            <AuthPermsPanel only={RAPPEL_PERMS} />
-          </StatsCollapse>
         </div>
       </StatsCollapse>
       <StatsCollapse defaultOpen={false} color={C.accent} title={<span>⏳ EN ATTENTE {cnt(feed.length)}</span>}>
