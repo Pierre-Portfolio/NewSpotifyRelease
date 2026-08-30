@@ -41,7 +41,7 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 **Découvertes de la semaine**
 Rien n'est importé automatiquement. Deux moyens : le **bouton violet** dans ⚙ Scrapping (qui teste l'accès, importe ce qui est lisible et ouvre ta playlist), et surtout la **capture par la lecture** — lance la playlist une fois par semaine et le Hub range les titres dans « En attente » tout seul. Depuis la migration Spotify de février 2026, le contenu des playlists éditoriales n'est plus toujours lisible : la capture par la lecture reste le moyen fiable.
 
-L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta Playlist (l'écart entre tes likes et le contenu de tes playlists).
+L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta Playlist (l'écart entre tes likes et le contenu de tes playlists, et en dernier **les artistes que tu suis dont aucun titre n'est rangé dans une playlist**).
 
 ---
 

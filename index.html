@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.0.0';
+const APP_VERSION = '12.0.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -46860,6 +46860,7 @@ const DELTA_CACHE_MAX   = 1500;  // au-delà, le résultat n'est PAS mémorisé 
                                  // partagé par tout le Hub — mieux vaut re-scanner que casser
                                  // les écritures des autres modules)
 const DELTA_PAGE        = 60;    // titres rendus par page dans une liste
+const DELTA_FOLLOW_MAX  = 3000;  // artistes suivis lus au maximum (60 pages)
 
 // Normalise une piste Spotify → { uri, title, artist, image } ; null si inexploitable.
 // Sont écartés : les titres LOCAUX (pas d'URI Spotify comparable), les épisodes de podcast
@@ -46886,6 +46887,14 @@ function deltaTrack(t) {
     image:  imgs.length ? (imgs[imgs.length - 1]?.url || '') : '',
   };
 }
+// Verse les ids d'artistes d'une piste BRUTE dans un Set. Les ids ne sont JAMAIS recopiés
+// dans les pistes gardées (donc pas dans le cache localStorage) : seul le Set vit le temps du
+// scan, et seule la liste finale des artistes orphelins est mémorisée.
+function deltaCollectArtists(raw, sink) {
+  if (!sink || !raw) return;
+  for (const a of (raw.artists || [])) if (a?.id) sink.add(a.id);
+}
+
 // apiGet THROW sur 429 mais renvoie { rate_limited:true } quand la fenêtre est déjà ouverte
 // (_rlCheck) → on ramène les deux cas à la même exception pour le caller.
 function deltaGuard(d) {
@@ -46910,7 +46919,7 @@ function deltaSample(it) {
 // Titres likés (bibliothèque). ⚠ Seuls /me/tracks/contains et PUT/DELETE /me/tracks ont été
 // supprimés par la migration fév. 2026 : GET /me/tracks reste l'endpoint de LISTE. /me/library
 // est essayé en repli au cas où la liste y basculerait aussi (même prudence que fetchPlaylistItems).
-async function deltaFetchLiked(onProgress) {
+async function deltaFetchLiked(onProgress, artistSink) {
   const bases = [
     'https://api.spotify.com/v1/me/tracks?limit=50',
     'https://api.spotify.com/v1/me/library?limit=50&type=track',
@@ -46924,8 +46933,9 @@ async function deltaFetchLiked(onProgress) {
       for (const it of d.items) {
         received++;
         if (!sample) sample = deltaSample(it);
-        const t = deltaTrack(deltaEntry(it));
-        if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); }
+        const raw = deltaEntry(it);
+        const t   = deltaTrack(raw);
+        if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); deltaCollectArtists(raw, artistSink); }
       }
       pages++;
       onProgress?.(out.length);
@@ -46935,6 +46945,34 @@ async function deltaFetchLiked(onProgress) {
     if (out.length) return { tracks: out, received, sample };
   }
   return { tracks: [], received: 0, sample: null };
+}
+
+// Artistes suivis (mêmes pages que le scraping : /me/following?type=artist, 50 par page).
+// Sert au collapse « artistes sans titre en playlist » : on n'en garde que l'identité.
+async function deltaFetchFollowed(onProgress) {
+  const out = [], seen = new Set();
+  let url = 'https://api.spotify.com/v1/me/following?type=artist&limit=50', pages = 0;
+  while (url && out.length < DELTA_FOLLOW_MAX && pages < 60) {
+    const d = deltaGuard(await apiGet(url));
+    const items = d?.artists?.items;
+    if (!Array.isArray(items)) break;
+    for (const a of items) {
+      if (!a?.id || seen.has(a.id)) continue;
+      seen.add(a.id);
+      const imgs = a.images || [];
+      out.push({
+        id: a.id,
+        name: a.name || '(sans nom)',
+        image: imgs.length ? (imgs[imgs.length - 1]?.url || '') : '',
+        url: a.external_urls?.spotify || '',
+      });
+    }
+    pages++;
+    onProgress?.(out.length);
+    url = d?.artists?.next || null;
+    if (url) await sleep(DELTA_GAP_MS);
+  }
+  return out;
 }
 
 // Playlists du compte (possédées ET suivies — « toutes les playlists de mon compte »).
@@ -46967,7 +47005,7 @@ async function deltaFetchPlaylists() {
 // Contenu COMPLET d'une playlist (paginé), en tolérant l'état de migration de l'app comme
 // fetchPlaylistItems : /items PUIS /tracks. Retourne un tableau (vide = playlist vide) ou
 // null quand AUCUN des deux endpoints n'a renvoyé de liste → contenu refusé par Spotify.
-async function deltaFetchPlaylistTracks(pid) {
+async function deltaFetchPlaylistTracks(pid, artistSink) {
   const bases = [
     `https://api.spotify.com/v1/playlists/${pid}/items?limit=50&additional_types=track`,
     `https://api.spotify.com/v1/playlists/${pid}/tracks?limit=50&additional_types=track`,
@@ -46990,8 +47028,9 @@ async function deltaFetchPlaylistTracks(pid) {
       for (const it of d.items) {
         received++;
         if (!sample) sample = deltaSample(it);
-        const t = deltaTrack(deltaEntry(it));
-        if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); }
+        const raw = deltaEntry(it);
+        const t   = deltaTrack(raw);
+        if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); deltaCollectArtists(raw, artistSink); }
       }
       pages++;
       url = d.next || null;
@@ -47016,8 +47055,13 @@ async function deltaFetchPlaylistTracks(pid) {
 // le contenu lu (mode debug « tout afficher »). Sans `all`, le mode debug afficherait le delta
 // déguisé et ne prouverait rien.
 async function deltaScan(onProgress) {
+  // Sets d'IDS D'ARTISTES rencontrés (pas d'uris) : ils servent au dernier collapse,
+  // « artistes suivis dont AUCUN titre n'est dans une playlist ».
+  const plArtists    = new Set();
+  const likedArtists = new Set();
+
   onProgress('Lecture des titres likés…');
-  const lk = await deltaFetchLiked(n => onProgress(`Titres likés : ${n} lus…`));
+  const lk = await deltaFetchLiked(n => onProgress(`Titres likés : ${n} lus…`), likedArtists);
   const liked = lk.tracks;
   const likedSet = new Set(liked.map(t => t.uri));
 
@@ -47030,7 +47074,7 @@ async function deltaScan(onProgress) {
   for (let i = 0; i < metas.length; i++) {
     const p = metas[i];
     onProgress(`Playlist ${i + 1}/${metas.length} · ${p.name}`);
-    const r = await deltaFetchPlaylistTracks(p.id);
+    const r = await deltaFetchPlaylistTracks(p.id, plArtists);
     if (r === null) { playlists.push({ ...p, unreadable: true, read: 0, received: 0, tracks: [], all: [] }); }
     else {
       for (const t of r.tracks) inPlaylists.add(t.uri);
@@ -47042,6 +47086,16 @@ async function deltaScan(onProgress) {
     }
     if (i < metas.length - 1) await sleep(DELTA_GAP_MS);
   }
+
+  // Abonnements lus EN DERNIER : les playlists illisibles (403 sur une playlist éditoriale)
+  // ne peuvent que gonfler la liste — d'où l'avertissement affiché quand il y en a.
+  onProgress('Lecture de tes abonnements…');
+  const followed = await deltaFetchFollowed(n => onProgress(`Abonnements : ${n} lus…`));
+  const followedGap = followed
+    .filter(a => !plArtists.has(a.id))
+    .map(a => ({ ...a, liked: likedArtists.has(a.id) }))
+    .sort((x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' }));
+
   return {
     at: Date.now(),
     likedTotal: liked.length,
@@ -47050,6 +47104,8 @@ async function deltaScan(onProgress) {
     likedAll: liked,
     likedOnly: liked.filter(t => !inPlaylists.has(t.uri)),
     playlists,
+    followedTotal: followed.length,
+    followedGap,
   };
 }
 
@@ -47058,7 +47114,8 @@ async function deltaScan(onProgress) {
 function deltaCacheSave(d) {
   try {
     // `all` est mémorisé en plus du delta (mode debug) → il compte dans le volume
-    const n = (d.likedAll || d.likedOnly).length + d.playlists.reduce((s, p) => s + (p.all || p.tracks).length, 0);
+    const n = (d.likedAll || d.likedOnly).length + d.playlists.reduce((s, p) => s + (p.all || p.tracks).length, 0)
+            + (d.followedGap || []).length;
     if (n > DELTA_CACHE_MAX) { localStorage.removeItem(DELTA_CACHE_KEY); return false; }
     localStorage.setItem(DELTA_CACHE_KEY, JSON.stringify(d));
     return true;
@@ -47168,6 +47225,40 @@ function DeltaTrackList({ tracks, empty }) {
   );
 }
 
+// Même liste paginée, pour des ARTISTES (collapse « aucun titre en playlist »).
+// Le ❤ signale un artiste absent des playlists mais présent dans les titres likés.
+function DeltaArtistList({ artists, empty }) {
+  const [max, setMax] = React.useState(DELTA_PAGE);
+  if (!artists.length) {
+    return <div style={{ fontSize:11, color:C.dim, fontFamily:'DM Mono,monospace', padding:'14px 0', textAlign:'center' }}>{empty}</div>;
+  }
+  return (
+    <div style={{ display:'flex', flexDirection:'column' }}>
+      {artists.slice(0, max).map(a => (
+        <div key={a.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px' }}>
+          <AlbumArt size={38} letter={(a.name || '?')[0].toUpperCase()} color={DELTA_COLOR} image={a.image} />
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{a.name}</div>
+            <div style={{ fontSize:10, color:C.muted }}>
+              {a.liked ? '❤ présent dans tes titres likés' : 'aucun titre, ni en playlist ni en liké'}
+            </div>
+          </div>
+          {a.url && (
+            <a href={safeHref(a.url)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
+              style={{ fontSize:13, color:C.accent, textDecoration:'none', flexShrink:0, padding:'0 4px' }}>↗</a>
+          )}
+        </div>
+      ))}
+      {artists.length > max && (
+        <button onClick={() => setMax(m => m + DELTA_PAGE * 2)}
+          style={{ marginTop:8, background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:'7px 12px', fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>
+          + Afficher les {artists.length - max} artistes restants
+        </button>
+      )}
+    </div>
+  );
+}
+
 function DeltaPlaylistPanel() {
   const { user, logout } = useStore();
   const [, force] = React.useReducer(x => x + 1, 0);
@@ -47192,6 +47283,9 @@ function DeltaPlaylistPanel() {
   // `ownerId` n'existe pas dans un cache écrit avant 7.6.95 → on n'affiche rien plutôt qu'un « 0 » faux
   const mine = data && user?.id && data.playlists.some(p => p.ownerId !== undefined)
     ? data.playlists.filter(p => p.ownerId === user.id).length : null;
+  // Playlists dont Spotify a refusé le contenu : leurs artistes n'ont pas pu être comptés,
+  // le collapse « artistes sans titre en playlist » peut donc en lister à tort.
+  const plUnreadable = data ? data.playlists.filter(p => p.unreadable).length : 0;
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
@@ -47283,6 +47377,29 @@ function DeltaPlaylistPanel() {
               </StatsCollapse>
             );
           })}
+
+          {/* Dernier collapse : les artistes SUIVIS dont aucun titre n'apparaît dans une
+              playlist. Calculé sur les ids d'artistes croisés pendant le scan (aucune
+              requête de plus que la lecture de /me/following). ⚠ Absent d'un cache écrit
+              avant 12.0.1 → on invite à relancer plutôt que d'afficher une liste vide. */}
+          <StatsCollapse defaultOpen={false} color={DELTA_COLOR}
+            title={<span>🎤 ARTISTES SANS TITRE EN PLAYLIST {cnt(data.followedGap ? data.followedGap.length : '?')}</span>}>
+            {!data.followedGap ? (
+              <div style={{ fontSize:10, color:'#f5a623', fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+                ⚠ Cette section n'existait pas lors de ta dernière analyse — relance-la pour l'obtenir.
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+                  Artistes que tu suis dont <b>aucun titre</b> n'est rangé dans une de tes playlists
+                  — {data.followedGap.length} sur {data.followedTotal ?? '?'} abonnement(s).
+                  {plUnreadable > 0 && ` ⚠ ${plUnreadable} playlist(s) illisible(s) : leur contenu n'a pas pu être compté, la liste peut donc être trop longue.`}
+                </div>
+                <DeltaArtistList artists={data.followedGap}
+                  empty="Chacun de tes artistes suivis a au moins un titre dans une playlist." />
+              </>
+            )}
+          </StatsCollapse>
         </>
       )}
     </div>
