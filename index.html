@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.9.4';
+const APP_VERSION = '11.9.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29888,6 +29888,147 @@ function ModuleAiModal({ modId, cfg, onToggle, onClose }) {
     </div>, document.body);
 }
 
+// ══════════════════════════════════════════════════════════════════
+// 🔐 AUTORISATIONS EXTERNES (demande utilisateur) — UNE table pour tout ce que le Hub peut
+// demander au navigateur ou à un tiers. « À propos » les affiche TOUTES ; un module n'affiche
+// que les siennes (`only`). Ajouter une autorisation = une ligne ici, et elle apparaît aux
+// deux endroits — c'est ce qui garantit que la liste d'À propos reste exhaustive.
+//
+// ⚠ AUCUN bouton « tout autoriser » n'est possible, et c'est une limite du navigateur, pas un
+// choix : une popup OAuth doit partir du MÊME tick qu'un clic (cf. gdriveLogin), donc seule
+// la première d'une rafale passerait. Google REFUSE en plus de combiner les scopes `youtube`
+// et `drive.file` (erreur 400, cf. include_granted_scopes:false). Chaque ligne a donc son
+// propre bouton, et un clic = une demande.
+// ⚠ Les états navigateur (notifications, géoloc, stockage persistant) sont ASYNCHRONES et
+// changent hors de React (réglages du navigateur, autre onglet) : ils sont relus au montage,
+// au retour dans l'onglet, et après chaque demande.
+// ⚠ `gdriveLogin` / `ytgLogin` RECHARGENT la page en cas de succès — inutile de rafraîchir
+// l'état derrière, l'état initial du prochain rendu est déjà le bon.
+// ══════════════════════════════════════════════════════════════════
+const AUTH_PERM_ON = 'on', AUTH_PERM_OFF = 'off', AUTH_PERM_NO = 'denied', AUTH_PERM_NA = 'na';
+const AUTH_PERMS = [
+  { id:'gdrive', icon:'△', label:'Google Drive', color:'#4285f4', where:'À propos · Vêtement · Histoire',
+    what:"Sauvegarde et restauration cloud, et les photos de fiches qui vivent dans ton Drive — jamais en local.",
+    state: () => !gdriveConfigured() ? AUTH_PERM_NA : (gdriveConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF),
+    ask: () => gdriveLogin() },
+  { id:'gdrive_read', icon:'△', label:'Google Drive · lecture seule', color:'#4285f4', where:'Finance → Mes Actifs',
+    what:"Lit la feuille de calcul de tes actifs. Scope à part (drive.readonly), accordé en même temps que le précédent.",
+    state: () => !gdriveConfigured() ? AUTH_PERM_NA : (gdriveHasScope(GDRIVE_SCOPE_READ) ? AUTH_PERM_ON : AUTH_PERM_OFF),
+    ask: () => gdriveLogin({ scopes: GDRIVE_SCOPES }) },
+  { id:'youtube', icon:'▶️', label:'YouTube', color:'#ff4d4d', where:'Actu → Vidéos YouTube · TV Time',
+    what:"Tes abonnements et la playlist « Hub Pierre ». ⚠ Consentement SÉPARÉ de Drive : Google refuse de demander les deux ensemble.",
+    state: () => !gdriveConfigured() ? AUTH_PERM_NA : (ytgConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF),
+    ask: () => ytgLogin() },
+  { id:'dropbox', icon:'☁︎', label:'Dropbox', color:'#0061ff', where:'À propos',
+    what:"Sauvegarde et restauration multi-appareils.",
+    state: () => dropboxConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF,
+    ask: () => dropboxLogin() },
+  { id:'pcloud', icon:'◲', label:'pCloud', color:'#20bed6', where:'À propos',
+    what:"Sauvegarde et restauration multi-appareils.",
+    state: () => pcloudConnected() ? AUTH_PERM_ON : AUTH_PERM_OFF,
+    ask: () => pcloudLogin() },
+  { id:'notif', icon:'🔔', label:'Notifications', color:'#6f7bf5', where:'Alertes · Météo · Musique',
+    what:"Rappels arrivés à échéance, pluie annoncée dans les 2 h, fin de la fenêtre de blocage du scrapping.",
+    state: () => !('Notification' in window) ? AUTH_PERM_NA
+      : Notification.permission === 'granted' ? AUTH_PERM_ON
+      : Notification.permission === 'denied' ? AUTH_PERM_NO : AUTH_PERM_OFF,
+    ask: () => Notification.requestPermission() },
+  { id:'geo', icon:'📍', label:'Géolocalisation', color:'#4aa3f0', where:'Météo',
+    what:"Ajoute « Ma position » aux lieux suivis et cible l'alerte pluie. ⚠ L'app ne trace ni n'enregistre jamais ta position.",
+    // ⚠ `permissions.query` n'existe pas partout (Safari) : sans lui l'état reste INCONNU, on
+    // affiche donc « à demander » plutôt qu'un faux « autorisé ».
+    state: () => !navigator.geolocation ? AUTH_PERM_NA
+      : Promise.resolve(navigator.permissions && navigator.permissions.query
+          ? navigator.permissions.query({ name:'geolocation' }).then(
+              p => p.state === 'granted' ? AUTH_PERM_ON : p.state === 'denied' ? AUTH_PERM_NO : AUTH_PERM_OFF,
+              () => AUTH_PERM_OFF)
+          : AUTH_PERM_OFF),
+    // La seule façon de DEMANDER la géoloc est de la lire une fois — le résultat est jeté.
+    ask: () => new Promise(res => navigator.geolocation.getCurrentPosition(() => res(true), () => res(false), { timeout:10000 })) },
+  { id:'persist', icon:'💾', label:'Stockage persistant', color:'#c792ea', where:'Toute l\'app',
+    what:"Empêche le navigateur d'effacer ta base locale (SQLite + IndexedDB) quand la place manque. Déjà demandé une fois à la connexion.",
+    state: () => !(navigator.storage && navigator.storage.persisted) ? AUTH_PERM_NA
+      : navigator.storage.persisted().then(v => v ? AUTH_PERM_ON : AUTH_PERM_OFF, () => AUTH_PERM_NA),
+    ask: () => navigator.storage.persist() },
+];
+const AUTH_PERM_TXT = {
+  on:     { txt:'✓ Autorisé',     col:'#4caf50' },
+  off:    { txt:'— À autoriser',  col:'#f5a623' },
+  denied: { txt:'✗ Refusé',       col:'#e05050' },
+  na:     { txt:'Indisponible',   col:'#8a8a8a' },
+};
+
+// `only` = ids à afficher (une page de module) ; absent = TOUTES (À propos).
+// ⚠ `only` est comparé par CONTENU (`join`) et non par référence : un tableau écrit en ligne
+// dans le JSX est recréé à chaque rendu et relancerait l'effet en boucle (piège 2/6).
+function AuthPermsPanel({ only }) {
+  const key = only ? only.join(',') : '';
+  const list = AUTH_PERMS.filter(p => !only || only.indexOf(p.id) !== -1);
+  const [state, setState] = React.useState({});
+  const [busy, setBusy] = React.useState('');
+  const refresh = React.useCallback(() => {
+    AUTH_PERMS.forEach(p => {
+      let v; try { v = p.state(); } catch { v = AUTH_PERM_NA; }
+      Promise.resolve(v).then(
+        r => setState(o => (o[p.id] === r ? o : { ...o, [p.id]: r })),
+        () => setState(o => ({ ...o, [p.id]: AUTH_PERM_NA })));
+    });
+  }, []);
+  React.useEffect(() => {
+    refresh();
+    // Une autorisation peut être révoquée depuis les réglages du navigateur, sans revenir
+    // ici : on relit l'état à chaque retour dans l'onglet.
+    const onVis = () => { if (!document.hidden) refresh(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [refresh, key]);
+
+  const run = async p => {
+    setBusy(p.id);
+    try { await p.ask(); } catch {}
+    setBusy('');
+    refresh();
+  };
+  return (
+    <div style={{ display:'flex', flexDirection:'column' }}>
+      {list.map(p => {
+        const st = state[p.id] || AUTH_PERM_NA;
+        const info = AUTH_PERM_TXT[st] || AUTH_PERM_TXT.na;
+        const canAsk = st === AUTH_PERM_OFF && busy !== p.id;
+        return (
+          <div key={p.id} style={{ padding:'8px 2px', borderBottom:`1px solid ${C.border}55` }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ fontSize:13, flexShrink:0 }}>{p.icon}</span>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, fontWeight:600, color: st === AUTH_PERM_ON ? p.color : C.text }}>{p.label}</div>
+                <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{p.where}</div>
+              </div>
+              <span style={{ fontSize:9.5, fontWeight:700, color:info.col, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', flexShrink:0 }}>
+                {busy === p.id ? '…' : info.txt}
+              </span>
+              {st !== AUTH_PERM_ON && (
+                <button onClick={() => canAsk && run(p)} disabled={!canAsk}
+                  title={st === AUTH_PERM_NO ? 'Refusé : seul le navigateur peut revenir en arrière (icône 🔒 de la barre d’adresse → Autorisations du site)'
+                    : st === AUTH_PERM_NA ? 'Indisponible sur ce navigateur / non configuré'
+                    : 'Demander cette autorisation'}
+                  style={{ fontSize:10, fontWeight:700, color: canAsk ? p.color : C.dim, background:'none', border:`1px solid ${canAsk ? p.color + '66' : C.border}`, borderRadius:6, padding:'4px 10px', cursor: canAsk ? 'pointer' : 'default', flexShrink:0, opacity: canAsk ? 1 : 0.45 }}>
+                  Autoriser
+                </button>
+              )}
+            </div>
+            <div style={{ fontSize:10, color:C.muted, lineHeight:1.45, marginTop:3 }}>{p.what}</div>
+          </div>
+        );
+      })}
+      {!only && (
+        <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, marginTop:8 }}>
+          Une autorisation se demande <b>une ligne à la fois</b> : le navigateur exige un clic par fenêtre de consentement, et Google refuse de demander Drive et YouTube ensemble. Un « ✗ Refusé » ne se rattrape que dans les réglages du navigateur (icône 🔒 de la barre d'adresse → Autorisations du site).
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VosEcoutesPanel() {
   const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, moduleAi, setModuleAiProvider, logout } = useStore();
   // Module dont la pop-up 🤖 « quelle IA pour ce module » est ouverte (null = aucune).
@@ -30013,6 +30154,15 @@ function VosEcoutesPanel() {
             ? 'Activé : une fois par jour à la connexion, chaque chaîne YouTube est vérifiée (nouvelles vidéos et Shorts) puis chaque série suivie (nouvelles saisons). Interrompue, elle reprend dans la journée là où elle s\'était arrêtée.'
             : 'Désactivé : la vérification n\'a lieu que quand tu ouvres TV Time (et seulement si elle date de plus de 6 h / 24 h), ou quand tu cliques sur le bouton ↻.',
           TVTIME_COLOR)}
+      </StatsCollapse>
+      {/* 🔐 AUTORISATIONS — la liste EXHAUSTIVE (demande utilisateur : « 100 % d'entre elles
+          quand je clique sur À propos »). Les modules concernés n'en montrent qu'un extrait,
+          via la même table `AUTH_PERMS` : rien ne peut donc manquer ici. */}
+      <StatsCollapse title="🔐 AUTORISATIONS" color="#8ab4ff">
+        <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
+          Tout ce que le Hub peut demander au navigateur ou à un service tiers, au même endroit — état actuel et bouton pour accorder ce qui manque. Chaque module concerné propose aussi la sienne sur sa propre page.
+        </div>
+        <AuthPermsPanel />
       </StatsCollapse>
       <StatsCollapse title="↧ EXPORTER MES DONNÉES" color="#4ea3f5">
         {EXPORT_SECTIONS.map(sec => (
@@ -32097,10 +32247,9 @@ function ActuPanel() {
 
       {/* Cartes repliables (fermées par défaut) — réutilise StatsCollapse.
           ORDRE VOULU : ALPHABÉTIQUE sur le titre (emoji ignoré), aux 2 niveaux :
-          1) Actualité (sous-sections : Tendances du jour EN TÊTE (demande utilisateur),
-          puis Actu résumé par IA (juste au-dessus d'Actu Mondial, demande utilisateur),
-          Actu Mondial, Wikipédia (entre Actu Mondial et LinkedIn, demande
-          utilisateur), LinkedIn, Bourse & crypto, IA & Science, Cyber Secu, Insolite, Jeux
+          1) Actualité (sous-sections : Actu résumé par IA EN TÊTE puis Tendances du jour
+          (demande utilisateur), Actu Mondial, Wikipédia (entre Actu Mondial et LinkedIn,
+          demande utilisateur), LinkedIn, Bourse & crypto, IA & Science, Cyber Secu, Insolite, Jeux
           — ⚠ Cyber Secu placé ENTRE IA et Insolite, position demandée, prime sur l'alphabet)
           · 2) Cartographie (Réseaux de Transport Paris, Feux de forêt, Guerre,
           Qualité de l'air) · 3) Dernières fuites de données · 4) Vidéos YouTube. */}
@@ -32109,7 +32258,15 @@ function ActuPanel() {
         <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
           title={<span>📰 ACTUALITÉ</span>}>
 
-          {/* 1.0 Tendances du jour — placé TOUT EN HAUT (demande utilisateur, prime sur l'alphabet) */}
+          {/* 1.0 Actu résumée par IA — placée TOUT EN HAUT, au-dessus des Tendances du jour
+              (demande utilisateur) : c'est la synthèse de ce que les sections suivantes
+              détaillent, elle n'a de sens qu'avant elles. */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🤖 ACTU RÉSUMÉ PAR IA <span style={{ color:C.dim, fontWeight:400 }}>· la veille en 5+5 puces</span></span>}>
+            <ActuAiSummary data={d} />
+          </StatsCollapse>
+
+          {/* 1.1 Tendances du jour — sous le résumé IA (demande utilisateur, prime sur l'alphabet) */}
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🔥 TENDANCES DU JOUR <span style={{ color:C.dim, fontWeight:400 }}>· Google Trends</span></span>}>
             {(d.trends && d.trends.length)
@@ -32120,15 +32277,7 @@ function ActuPanel() {
             <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>Les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends France en substitut.</div>
           </StatsCollapse>
 
-          {/* 1.0b Actu résumée par IA (demande utilisateur) — placée JUSTE AU-DESSUS
-              d'Actu Mondial : c'est la synthèse de ce que les sections suivantes
-              détaillent, elle n'a de sens qu'avant elles. */}
-          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
-            title={<span>🤖 ACTU RÉSUMÉ PAR IA <span style={{ color:C.dim, fontWeight:400 }}>· la veille en 5+5 puces</span></span>}>
-            <ActuAiSummary data={d} />
-          </StatsCollapse>
-
-          {/* 1.1 Actu Mondial */}
+          {/* 1.2 Actu Mondial */}
           <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
             title={<span>🌍 ACTU MONDIAL <span style={{ color:C.dim, fontWeight:400 }}>· Google News</span></span>}>
             {(d.monde && d.monde.length)
@@ -34148,6 +34297,9 @@ function MeteoLoc({ loc, full }) {
   );
 }
 
+// ⚠ Tableau CONSTANT (piège 6) : écrit en ligne dans le JSX, il serait recréé à chaque
+// rendu et relancerait l'effet d'`AuthPermsPanel` en boucle.
+const METEO_PERMS = ['geo', 'notif'];
 function MeteoPanel() {
   const [data, setData] = React.useState({}); // key -> { name, days } | { name, error }
   // Light = 3 jours (défaut) · Full = 7 jours (tuiles plus petites). NON persisté.
@@ -34265,6 +34417,14 @@ function MeteoPanel() {
       {full && <MeteoLoc loc={data.courbevoie} full={full} />}
       <MeteoLoc loc={data.boulogne} full={full} />
       <MeteoLoc loc={data.me} full={full} />
+      {/* 🔐 Les deux autorisations dont Météo dépend — la géolocalisation (bloc « Ma
+          position ») et les notifications (alerte pluie). Elles n'avaient aucun point
+          d'entrée : la géoloc n'était demandée qu'implicitement au montage, et l'alerte
+          pluie se taisait sans un mot si les notifications étaient bloquées. Même table
+          qu'À propos (`AUTH_PERMS`), donc jamais deux vérités. */}
+      <StatsCollapse defaultOpen={false} color={METEO_BLUE} title="🔐 AUTORISATIONS">
+        <AuthPermsPanel only={METEO_PERMS} />
+      </StatsCollapse>
     </div>
   );
 }
@@ -45676,6 +45836,8 @@ function RappelCalendar({ events }) {
   );
 }
 
+// ⚠ Tableau CONSTANT (piège 6) : en ligne dans le JSX il serait recréé à chaque rendu.
+const RAPPEL_PERMS = ['notif'];
 function RappelPanel() {
   const [dates, setDates]   = React.useState(loadRappels);
   const [times, setTimes]   = React.useState(loadRappelTimes);   // heure OPTIONNELLE des items fixes
@@ -45835,6 +45997,13 @@ function RappelPanel() {
         </div>
       </div>
       {showCal && <RappelCalendar events={allDated} />}
+      {/* 🔐 Notifications — l'autorisation dont TOUT ce module dépend : sans elle, un rappel
+          arrivé à échéance ne fait rien sortir du navigateur. Elle n'était demandée qu'au
+          moment d'une notification, donc jamais visible en tant que réglage. Même table
+          qu'À propos (`AUTH_PERMS`). */}
+      <StatsCollapse defaultOpen={false} color={RAPPEL_PURPLE} title="🔐 AUTORISATIONS">
+        <AuthPermsPanel only={RAPPEL_PERMS} />
+      </StatsCollapse>
       {due.length > 0 && (
         <div style={{ background:'#e0505022', border:'1px solid #e0505066', borderRadius:10, padding:'8px 11px', fontSize:11, color:'#ff8a8a', fontWeight:700, lineHeight:1.4 }}>
           🔔 {due.length} rappel{due.length > 1 ? 's' : ''} à traiter : {due.join(', ')}
@@ -46961,6 +47130,12 @@ function MusiquePanel() {
               l'import automatique a été retiré ; les Logs en dessous montrent le résultat. */}
           <DiscoverWeeklyButton />
           <LogsPanel compact={isMobile} />
+          {/* 🔐 Notifications — c'est ce module qui prévient quand la fenêtre de blocage
+              (quota 24 h / 429) expire. L'autorisation n'était demandée qu'au moment où le
+              blocage commençait ; elle est ici en clair. Même table qu'À propos. */}
+          <StatsCollapse defaultOpen={false} color={MUSIQUE_COLOR} title="🔐 AUTORISATIONS">
+            <AuthPermsPanel only={RAPPEL_PERMS} />
+          </StatsCollapse>
         </div>
       </StatsCollapse>
       <StatsCollapse defaultOpen={false} color={C.accent} title={<span>⏳ EN ATTENTE {cnt(feed.length)}</span>}>
