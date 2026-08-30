@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.9.2';
+const APP_VERSION = '11.9.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -36326,7 +36326,7 @@ const TVTIME_COLOR = '#f5b81f';   // ambre de l'arc-en-ciel (entre To Do et Stat
 const TMDB_API_KEY = '';          // clé v3 en dur (optionnelle) — sinon saisie dans l'UI
 const TMDB_KEY_LS  = 'spotifyplus_tmdb_key';
 const TVTIME_LS_KEY = 'spotifyplus_tvtime';
-const TVTIME_FILTER_LS = 'spotifyplus_tvtime_filter';  // 'all' | 'movie' | 'tv' | 'youtube' — filtre persisté
+const TVTIME_FILTER_LS = 'spotifyplus_tvtime_filter';  // 'all' | 'movie' | 'tv' | 'youtube' | 'shorts' | 'book' — filtre persisté
 const YT_KEY_LS = 'spotifyplus_yt_key';   // clé API YouTube Data v3 (séparée de la clé TMDB)
 const YT_COLOR = '#ff4d4d';               // rouge YouTube (filtre + accents de la section)
 const YT_MAX_VIDEOS = 500;                // plafond de vidéos récupérées par chaîne/playlist (quota + localStorage)
@@ -36432,6 +36432,9 @@ let _tvItemsCache = null;
 const YT_UNSAVED_ID    = '__hub_unsaved';
 const YT_UNSAVED_TITLE = YTSUB_WL_NAME;   // même nom que la playlist YouTube dont elle est le pendant
 const ytIsUnsaved = it => !!it && it.type === 'youtube' && it.id === YT_UNSAVED_ID;
+// Chaîne 100 % Shorts = tag `shortsOnly` posé par le bouton 🩳 de sa fiche. C'est ce qui
+// partage la barre de filtres TV Time entre l'onglet « ▶️ YT » et l'onglet « 🩳 Short ».
+const ytIsShortsChan = it => !!(it && it.shortsOnly);
 
 function loadTvItems() {
   if (_tvItemsCache) return _tvItemsCache;
@@ -39254,7 +39257,7 @@ function TvTimePanel() {
   const [previewLoading, setPreviewLoading] = React.useState(false);
   // Filtre Films/Séries persisté — 'all' | 'movie' | 'tv'
   const [mediaFilter, setMediaFilter] = React.useState(() => {
-    try { const v = localStorage.getItem(TVTIME_FILTER_LS); return (v === 'movie' || v === 'tv' || v === 'youtube' || v === 'book') ? v : 'all'; } catch { return 'all'; }
+    try { const v = localStorage.getItem(TVTIME_FILTER_LS); return (v === 'movie' || v === 'tv' || v === 'youtube' || v === 'shorts' || v === 'book') ? v : 'all'; } catch { return 'all'; }
   });
   const pickFilter = f => { setMediaFilter(f); try { localStorage.setItem(TVTIME_FILTER_LS, f); } catch {} };
   // Tri des listes (persisté) + filtre texte sur le nom (non persisté) — appliqués aux
@@ -40082,7 +40085,12 @@ function TvTimePanel() {
     .filter(it => !nameQ || (it.title || '').toLowerCase().includes(nameQ))
     .slice().sort(tvCmp);
   const nbMovies = items.reduce((a, it) => a + (it.type === 'movie' ? 1 : 0), 0);
-  const nbYoutube = items.reduce((a, it) => a + (it.type === 'youtube' ? 1 : 0), 0);
+  // ⚠ Onglets « ▶️ YT » et « 🩳 Short » SÉPARÉS (demande utilisateur) : une chaîne tague
+  // `shortsOnly` (bouton 🩳 « Garder uniquement les Shorts » de sa fiche) va dans Short,
+  // toutes les autres dans YT. C'est le seul découpage possible ici — la barre filtre des
+  // CHAÎNES, pas des vidéos : une chaîne mixte reste donc dans YT avec ses Shorts.
+  const nbYoutube = items.reduce((a, it) => a + (it.type === 'youtube' && !ytIsShortsChan(it) ? 1 : 0), 0);
+  const nbShorts  = items.reduce((a, it) => a + (it.type === 'youtube' &&  ytIsShortsChan(it) ? 1 : 0), 0);
   const nbSeries = filmTv.length - nbMovies;
   // Bloc YouTube séparé : items 'youtube' filtrés par nom + triés, répartis par statut
   const ytItems = items.filter(it => it.type === 'youtube' && (!nameQ || (it.title || '').toLowerCase().includes(nameQ))).slice().sort(tvCmp);
@@ -40431,20 +40439,36 @@ function TvTimePanel() {
             )}
           </>)}
 
-          {/* Filtre Films / Séries / YouTube (persisté) — cliquer YT affiche tout le contenu YouTube */}
-          {items.length > 0 && (
-            <div style={{ display:'flex', gap:5 }}>
-              {[['all', `Tous · ${filmTv.length}`, TVTIME_COLOR], ['tv', `📺 Séries · ${nbSeries}`, TVTIME_COLOR], ['movie', `🎬 Films · ${nbMovies}`, TVTIME_COLOR], ['youtube', `▶️ YT · ${nbYoutube}`, YT_COLOR], ...(booksOn ? [['book', `📚 Livres · ${nbBooks}`, BOOK_COLOR]] : [])].map(([k, label, col]) => {
+          {/* Filtre Films / Séries / YT / Short / Livres (persisté). ⚠ Demande utilisateur :
+              chaque onglet est sur DEUX LIGNES — icône + libellé, puis le compte EN DESSOUS
+              (plus de « · 12 » à la suite du libellé, qui allongeait les boutons). Avec 6
+              onglets sur 390 px, c'est ce retour à la ligne qui les fait tenir. */}
+          {items.length > 0 && (() => {
+            const tabs = [['all', '', 'Tous', filmTv.length, TVTIME_COLOR],
+              ['tv', '📺', 'Séries', nbSeries, TVTIME_COLOR],
+              ['movie', '🎬', 'Films', nbMovies, TVTIME_COLOR],
+              ['youtube', '▶️', 'YT', nbYoutube, YT_COLOR],
+              ['shorts', '🩳', 'Short', nbShorts, YT_COLOR],
+              ...(booksOn ? [['book', '📚', 'Livres', nbBooks, BOOK_COLOR]] : [])];
+            // ⚠ 6 onglets (Livres activé) ne tiennent plus en 390 px à 10 px : « Séries » et
+            // « Livres » se faisaient tronquer en « Sér… ». On resserre alors la police et les
+            // gouttières plutôt que de rogner les libellés — mesuré à 390 px, le cas étroit.
+            const tight = tabs.length > 5;
+            return (
+            <div style={{ display:'flex', gap: tight ? 3 : 5 }}>
+              {tabs.map(([k, icon, label, n, col]) => {
                 const active = mediaFilter === k;
                 return (
                   <button key={k} onClick={() => pickFilter(k)}
-                    style={{ flex:1, background: active ? `${col}22` : 'none', border:`1px solid ${active ? col + '66' : C.border}`, borderRadius:6, color: active ? col : C.dim, fontSize:10, fontWeight:700, padding:'4px 0', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
-                    {label}
+                    style={{ flex:1, minWidth:0, background: active ? `${col}22` : 'none', border:`1px solid ${active ? col + '66' : C.border}`, borderRadius:6, color: active ? col : C.dim, fontSize: tight ? 9 : 10, fontWeight:700, padding: tight ? '4px 0' : '4px 2px', cursor:'pointer', fontFamily:'DM Mono,monospace', display:'flex', flexDirection:'column', alignItems:'center', gap:1, lineHeight:1.25 }}>
+                    <span style={{ whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', maxWidth:'100%' }}>{icon ? icon + ' ' : ''}{label}</span>
+                    <span style={{ fontSize: tight ? 10 : 11 }}>{n}</span>
                   </button>
                 );
               })}
             </div>
-          )}
+            );
+          })()}
 
           {/* Filtre par nom + tri des listes (tri persisté) */}
           {items.length > 0 && (
@@ -40464,7 +40488,7 @@ function TvTimePanel() {
           )}
 
           {/* ══ FILMS & SÉRIES ══ (masqué quand le filtre YouTube est actif) */}
-          {mediaFilter !== 'youtube' && mediaFilter !== 'book' && <>
+          {mediaFilter !== 'youtube' && mediaFilter !== 'shorts' && mediaFilter !== 'book' && <>
           {/* En cours de visionnage */}
           {secTitle('watching', '▶', 'EN COURS', watching.length)}
           {secOpen.watching && (watching.length === 0
@@ -40549,17 +40573,26 @@ function TvTimePanel() {
               )))}
           </>}
 
-          {/* ══ CONTENU YOUTUBE ══ affiché quand le filtre YouTube est actif — chaînes &
-              playlists suivies avec leurs propres sections EN COURS / À VOIR / VUS. */}
-          {mediaFilter === 'youtube' && (
+          {/* ══ CONTENU YOUTUBE ══ affiché quand l'onglet ▶️ YT **ou** 🩳 Short est actif —
+              chaînes & playlists suivies avec leurs propres sections EN COURS / VUS.
+              ⚠ Le même bloc sert aux deux onglets, seul `keep` change : les chaînes
+              `shortsOnly` d'un côté, toutes les autres de l'autre. Les listes globales
+              (`ytWatching`, `ytDone`) restent ENTIÈRES — le 🩳 de l'en-tête lance la file de
+              TOUS les Shorts restants, il ne doit pas dépendre de l'onglet ouvert. */}
+          {(mediaFilter === 'youtube' || mediaFilter === 'shorts') && (() => {
+            const shortsTab = mediaFilter === 'shorts';
+            const keep = l => l.filter(it => ytIsShortsChan(it) === shortsTab);
+            const ytW = keep(ytWatching), ytD = keep(ytDone);
+            const nb = shortsTab ? nbShorts : nbYoutube;
+            return (
             <div style={{ marginTop:2 }}>
-              {nbYoutube === 0
-                ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucune chaîne — colle un lien YouTube dans le champ ci-dessus</div>
+              {nb === 0
+                ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>{shortsTab ? 'Aucune chaîne 100 % Shorts — ouvre une chaîne dans ▶️ YT et active son bouton 🩳 « Garder uniquement les Shorts »' : 'Aucune chaîne — colle un lien YouTube dans le champ ci-dessus'}</div>
                 : <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-                    {secTitle('ytWatching', '▶', 'EN COURS', ytWatching.length, null, YT_COLOR)}
-                    {secOpen.ytWatching && (ytWatching.length === 0
+                    {secTitle('ytWatching', '▶', 'EN COURS', ytW.length, null, YT_COLOR)}
+                    {secOpen.ytWatching && (ytW.length === 0
                       ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Rien en cours</div>
-                      : ytWatching.map(it => row(it, progLabel(it),
+                      : ytW.map(it => row(it, progLabel(it),
                           <>
                             <button onClick={() => setStatus(it, 'done')} title="Valider — tout vu" style={abtn('#4caf50')}>✓</button>
                             {wlBtn(it)}
@@ -40570,10 +40603,10 @@ function TvTimePanel() {
                             <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
                           </>
                         )))}
-                    {secTitle('ytDone', '✓', 'VUS', ytDone.length, null, YT_COLOR)}
-                    {secOpen.ytDone && (ytDone.length === 0
+                    {secTitle('ytDone', '✓', 'VUS', ytD.length, null, YT_COLOR)}
+                    {secOpen.ytDone && (ytD.length === 0
                       ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucune chaîne vue</div>
-                      : ytDone.map(it => row(it, ytIsUnsaved(it)
+                      : ytD.map(it => row(it, ytIsUnsaved(it)
                           ? `${(it.videos || []).length} vidéo(s) vues hors chaîne suivie`
                           : `${ytProgressLabel(it)}${it.dropped ? ' · plus suivie' : ''}`,
                           <>
@@ -40584,7 +40617,8 @@ function TvTimePanel() {
                         )))}
                   </div>}
             </div>
-          )}
+            );
+          })()}
 
           {/* ══ 📚 LIVRES ══ (visible quand l'onglet Livres est actif) */}
           {mediaFilter === 'book' && (
