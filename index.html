@@ -113,13 +113,13 @@ const REDIRECT_URI = 'https://pierre-portfolio.github.io/NewSpotifyRelease/';
 // par défaut → Delta Playlist ne voyait aucune playlist perso (seulement les suivies/publiques),
 // SANS aucune erreur : l'API répond 200 avec une liste incomplète. Token émis avant cet ajout →
 // même symptôme tant que l'utilisateur ne s'est pas déconnecté/reconnecté (bandeau dédié).
-const SCOPES       = 'user-follow-read user-read-private user-read-currently-playing user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative';
+const SCOPES       = 'user-follow-read user-follow-modify user-read-private user-read-currently-playing user-read-playback-state user-modify-playback-state user-library-read user-library-modify playlist-read-private playlist-read-collaborative';
 const ESTIMATED_TOTAL = 1400;
 // Version de l'app : MAJ.MIN.U = nombre de commits du dépôt découpé en
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.9.9';
+const APP_VERSION = '12.0.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1732,6 +1732,26 @@ function libraryWriteFailed(res) {
   if (res.error) { alert('Action impossible pour le moment — Spotify a renvoyé une erreur.'); return true; }
   return false;
 }
+
+// ── Artistes « inconnus » de la table locale ───────────────────────────────────
+// Une ligne d'`artists_scraped` peut n'avoir AUCUN nom : elle date d'avant la colonne
+// `name` (migration), ou vient d'une sauvegarde qui ne portait que `spotify_id` + `name`.
+// Comme la boucle de scan ne visite que les artistes rendus par /me/following, une telle
+// ligne n'est plus jamais remplie : elle reste « Artiste inconnu » à vie.
+// `spotifyArtistsByIds` tranche la question posée par l'utilisateur (« ont-ils supprimé
+// leur compte ? ») : /v1/artists renvoie `null` À LA PLACE de l'objet pour un id qui
+// n'existe plus côté Spotify, en gardant l'ordre des ids demandés.
+// ⚠ 50 ids max par requête (au-delà : 400).
+const SPOTIFY_IDS_MAX = 50;
+async function spotifyArtistsByIds(ids) {
+  const data = await apiGet(`https://api.spotify.com/v1/artists?ids=${ids.join(',')}`);
+  if (data?.rate_limited) return { rateLimited: true };
+  return { list: Array.isArray(data?.artists) ? data.artists : null };
+}
+// Retrait d'abonnement. ⚠ Demande le scope `user-follow-modify`, ajouté APRÈS coup à
+// SCOPES : un jeton plus ancien ne l'a pas (403) et seule une reconnexion l'accorde.
+const spotifyUnfollowArtists = ids =>
+  apiDel(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
 // ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
 // puis 100 de plus à 00h30 (1h plus tard). Désormais, atteindre 100 démarre un
@@ -3939,6 +3959,12 @@ function StoreProvider({ children }) {
   }, [dbReady, artistSearch, filterType, sortBy, genreFilter]);
   reloadFeedRef.current = reloadFeed;   // la capture Découvertes (poll player) lit la version à jour
 
+  // Recharge la liste des artistes depuis la DB — utilisé par le panneau Artistes après
+  // une identification / suppression d'artistes inconnus (deps [] : ne lit qu'un setter).
+  const reloadArtists = React.useCallback(() => {
+    try { setArtists(loadArtistsFromDB()); } catch {}
+  }, []);
+
   // Réinitialise manuellement le quota 24h (compteur + fenêtre) — débloque une
   // synchro sans attendre l'expiration des 24h. Confirmation côté UI.
   const resetQuota = () => {
@@ -3977,7 +4003,7 @@ function StoreProvider({ children }) {
     dbReady, purgeListened, resetQuota, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
-    likedTracks, setLikedTracks, history, artists, navigateFeed, markListened,
+    likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, genreFilter, setGenreFilter, resetFilters,
     resumableSession, resumeSync,
@@ -46443,18 +46469,93 @@ function fmtCompactNum(n) {
 // (id, dernière date de scrapping + métadonnées gratuites de l'API Spotify)
 // ════════════════════════════════════════════════
 function ArtistsPanel() {
-  const { artists } = useStore();
+  const { artists, reloadArtists } = useStore();
   const [search,   setSearch]   = React.useState('');
   const [sortBy,   setSortBy]   = React.useState('recent');
-  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'error'
+  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'partial' | 'error' | 'gone'
+  const [busy,     setBusy]     = React.useState('');    // '' | 'resolve' | 'purge'
+  const [msg,      setMsg]      = React.useState('');    // compte-rendu de la dernière action
   const filtersOn = search.trim() || sortBy !== 'recent' || status !== 'all';
   const reset = () => { setSearch(''); setSortBy('recent'); setStatus('all'); };
+
+  // « Artiste inconnu » = ligne SANS nom (voir spotifyArtistsByIds). `gone` = Spotify a
+  // répondu qu'il ne connaît plus cet id → la page de l'artiste n'existe plus.
+  const unknown = React.useMemo(() => (artists || []).filter(a => !a.name && a.lastScanStatus !== 'gone'), [artists]);
+  const gone    = React.useMemo(() => (artists || []).filter(a => a.lastScanStatus === 'gone'), [artists]);
+
+  // Demande à Spotify qui sont les lignes sans nom : celles qu'il connaît encore sont
+  // remplies (nom, photo, genres…), les autres passent en statut 'gone'.
+  const resolveUnknown = async () => {
+    if (busy || !unknown.length) return;
+    setBusy('resolve'); setMsg('');
+    let found = 0, missing = 0, stopped = '';
+    for (let i = 0; i < unknown.length; i += SPOTIFY_IDS_MAX) {
+      const batch = unknown.slice(i, i + SPOTIFY_IDS_MAX);
+      let r = null;
+      // apiGet THROW sur 429 — sans ce try, l'identification casserait au lieu de s'arrêter
+      try { r = await spotifyArtistsByIds(batch.map(a => a.id)); }
+      catch { stopped = 'Spotify limite les requêtes (rate limit) — réessaie dans quelques minutes.'; break; }
+      if (r.rateLimited) { stopped = 'Spotify limite les requêtes (rate limit) — réessaie dans quelques minutes.'; break; }
+      if (!r.list)       { stopped = 'Réponse inattendue de Spotify — rien n\'a été modifié.'; break; }
+      r.list.forEach((ar, k) => {
+        const id = batch[k] && batch[k].id;
+        if (!id) return;
+        if (ar && ar.id) {
+          try {
+            dbRun(
+              "UPDATE artists_scraped SET name = ?, image_url = ?, popularity = ?, followers = ?, genres = ?, spotify_url = ? WHERE spotify_id = ?",
+              [ar.name || null, ar.images?.[1]?.url || ar.images?.[0]?.url || null, ar.popularity ?? null,
+               ar.followers?.total ?? null, JSON.stringify(ar.genres || []), ar.external_urls?.spotify || null, id]
+            );
+            found++;
+          } catch {}
+        } else {
+          try { dbRun("UPDATE artists_scraped SET last_scan_status = 'gone' WHERE spotify_id = ?", [id]); missing++; } catch {}
+        }
+      });
+    }
+    if (found || missing) { try { await saveDB(); } catch {} reloadArtists(); }
+    setBusy('');
+    setMsg(stopped || `${found} artiste(s) identifié(s) · ${missing} introuvable(s) sur Spotify.`);
+  };
+
+  // Supprime les introuvables : ligne locale (donc plus jamais scrapés) + désabonnement
+  // Spotify. ⚠ La suppression locale est INCONDITIONNELLE — un jeton sans
+  // `user-follow-modify` fait échouer le désabonnement, la ligne n'en sert pas plus.
+  const purgeGone = async () => {
+    if (busy || !gone.length) return;
+    const ids = gone.map(a => a.id);
+    if (!confirm(`Supprimer ${ids.length} artiste(s) introuvable(s) ?\n\nIls disparaissent de cette liste (et donc des artistes à scraper) et sont retirés de tes abonnements Spotify.\nLes titres déjà enregistrés en base ne bougent pas.`)) return;
+    setBusy('purge'); setMsg('');
+    let refused = false, sent = 0;
+    for (let i = 0; i < ids.length; i += SPOTIFY_IDS_MAX) {
+      let r = null;
+      try { r = await spotifyUnfollowArtists(ids.slice(i, i + SPOTIFY_IDS_MAX)); } catch {}
+      if (r && r.ok) sent += Math.min(SPOTIFY_IDS_MAX, ids.length - i);
+      else if (r && r.error === 'forbidden') refused = true;
+    }
+    try {
+      ids.forEach(id => dbRun("DELETE FROM artists_scraped WHERE spotify_id = ?", [id]));
+      await saveDB();
+    } catch {}
+    reloadArtists();
+    setBusy('');
+    setMsg(refused
+      ? `${ids.length} ligne(s) supprimée(s) localement. Spotify a refusé le désabonnement : déconnecte-toi puis reconnecte-toi pour accorder la nouvelle permission.`
+      : `${ids.length} artiste(s) supprimé(s) · ${sent} désabonnement(s) envoyé(s) à Spotify.`);
+  };
+  const actBtn = (color, on = true) => ({
+    background: on ? color + '18' : 'none', border: `1px solid ${on ? color + '55' : C.border}`,
+    borderRadius: 6, padding: '5px 10px', cursor: on ? 'pointer' : 'default',
+    color: on ? color : C.dim, fontSize: 10.5, fontWeight: 700, opacity: on ? 1 : 0.5,
+  });
 
   const view = React.useMemo(() => {
     let r = (artists || []).filter(a => {
       if (status === 'ok'      && a.lastScanStatus !== 'ok' && a.lastScanStatus != null) return false;
       if (status === 'partial' && a.lastScanStatus !== 'partial') return false;
       if (status === 'error'   && a.lastScanStatus !== 'error') return false;
+      if (status === 'gone'    && a.lastScanStatus !== 'gone') return false;
       const q = search.trim().toLowerCase();
       if (q) return (a.name || '').toLowerCase().includes(q) || (a.id || '').toLowerCase().includes(q);
       return true;
@@ -46487,9 +46588,45 @@ function ArtistsPanel() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      {/* Artistes sans nom : la réponse à « ont-ils supprimé leur compte ? » ne peut venir
+          que de Spotify, un bouton la lui demande (aucune requête sans clic). */}
+      {unknown.length > 0 && (
+        <div style={{ border:'1px solid #5a3a18', background:'#2a1c08', borderRadius:8, padding:'9px 10px', display:'flex', flexDirection:'column', gap:7 }}>
+          <div style={{ fontSize:10.5, color:'#e0a050', lineHeight:1.55 }}>
+            <b>{unknown.length} artiste(s) sans nom.</b> Ces lignes ont été créées avant que le
+            nom soit enregistré (ou restaurées d'une vieille sauvegarde) : elles ne font plus
+            partie de tes abonnements Spotify, donc aucun scan ne repasse jamais les remplir.
+            <br/>« Identifier » demande à Spotify qui elles sont — celles dont la page n'existe
+            plus sont marquées <b>Introuvable</b> et peuvent être supprimées.
+          </div>
+          <div>
+            <button onClick={resolveUnknown} disabled={!!busy} style={actBtn('#e0a050', !busy)}>
+              {busy === 'resolve' ? '⏳ Identification…' : `🔍 Identifier (${unknown.length})`}
+            </button>
+          </div>
+        </div>
+      )}
+      {gone.length > 0 && (
+        <div style={{ border:`1px solid ${C.border}`, background:C.surfaceHigh, borderRadius:8, padding:'9px 10px', display:'flex', flexDirection:'column', gap:7 }}>
+          <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.55 }}>
+            <b style={{ color:C.text }}>{gone.length} artiste(s) introuvable(s) sur Spotify</b> — leur page
+            n'existe plus (compte supprimé, ou fusionné avec un autre). Les supprimer les retire
+            de cette liste, donc des artistes à scraper, <b>et de tes abonnements Spotify</b>.
+            Les titres déjà enregistrés en base ne bougent pas.
+          </div>
+          <div>
+            <button onClick={purgeGone} disabled={!!busy} style={actBtn('#e05050', !busy)}>
+              {busy === 'purge' ? '⏳ Suppression…' : `🗑 Supprimer (${gone.length})`}
+            </button>
+          </div>
+        </div>
+      )}
+      {msg && (
+        <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', lineHeight:1.5, padding:'0 2px' }}>{msg}</div>
+      )}
       {/* Toolbar : statut + tri + reset */}
       <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
-        {[['all','Tous'],['ok','✓ OK'],['partial','⏳ Partiel'],['error','⚠ Erreur']].map(([k,n]) => (
+        {[['all','Tous'],['ok','✓ OK'],['partial','⏳ Partiel'],['error','⚠ Erreur'],['gone','👻 Introuvable']].map(([k,n]) => (
           <button key={k} onClick={() => setStatus(k)} style={btnFilter(status===k)}>{n}</button>
         ))}
         <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
@@ -46543,13 +46680,17 @@ function ArtistsPanel() {
 function ArtistRow({ a }) {
   const err     = a.lastScanStatus === 'error';
   const partial = a.lastScanStatus === 'partial';
-  // Couleur + libellé du badge selon le statut (erreur rouge, partiel orange, ok vert)
-  const badge = err
-    ? { txt:'ERREUR',  fg:'#e05050', bg:'#2a0e0e', bd:'#5a2020' }
-    : partial
-      ? { txt:'PARTIEL', fg:'#e0a050', bg:'#2a1c08', bd:'#5a3a18' }
-      : { txt:'OK',      fg:C.accent, bg:`${C.accent}18`, bd:`${C.accent}40` };
-  const artColor = err ? '#e05050' : partial ? '#e0a050' : C.accent;
+  const gone    = a.lastScanStatus === 'gone';
+  // Couleur + libellé du badge selon le statut (erreur rouge, partiel orange, ok vert,
+  // introuvable gris : l'id a été refusé par /v1/artists, la page n'existe plus)
+  const badge = gone
+    ? { txt:'INTROUVABLE', fg:'#8a8a8a', bg:'#161616', bd:'#2e2e2e' }
+    : err
+      ? { txt:'ERREUR',  fg:'#e05050', bg:'#2a0e0e', bd:'#5a2020' }
+      : partial
+        ? { txt:'PARTIEL', fg:'#e0a050', bg:'#2a1c08', bd:'#5a3a18' }
+        : { txt:'OK',      fg:C.accent, bg:`${C.accent}18`, bd:`${C.accent}40` };
+  const artColor = gone ? '#8a8a8a' : err ? '#e05050' : partial ? '#e0a050' : C.accent;
   return (
     <div style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'9px 10px', borderRadius:8, background:C.surfaceHigh, border:`1px solid ${C.border}` }}>
       <AlbumArt size={44} letter={(a.name || a.id || '?')[0].toUpperCase()} color={artColor} image={a.image} />
@@ -46562,7 +46703,8 @@ function ArtistRow({ a }) {
             <a href={a.spotifyUrl} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
               style={{ fontSize:11, color:C.accent, textDecoration:'none', flexShrink:0 }}>↗</a>
           )}
-          <span title={partial ? 'Scan interrompu (429) — titres ajoutés mais artiste pas terminé, sera repris à la prochaine synchro' : undefined}
+          <span title={gone ? 'Spotify ne connaît plus cet identifiant : la page de l’artiste n’existe plus'
+              : partial ? 'Scan interrompu (429) — titres ajoutés mais artiste pas terminé, sera repris à la prochaine synchro' : undefined}
             style={{ marginLeft:'auto', flexShrink:0, fontSize:8, fontWeight:700, letterSpacing:'0.04em', padding:'2px 6px', borderRadius:5,
             background: badge.bg, color: badge.fg, border:`1px solid ${badge.bd}` }}>
             {badge.txt}
