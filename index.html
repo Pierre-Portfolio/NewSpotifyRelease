@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.0.1';
+const APP_VERSION = '12.0.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4131,8 +4131,22 @@ function useSharedTick(active) {
 // patron que `_immersive`) parce que la barre est rendue par `MobileApp`/`WebApp`, très
 // loin du composant du jeu. ⚠ Le POLL du player continue de tourner : seul l'AFFICHAGE
 // est retiré, la lecture et l'auto-avance ne sont pas touchées.
-const _hidePlayer = { n: 0, subs: new Set() };
-function _hidePlayerNotify() { _hidePlayer.subs.forEach(fn => { try { fn(_hidePlayer.n > 0); } catch {} }); }
+// Deux causes de masquage, réunies dans le MÊME publieur : le verrou temporaire des jeux
+// (`n`, un compteur) et la préférence permanente d'À propos → Paramétrage (`pref`).
+// ⚠ Même convention que MUSIC_AUTO_LS : clé ABSENTE = barre AFFICHÉE, seule la valeur
+// 'off' la masque (une lecture ratée ne doit jamais faire disparaître la barre).
+const PLAYERBAR_LS = 'spotifyplus_playerbar';
+function playerBarPref() { try { return localStorage.getItem(PLAYERBAR_LS) !== 'off'; } catch { return true; } }
+const _hidePlayer = { n: 0, pref: !playerBarPref(), subs: new Set() };
+function playerBarHidden() { return _hidePlayer.n > 0 || _hidePlayer.pref; }
+function _hidePlayerNotify() { const h = playerBarHidden(); _hidePlayer.subs.forEach(fn => { try { fn(h); } catch {} }); }
+// Bascule de la préférence. `lsSet` renvoie false si le quota est plein — l'état mémoire
+// suit quand même, sinon l'interrupteur reviendrait tout seul à sa position d'avant.
+function playerBarSet(on) {
+  lsSet(PLAYERBAR_LS, on ? 'on' : 'off');
+  _hidePlayer.pref = !on;
+  _hidePlayerNotify();
+}
 function useHidePlayerBar(active) {
   React.useEffect(() => {
     if (!active) return;
@@ -4141,11 +4155,11 @@ function useHidePlayerBar(active) {
   }, [active]);
 }
 function usePlayerHidden() {
-  const [v, setV] = React.useState(_hidePlayer.n > 0);
+  const [v, setV] = React.useState(playerBarHidden());
   React.useEffect(() => {
     const h = b => setV(b);
     _hidePlayer.subs.add(h);
-    setV(_hidePlayer.n > 0);   // le verrou a pu être posé avant ce montage
+    setV(playerBarHidden());   // le verrou a pu être posé avant ce montage
     return () => { _hidePlayer.subs.delete(h); };
   }, []);
   return v;
@@ -26999,7 +27013,8 @@ function buildBackup() {
              vet_prix: lsRaw(VET_PRIX_LS),
              // ⚠ La PRÉFÉRENCE de scrapping auto voyage ; PAS `MUSIC_AUTO_DAY_LS` (le jour de
              // la dernière passe), qui est propre à cet appareil et se recalcule tout seul.
-             music_auto: lsRaw(MUSIC_AUTO_LS), finance_auto: lsRaw(FIN_AUTO_LS), tvtime_auto: lsRaw(TV_AUTO_LS) },
+             music_auto: lsRaw(MUSIC_AUTO_LS), finance_auto: lsRaw(FIN_AUTO_LS), tvtime_auto: lsRaw(TV_AUTO_LS),
+             playerbar: lsRaw(PLAYERBAR_LS) },
   };
 }
 // Sections d'export séparées (À propos) : fields = clés de buildBackup() incluses
@@ -27453,6 +27468,7 @@ function applyBackup(data) {
     putRaw(MUSIC_AUTO_LS, data.prefs.music_auto);
     putRaw(FIN_AUTO_LS, data.prefs.finance_auto);
     putRaw(TV_AUTO_LS, data.prefs.tvtime_auto);
+    putRaw(PLAYERBAR_LS, data.prefs.playerbar);
   }
   return { artistsRestored, statsRestored, musicRestored, failed };
 }
@@ -30077,6 +30093,9 @@ function VosEcoutesPanel() {
   const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, moduleAi, setModuleAiProvider, logout } = useStore();
   // Module dont la pop-up 🤖 « quelle IA pour ce module » est ouverte (null = aucune).
   const [aiCfgMod, setAiCfgMod] = React.useState(null);
+  // Affichage de la barre de lecture Spotify (bas de l'écran) — préférence persistée.
+  const [barOn, setBarOn] = React.useState(playerBarPref());
+  const toggleBar = () => { const on = !barOn; playerBarSet(on); setBarOn(on); };
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
   // Ouverture d'À propos sans Google connecté → renouvellement silencieux du jeton DRIVE
@@ -30175,6 +30194,25 @@ function VosEcoutesPanel() {
             </div>
           );
         })}
+        {/* Barre de lecture Spotify — même rendu que les lignes de module ci-dessus, mais
+            ce n'est pas un module : elle est rendue par MobileApp/WebApp, pas par un onglet.
+            Le POLL du player continue de tourner, seul l'AFFICHAGE disparaît (les écoutes
+            restent marquées et l'auto-avance fonctionne). */}
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'7px 4px', borderTop:`1px solid ${C.border}`, marginTop:6 }}>
+          <span style={{ fontSize:12, fontWeight:600, color: barOn ? C.accent : C.dim, display:'flex', alignItems:'center', gap:7, minWidth:0, flex:1 }}>
+            <span style={{ opacity: barOn ? 1 : 0.4 }}>🎵</span> Barre de lecture
+          </span>
+          <button onClick={toggleBar} role="switch" aria-checked={barOn}
+            title={barOn ? 'Masquer le bandeau de lecture en bas de l’écran' : 'Réafficher le bandeau de lecture en bas de l’écran'}
+            style={{ position:'relative', width:38, height:22, borderRadius:11, border:'none', cursor:'pointer', flexShrink:0, padding:0, background: barOn ? C.accent : C.border, transition:'background 0.15s' }}>
+            <span style={{ position:'absolute', top:2, left: barOn ? 18 : 2, width:18, height:18, borderRadius:'50%', background:'#fff', transition:'left 0.15s', boxShadow:'0 1px 2px rgba(0,0,0,0.4)' }} />
+          </button>
+        </div>
+        <div style={{ fontSize:10, color:C.muted, lineHeight:1.5, padding:'0 4px' }}>
+          {barOn
+            ? 'Le bandeau du bas (pochette, lecture/pause, précédent/suivant) est affiché dès que Spotify joue.'
+            : 'Bandeau masqué. La lecture, le marquage des écoutes et l\'auto-avance continuent normalement — seuls les boutons disparaissent.'}
+        </div>
         {aiCfgMod && <ModuleAiModal modId={aiCfgMod} cfg={moduleAi} onToggle={setModuleAiProvider} onClose={() => setAiCfgMod(null)} />}
       </StatsCollapse>
       {/* 🔐 AUTORISATIONS — juste SOUS le Paramétrage : la liste EXHAUSTIVE, en cases à

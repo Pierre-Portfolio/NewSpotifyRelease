@@ -28,6 +28,7 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 - **Protection rate-limit** : dès le 1er 429 tout s'arrête 15 min minimum (persiste au rechargement)
 - **Quota de 100 artistes / 24 h glissantes** avec compte à rebours, réinitialisable dans À propos
 - **🤖 Scrapping automatique** : au lancement du Hub, s'il reste du quota le scan part tout seul et continue même si tu navigues dans un autre module. Une passe par jour ; coupé par le quota, il reprend où il s'était arrêté. Interrupteur dans **À propos → 🤖 Lancement automatique**
+- **🎵 Masquer le bandeau de lecture** : interrupteur dans **À propos → ⚙️ Paramétrage**. La lecture, le marquage des écoutes et l'auto-avance continuent normalement — seuls les boutons du bas disparaissent
 - **👻 Artistes inconnus** : dans 🎤 Artistes suivis, les lignes sans nom (vieilles données) se règlent en un clic — « Identifier » demande à Spotify qui elles sont, et celles dont la page n'existe plus peuvent être supprimées de la liste **et de tes abonnements Spotify** (nouvelle permission : reconnecte-toi une fois)
 - Notification navigateur en fin de session
 
