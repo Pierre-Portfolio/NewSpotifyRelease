@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '11.9.1';
+const APP_VERSION = '11.9.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20259,8 +20259,8 @@ const MODULE_AI_LS = 'spotifyplus_module_ai';
 // de données ne sait faire à sa place. C'est le seul endroit où cette réponse est écrite :
 // la garder juste évite de décocher une IA sans voir ce qu'on éteint.
 const AI_MODULES = {
-  actu: { label:'Résumé des vidéos YouTube',
-    why:"Les vidéos de tes abonnements se lisent dans une iframe : rien ne dit ce qu'il y a dedans avant de la regarder. Le bouton ✨ fait REGARDER la vidéo par l'IA et en sort les points clés horodatés. YouTube ne publie ni résumé ni transcription exploitable." },
+  actu: { label:"Résumé de l'actu de la veille · résumé des vidéos YouTube",
+    why:"« 🤖 Actu résumé par IA » relit les titres rapatriés et en tire 5 puces sur le monde et 5 sur la France : aucun flux RSS ne rend une synthèse, seulement des titres bruts. Et le bouton ✨ du lecteur fait REGARDER une vidéo d'abonnement par l'IA pour en sortir les points clés horodatés — YouTube ne publie ni résumé ni transcription exploitable." },
   compare: { label:'Recherche « Tous produits »',
     why:"CheapShark couvre les jeux PC, et rien d'autre : aucune API gratuite ne compare les prix du reste. Pour « Tous produits », l'IA fait la recherche web et rend un tableau de prix — depuis une page sans serveur, c'est la seule source possible." },
   collection: { label:'Recherche Pop · photo → objet · scan',
@@ -31848,6 +31848,185 @@ function ActuCard({ href, main, sub, right, rightColor, image, fav }) {
     : <div style={style}>{inner}</div>;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// 🤖 ACTU RÉSUMÉ PAR IA (demande utilisateur) — 5 puces sur l'actu MONDIALE de la
+// veille + 5 puces sur l'actu FRANÇAISE, en tête de « 📰 ACTUALITÉ », au-dessus
+// d'Actu Mondial.
+//
+// ⚠ Le résumé est écrit À PARTIR DES TITRES rapatriés, jamais de la mémoire du modèle :
+// une IA a une date de coupure, un « résumé de la veille » sorti de sa culture générale
+// serait une pure invention. Les titres partent donc DANS le prompt, avec leur date.
+// ⚠ La recherche web ancrée (`opts.tools`) aurait été l'autre voie — mais elle n'existe
+// que chez Gemini (NO_GROUNDING partout ailleurs), ce qui aurait fermé la section aux
+// 7 autres fournisseurs. Les titres dans le prompt marchent avec toute la chaîne.
+// ⚠ Cache module-level + localStorage RE-FETCHABLE (`spotifyplus_actu_ia`) :
+// volontairement ABSENT de buildBackup, comme les autres caches d'Actu.
+// ⚠ État module-level (pattern `_delta`) et pas `useState` : `StatsCollapse` démonte
+// ses enfants à la fermeture (piège 5) — replier la section pendant la génération
+// perdrait sinon la réponse déjà payée.
+// ══════════════════════════════════════════════════════════════════
+const ACTU_IA_LS     = 'spotifyplus_actu_ia';   // { day, monde, france, at, ai } — re-fetchable, hors backup
+const ACTU_IA_MAX    = 5;                       // puces par bloc (demande utilisateur)
+const ACTU_IA_TITLES = 18;                      // titres envoyés à l'IA par bloc
+const ACTU_IA_DAYS   = 3;                       // fraîcheur des titres retenus (la veille + marge)
+// ⚠ Clé de JOUR LOCALE (piège 16), jamais `toISOString()` : le résumé « de la veille »
+// changerait de journée vers 02 h en France.
+const actuIaDayKey = () => { const x = new Date(); return `${x.getFullYear()}-${x.getMonth() + 1}-${x.getDate()}`; };
+const actuIaYesterday = () => new Date(Date.now() - 86400000)
+  .toLocaleDateString('fr-FR', { weekday:'long', day:'numeric', month:'long', year:'numeric' });
+// AAAA-MM-JJ **local** (comme la clé de jour) : les dates des titres et la date cible
+// données à l'IA doivent être dans le MÊME référentiel, sinon un article du soir bascule
+// d'un jour et le modèle le range dans le mauvais bloc.
+const actuIaIso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Actu française « à la une » — le seul bloc qui n'existe dans AUCUN cache d'Actu
+// (`presse` = IA/science, `regional` = 3 communes). Flux éditorial Google News France,
+// lu à la demande (une fois par jour, à la génération), donc pas dans `actuFetchAll`.
+function actuFetchFrance() {
+  return actuFetchGNews([
+    'https://news.google.com/rss?hl=fr&gl=FR&ceid=FR:fr',
+    'https://news.google.com/rss/headlines/section/topic/NATION?hl=fr&gl=FR&ceid=FR:fr',
+  ], ACTU_IA_TITLES);
+}
+
+const _actuIa = { day:'', monde:[], france:[], at:0, ai:'', busy:false, err:'', loaded:false, subs:new Set() };
+function actuIaSet(patch) { Object.assign(_actuIa, patch); _actuIa.subs.forEach(f => { try { f(); } catch {} }); }
+function actuIaLoad() {
+  let o = null;
+  try { o = JSON.parse(localStorage.getItem(ACTU_IA_LS)); } catch {}
+  if (!o || typeof o !== 'object') return;
+  const arr = a => (Array.isArray(a) ? a : []).map(String).slice(0, ACTU_IA_MAX);
+  actuIaSet({ day: String(o.day || ''), monde: arr(o.monde), france: arr(o.france), at: o.at || 0, ai: String(o.ai || '') });
+}
+function actuIaSave() {
+  lsSet(ACTU_IA_LS, JSON.stringify({ day:_actuIa.day, monde:_actuIa.monde, france:_actuIa.france, at:_actuIa.at, ai:_actuIa.ai }));
+}
+function actuIaFresh() { return _actuIa.day === actuIaDayKey() && (_actuIa.monde.length > 0 || _actuIa.france.length > 0); }
+
+// Titres → lignes numérotées « titre — source — date ». La date compte autant que le
+// titre : c'est elle qui permet à l'IA de trier la veille du reste.
+function actuIaLines(items) {
+  // ⚠ Les flux Google News datent en RFC-822 (« Sun, 30 Aug 2026 … ») : un `slice(0,10)`
+  // rendrait « Sun, 30 Au ». On normalise en AAAA-MM-JJ, la seule forme qu'une IA
+  // compare sans se tromper — c'est cette date qui lui sert à isoler la veille.
+  const day = v => { const t = Date.parse(v); return isNaN(t) ? '' : actuIaIso(new Date(t)); };
+  return items.map((a, i) => {
+    const bits = [String((a && a.title) || '').trim()];
+    if (a && a.source) bits.push(String(a.source).trim());
+    const d = a && a.date ? day(a.date) : '';
+    if (d) bits.push(d);
+    return `${i + 1}. ${bits.join(' — ')}`;
+  }).filter(l => l.length > 3).join('\n');
+}
+function actuIaPrompt(monde, france, jour) {
+  return `Tu es journaliste à l'AFP. Voici des titres de presse relevés à l'instant, avec leur source et leur date de publication.
+
+TITRES INTERNATIONAUX :
+${actuIaLines(monde) || '(aucun)'}
+
+TITRES FRANÇAIS :
+${actuIaLines(france) || '(aucun)'}
+
+Rédige le résumé de l'actualité du ${jour} (${actuIaIso(new Date(Date.now() - 86400000))}) :
+- ${ACTU_IA_MAX} puces sur l'actualité MONDIALE (hors France)
+- ${ACTU_IA_MAX} puces sur l'actualité FRANÇAISE
+
+Règles STRICTES :
+- Une puce = UNE phrase complète en français, 15 à 30 mots, factuelle, sans emoji, sans gras, sans lien.
+- Appuie-toi UNIQUEMENT sur les titres ci-dessus : n'ajoute aucun fait, chiffre ou nom qui n'y figure pas.
+- Priorité aux titres datés du ${jour} ; regroupe en une seule puce les titres qui parlent du même événement.
+- Classe par importance, la plus importante en premier. Pas de doublon entre les deux blocs.
+- Si les titres ne suffisent pas à écrire ${ACTU_IA_MAX} puces, donnes-en moins.
+
+Réponds UNIQUEMENT en JSON, sans texte autour :
+{"monde":["phrase 1","phrase 2"],"france":["phrase 1","phrase 2"]}`;
+}
+function actuIaErrMsg(e) {
+  const m = String((e && e.message) || '') || 'Erreur IA.';
+  return m === 'NO_KEY'
+    ? "Aucune clé IA enregistrée — ajoute-en une dans le module 🔌 API (Gemini, Groq, Mistral…)."
+    : m;
+}
+// `data` = le cache d'Actu déjà chargé par `ActuPanel` (aucune requête pour le bloc monde).
+async function actuIaRun(data) {
+  if (_actuIa.busy) return;
+  actuIaSet({ busy:true, err:'' });
+  try {
+    const d = data || {};
+    const monde = actuRecentFirst(Array.isArray(d.monde) ? d.monde : [], ACTU_IA_DAYS).slice(0, ACTU_IA_TITLES);
+    // Repli si les proxies CORS ne rendent rien : les autres flux d'Actu sont eux aussi
+    // francophones — moins « une », mais mieux qu'un bloc France vide.
+    let fr = [];
+    try { fr = await actuFetchFrance(); } catch { fr = []; }
+    if (!fr.length) fr = [].concat(d.presse || [], d.bourse || [], d.cyber || [], d.insolite || [], d.jeux || []);
+    fr = actuRecentFirst(fr, ACTU_IA_DAYS).slice(0, ACTU_IA_TITLES);
+    if (!monde.length && !fr.length) throw new Error("Aucun titre à résumer — actualise d'abord la section Actu (bouton ↻ en haut).");
+    const txt = await aiGenerate('actu', [{ text: actuIaPrompt(monde, fr, actuIaYesterday()) }]);
+    const j = geminiExtract(txt, '{', '}');
+    if (!j) throw new Error("Réponse de l'IA illisible.");
+    const clean = a => (Array.isArray(a) ? a : [])
+      .map(s => String(s == null ? '' : s).replace(/^[-•*\d.\s]+/, '').trim())
+      .filter(Boolean).slice(0, ACTU_IA_MAX);
+    const mo = clean(j.monde), fa = clean(j.france);
+    if (!mo.length && !fa.length) throw new Error("L'IA n'a renvoyé aucune puce.");
+    actuIaSet({ day: actuIaDayKey(), monde: mo, france: fa, at: Date.now(), ai: aiLastProvider(), busy:false, err:'' });
+    actuIaSave();
+  } catch (e) {
+    actuIaSet({ busy:false, err: actuIaErrMsg(e) });
+  }
+}
+
+function ActuAiSummary({ data }) {
+  const [, force] = React.useReducer(x => x + 1, 0);
+  const dataRef = React.useRef(data);
+  dataRef.current = data;                       // ⚠ ref anti-closure : l'effet de montage a des deps []
+  React.useEffect(() => {
+    _actuIa.subs.add(force);
+    if (!_actuIa.loaded) { _actuIa.loaded = true; actuIaLoad(); }
+    // Génération AUTOMATIQUE à l'ouverture du collapse, une seule fois par jour :
+    // ouvrir la section EST le geste de l'utilisateur, et le cache du jour la rend gratuite ensuite.
+    if (!actuIaFresh() && !_actuIa.busy && aiAnyKey(false, 'actu')) actuIaRun(dataRef.current);
+    return () => { _actuIa.subs.delete(force); };
+  }, []);
+
+  const { busy, err, monde, france, at, ai } = _actuIa;
+  const hasKey = aiAnyKey(false, 'actu');
+  const has = monde.length > 0 || france.length > 0;
+  const bloc = (title, list) => (
+    <div>
+      <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:C.muted, margin:'10px 0 2px' }}>{title}</div>
+      {list.length
+        ? list.map((b, i) => (
+            <div key={i} style={{ display:'flex', gap:8, alignItems:'baseline', padding:'6px 0', borderBottom:`1px solid ${C.border}55` }}>
+              <span style={{ color:ACTU_COLOR, fontWeight:700, flexShrink:0, fontFamily:'DM Mono,monospace' }}>•</span>
+              <div style={{ fontSize:12.5, color:C.text, lineHeight:1.4 }}>{b}</div>
+            </div>
+          ))
+        : <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune puce — pas assez de titres pour ce bloc.</div>}
+    </div>
+  );
+  return (
+    <div>
+      <div style={{ display:'flex', justifyContent:'flex-end', marginBottom:2 }}>
+        <button onClick={() => actuIaRun(data)} disabled={busy || !hasKey}
+          style={{ fontSize:9, color: (busy || !hasKey) ? C.dim : C.muted, background:'none', border:`1px solid ${C.border}`, borderRadius:6, padding:'2px 8px', cursor: (busy || !hasKey) ? 'default' : 'pointer' }}>
+          {busy ? '🤖 …' : '↻ Regénérer'}
+        </button>
+      </div>
+      {!hasKey && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Aucune clé IA enregistrée — ajoute-en une dans le module 🔌 API (Gemini, Groq, Mistral…).</div>}
+      {err && <div style={{ fontSize:11, color:'#e05050', padding:'4px 0' }}>{err}</div>}
+      {busy && !has && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>Lecture des titres et rédaction du résumé…</div>}
+      {has && (<>
+        {bloc('🌍 MONDE', monde)}
+        {bloc('🇫🇷 FRANCE', france)}
+        <div style={{ fontSize:9, color:C.dim, marginTop:8 }}>
+          Résumé du <b>{actuIaYesterday()}</b>, écrit par l'IA{ai ? ` (${ai})` : ''} à partir des titres de presse rapatriés{at ? ` le ${new Date(at).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}` : ''}. Regénéré une fois par jour. ⚠ Reformulation de titres, pas une source : vérifie dans les sections ci-dessous avant de citer.
+        </div>
+      </>)}
+    </div>
+  );
+}
+
 function ActuPanel() {
   const [data, setData]   = React.useState(() => loadActu());
   const [loading, setLoad] = React.useState(false);
@@ -31919,7 +32098,8 @@ function ActuPanel() {
       {/* Cartes repliables (fermées par défaut) — réutilise StatsCollapse.
           ORDRE VOULU : ALPHABÉTIQUE sur le titre (emoji ignoré), aux 2 niveaux :
           1) Actualité (sous-sections : Tendances du jour EN TÊTE (demande utilisateur),
-          puis Actu Mondial, Wikipédia (entre Actu Mondial et LinkedIn, demande
+          puis Actu résumé par IA (juste au-dessus d'Actu Mondial, demande utilisateur),
+          Actu Mondial, Wikipédia (entre Actu Mondial et LinkedIn, demande
           utilisateur), LinkedIn, Bourse & crypto, IA & Science, Cyber Secu, Insolite, Jeux
           — ⚠ Cyber Secu placé ENTRE IA et Insolite, position demandée, prime sur l'alphabet)
           · 2) Cartographie (Réseaux de Transport Paris, Feux de forêt, Guerre,
@@ -31938,6 +32118,14 @@ function ActuPanel() {
                   null, t.traffic))
               : empty('Indisponible (proxy CORS injoignable).')}
             <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>Les tendances Twitter/X ne sont plus accessibles gratuitement — Google Trends France en substitut.</div>
+          </StatsCollapse>
+
+          {/* 1.0b Actu résumée par IA (demande utilisateur) — placée JUSTE AU-DESSUS
+              d'Actu Mondial : c'est la synthèse de ce que les sections suivantes
+              détaillent, elle n'a de sens qu'avant elles. */}
+          <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
+            title={<span>🤖 ACTU RÉSUMÉ PAR IA <span style={{ color:C.dim, fontWeight:400 }}>· la veille en 5+5 puces</span></span>}>
+            <ActuAiSummary data={d} />
           </StatsCollapse>
 
           {/* 1.1 Actu Mondial */}
