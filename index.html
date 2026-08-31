@@ -177,7 +177,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.1.4';
+const APP_VERSION = '12.1.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17457,6 +17457,7 @@ function GameMotus() {
   const [duoCur, setDuoCur] = React.useState(0);           // joueur dont c'est le tour
   const [duoDone, setDuoDone] = React.useState([false, false]); // a épuisé ses 6 essais sans trouver
   const [winner, setWinner]  = React.useState(null);       // duo : 0 | 1 | -1 (nul) | null
+  const [gaveUp, setGaveUp]  = React.useState(false);       // solo : partie perdue par abandon volontaire
   const MEM2 = ['#39b2d1', '#e0803c'];                     // couleurs joueur 1 / joueur 2
   const msgTimer = React.useRef(null);
   const endTimer = React.useRef(null);
@@ -17467,7 +17468,7 @@ function GameMotus() {
     const list = (window.MOTUS_WORDS && window.MOTUS_WORDS[len] && window.MOTUS_WORDS[len][diff]) || [];
     if (!list.length) return;
     const w = list[Math.floor(Math.random() * list.length)];
-    setAnswer(w); setInput(w[0]); setMsg(''); setRevealing(false); setWinner(null);
+    setAnswer(w); setInput(w[0]); setMsg(''); setRevealing(false); setWinner(null); setGaveUp(false);
     if (mode === 'duo') {
       // Duel : même mot, on tire au sort qui commence, puis écran « passe l'appareil ».
       setDuoGuesses([[], []]); setDuoDone([false, false]); setGuesses([]);
@@ -17480,6 +17481,21 @@ function GameMotus() {
   const beginTurn = () => { setGuesses(duoGuesses[duoCur]); setInput(answer[0]); setMsg(''); setRevealing(false); setPhase('play'); };
   const type = ch => { if (phase !== 'play' || revealing) return; setInput(v => v.length < len ? v + ch : v); };
   const del  = () => { if (phase !== 'play' || revealing) return; setInput(v => v.length > 1 ? v.slice(0, -1) : v); }; // jamais la lettre offerte
+  // « Je donne ma langue au chat » : abandon volontaire. En SOLO on révèle le mot tout de
+  // suite (écran de fin, comme les 6 essais épuisés). En DUO on ne peut PAS le montrer —
+  // l'adversaire cherche le même mot — donc l'abandon ne fait que griller son tour.
+  const giveUp = () => {
+    if (phase !== 'play' || revealing) return;
+    clearTimeout(endTimer.current);
+    if (mode === 'duo') {
+      setDuoGuesses(b => b.map((x, i) => i === duoCur ? guesses : x));
+      const nd = duoDone.map((d, i) => i === duoCur ? true : d);
+      setDuoDone(nd);
+      if (nd[0] && nd[1]) { setWinner(-1); setPhase('over'); return; }
+      setDuoCur(1 - duoCur); setPhase('pass'); return;
+    }
+    setGaveUp(true); setInput(''); setPhase('lost');
+  };
   const submit = () => {
     if (phase !== 'play' || revealing) return;
     if (input.length < len) { flash('Complétez le mot'); setShake(s => s + 1); return; }
@@ -17517,6 +17533,14 @@ function GameMotus() {
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
   }, [phase, revealing, input, guesses, answer, len]);
+  // Le mot est révélé SOUS la grille : sur un écran court (mobile) le bloc tombait sous le
+  // clavier virtuel et on relançait une partie sans jamais l'avoir lu → on le ramène en vue.
+  const endRef = React.useRef(null);
+  React.useEffect(() => {
+    if (phase !== 'won' && phase !== 'lost' && phase !== 'over') return;
+    const t = setTimeout(() => { if (endRef.current) endRef.current.scrollIntoView({ block:'center', behavior:'smooth' }); }, 60);
+    return () => clearTimeout(t);
+  }, [phase]);
   // Couleur des touches : jamais de rétrogradation (ok > present > absent)
   const RANK = { absent:0, present:1, ok:2 };
   const letterState = {};
@@ -17598,7 +17622,7 @@ function GameMotus() {
   if (phase === 'over') {
     return (
       <GameWrap bar={<><span style={{ fontSize:12.5, fontWeight:800, color: winner === -1 ? C.text : MEM2[winner] }}>{winner === -1 ? '🤝 Match nul' : `🎉 Joueur ${winner + 1} gagne !`}</span><button onClick={() => setPhase('home')} style={gameBtn()}>← Menu</button></>}>
-        <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', alignItems:'center', gap:10, padding:'16px', borderRadius:14, background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, textAlign:'center' }}>
+        <div ref={endRef} style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', alignItems:'center', gap:10, padding:'16px', borderRadius:14, background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, textAlign:'center' }}>
           <div style={{ fontSize:32 }}>{winner === -1 ? '🤝' : '🏆'}</div>
           <div style={{ fontSize:16, fontWeight:900, color: winner === -1 ? C.text : MEM2[winner] }}>
             {winner === -1 ? 'Personne n\'a trouvé !' : `Le Joueur ${winner + 1} a trouvé en ${duoGuesses[winner].length} essai${duoGuesses[winner].length > 1 ? 's' : ''}`}
@@ -17666,26 +17690,32 @@ function GameMotus() {
       <div style={{ width:'100%', maxWidth: Math.min(360, len * 52), display:'flex', flexDirection:'column', gap:5 }}>{rows}</div>
       {msg && <div style={{ fontSize:11.5, fontWeight:700, color:'#f4c430' }}>{msg}</div>}
       {(phase === 'won' || phase === 'lost') && (
-        <div style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', alignItems:'center', gap:8, padding:'14px 16px', borderRadius:14, background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, textAlign:'center' }}>
-          <div style={{ fontSize:30 }}>{phase === 'won' ? '🎉' : '😶'}</div>
-          <div style={{ fontSize:15, fontWeight:900, color: phase === 'won' ? '#3fae6a' : '#e05050' }}>{phase === 'won' ? `Bravo ! Trouvé en ${guesses.length} essai${guesses.length > 1 ? 's' : ''}.` : 'Perdu…'}</div>
+        <div ref={endRef} style={{ width:'100%', maxWidth:320, display:'flex', flexDirection:'column', alignItems:'center', gap:8, padding:'14px 16px', borderRadius:14, background:`${GAMES_COLOR}10`, border:`1px solid ${GAMES_COLOR}33`, textAlign:'center' }}>
+          <div style={{ fontSize:30 }}>{phase === 'won' ? '🎉' : gaveUp ? '🐱' : '😶'}</div>
+          <div style={{ fontSize:15, fontWeight:900, color: phase === 'won' ? '#3fae6a' : '#e05050' }}>{phase === 'won' ? `Bravo ! Trouvé en ${guesses.length} essai${guesses.length > 1 ? 's' : ''}.` : gaveUp ? 'Tu as donné ta langue au chat…' : `Perdu — ${MOTUS_MAX} essais épuisés.`}</div>
           <div style={{ fontSize:11, color:C.muted }}>Le mot était</div>
-          <div style={{ fontSize:20, fontWeight:900, letterSpacing:'0.12em', color:MOTUS_UI.accent }}>{answer}</div>
+          <div style={{ fontSize:22, fontWeight:900, letterSpacing:'0.12em', color:MOTUS_UI.accent }}>{answer}</div>
           <div style={{ display:'flex', gap:6, marginTop:4 }}>
             <button onClick={start} style={gameBtn()}>↻ Nouveau mot</button>
             <button onClick={() => setPhase('home')} style={gameBtn()}>← Menu</button>
           </div>
         </div>
       )}
-      <div style={{ width:'100%', maxWidth:380, display:'flex', flexDirection:'column', gap:5 }}>
-        {KEYS.map((row, ri) => (
-          <div key={ri} style={{ display:'flex', gap:4, justifyContent:'center' }}>
-            {ri === 2 && <button onClick={submit} style={{ flex:'1.6', background:`linear-gradient(135deg, ${MOTUS_UI.accent}, ${MOTUS_UI.accent2})`, border:'none', borderRadius:7, color:'#2a1400', fontWeight:800, fontSize:10.5, cursor:'pointer', padding:'11px 0' }}>ENTRÉE</button>}
-            {row.split('').map(k => <button key={k} onClick={() => type(k)} style={{ flex:1, border:'none', borderRadius:7, fontWeight:700, fontSize:13, cursor:'pointer', padding:'11px 0', minWidth:0, ...keyClr(k) }}>{k}</button>)}
-            {ri === 2 && <button onClick={del} style={{ flex:'1.6', background:'#33333f', border:'none', borderRadius:7, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer', padding:'11px 0' }}>⌫</button>}
-          </div>
-        ))}
-      </div>
+      {phase === 'play' && (
+        <div style={{ width:'100%', maxWidth:380, display:'flex', flexDirection:'column', gap:5 }}>
+          {KEYS.map((row, ri) => (
+            <div key={ri} style={{ display:'flex', gap:4, justifyContent:'center' }}>
+              {ri === 2 && <button onClick={submit} style={{ flex:'1.6', background:`linear-gradient(135deg, ${MOTUS_UI.accent}, ${MOTUS_UI.accent2})`, border:'none', borderRadius:7, color:'#2a1400', fontWeight:800, fontSize:10.5, cursor:'pointer', padding:'11px 0' }}>ENTRÉE</button>}
+              {row.split('').map(k => <button key={k} onClick={() => type(k)} style={{ flex:1, border:'none', borderRadius:7, fontWeight:700, fontSize:13, cursor:'pointer', padding:'11px 0', minWidth:0, ...keyClr(k) }}>{k}</button>)}
+              {ri === 2 && <button onClick={del} style={{ flex:'1.6', background:'#33333f', border:'none', borderRadius:7, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer', padding:'11px 0' }}>⌫</button>}
+            </div>
+          ))}
+          <button onClick={giveUp} disabled={revealing}
+            style={{ marginTop:4, width:'100%', background:'rgba(224,128,60,0.12)', border:'1px solid rgba(224,128,60,0.45)', borderRadius:8, color:'#e0803c', fontWeight:700, fontSize:12, padding:'10px 0', cursor: revealing ? 'default' : 'pointer', opacity: revealing ? 0.5 : 1 }}>
+            {mode === 'duo' ? '🐱 J\'abandonne mon duel' : '🐱 Je donne ma langue au chat'}
+          </button>
+        </div>
+      )}
     </GameWrap>
   );
 }
