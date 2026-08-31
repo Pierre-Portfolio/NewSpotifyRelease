@@ -111,7 +111,8 @@
 <!-- CDN épinglés en version exacte + SRI : un CDN compromis ne peut plus injecter de code (token en localStorage) -->
 <script crossorigin="anonymous" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script crossorigin="anonymous" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-<script crossorigin="anonymous" integrity="sha384-ezQ6HS3FLspd9te19o2McUV6FAK091+GG7KO54f/R8DKgCDi7fULhapNrd5LY+vG" src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
+<!-- ⚠ Babel n'est PLUS chargé ici : le script d'amorçage en bas de page ne le télécharge que
+     si le code compilé n'est pas déjà en cache (voir « AMORÇAGE » avant </body>). -->
 <!-- sql.js auto-hébergé (vendor/) : le .wasm ne peut pas avoir de SRI — l'héberger nous-mêmes ferme le dernier vecteur CDN -->
 <script src="./vendor/sql-wasm.js"></script>
 <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js');</script>
@@ -130,15 +131,15 @@
     <div class="slow">Première ouverture depuis la mise à jour : le Hub se prépare une fois, les suivantes seront bien plus rapides.</div>
   </div>
 </div>
-<!-- ⚠ presets = `react` SEUL, et surtout PAS `env`. `react` traduit le JSX (indispensable) ;
-     `env`, sans cible déclarée, réécrivait en plus TOUT le JavaScript moderne en ES5 — un travail
-     inutile ici, puisque l'app exige déjà WebAssembly (sql.js), IndexedDB et l'opérateur `?.` :
-     aucun navigateur capable de la faire tourner n'a besoin de cette traduction.
-     Mesuré sur ce fichier : `env,react` = 16,4 s de compilation, `react` seul = 3,8 s. Le premier
-     écran passait de 66 s à 17,9 s sur un téléphone de milieu de gamme (processeur bridé ×4).
-     ⚠ Ne PAS remettre `env` : la compilation a lieu dans le navigateur À CHAQUE ouverture, tout
-     ce qu'on lui donne à faire est payé par l'utilisateur, à chaque fois. -->
-<script type="text/babel" data-presets="react">
+<!-- ⚠ `type="text/app-source"` : un type INCONNU du navigateur — le bloc n'est ni exécuté, ni
+     compilé automatiquement par Babel. Il n'est qu'un porteur de texte, lu par le script
+     d'amorçage (« AMORÇAGE » avant </body>) qui décide seul quoi en faire.
+     ⚠ NE PAS le repasser en `type="text/babel"` : Babel le compilerait alors en double, à chaque
+     ouverture, en plus du cache — c'est exactement ce qu'on vient de supprimer.
+     ⚠ Le seul preset appliqué est `react` (traduction du JSX), JAMAIS `env` : sans cible déclarée
+     ce dernier réécrivait tout le JavaScript moderne en ES5, un travail inutile ici (l'app exige
+     déjà WebAssembly, IndexedDB et `?.`) qui coûtait 16,4 s de compilation au lieu de 3,8 s. -->
+<script type="text/app-source" id="app-src">
 
 // ════════════════════════════════════════════════
 // CONFIG
@@ -161,7 +162,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.0.8';
+const APP_VERSION = '12.0.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -47576,6 +47577,94 @@ function App() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+<!-- ══════════════════ AMORÇAGE : cache de compilation ══════════════════
+     Le bloc ci-dessus est du JSX : il DOIT passer par Babel avant de pouvoir tourner. Compiler
+     47 000 lignes coûte ~3,8 s sur un ordinateur et ~20 s sur un téléphone — à CHAQUE ouverture.
+     On ne le fait donc plus qu'une fois par version : le résultat est mémorisé, et les ouvertures
+     suivantes ne font que l'exécuter (mesuré : ~1,5 s sur téléphone au lieu de ~20 s).
+
+     Chemin RAPIDE  : code trouvé en cache → exécuté tel quel. Babel n'est même pas téléchargé
+                      (3 Mo de moins sur le réseau).
+     Chemin COMPLET : rien en cache → Babel est chargé, compile, on exécute, puis on mémorise
+                      APRÈS le démarrage pour ne pas retarder l'affichage.
+
+     ⚠ Clé de cache = APP_VERSION + longueur de la source. APP_VERSION est déjà incrémentée à
+       chaque commit (règle du projet), la longueur rattrape le cas où on aurait oublié : sans
+       cette seconde moitié, un oubli de bump servirait l'ANCIEN code compilé indéfiniment.
+     ⚠ Cache Storage, pas localStorage : 2,75 Mo, contre un quota de ~5 Mo partagé par tout le Hub.
+     ⚠ Le cache `spotifyplus-compiled` est explicitement PRÉSERVÉ par le service worker, qui
+       supprime sinon tout cache dont le nom ne correspond pas au sien (voir son `activate`).
+     ⚠ Injection par un <script> dont on remplit le textContent, et NON `eval`/`new Function` :
+       c'est le seul moyen d'exécuter le code dans la portée GLOBALE, comme le faisait Babel.
+       La CSP l'autorise déjà (`'unsafe-inline'`, requis de toute façon par Babel).
+     ⚠ Tout échec retombe sur le chemin complet, et une erreur de compilation s'affiche sur
+       l'écran d'attente — sans quoi elle ne laisserait qu'un voile figé, sans explication. -->
+<script>
+(function () {
+  var el  = document.getElementById('app-src');
+  var src = el.textContent;
+  var ver = (/APP_VERSION\s*=\s*'([^']+)'/.exec(src) || [, '0'])[1];
+  var KEY = new URL('__compiled__?v=' + ver + '-' + src.length, location.href).href;
+  var CACHE = 'spotifyplus-compiled';
+
+  // Exécute le code compilé dans la portée globale.
+  function run(code) {
+    var s = document.createElement('script');
+    s.textContent = code;
+    document.body.appendChild(s);
+  }
+
+  // Une erreur ici laisse l'écran d'attente à l'écran pour toujours : on l'y écrit.
+  function fail(e) {
+    try {
+      var t = document.querySelector('#boot .txt');
+      var d = document.querySelector('#boot .slow');
+      if (t) { t.textContent = 'Le Hub n\'a pas pu démarrer'; t.style.color = '#e05050'; }
+      if (d) { d.textContent = String((e && e.message) || e); d.style.animation = 'none'; d.style.opacity = '1'; }
+    } catch (_) {}
+    if (window.console) console.error('[amorçage]', e);
+  }
+
+  // Mémorise le code compilé et purge les versions précédentes (2,75 Mo chacune).
+  function save(code) {
+    try {
+      caches.open(CACHE).then(function (c) {
+        c.keys().then(function (ks) {
+          ks.forEach(function (k) { if (k.url !== KEY) c.delete(k); });
+        }).catch(function () {});
+        c.put(new Request(KEY), new Response(code, { headers: { 'Content-Type': 'text/javascript' } }));
+      }).catch(function () {});
+    } catch (_) {}
+  }
+
+  function compileAndRun() {
+    var s = document.createElement('script');
+    s.src = 'https://unpkg.com/@babel/standalone@7.29.7/babel.min.js';
+    s.integrity = 'sha384-ezQ6HS3FLspd9te19o2McUV6FAK091+GG7KO54f/R8DKgCDi7fULhapNrd5LY+vG';
+    s.crossOrigin = 'anonymous';
+    s.onerror = function () { fail(new Error('Babel n\'a pas pu être téléchargé — vérifie ta connexion.')); };
+    s.onload = function () {
+      if (typeof Babel === 'undefined') return fail(new Error('Babel chargé mais indisponible.'));
+      var code;
+      try { code = Babel.transform(src, { presets: ['react'] }).code; }
+      catch (e) { return fail(e); }
+      run(code);
+      // Après le démarrage : écrire 2,75 Mo ne doit pas retarder le premier écran.
+      setTimeout(function () { save(code); }, 0);
+    };
+    document.head.appendChild(s);
+  }
+
+  try {
+    if (!window.caches) return compileAndRun();
+    caches.open(CACHE)
+      .then(function (c) { return c.match(KEY); })
+      .then(function (res) { return res ? res.text() : null; })
+      .then(function (code) { if (code) run(code); else compileAndRun(); })
+      .catch(compileAndRun);
+  } catch (e) { compileAndRun(); }
+})();
 </script>
 </body>
 </html>

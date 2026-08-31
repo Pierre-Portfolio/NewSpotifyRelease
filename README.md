@@ -9,6 +9,8 @@
 
 ## Aperçu
 
+> ⏱️ **Première ouverture après une mise à jour** : le Hub se prépare pendant quelques secondes (écran « Préparation du Hub… »), puis mémorise le résultat — les ouvertures suivantes sont quasi instantanées.
+
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan — sauf la toute première fois, où sa discographie complète est récupérée. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
 Au-delà de la musique, c'est un **hub perso** regroupant des modules activables/désactivables : Actu, Alertes, API, Bon Plan, Collection, Emploi, Finance, Frigo, Histoire, Jeux, Maps, Météo, Mot de passe, Note, Revente, Santé, Sport, To do, TV Time, Vêtement et Stats.

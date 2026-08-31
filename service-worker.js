@@ -125,7 +125,7 @@
 // s'applique plus que dans le module Musique.
 // v255 : bump de cache — Vêtement : flèches ‹ › dans la visionneuse photo (changer de
 // vêtement dans la même catégorie, avec retour au début aux extrémités).
-const CACHE  = 'spotifyplus-v369';
+const CACHE  = 'spotifyplus-v370';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
@@ -138,7 +138,11 @@ self.addEventListener('install', e => {
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      // ⚠ `spotifyplus-compiled` (le code JSX déjà compilé, écrit par l'amorçage d'index.html)
+      // est PRÉSERVÉ : sans cette exception, chaque déploiement l'effacerait juste après que la
+      // page vient de l'écrire, et l'app repayerait ~20 s de compilation à l'ouverture suivante.
+      // Ce cache se purge lui-même (l'amorçage supprime les versions autres que la sienne).
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== 'spotifyplus-compiled').map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
