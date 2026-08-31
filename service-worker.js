@@ -125,7 +125,7 @@
 // s'applique plus que dans le module Musique.
 // v255 : bump de cache — Vêtement : flèches ‹ › dans la visionneuse photo (changer de
 // vêtement dans la même catégorie, avec retour au début aux extrémités).
-const CACHE  = 'spotifyplus-v370';
+const CACHE  = 'spotifyplus-v371';
 const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                 './vendor/leaflet.js', './vendor/leaflet.css',
                 './vendor/motus-words.js', './vendor/motus-dico.js'];
@@ -147,6 +147,25 @@ self.addEventListener('activate', e => {
   );
 });
 
+// Au-delà de ce délai, on sert l'app shell en cache plutôt que de continuer à attendre.
+// 1,5 s : au-dessus du temps de réponse habituel en Wi-Fi (l'utilisateur reçoit alors la
+// version fraîche), en dessous du seuil où l'attente devient une panne perçue.
+const SHELL_TIMEOUT_MS = 1500;
+
+// Signature d'une réponse, pour reconnaître un app shell différent SANS relire 3,2 Mo :
+// l'ETag de GitHub Pages, à défaut Last-Modified. `null` = impossible à comparer.
+const shellTag = r => (r && (r.headers.get('ETag') || r.headers.get('Last-Modified'))) || null;
+// Prévient UNE page précise qu'elle tourne sur une version périmée.
+// ⚠ Surtout pas `clients.matchAll()` : un téléchargement de fond peut se terminer APRÈS la
+// fermeture de la page qui l'a lancé, et le bandeau s'afficherait alors sur la page suivante
+// — qui a justement déjà la version fraîche. On ne parle qu'au client servi (`id`), et s'il
+// n'existe plus, personne n'est prévenu : c'est le comportement voulu.
+async function notifyShellUpdated(id) {
+  if (!id) return;
+  const c = await self.clients.get(id);
+  if (c) { try { c.postMessage({ type: 'shell-updated' }); } catch (_) {} }
+}
+
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
@@ -154,21 +173,56 @@ self.addEventListener('fetch', e => {
     (url.origin === location.origin && (url.pathname.endsWith('/') || url.pathname.endsWith('/index.html')));
 
   if (isAppShell) {
-    // Network-first : version fraîche si en ligne, cache en secours hors-ligne.
+    // Network-first AVEC PLAFOND DE TEMPS.
+    // Avant : on attendait le réseau sans limite. L'app shell fait 3,2 Mo (~0,95 Mo compressé)
+    // et il est retéléchargé à CHAQUE lancement (`no-store`, voir plus bas) : sur un réseau
+    // lent l'app restait bloquée aussi longtemps qu'il le fallait, et le `.catch` ne servait
+    // à rien puisqu'il ne se déclenche que sur une VRAIE erreur, jamais sur la lenteur.
+    // Maintenant : au-delà de SHELL_TIMEOUT_MS, on sert la copie en cache et le téléchargement
+    // CONTINUE en arrière-plan pour mettre le cache à jour.
+    // ⚠ Ce n'est PAS un retour au cache-first (interdit, voir l'en-tête) : la version fraîche
+    // est demandée à chaque lancement et remplace toujours le cache. Le seul effet est qu'une
+    // mise à jour arrivée trop tard s'applique au lancement SUIVANT — d'où le message
+    // « shell-updated » ci-dessous, qui permet à la page de le signaler tout de suite.
+    // ⚠ S'il n'y a RIEN en cache (toute première visite), on attend le réseau sans plafond :
+    // il n'y a rien d'autre à servir.
     // { cache: 'no-store' } → on court-circuite le cache HTTP du navigateur (max-age=600
     // de GitHub Pages) pour toujours récupérer le dernier index.html déployé. On fetch par
     // URL (pas e.request) car une Request en mode 'navigate' + init lève une exception.
-    e.respondWith(
-      fetch(e.request.url, { cache: 'no-store' })
-        .then(res => {
-          // Ne mettre en cache QUE les réponses OK : sinon une page 404/5xx (GitHub Pages
-          // en maintenance, erreur transitoire) écraserait './index.html' en cache et serait
-          // servie hors-ligne à la place de l'app.
-          if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put('./index.html', copy)); }
-          return res;
-        })
-        .catch(() => caches.match('./index.html'))
-    );
+    const net = fetch(e.request.url, { cache: 'no-store' }).then(res => {
+      // Ne mettre en cache QUE les réponses OK : sinon une page 404/5xx (GitHub Pages
+      // en maintenance, erreur transitoire) écraserait './index.html' en cache et serait
+      // servie hors-ligne à la place de l'app.
+      if (!res.ok) return res;
+      const copy = res.clone();
+      return caches.open(CACHE).then(c => c.put('./index.html', copy)).then(() => res, () => res);
+    });
+    // ⚠ waitUntil appelé SYNCHRONEMENT (comme respondWith) : le téléchargement doit aller à
+    // son terme même quand on a déjà répondu depuis le cache, sinon le navigateur peut
+    // arrêter le service worker avant que la mise à jour soit écrite.
+    e.waitUntil(net.catch(() => {}));
+    e.respondWith((async () => {
+      const cached = await caches.match('./index.html');
+      if (!cached) return net;   // toute première visite : rien d'autre à servir
+      const fresh = await Promise.race([
+        net.then(r => (r && r.ok) ? r : null, () => null),
+        new Promise(r => setTimeout(() => r(null), SHELL_TIMEOUT_MS)),
+      ]);
+      if (fresh) return fresh;   // le réseau a gagné : l'utilisateur a déjà la version fraîche
+      // On sert le cache. Si le téléchargement en cours rapporte un shell DIFFÉRENT de celui
+      // qu'on vient de servir, la page tourne sur une version périmée → on le lui dit.
+      // ⚠ Comparaison avec la copie RÉELLEMENT SERVIE, et pas avec le téléchargement
+      // précédent : sinon le bandeau s'afficherait alors que l'utilisateur a déjà le neuf.
+      const servedTag = shellTag(cached);
+      // Sur une navigation, la page qu'on est en train de servir n'existe pas encore :
+      // son identifiant est `resultingClientId` (`clientId` pour une sous-ressource).
+      const servedId = e.resultingClientId || e.clientId;
+      net.then(res => {
+        const tag = res && res.ok ? shellTag(res) : null;
+        if (tag && servedTag && tag !== servedTag) notifyShellUpdated(servedId);
+      }).catch(() => {});
+      return cached;
+    })());
   } else {
     // Autres ressources : cache-first comme avant
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));

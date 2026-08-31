@@ -20,7 +20,7 @@ PWA **sans backend** sur GitHub Pages, données 100 % locales (sql.js SQLite WAS
 |---|---|
 | `index.html` | **App complète** (React 18 CDN + Babel + sql.js), ~35 000 lignes, tout en un fichier |
 | `manifest.json` | Config PWA |
-| `service-worker.js` | Cache app shell + vendor. **Network-first** pour l'app shell (`fetch {cache:'no-store'}` pour bypasser le `max-age=600` de GitHub Pages), ne cache que `res.ok`, clé normalisée `./index.html`. ⚠ Son `activate` supprime tout cache dont le nom ≠ le sien — **sauf `spotifyplus-compiled`**, qui porte le code compilé et se purge lui-même. **Bumper la version du cache après changement.** |
+| `service-worker.js` | Cache app shell + vendor. **Network-first avec plafond `SHELL_TIMEOUT_MS` (1,5 s)** pour l'app shell (`fetch {cache:'no-store'}` pour bypasser le `max-age=600` de GitHub Pages) : au-delà du délai on sert le cache et le téléchargement continue en fond ; s'il rapporte un ETag différent de la copie servie, `postMessage('shell-updated')` **au seul client servi** (`resultingClientId`) → bandeau `#newver`. Ne cache que `res.ok`, clé normalisée `./index.html`. ⚠ Sans cache, on attend le réseau sans plafond. ⚠ Son `activate` supprime tout cache dont le nom ≠ le sien — **sauf `spotifyplus-compiled`**, qui porte le code compilé et se purge lui-même. **Bumper la version du cache après changement.** |
 | `vendor/sql-wasm.js` / `.wasm` | sql.js 1.10.2 auto-hébergé |
 | `vendor/leaflet.js` / `.css` | Leaflet 1.9.4, **lazy** (`loadLeaflet()`) |
 | `vendor/motus-words.js` / `motus-dico.js` | Données Motus (~1,1 Mo), **lazy** (`loadMotusData()`), IIFE → `window.MOTUS_WORDS` / `MOTUS_DICO` |
@@ -220,7 +220,7 @@ Détient l'auth, le feed (+ `filteredFeed` et `filteredFeedIndex` Map URI→inde
 **Sécurité**
 29. **`dangerouslySetInnerHTML` proscrit** → `DOMParser` pour extraire du texte d'un HTML tiers.
 30. **`safeHref` avant tout `<a href>`** (la CSP autorise `unsafe-inline`, donc un `javascript:` s'exécuterait) — y compris sur une URL proposée par une IA.
-31. **Service worker** : ne cacher que `res.ok` (sinon un 404 écrase l'app), app shell en **network-first** avec `{cache:'no-store'}`. Ne jamais revenir en cache-first pour l'app shell.
+31. **Service worker** : ne cacher que `res.ok` (sinon un 404 écrase l'app), app shell en **network-first plafonné à 1,5 s** avec `{cache:'no-store'}`. Ne jamais revenir en cache-**first** pour l'app shell (les PWA installées ne recevaient plus les mises à jour) — le plafond n'en est pas un : la version fraîche est demandée à chaque lancement, elle ne bloque simplement plus l'affichage. ⚠ Notifier `matchAll()` afficherait le bandeau sur la page SUIVANTE : un téléchargement de fond survit à la page qui l'a lancé.
 
 **Environnement d'agent**
 32. **Le proxy réseau bloque de nombreux hôtes** (Google News, LinkedIn, Steam, CoinGecko, docs.google.com, YouTube, instagram…) → écrire un parsing défensif et **dire explicitement « non vérifiable côté agent »** plutôt que d'affirmer.

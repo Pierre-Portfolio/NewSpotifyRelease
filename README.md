@@ -10,6 +10,8 @@
 ## Aperçu
 
 > ⏱️ **Première ouverture après une mise à jour** : le Hub se prépare pendant quelques secondes (écran « Préparation du Hub… »), puis mémorise le résultat — les ouvertures suivantes sont quasi instantanées.
+>
+> 📶 **Sur réseau lent**, le Hub s'ouvre depuis sa copie locale au bout de 1,5 s au lieu d'attendre le téléchargement. Si une nouvelle version arrive entre-temps, un bandeau « Nouvelle version disponible » propose de recharger.
 
 Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan — sauf la toute première fois, où sa discographie complète est récupérée. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
