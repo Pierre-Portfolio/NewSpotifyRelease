@@ -119,7 +119,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.0.3';
+const APP_VERSION = '12.0.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17811,6 +17811,14 @@ const OSU_LEVELS = [
 ];
 const OSU_APPROACH = 20;   // 13 × 1.5 : marge du cercle d'approche autour de la cible
 const OSU_LEVEL_LS = 'spotifyplus_game_osu_level';
+// ── Un record PAR DIFFICULTÉ ──────────────────────────────────────────────────
+// `spotifyplus_game_hi_osu_<id>` par niveau, en plus de `..._osu` qui reste le MEILLEUR
+// TOUS NIVEAUX CONFONDUS : c'est lui que lisent les Stats (GAMES_HUB_STATS) et la purge des
+// records orphelins. ⚠ L'ancien record global n'est PAS recopié dans les niveaux : on ignore
+// à quelle difficulté il a été fait, l'attribuer aux quatre serait faux trois fois.
+// ⚠ Les nouvelles clés entrent toutes seules dans les sauvegardes (buildBackup balaie le
+// préfixe `spotifyplus_game_hi_`) et fusionnent au MAX comme les autres.
+const osuHiKey = id => 'osu_' + id;
 function GameOsu() {
   const [level, setLevel] = React.useState(() => { const v = +localStorage.getItem(OSU_LEVEL_LS); return v >= 1 && v <= OSU_LEVELS.length ? v : 2; });
   React.useEffect(() => { try { localStorage.setItem(OSU_LEVEL_LS, String(level)); } catch {} }, [level]);
@@ -17821,7 +17829,11 @@ function GameOsu() {
   const [maxCombo, setMaxCombo] = React.useState(0);
   const [hits, setHits] = React.useState(0);
   const [misses, setMisses] = React.useState(0);
-  const [best, setBest] = React.useState(() => gameHi('osu'));
+  // Un record par niveau (index = id - 1) + le meilleur tous niveaux, lu par les Stats.
+  const [bests, setBests] = React.useState(() => OSU_LEVELS.map(l => gameHi(osuHiKey(l.id))));
+  const [allBest, setAllBest] = React.useState(() => gameHi('osu'));
+  const [beaten, setBeaten] = React.useState(false);   // record du niveau battu à la manche qui vient de finir
+  const best = bests[level - 1] || 0;
   const [phase, setPhase] = React.useState('ready');
   const [left, setLeft] = React.useState(OSU_ROUND);
   const idRef = React.useRef(0);
@@ -17829,7 +17841,7 @@ function GameOsu() {
   // Difficulté demandée PENDANT une manche (null = aucune demande en cours). Tant qu'elle est
   // posée, la partie est en pause et la pop-up de confirmation couvre le plateau.
   const [askLvl, setAskLvl] = React.useState(null);
-  const start = () => { setScore(0); setCombo(0); setMaxCombo(0); setHits(0); setMisses(0); setLeft(OSU_ROUND); setCircles([]); setPhase('playing'); };
+  const start = () => { setScore(0); setCombo(0); setMaxCombo(0); setHits(0); setMisses(0); setLeft(OSU_ROUND); setCircles([]); setBeaten(false); setPhase('playing'); };
   // Clic sur une autre difficulté : en jeu → pause + confirmation, sinon changement direct.
   // ⚠ Le plateau est VIDÉ à la pause : les `setTimeout` de fin de vie déjà armés ne peuvent
   // pas être annulés (ils ne sont pas dans l'effet), mais ils ne comptent un raté QUE si le
@@ -17859,15 +17871,22 @@ function GameOsu() {
     return () => { clearInterval(spawn); clearInterval(tick); };
   }, [phase, lvl.spawn, lvl.life, lvl.multi]);
   React.useEffect(() => {
-    if (phase === 'playing' && left <= 0) { setPhase('done'); setCircles([]); setBest(b => { const nb = Math.max(b, score); setGameHi('osu', nb); return nb; }); }
-  }, [left, phase, score]);
+    if (phase !== 'playing' || left > 0) return;
+    setPhase('done'); setCircles([]);
+    // ⚠ Écritures localStorage EN DEHORS des updaters de state (un updater peut être rejoué).
+    const prev = gameHi(osuHiKey(level));
+    if (score > prev) { setGameHi(osuHiKey(level), score); setBests(bs => bs.map((v, i) => i === level - 1 ? score : v)); }
+    setBeaten(score > prev);
+    const prevAll = gameHi('osu');
+    if (score > prevAll) { setGameHi('osu', score); setAllBest(score); }
+  }, [left, phase, score, level]);
   // Bonus de score proportionnel à la difficulté (les cercles plus durs rapportent plus).
   const hit = (id, e) => { e.stopPropagation(); setCircles(cs => cs.filter(c => c.id !== id)); setHits(h => h + 1); const nc = comboRef.current + 1; setCombo(nc); setMaxCombo(m => Math.max(m, nc)); setScore(s => s + (60 + level * 40) + nc * 10); };
   const acc = hits + misses ? Math.round(hits / (hits + misses) * 100) : 100;
   const sz = lvl.size, half = sz / 2;
   return (
     <GameWrap hint="Clique/touche chaque cercle avant qu'il disparaisse. Enchaîne les combos pour marquer plus !"
-      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Combo <b style={{ color:GAMES_COLOR }}>{combo}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Combo <b style={{ color:GAMES_COLOR }}>{combo}</b> · Record {lvl.label} <b style={{ color:GAMES_COLOR }}>{best}</b> · Tous niveaux <b style={{ color:C.text }}>{allBest}</b></span>}>
       <style>{'@keyframes osuAppr{from{transform:scale(2.6);opacity:.85}to{transform:scale(1);opacity:.25}}'}</style>
       {/* Choix de la difficulté (verrouillé pendant une manche) */}
       <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center', width:'100%', maxWidth:380 }}>
@@ -17875,7 +17894,12 @@ function GameOsu() {
           const active = l.id === level;
           return <button key={l.id} onClick={() => askLevel(l.id)} disabled={phase === 'paused'}
             title={phase === 'playing' && !active ? 'Changer de difficulté — la manche en cours sera arrêtée' : undefined}
-            style={{ background: active ? `${GAMES_COLOR}22` : C.surface, border:`1px solid ${active ? GAMES_COLOR : C.border}`, color: active ? GAMES_COLOR : C.text, borderRadius:8, padding:'5px 10px', fontSize:11.5, fontWeight: active ? 800 : 600, cursor: phase === 'paused' ? 'default' : 'pointer', opacity: phase === 'paused' && !active ? 0.45 : 1 }}>{l.id}· {l.label}</button>;
+            style={{ background: active ? `${GAMES_COLOR}22` : C.surface, border:`1px solid ${active ? GAMES_COLOR : C.border}`, color: active ? GAMES_COLOR : C.text, borderRadius:8, padding:'4px 10px 5px', fontSize:11.5, fontWeight: active ? 800 : 600, lineHeight:1.25, cursor: phase === 'paused' ? 'default' : 'pointer', opacity: phase === 'paused' && !active ? 0.45 : 1 }}>
+            {l.id}· {l.label}
+            <span style={{ display:'block', fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', color: active ? GAMES_COLOR : C.dim, opacity: active ? 0.9 : 0.7 }}>
+              ⭐ {bests[l.id - 1] || '—'}
+            </span>
+          </button>;
         })}
       </div>
       {/* ⚠ 8.0.6 — PLATEAU 2× PLUS HAUT (demande utilisateur, capture à l'appui : le cadre
@@ -17912,7 +17936,8 @@ function GameOsu() {
         {phase !== 'playing' && phase !== 'paused' && (
           <div style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, color:'#fff', textAlign:'center', padding:16 }}>
             {phase === 'done' && <div style={{ fontSize:13, lineHeight:1.6 }}>Score <b style={{ color:GAMES_COLOR }}>{score}</b> · Précision <b>{acc}%</b> · Combo max <b>{maxCombo}</b></div>}
-            <div style={{ fontSize:11.5, color:'#bbb' }}>Difficulté : <b style={{ color:GAMES_COLOR }}>{lvl.label}</b> · Manche de {OSU_ROUND}s</div>
+            {phase === 'done' && beaten && <div style={{ fontSize:12.5, fontWeight:800, color:GAMES_COLOR }}>🎉 Nouveau record en {lvl.label} !</div>}
+            <div style={{ fontSize:11.5, color:'#bbb' }}>Difficulté : <b style={{ color:GAMES_COLOR }}>{lvl.label}</b> · Manche de {OSU_ROUND}s · Record <b style={{ color:GAMES_COLOR }}>{best || '—'}</b></div>
             <button onClick={start} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{phase === 'done' ? '↻ Rejouer' : '▶ Démarrer'}</button>
           </div>
         )}
