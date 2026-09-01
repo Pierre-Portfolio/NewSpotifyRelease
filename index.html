@@ -177,7 +177,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.1.5';
+const APP_VERSION = '12.1.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17438,6 +17438,11 @@ function motusEval(word, answer) {
   for (let i = 0; i < word.length; i++) { if (res[i] === 'ok') continue; if (counts[word[i]] > 0) { res[i] = 'present'; counts[word[i]]--; } }
   return res;
 }
+// Saisie CASE PAR CASE : la tentative en cours est un TABLEAU de `len` cases ('' = vide),
+// plus une chaîne où les lettres s'empilent à la suite → on peut toucher n'importe quelle
+// case pour y écrire (demande de Cécile : plus simple pour réfléchir). La case 0 porte la
+// lettre offerte : jamais sélectionnable, jamais effaçable.
+function motusSlots(first, n) { const a = Array(n).fill(''); a[0] = first; return a; }
 function GameMotus() {
   const [ready, setReady]   = React.useState(() => !!(window.MOTUS_WORDS && window.MOTUS_DICO));
   const [loadErr, setLoadErr] = React.useState(false);
@@ -17446,7 +17451,8 @@ function GameMotus() {
   const [diff, setDiff]     = React.useState('facile');
   const [answer, setAnswer] = React.useState('');
   const [guesses, setGuesses] = React.useState([]);    // mots validés (révélés)
-  const [input, setInput]   = React.useState('');      // tentative en cours (1re lettre offerte)
+  const [slots, setSlots]   = React.useState([]);      // tentative en cours : une case par lettre ('' = vide)
+  const [pos, setPos]       = React.useState(1);       // case active = celle où la prochaine lettre s'écrit
   const [msg, setMsg]       = React.useState('');
   const [shake, setShake]   = React.useState(0);       // incrément → relance l'anim de secousse
   const [revealing, setRevealing] = React.useState(false); // anim de retournement en cours → saisie bloquée
@@ -17458,17 +17464,21 @@ function GameMotus() {
   const [duoDone, setDuoDone] = React.useState([false, false]); // a épuisé ses 6 essais sans trouver
   const [winner, setWinner]  = React.useState(null);       // duo : 0 | 1 | -1 (nul) | null
   const [gaveUp, setGaveUp]  = React.useState(false);       // solo : partie perdue par abandon volontaire
+  // ⚠ Abandon en DEUX appuis : le bouton était collé sous le clavier et se déclenchait par
+  // erreur en visant une touche. Le 1er appui arme seulement (désarmement auto après 4 s).
+  const [giveUpArm, setGiveUpArm] = React.useState(false);
   const MEM2 = ['#39b2d1', '#e0803c'];                     // couleurs joueur 1 / joueur 2
   const msgTimer = React.useRef(null);
   const endTimer = React.useRef(null);
+  const armTimer = React.useRef(null);
   const fetchData = () => { setLoadErr(false); loadMotusData().then(() => setReady(true)).catch(() => setLoadErr(true)); };
-  React.useEffect(() => { if (!ready) fetchData(); return () => { clearTimeout(msgTimer.current); clearTimeout(endTimer.current); }; }, []);
+  React.useEffect(() => { if (!ready) fetchData(); return () => { clearTimeout(msgTimer.current); clearTimeout(endTimer.current); clearTimeout(armTimer.current); }; }, []);
   const flash = t => { setMsg(t); clearTimeout(msgTimer.current); msgTimer.current = setTimeout(() => setMsg(''), 1600); };
   const start = () => {
     const list = (window.MOTUS_WORDS && window.MOTUS_WORDS[len] && window.MOTUS_WORDS[len][diff]) || [];
     if (!list.length) return;
     const w = list[Math.floor(Math.random() * list.length)];
-    setAnswer(w); setInput(w[0]); setMsg(''); setRevealing(false); setWinner(null); setGaveUp(false);
+    setAnswer(w); setSlots(motusSlots(w[0], len)); setPos(1); setMsg(''); setRevealing(false); setWinner(null); setGaveUp(false); disarm();
     if (mode === 'duo') {
       // Duel : même mot, on tire au sort qui commence, puis écran « passe l'appareil ».
       setDuoGuesses([[], []]); setDuoDone([false, false]); setGuesses([]);
@@ -17478,12 +17488,31 @@ function GameMotus() {
     }
   };
   // Duo : le joueur courant révèle son écran (sa propre grille) et commence son tour.
-  const beginTurn = () => { setGuesses(duoGuesses[duoCur]); setInput(answer[0]); setMsg(''); setRevealing(false); setPhase('play'); };
-  const type = ch => { if (phase !== 'play' || revealing) return; setInput(v => v.length < len ? v + ch : v); };
-  const del  = () => { if (phase !== 'play' || revealing) return; setInput(v => v.length > 1 ? v.slice(0, -1) : v); }; // jamais la lettre offerte
+  const beginTurn = () => { setGuesses(duoGuesses[duoCur]); setSlots(motusSlots(answer[0], len)); setPos(1); setMsg(''); setRevealing(false); disarm(); setPhase('play'); };
+  // Écrit dans la case active puis saute à la case VIDE suivante (à défaut, celle de droite) :
+  // taper d'affilée se comporte comme avant, mais on peut d'abord toucher la case voulue.
+  const type = ch => {
+    if (phase !== 'play' || revealing) return;
+    const a = [...slots]; a[pos] = ch;
+    const nx = a.findIndex((x, i) => i > pos && !x);
+    setSlots(a); setPos(nx === -1 ? Math.min(pos + 1, len - 1) : nx);
+  };
+  // ⌫ : vide la case active si elle porte une lettre, sinon recule d'une case et la vide.
+  const del = () => {
+    if (phase !== 'play' || revealing) return;
+    const a = [...slots];
+    if (a[pos]) { a[pos] = ''; setSlots(a); return; }   // pos ≥ 1 : la lettre offerte est hors d'atteinte
+    const p = Math.max(1, pos - 1); a[p] = ''; setSlots(a); setPos(p);
+  };
   // « Je donne ma langue au chat » : abandon volontaire. En SOLO on révèle le mot tout de
   // suite (écran de fin, comme les 6 essais épuisés). En DUO on ne peut PAS le montrer —
   // l'adversaire cherche le même mot — donc l'abandon ne fait que griller son tour.
+  const disarm = () => { clearTimeout(armTimer.current); setGiveUpArm(false); };
+  const giveUpTap = () => {
+    if (phase !== 'play' || revealing) return;
+    if (!giveUpArm) { setGiveUpArm(true); clearTimeout(armTimer.current); armTimer.current = setTimeout(() => setGiveUpArm(false), 4000); return; }
+    disarm(); giveUp();
+  };
   const giveUp = () => {
     if (phase !== 'play' || revealing) return;
     clearTimeout(endTimer.current);
@@ -17494,15 +17523,16 @@ function GameMotus() {
       if (nd[0] && nd[1]) { setWinner(-1); setPhase('over'); return; }
       setDuoCur(1 - duoCur); setPhase('pass'); return;
     }
-    setGaveUp(true); setInput(''); setPhase('lost');
+    setGaveUp(true); setPhase('lost');
   };
   const submit = () => {
     if (phase !== 'play' || revealing) return;
-    if (input.length < len) { flash('Complétez le mot'); setShake(s => s + 1); return; }
+    if (slots.some(x => !x)) { flash('Complétez le mot'); setShake(s => s + 1); return; }
+    const word = slots.join('');
     const dicoSet = window.MOTUS_DICO && window.MOTUS_DICO[len];
-    if (dicoSet && !dicoSet.has(input) && input !== answer) { flash('Mot inconnu du dictionnaire'); setShake(s => s + 1); return; }
-    const word = input; const ng = [...guesses, word];
-    setGuesses(ng); setInput(''); setRevealing(true);
+    if (dicoSet && !dicoSet.has(word) && word !== answer) { flash('Mot inconnu du dictionnaire'); setShake(s => s + 1); return; }
+    const ng = [...guesses, word];
+    setGuesses(ng); setSlots(motusSlots(answer[0], len)); setPos(1); disarm(); setRevealing(true);
     // Fin de partie / ligne suivante APRÈS le retournement case par case (220 ms/case)
     endTimer.current = setTimeout(() => {
       setRevealing(false);
@@ -17518,21 +17548,25 @@ function GameMotus() {
         return;
       }
       if (word === answer) setPhase('won');
-      else if (ng.length >= MOTUS_MAX) setPhase('lost');
-      else setInput(answer[0]);
+      else if (ng.length >= MOTUS_MAX) setPhase('lost');   // ligne suivante déjà réarmée par `submit`
     }, len * 220 + 300);
   };
   // Clavier physique (uniquement en jeu — pas depuis l'accueil du jeu)
   React.useEffect(() => {
     if (phase !== 'play') return;
     const onKey = e => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {   // déplacer la case active au clavier
+        e.preventDefault();
+        setPos(p => Math.min(len - 1, Math.max(1, p + (e.key === 'ArrowLeft' ? -1 : 1))));
+        return;
+      }
       if (e.key === 'Enter' || e.key === 'Backspace' || /^[A-Za-z]$/.test(e.key)) {
         e.preventDefault();
         if (e.key === 'Enter') submit(); else if (e.key === 'Backspace') del(); else type(e.key.toUpperCase());
       }
     };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
-  }, [phase, revealing, input, guesses, answer, len]);
+  }, [phase, revealing, slots, pos, guesses, answer, len]);
   // Le mot est révélé SOUS la grille : sur un écran court (mobile) le bloc tombait sous le
   // clavier virtuel et on relançait une partie sans jamais l'avoir lu → on le ramène en vue.
   const endRef = React.useRef(null);
@@ -17549,7 +17583,7 @@ function GameMotus() {
 
   // ── Écran d'accueil du jeu : longueur + difficulté + Jouer ──
   if (phase === 'home') return (
-    <GameWrap hint="Trouvez le mot mystère : une lettre offerte, six essais. 🟥 bien placée · 🟡 présente mal placée · 🟦 absente. Chaque proposition doit être un vrai mot français.">
+    <GameWrap hint="Trouvez le mot mystère : une lettre offerte, six essais. 🟥 bien placée · 🟡 présente mal placée · 🟦 absente. Chaque proposition doit être un vrai mot français. Touchez une case pour y placer une lettre.">
       <div style={{ width:'100%', maxWidth:340, display:'flex', flexDirection:'column', gap:14 }}>
         <div>
           <div style={{ fontSize:11, fontWeight:700, letterSpacing:'0.06em', color:C.muted, marginBottom:6 }}>MODE DE JEU</div>
@@ -17651,11 +17685,13 @@ function GameMotus() {
       <div key={r === curRow ? `r${r}-s${shake}` : r}
         style={{ display:'grid', gridTemplateColumns:`repeat(${len},1fr)`, gap:5, width:'100%', animation: isCur && shake ? 'motusShake .4s' : 'none' }}>
         {Array.from({ length: len }).map((_, c) => {
-          const ch = g ? g[c] : (isCur ? (input[c] || '') : '');
+          const ch = g ? g[c] : (isCur ? (slots[c] || '') : '');
           const v = verdict ? verdict[c] : null;
-          const cursor = isCur && c === input.length && c > 0;
+          const pick = isCur && c > 0;             // case 0 = lettre offerte, jamais sélectionnable
+          const cursor = isCur && c === pos && c > 0;
           return (
-            <div key={c} style={{
+            <div key={c} onClick={pick ? () => setPos(c) : undefined} style={{
+              cursor: pick ? 'pointer' : 'default',
               aspectRatio:'1', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:cellFont,
               borderRadius: v === 'present' ? '50%' : 8,   // ROND jaune du Motus original
               color: v === 'present' ? '#2a1400' : '#fff',
@@ -17710,9 +17746,12 @@ function GameMotus() {
               {ri === 2 && <button onClick={del} style={{ flex:'1.6', background:'#33333f', border:'none', borderRadius:7, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer', padding:'11px 0' }}>⌫</button>}
             </div>
           ))}
-          <button onClick={giveUp} disabled={revealing}
-            style={{ marginTop:4, width:'100%', background:'rgba(224,128,60,0.12)', border:'1px solid rgba(224,128,60,0.45)', borderRadius:8, color:'#e0803c', fontWeight:700, fontSize:12, padding:'10px 0', cursor: revealing ? 'default' : 'pointer', opacity: revealing ? 0.5 : 1 }}>
-            {mode === 'duo' ? '🐱 J\'abandonne mon duel' : '🐱 Je donne ma langue au chat'}
+          <button onClick={giveUpTap} disabled={revealing}
+            style={{ marginTop:20, alignSelf:'center', width:'78%', maxWidth:250, background: giveUpArm ? 'rgba(224,80,80,0.16)' : 'transparent',
+              border:`1px solid ${giveUpArm ? 'rgba(224,80,80,0.55)' : 'rgba(255,255,255,0.13)'}`, borderRadius:8, color: giveUpArm ? '#e05050' : C.muted,
+              fontWeight:700, fontSize:11, padding:'8px 0', cursor: revealing ? 'default' : 'pointer', opacity: revealing ? 0.5 : 1 }}>
+            {giveUpArm ? (mode === 'duo' ? '⚠️ Confirmer : je grille mon tour' : '⚠️ Confirmer : le mot sera révélé')
+              : (mode === 'duo' ? '🐱 J\'abandonne mon duel' : '🐱 Je donne ma langue au chat')}
           </button>
         </div>
       )}
