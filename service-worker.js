@@ -160,20 +160,30 @@
 // porter un `javascript:` exécuté au clic, CSP `unsafe-inline`) ; sauvegarde chiffrable
 // (l'export contenait le jeton GitHub et toutes les clés d'API en clair) ; nonce anti-CSRF
 // sur Dropbox ; clé Gemini en en-tête au lieu de la query string ; form-action 'none'.
-const CACHE  = 'spotifyplus-v385';          // app shell — bumpé à chaque déploiement
+// v386 : optimisations. React auto-hébergé + polices auto-hébergées (précache vendor → bump
+// VENDOR v2, avec le manifeste enrichi) ; moteur Doodle et catalogue Sport sortis d'index.html
+// vers vendor/doodle.js et vendor/sport-data.js, chargés à la demande (précachés avec l'app
+// shell : ils changent avec elle) ; data/*.json en stale-while-revalidate (Actu et Finance
+// s'affichent hors ligne et sans attendre le réseau).
+const CACHE  = 'spotifyplus-v386';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
-const VENDOR = 'spotifyplus-vendor-v1';
+const VENDOR = 'spotifyplus-vendor-v2';
 // ⚠ UNE SEULE entrée pour l'app shell. La liste portait aussi './' : deux URL distinctes
 // pour le MÊME fichier de 3,1 Mo, donc `addAll` le téléchargeait DEUX FOIS et en gardait
 // deux copies — alors que la copie sous './' n'était jamais relue (le `fetch` handler lit
 // et écrit toujours la clé normalisée './index.html', et toute navigation same-origin
 // finissant par '/' part de toute façon dans la branche app shell).
-const ASSETS = ['./index.html'];
+// + les deux scripts chargés à la demande par l'app (moteur Doodle, catalogue Sport) : ils
+// changent avec index.html, ils vivent donc dans SON cache, pas dans le vendor immuable.
+const ASSETS = ['./index.html', './vendor/doodle.js', './vendor/sport-data.js'];
 // Fichiers immuables et légers du shell, précachés avec le vendor : sans eux, une PWA
 // lancée hors ligne n'a ni manifeste ni icône — et `notify()` affiche ses notifications
 // sans le moindre visuel (elle demande ./icon-192.png, qui n'était nulle part en cache).
 const VENDOR_ASSETS = ['./vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
+                       './vendor/react.production.min.js', './vendor/react-dom.production.min.js',
+                       './vendor/fonts.css', './vendor/fonts/dmsans-var-latin.woff2',
+                       './vendor/fonts/dmmono-400-latin.woff2', './vendor/fonts/dmmono-500-latin.woff2',
                        './vendor/leaflet.js', './vendor/leaflet.css',
                        './vendor/motus-words.js', './vendor/motus-dico.js',
                        './manifest.json', './icon-192.png', './icon-512.png'];
@@ -240,7 +250,7 @@ self.addEventListener('fetch', e => {
   if (isAppShell) {
     // Network-first AVEC PLAFOND DE TEMPS.
     // Avant : on attendait le réseau sans limite. L'app shell fait 3,2 Mo (~0,95 Mo compressé)
-    // et il est retéléchargé à CHAQUE lancement (`no-store`, voir plus bas) : sur un réseau
+    // et il est revalidé à CHAQUE lancement (`no-cache`, voir plus bas) : sur un réseau
     // lent l'app restait bloquée aussi longtemps qu'il le fallait, et le `.catch` ne servait
     // à rien puisqu'il ne se déclenche que sur une VRAIE erreur, jamais sur la lenteur.
     // Maintenant : au-delà de SHELL_TIMEOUT_MS, on sert la copie en cache et le téléchargement
@@ -293,8 +303,21 @@ self.addEventListener('fetch', e => {
       }).catch(() => {});
       return cached;
     })());
+  } else if (url.origin === location.origin && url.pathname.includes('/data/')) {
+    // data/*.json (Actu, indices) : STALE-WHILE-REVALIDATE. On répond tout de suite avec la
+    // copie en cache s'il y en a une (Actu et Finance s'affichent hors ligne et sans attendre
+    // le réseau), et le téléchargement met le cache à jour pour la prochaine fois. Rangé dans
+    // CACHE (purgé à chaque déploiement, c'est sans importance : il se remplit au 1er usage).
+    // ⚠ `waitUntil` : la mise à jour doit aller à son terme même quand on a déjà répondu.
+    const net = fetch(e.request).then(res => {
+      if (!res.ok) return res;
+      const copy = res.clone();
+      return caches.open(CACHE).then(c => c.put(e.request, copy)).then(() => res, () => res);
+    });
+    e.waitUntil(net.catch(() => {}));
+    e.respondWith(caches.match(e.request).then(cached => cached || net));
   } else if (url.origin === location.origin) {
-    // Ressources locales (vendor/, icônes, data/) : cache-first, tous caches confondus —
+    // Ressources locales (vendor/, icônes) : cache-first, tous caches confondus —
     // `caches.match` sans option balaie aussi bien CACHE que VENDOR.
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
   }

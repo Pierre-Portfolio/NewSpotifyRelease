@@ -116,7 +116,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 
 ## Technologies
 
-- **React 18.3.1 + Babel Standalone 7.29.7** (CDN, versions épinglées + SRI)
+- **React 18.3.1** auto-hébergé dans `vendor/` (avec les polices) ; **Babel Standalone 7.29.7** (CDN, version épinglée + SRI), téléchargé seulement à la première ouverture d'une nouvelle version
 - **Content-Security-Policy** verrouillée : même en cas de XSS, le token Spotify ne peut pas être exfiltré
 - **sql.js 1.10.2** (SQLite WASM) et **Leaflet 1.9.4** auto-hébergés dans `vendor/`
 - **IndexedDB** pour la persistance · Spotify Web API (refresh token avec rotation + mutex)
@@ -124,7 +124,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 
 ## Structure du projet
 
-Tout tient dans `index.html` (l'app complète). Autour : `manifest.json` et `service-worker.js` (PWA, cache offline), `vendor/` (sql.js, Leaflet, données Motus auto-hébergées), `data/` + `scripts/` + `.github/workflows/` (Actu et indices boursiers pré-fetchés par GitHub Actions), et `CLAUDE.md` (doc technique).
+Tout tient dans `index.html` (l'app complète). Autour : `manifest.json` et `service-worker.js` (PWA, cache offline), `vendor/` (React, polices, sql.js, Leaflet, données Motus, moteur Doodle et catalogue Sport auto-hébergés), `data/` + `scripts/` + `.github/workflows/` (Actu et indices boursiers pré-fetchés par GitHub Actions), et `CLAUDE.md` (doc technique).
 
 ## Aperçu de l'interface
 
