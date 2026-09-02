@@ -8,6 +8,15 @@ Ce qui MARCHE : interroger Yahoo via des **proxies HTTP publics keyless** qui re
 depuis LEUR IP non bloquée (prouvé : codetabs a renvoyé le NASDAQ-100). On essaie
 plusieurs proxies, timeout court, le 1er qui renvoie un JSON valide gagne. Valeur
 précédente conservée si tout échoue pour un symbole.
+
+⚠ SÉCURITÉ — ces relais sont des tiers non choisis, et ce qu'ils renvoient est COMMITTÉ
+dans le dépôt puis servi same-origin par l'app : un relais défaillant ou hostile pouvait
+afficher le CAC 40 au chiffre qu'il voulait, sans que rien ne le signale. Deux garde-fous,
+calqués sur ce que fetch_actu.py fait déjà pour l'actualité :
+  · `check_quote` refuse ce qui n'est pas un nombre fini positif, et refuse un écart de plus
+    de MAX_MOVE_PCT avec la dernière valeur connue (un indice ne saute pas de 25 % en 2 h :
+    les coupe-circuits américains arrêtent la séance bien avant) → valeur précédente gardée ;
+  · `via` note, par symbole, le relais réellement emprunté ('' = direct). L'app l'affiche.
 """
 import json
 import os
@@ -28,6 +37,10 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 TIMEOUT = 12  # court : on passe vite au proxy suivant
 MAX_BODY = 1024 * 1024  # lecture bornée : un relais qui déverse des Mo ne doit pas tuer le runner
+# Écart maximal toléré avec la dernière valeur connue. Généreux à dessein : il ne s'agit pas
+# de juger le marché mais d'écarter une valeur ABSURDE (relais qui renvoie autre chose, unité
+# différente, chiffre inventé). Les coupe-circuits US arrêtent la séance à −20 %.
+MAX_MOVE_PCT = 25.0
 
 # Proxies keyless. (gabarit, encode?) — {u} = URL Yahoo (encodée si encode=True).
 PROXIES = [
@@ -44,10 +57,39 @@ def _get(url, timeout=TIMEOUT):
         return r.read(MAX_BODY)
 
 
+def check_quote(q, previous):
+    """Le cours est-il PLAUSIBLE ? Renvoie None (à rejeter) ou le dict tel quel.
+
+    Ce qui vient d'un relais public n'est pas une donnée de confiance : on refuse ce qui
+    n'est pas un nombre fini strictement positif, et un écart de plus de MAX_MOVE_PCT avec
+    la dernière valeur connue. Sans valeur précédente (premier run), seul le type est testé.
+    """
+    price = q.get("price")
+    if isinstance(price, bool) or not isinstance(price, (int, float)):
+        return None
+    if not (price == price) or price in (float("inf"), float("-inf")) or price <= 0:
+        return None
+    pct = q.get("pct")
+    if pct is not None and (isinstance(pct, bool) or not isinstance(pct, (int, float))
+                            or not (pct == pct) or abs(pct) > MAX_MOVE_PCT):
+        q["pct"] = None
+    old = (previous or {}).get("price")
+    if isinstance(old, (int, float)) and not isinstance(old, bool) and old > 0:
+        move = abs(price - old) / old * 100
+        if move > MAX_MOVE_PCT:
+            print(f"   !! écart invraisemblable ({move:.1f} % vs {old}) — valeur rejetée",
+                  file=sys.stderr)
+            return None
+    return q
+
+
 def fetch_yahoo(symbol, start=0):
-    """Récupère le chart Yahoo du symbole via les proxies ; renvoie {price, pct} ou None.
+    """Récupère le chart Yahoo du symbole via les proxies ; renvoie {price, pct, via} ou None.
     `start` décale l'ordre des proxies (rotation par symbole) pour ne pas toujours taper
-    codetabs en premier → évite que le symbole du milieu se fasse rate-limiter."""
+    codetabs en premier → évite que le symbole du milieu se fasse rate-limiter.
+
+    `via` = hôte du relais réellement emprunté ('' si un jour l'appel direct passe) :
+    la provenance voyage avec la valeur, jusqu'à l'app."""
     target = ("https://query1.finance.yahoo.com/v8/finance/chart/"
               + urllib.parse.quote(symbol) + "?range=5d&interval=1d")
     enc = urllib.parse.quote(target, safe="")
@@ -67,7 +109,9 @@ def fetch_yahoo(symbol, start=0):
             if price is None:
                 continue
             pct = ((price - prev) / prev * 100) if prev else None
-            return {"price": round(price, 2), "pct": round(pct, 2) if pct is not None else None}
+            return {"price": round(price, 2),
+                    "pct": round(pct, 2) if pct is not None else None,
+                    "via": tmpl.split("/")[2]}
         except Exception as e:  # noqa: BLE001 — proxy lent/HS, on tente le suivant
             print(f"   {tmpl.split('/')[2]} {symbol}: {e}", file=sys.stderr)
             time.sleep(0.3)
@@ -95,12 +139,18 @@ def main():
         still = []
         for idx, (key, sym, name) in pending:
             q = fetch_yahoo(sym, start=idx + attempt)  # rotation par symbole ET par passe
+            # ⚠ Contrôle de plausibilité AVANT d'accepter : ce chiffre vient d'un relais
+            # public et part droit dans le dépôt. Rejeté ⇒ on garde la valeur précédente et
+            # on retente à la passe suivante (avec un autre relais, grâce à la rotation).
+            q = check_quote(q, indices.get(key)) if q else None
             if q:
                 q["name"] = name
                 q["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 indices[key] = q
                 ok += 1
-                print(f"{name}: {q['price']} ({q['pct']}%)")
+                relay = q.get("via")
+                print(f"{name}: {q['price']} ({q['pct']}%)"
+                      + (f"  ⚠ via relais public {relay}" if relay else ""))
             else:
                 still.append((idx, (key, sym, name)))
             time.sleep(2)  # espace les appels (limite de débit des proxies)

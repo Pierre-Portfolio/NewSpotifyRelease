@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.3.2';
+const APP_VERSION = '12.3.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20395,8 +20395,48 @@ function saveLolCfg(cfg) { lsSet(LOL_CFG_LS, JSON.stringify(cfg)); }
 // proxies relaient — indispensable pour distinguer « pas en partie » (404 Spectator),
 // « clé expirée » (401/403) et « Riot ID introuvable » (404 account).
 const LOL_PROXY_TIMEOUT_MS = 8000;   // même plafond par tentative qu'`opggGet`
+// ── ⚠ LA CLÉ RIOT ET LES RELAIS PUBLICS ──────────────────────────────────────
+// L'API Riot n'envoie AUCUN en-tête CORS : depuis une page, on ne peut l'atteindre qu'à
+// travers un relais public. Or un relais voit tout ce qui passe — la clé comprise, et elle
+// atterrit dans SES journaux d'accès. C'était fait en silence : la clé partait en clair dans
+// la query string (`?api_key=RGAPI-…`), donc dans le CHEMIN de l'URL relayée, à chacun des
+// trois relais essayés. Aucun XSS n'était nécessaire, la fuite était le fonctionnement normal.
+// C'est le seul secret du Hub à traverser un tiers non choisi : Steam, Google CSE, Alpha
+// Vantage et TwelveData mettent aussi leur clé en query string, mais vont DIRECTEMENT chez le
+// propriétaire de l'API, ce qui est le protocole prévu.
+// Il n'existe aucune façon de garder la clé secrète ici : sans backend, un relais est
+// nécessairement en position de la lire. La seule réponse honnête est donc le CONSENTEMENT —
+// et le défaut est NON. Ce qui change :
+//   1. essai DIRECT d'abord, clé en en-tête `X-Riot-Token` (aucun tiers ne la voit). Riot
+//      n'ouvre pas le CORS aujourd'hui, donc ça échoue en général — mais ça ne coûte rien,
+//      et c'est le seul chemin sans divulgation ;
+//   2. relais publics UNIQUEMENT si l'utilisateur a coché la case du panneau ⚙, en
+//      connaissance de cause. Sinon on renvoie RELAY_OFF et l'UI explique pourquoi.
+// ⚠ Le repli Riot est OPTIONNEL : op.gg (sans clé) reste la source primaire, rien d'essentiel
+// ne dépend de ce chemin.
+const LOL_RELAY_LS = 'spotifyplus_lol_relay';   // absent = NON ; seule la valeur 'on' autorise
+function lolRelayOn()  { return lsGet(LOL_RELAY_LS) === 'on'; }
+function lolRelaySet(v) { return lsSet(LOL_RELAY_LS, v ? 'on' : 'off'); }
+// Lit le corps même sur un statut non-2xx (les erreurs Riot sont un JSON `{status:{…}}`).
+function _lolParse(t) {
+  if (!t || !t.trim()) return undefined;
+  try {
+    const j = JSON.parse(t);
+    if (j && j.status && typeof j.status.status_code === 'number') return { __error: j.status.status_code };
+    return j;
+  } catch { return undefined; }      // le relais a renvoyé sa propre page d'erreur (HTML)
+}
 async function lolApiGet(url) {
-  const full = url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(lolKey());
+  const key = lolKey();
+  if (!key) return null;
+  // 1. DIRECT — la clé reste entre le navigateur et Riot.
+  try {
+    const j = _lolParse(await fetchTimeout(url, LOL_PROXY_TIMEOUT_MS, { headers: { 'X-Riot-Token': key } }, r => r.text()));
+    if (j !== undefined) return j;
+  } catch {}
+  // 2. RELAIS — divulgation de la clé : seulement sur accord explicite.
+  if (!lolRelayOn()) return { __error: 'RELAY_OFF' };
+  const full = url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(key);
   const tries = [
     'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(full),
     'https://cors.eu.org/' + full,
@@ -20407,13 +20447,8 @@ async function lolApiGet(url) {
       // ⚠ Piège 28 : borne de temps sur CHAQUE tentative. Sans elle, un relais qui accepte
       // la connexion puis ne répond jamais bloquait la carte LoL indéfiniment — les trois
       // essais étant en série, il n'y avait même pas de repli. Même délai qu'`opggGet`.
-      const t = await fetchTimeout(u, LOL_PROXY_TIMEOUT_MS, undefined, r => r.text());
-      if (!t || !t.trim()) continue;
-      try {
-        const j = JSON.parse(t);
-        if (j && j.status && typeof j.status.status_code === 'number') return { __error: j.status.status_code };
-        return j;
-      } catch { continue; }              // le proxy a renvoyé sa propre page d'erreur (HTML) → suivant
+      const j = _lolParse(await fetchTimeout(u, LOL_PROXY_TIMEOUT_MS, undefined, r => r.text()));
+      if (j !== undefined) return j;     // sinon : page d'erreur du relais → relais suivant
     } catch {}
   }
   return null;
@@ -20682,7 +20717,9 @@ async function lolChampMap() {
 // est enregistrée.
 async function lolRiotProfile(cfg, cachedPuuid) {
   const [name, tag] = cfg.riotId.split('#');
-  const errOf = r => (r && (r.__error === 401 || r.__error === 403)) ? 'KEY' : (r && r.__error === 404) ? 'NOTFOUND' : 'NET';
+  const errOf = r => (r && r.__error === 'RELAY_OFF') ? 'RELAY'
+                   : (r && (r.__error === 401 || r.__error === 403)) ? 'KEY'
+                   : (r && r.__error === 404) ? 'NOTFOUND' : 'NET';
   let puuid = cachedPuuid || null;      // économise la requête account si déjà connu
   if (!puuid) {
     const routing = LOL_ROUTING[cfg.platform] || 'europe';
@@ -20863,6 +20900,9 @@ function LolStatsSection() {
   const [err, setErr]           = React.useState('');
   const [diag, setDiag]         = React.useState(null);              // résultat du bouton 🩺 Diag (debug spectate)
   const [diagLoading, setDiagLoading] = React.useState(false);
+  // Autorisation explicite de faire transiter la clé Riot par un relais public (voir le bloc
+  // au-dessus de `lolApiGet`). Défaut : NON.
+  const [relayOk, setRelayOk] = React.useState(lolRelayOn);
   const configured = !!(cfg && cfg.riotId);   // la clé Riot n'est plus requise (op.gg sans clé)
 
   const ERR_MSGS = {
@@ -20870,6 +20910,7 @@ function LolStatsSection() {
     NOTFOUND: 'Riot ID introuvable — vérifie le format « Nom#TAG » et la région.',
     RIOTID:   'Format attendu : Nom#TAG (ex. Pierre#EUW).',
     NET:      'op.gg injoignable (et pas de clé Riot de secours enregistrée) — réessaie dans un instant, ou ajoute une clé Riot en repli via ⚙.',
+    RELAY:    "op.gg est injoignable et le repli Riot est bloqué : l'API Riot n'ouvre pas le CORS, elle n'est donc atteignable qu'à travers un relais public — qui verrait ta clé. Coche « autoriser le relais » dans ⚙ si tu l'acceptes.",
     CONFIG:   '',
   };
 
@@ -20915,6 +20956,7 @@ function LolStatsSection() {
     saveLolCfg(next); setCfg(next);
     const k = keyInput.trim();
     if (k) { try { localStorage.setItem(LOL_KEY_LS, k); } catch {} setKeyInput(''); }
+    lolRelaySet(relayOk);
     try { localStorage.removeItem(LOL_CACHE_LS); } catch {}   // cible changée → cache invalide
     setShowCfg(false); setErr(''); setData(null); setLive(null);
     setTimeout(() => refresh(true), 0);   // op.gg sans clé → toujours rafraîchir
@@ -20948,6 +20990,23 @@ function LolStatsSection() {
         </select>
         <div style={lab}>CLÉ API RIOT — OPTIONNELLE, REPLI SEULEMENT {lolKey() ? '(déjà enregistrée — laisser vide pour la garder)' : ''}</div>
         <input style={inp} type="password" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder="RGAPI-… (facultatif)" />
+        {/* ⚠ Consentement EXPLICITE, décoché par défaut : sans backend, l'API Riot (qui
+            n'ouvre pas le CORS) n'est joignable qu'à travers un relais public, et ce relais
+            lit la clé au passage. On ne peut pas empêcher ça — on peut seulement ne pas le
+            faire dans le dos de l'utilisateur. Voir le bloc au-dessus de `lolApiGet`. */}
+        {(lolKey() || keyInput.trim()) && (
+          <label style={{ display:'flex', alignItems:'flex-start', gap:8, cursor:'pointer', background:C.surfaceHigh, border:`1px solid ${relayOk ? '#c08a4055' : C.border}`, borderRadius:8, padding:'8px 10px' }}>
+            <input type="checkbox" checked={relayOk} onChange={e => setRelayOk(e.target.checked)} style={{ marginTop:1, flexShrink:0, accentColor:LOL_COLOR }} />
+            <span style={{ fontSize:10, color:C.muted, lineHeight:1.5 }}>
+              <b style={{ color: relayOk ? '#c08a40' : C.text }}>Autoriser le passage par un relais public</b><br/>
+              L'API Riot n'accepte pas les appels directs depuis un navigateur (pas de CORS). Sans cette
+              case, le repli Riot ne fonctionne pas — op.gg, qui ne demande aucune clé, reste la source
+              normale. Cochée, <b>ta clé Riot transite en clair par api.codetabs.com / cors.eu.org /
+              api.allorigins.win</b>, qui la voient et peuvent la journaliser. Une Personal API Key se
+              régénère sur developer.riotgames.com.
+            </span>
+          </label>
+        )}
         {err && <div style={{ fontSize:10, color:'#e05050' }}>{err}</div>}
         <div style={{ display:'flex', gap:8 }}>
           <button onClick={saveCfg} style={{ flex:1, background:`${LOL_COLOR}18`, border:`1px solid ${LOL_COLOR}50`, borderRadius:8, padding:'9px 12px', cursor:'pointer', color:LOL_COLOR, fontSize:11, fontWeight:700, fontFamily:'inherit' }}>✓ Enregistrer</button>
@@ -26575,6 +26634,25 @@ async function fetchIndicesJSON() {
   } catch { return null; }
 }
 
+// Provenance des indices — jumeau d'`ActuViaNotice`. `scripts/fetch_indices.py` note dans
+// chaque cours le relais public réellement emprunté (`via`), parce qu'un runner GitHub ne
+// peut pas joindre Yahoo directement. Ce que renvoie un relais est committé dans le dépôt
+// puis servi same-origin : le dire, c'est la moitié de la parade (l'autre étant le contrôle
+// de plausibilité côté script, qui refuse un écart de plus de 25 %).
+function IndicesViaNotice({ idx }) {
+  if (!idx || typeof idx !== 'object') return null;
+  const hosts = [...new Set(Object.keys(idx).map(k => idx[k] && idx[k].via).filter(Boolean))];
+  if (!hosts.length) return null;
+  return (
+    <div style={{ fontSize:9.5, color:'#c8956c', background:'#1a1208', border:'1px solid #3a2a10',
+      borderRadius:8, padding:'7px 10px', lineHeight:1.5, margin:'6px 0' }}>
+      ⚠ Cours relayés par <b>{hosts.join(', ')}</b> : Yahoo refuse les IP des runners GitHub, la
+      valeur transite donc par un relais public. Un écart de plus de 25 % avec le relevé précédent
+      est rejeté côté script, mais recoupe un chiffre surprenant avant d'en tirer une conclusion.
+    </div>
+  );
+}
+
 // ════════════════════════════════════════════════
 // GRAPHIQUES FINANCE — clic sur une ligne → modal avec l'historique du prix.
 // Sources par type de ligne (toutes DÉJÀ autorisées dans la CSP connect-src) :
@@ -28354,6 +28432,7 @@ function FinancePanel() {
         <FinanceRow icon="🇺🇸" name="S&P 500" value={fmtPrice(idx && idx.spx && idx.spx.price)} pct={idx && idx.spx && idx.spx.pct} chart={{ kind:'stooq', id:'^spx' }} onChart={setChartSpec} />
         <FinanceRow icon="💻" name="NASDAQ-100"  value={fmtPrice(idx && idx.ndq && idx.ndq.price)} pct={idx && idx.ndq && idx.ndq.pct} chart={{ kind:'stooq', id:'^ndq' }} onChart={setChartSpec} />
         {full && <FinanceRow icon="🇫🇷" name="CAC 40"  value={fmtPrice(idx && idx.cac && idx.cac.price)} pct={idx && idx.cac && idx.cac.pct} chart={{ kind:'stooq', id:'^cac' }} onChart={setChartSpec} />}
+        <IndicesViaNotice idx={idx} />
       </FinanceSection>
 
       <FinanceSection title="STOCK PICKING" eurusd={eurusd}>
@@ -30832,7 +30911,12 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     };
     const onMsg = e => {
       const w = frameWin();
-      if (!w || e.source !== w) return;   // ne lit QUE les messages de NOTRE iframe
+      if (!w || e.source !== w) return;                 // ne lit QUE les messages de NOTRE iframe
+      // ⚠ ET l'origine. `e.source` seul suffit contre une AUTRE fenêtre, mais pas contre notre
+      // propre iframe si elle navigue ailleurs (redirection, contenu remplacé) : elle resterait
+      // la même `Window`. Ce que ces messages pilotent — valider une vidéo comme vue, armer
+      // l'auto-avance — ne doit obéir qu'à l'embed YouTube.
+      if (e.origin !== YT_EMBED_ORIGIN) return;
       let d = e.data;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch { return; } }
       const info = d && d.info;

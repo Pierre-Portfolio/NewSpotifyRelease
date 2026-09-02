@@ -198,12 +198,35 @@ def gn_decode(link, art_id):
     return m.group(1) if m else None
 
 
+# ⚠ L'URL passée à `og_image` sort du décodage Google News : c'est une adresse ARBITRAIRE,
+# ouverte depuis un runner qui porte un jeton `contents: write`. `urlopen` suit les
+# redirections sans limite propre et accepte des schémas qu'on ne veut pas ici (ftp:). Cet
+# ouvreur borne les deux : http/https uniquement, à l'appel comme après chaque redirection,
+# et 4 sauts au maximum. Ça reste une requête sortante vers un tiers — mais plus une porte
+# ouverte à une chaîne de redirections choisie par la page.
+MAX_REDIRECTS = 4
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlparse(newurl).scheme not in ("http", "https"):
+            return None      # schéma refusé → urllib lève, l'appelant retente au prochain run
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = urllib.request.build_opener(_SafeRedirect())
+
+
 def og_image(article_url):
     """og:image / twitter:image de la page article (None si absente)."""
+    if urllib.parse.urlparse(article_url).scheme not in ("http", "https"):
+        return None
     req = urllib.request.Request(article_url, headers={
         "User-Agent": UA, "Accept": "text/html", "Accept-Language": "fr-FR,fr;q=0.9",
     })
-    with urllib.request.urlopen(req, timeout=IMG_TIMEOUT) as r:
+    with _SAFE_OPENER.open(req, timeout=IMG_TIMEOUT) as r:
         html = r.read(262144).decode("utf-8", "replace")   # 256 Ko suffisent pour le <head>
         base = r.geturl()
     for pat in (

@@ -185,7 +185,11 @@
 // plus son cooldown de 24 h après un 429 ; localStorage bloqué ne démonte plus l'app ;
 // borne de temps sur les relais LoL ; `state` OAuth à usage unique ; clés `__proto__`
 // refusées à la restauration.
-const CACHE  = 'spotifyplus-v392';          // app shell — bumpé à chaque déploiement
+// v393 : sécurité. La clé Riot ne part plus vers les relais publics sans accord explicite
+// (essai direct en en-tête d'abord, case à cocher ensuite) ; cours boursiers relayés
+// contrôlés et leur provenance affichée ; redirections bornées à http/https côté Action ;
+// origine vérifiée sur les messages du lecteur YouTube.
+const CACHE  = 'spotifyplus-v393';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
