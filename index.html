@@ -177,7 +177,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.1.7';
+const APP_VERSION = '12.1.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2019,6 +2019,18 @@ async function initDB() {
   // titre comme NON écouté. Table minuscule (une URI par ligne), alimentée par purgeListened
   // et chargée dans knownUris au boot — jamais purgée.
   _db.run("CREATE TABLE IF NOT EXISTS purged_uris (spotify_uri TEXT PRIMARY KEY)");
+  // ── Index de la FILE D'ATTENTE ──────────────────────────────────────────────
+  // `tracks` n'a aucun plafond (un premier scan reprend toute la discographie d'un artiste)
+  // et n'avait aucun index : `loadFeedFromDB` la balayait en entier puis triait, à chaque
+  // frappe dans le champ de recherche (debounce 150 ms), et `loadListenStatsFromDB` faisait
+  // deux agrégats de plus APRÈS CHAQUE ÉCOUTE.
+  // ⚠ Index PARTIELS (`WHERE listened = 0`) : ils ne portent que sur la file d'attente, pas
+  // sur l'historique — qui, lui, ne fait que grossir. C'est ce qui garde leur poids
+  // négligeable dans le blob que `saveDB()` réexporte à chaque écriture.
+  // ⚠ `COLLATE NOCASE` doit être IDENTIQUE à l'ORDER BY de loadFeedFromDB, sinon SQLite
+  // ignore l'index pour le tri.
+  try { _db.run("CREATE INDEX IF NOT EXISTS idx_tracks_wait ON tracks(release_date, id) WHERE listened = 0"); } catch {}
+  try { _db.run("CREATE INDEX IF NOT EXISTS idx_tracks_wait_artist ON tracks(artist_name COLLATE NOCASE, id) WHERE listened = 0"); } catch {}
   return _db;
 }
 
@@ -2053,8 +2065,15 @@ function dbAll(sql, params = []) {
   return rows;
 }
 
+// ⚠ NE PASSE PAS par dbAll : celui-ci convertit TOUTES les lignes du résultat en objets
+// JavaScript avant qu'on n'en garde une. Sur une requête sans LIMIT, c'est la table entière
+// construite pour rien. Ici on avance d'un seul cran et on libère.
 function dbGet(sql, params = []) {
-  return dbAll(sql, params)[0] || null;
+  const stmt = _db.prepare(sql);
+  if (params.length) stmt.bind(params);
+  const row = stmt.step() ? stmt.getAsObject() : null;
+  stmt.free();
+  return row;
 }
 
 function loadListenStatsFromDB() {
@@ -2113,6 +2132,29 @@ function loadHistoryFromDB() {
 }
 
 // Mappe une ligne DB `tracks` → item du feed (forme attendue par FeedList/les players)
+// ⚠ Collateur HISSÉ. `String.prototype.localeCompare` reconstruit un collateur Intl à
+// chaque appel : sur un tri de 1 000 items, c'est ~10 000 constructions. Une instance
+// unique rend exactement le même ordre.
+const _feedCollator = new Intl.Collator('fr', { sensitivity: 'base', numeric: true });
+// ⚠ Formateurs HISSÉS. `toLocaleDateString` reconstruit un formateur Intl à chaque appel,
+// et mapFeedRow en faisait DEUX par ligne : 2 000 constructions par rechargement du feed
+// (1 000 lignes), en rafale pendant la frappe dans le champ artiste. Réutiliser une instance
+// d'Intl.DateTimeFormat est le même rendu pour une fraction du coût.
+const _fmtFeedDay = new Intl.DateTimeFormat('fr-FR', { day: '2-digit', month: 'short' });
+const _fmtFeedMonth = new Intl.DateTimeFormat('fr-FR', { month: 'long', year: 'numeric' });
+// `release_date` a une précision VARIABLE (piège 19) : 'YYYY', 'YYYY-MM' ou 'YYYY-MM-DD'.
+// `releaseInRange` la traite déjà comme une période ; l'affichage, lui, faisait
+// new Date("2026") → 1er janvier UTC, présenté « 01 janv. ». On rend la précision réelle.
+function fmtReleaseDate(raw) {
+  if (!raw) return '';
+  const p = String(raw).split('-');
+  const y = parseInt(p[0]);
+  if (!Number.isFinite(y)) return '';
+  if (p.length === 1) return String(y);
+  const m = (parseInt(p[1]) || 1) - 1;
+  if (p.length === 2) return _fmtFeedMonth.format(new Date(y, m, 1));
+  return _fmtFeedDay.format(new Date(y, m, parseInt(p[2]) || 1));
+}
 function mapFeedRow(t) {
   return {
     id:         t.spotify_uri,
@@ -2121,8 +2163,8 @@ function mapFeedRow(t) {
     artist:     t.artist_name,
     title:      t.title,
     subtitle:   t.release_type === 'discover_weekly' ? 'Découvertes de la semaine' : t.release_type !== 'single' ? t.release_title : null,
-    date:       t.release_date ? new Date(t.release_date).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : '',
-    scraped_at: t.added_at ? new Date(t.added_at).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' }) : null,
+    date:       fmtReleaseDate(t.release_date),
+    scraped_at: t.added_at ? _fmtFeedDay.format(new Date(t.added_at)) : null,
     image:      t.cover_url,
     isNew:       false,
     liked:       t.liked || 0,
@@ -2621,6 +2663,17 @@ function meCacheLoad() {
 // ════════════════════════════════════════════════
 const StoreCtx = React.createContext(null);
 const useStore = () => React.useContext(StoreCtx);
+// ── LE TITRE EN COURS A SON PROPRE CONTEXTE ──────────────────────────────────
+// `now` change toutes les 5 s dès qu'une musique joue (le poll fait avancer `current` d'une
+// seconde). Tant qu'il vivait dans l'objet `api`, cet objet était recréé à chaque tick et
+// les 27 composants branchés sur `useStore()` se re-rendaient TOUS — y compris ceux qui ne
+// lisent qu'une fonction (DropboxSync et `restoreBackup`) ou le panneau ouvert du moment
+// (TV Time, Finance, un canvas de jeu). Sorti d'`api`, il ne réveille plus que les cinq
+// composants qui l'affichent vraiment.
+// ⚠ Les composants qui lisent le titre en cours appellent `useNow()` EN PLUS de
+// `useStore()` : `now` n'est plus dans l'objet du store.
+const NowCtx = React.createContext(null);
+const useNow = () => React.useContext(NowCtx);
 
 function StoreProvider({ children }) {
   const [authState, setAuthState] = React.useState('loading');
@@ -2739,15 +2792,20 @@ function StoreProvider({ children }) {
   const resetFilters = () => { setFilterType('all'); setSortBy('artist'); setArtistSearch(''); setGenreFilter(''); };
 
   const filteredFeed = React.useMemo(() => {
-    // #opt : sans filtre/tri actif (cas courant, notamment pendant la synchro où le feed
-    // change à chaque artiste), le filtre est un pass-through et le tri renvoie 0 → on
-    // retourne le tableau tel quel au lieu d'allouer + re-trier ~1000 items à chaque fois.
+    // #opt : sans filtre actif ET quand le tri demandé est déjà celui que le SQL a rendu, le
+    // filtre est un pass-through et le tri ne changerait rien → on retourne le tableau tel
+    // quel au lieu d'allouer + re-trier ~1000 items à chaque fois.
+    // ⚠ Le test portait sur `sortBy === 'default'` SEUL — or l'état initial est 'artist'
+    // (voir le useState plus haut) : le raccourci ne se déclenchait donc JAMAIS dans la
+    // configuration par défaut, et chaque changement de feed (un par artiste pendant une
+    // synchro) refaisait un tri complet au collateur. `loadFeedFromDB` trie déjà par
+    // `artist_name COLLATE NOCASE` et par `id` : les deux valeurs sont ici équivalentes.
     // Le chemin mémoire ci-dessous DOUBLE volontairement le filtre/tri SQL de loadFeedFromDB :
     // il reste nécessaire pour la fenêtre de debounce 150ms (feed tient encore l'ancien
     // résultat SQL) ET pour les items ajoutés par la synchro en cours (setFeed d'append qui
     // ne repasse pas par SQL). Il ne s'exécute qu'au changement de feed/filtre (useMemo).
     const q = artistSearch.trim().toLowerCase();   // #opt : calculé UNE fois, pas par item (~1000×)
-    if (filterType === 'all' && sortBy === 'default' && !q) return feed || [];
+    if (filterType === 'all' && (sortBy === 'default' || sortBy === 'artist') && !q) return feed || [];
     let r = (feed || []).filter(item => {
       if (filterType === 'single' && item.label !== 'Single') return false;
       if (filterType === 'album'  && item.label !== 'Album')  return false;
@@ -2757,8 +2815,10 @@ function StoreProvider({ children }) {
     });
     if (sortBy === 'default') return r;   // ordre SQL déjà correct → pas de clone+sort inutile
     return [...r].sort((a, b) => {
-      if (sortBy === 'date_asc') return (a.rawDate || '').localeCompare(b.rawDate || '');
-      if (sortBy === 'artist')    return (a.artist || '').localeCompare(b.artist || '');
+      // rawDate est une chaîne ISO tronquée ('2026', '2026-05', '2026-05-10') : la
+      // comparaison brute suffit et évite le collateur, inutile sur des chiffres.
+      if (sortBy === 'date_asc') return (a.rawDate || '') < (b.rawDate || '') ? -1 : (a.rawDate || '') > (b.rawDate || '') ? 1 : 0;
+      if (sortBy === 'artist')    return _feedCollator.compare(a.artist || '', b.artist || '');
       return 0;
     });
   }, [feed, filterType, sortBy, artistSearch]);
@@ -3064,11 +3124,17 @@ function StoreProvider({ children }) {
   }, [authState]);
 
   // ── Countdown UI ──
+  // ⚠ Dépendance sur `nextCall > 0`, PAS sur `nextCall` : l'effet modifie lui-même `nextCall`,
+  // il se démontait donc et se remontait à chaque tick — la fenêtre de 1 000 ms repartait
+  // après le commit React et le décompte prenait du retard sur l'horloge réelle. Ici
+  // l'intervalle est créé une fois au démarrage du décompte et détruit à son terme ; la forme
+  // fonctionnelle de setNextCall évite toute closure périmée.
+  const counting = nextCall > 0;
   React.useEffect(() => {
-    if (nextCall <= 0) return;
+    if (!counting) return;
     const id = setInterval(() => setNextCall(v => Math.max(0, v - 1)), 1000);
     return () => clearInterval(id);
-  }, [nextCall]);
+  }, [counting]);
 
   // ── Marquer comme écouté quand le morceau se termine (URI change) ──
   React.useEffect(() => {
@@ -4046,27 +4112,81 @@ function StoreProvider({ children }) {
     bootLocal();
   }, [bootLocal]);
 
-  const api = {
+  // ── ENVELOPPES STABLES ──────────────────────────────────────────────────────
+  // La plupart des fonctions du store sont déjà en `useCallback` — celles-ci ne le sont pas,
+  // et une identité qui change à chaque rendu ferait sauter la mémoïsation d'`api` juste
+  // en dessous. Plutôt que de les envelopper une à une dans un `useCallback` au tableau de
+  // dépendances long et fragile (`startSync` est la fonction la plus délicate du projet :
+  // une dépendance oubliée = un état périmé au milieu du scrapping), on garde la DERNIÈRE
+  // version dans une ref et on n'expose que des enveloppes qui, elles, ne changent jamais.
+  // Appeler l'enveloppe revient exactement à appeler la fonction : même closure, celle du
+  // rendu courant. Aucune liste de dépendances à tenir à jour.
+  const liveFns = React.useRef(null);
+  liveFns.current = { togglePause, startSync, logout, purgeListened, resetQuota, resetFilters, resumeSync, seek };
+  const stableFns = React.useMemo(() => ({
+    togglePause:    (...a) => liveFns.current.togglePause(...a),
+    startSync:      (...a) => liveFns.current.startSync(...a),
+    logout:         (...a) => liveFns.current.logout(...a),
+    purgeListened:  (...a) => liveFns.current.purgeListened(...a),
+    resetQuota:     (...a) => liveFns.current.resetQuota(...a),
+    resetFilters:   (...a) => liveFns.current.resetFilters(...a),
+    resumeSync:     (...a) => liveFns.current.resumeSync(...a),
+    seek:           (...a) => liveFns.current.seek(...a),
+  }), []);
+
+  // ⚠ MÉMOÏSÉ, et déclaré APRÈS tout ce qu'il liste (règle « Babel hoisting » du projet).
+  // Sans ce useMemo, l'objet était recréé à chaque rendu de StoreProvider et faisait
+  // re-rendre les 27 consommateurs du contexte — dont, toutes les 5 s, ceux qui n'ont rien
+  // à voir avec la lecture. `now` a été sorti (NowCtx) et les 8 fonctions instables passent
+  // par `stableFns`, si bien qu'`api` ne change plus que quand une donnée change VRAIMENT.
+  const api = React.useMemo(() => ({
+    ...stableFns,
     authState, user, otherTab, authError, offline, offlineReady, enterOffline,
-    syncState, scraping, paused, rlWaiting, blockedUntil, togglePause, startSync, logout,
+    syncState, scraping, paused, rlWaiting, blockedUntil,
     stats, progress, currentArtist, statusMsg, statusMode,
-    nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs, now,
+    nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs,
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
-    seek,
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
     moduleAi, setModuleAiProvider,
-    dbReady, purgeListened, resetQuota, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
+    dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
-    artistSearch, setArtistSearch, genreFilter, setGenreFilter, resetFilters,
-    resumableSession, resumeSync,
-  };
-  return <StoreCtx.Provider value={api}>{children}</StoreCtx.Provider>;
+    artistSearch, setArtistSearch, genreFilter, setGenreFilter,
+    resumableSession,
+  }), [
+    stableFns,
+    authState, user, otherTab, authError, offline, offlineReady, enterOffline,
+    syncState, scraping, paused, rlWaiting, blockedUntil,
+    stats, progress, currentArtist, statusMsg, statusMode,
+    nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs,
+    delayChoice, setDelayChoice,
+    listenStats, setListenStats,
+    loopEnabled, setLoopEnabled,
+    moduleToggles, setModuleEnabled,
+    homeModules, setModuleOnHome,
+    moduleAi, setModuleAiProvider,
+    dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
+    log, reloadFeed,
+    undoToast, undoRemove, clearUndo,
+    likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
+    filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
+    artistSearch, setArtistSearch, genreFilter, setGenreFilter,
+    resumableSession,
+  ]);
+  // ⚠ NowCtx est IMBRIQUÉ dans StoreCtx et enveloppe le MÊME `children` : quand `now` change,
+  // StoreProvider se re-rend mais `api` garde son identité (rien ne se propage côté store) et
+  // la référence de `children` est inchangée — React saute donc le rendu du sous-arbre, seuls
+  // les abonnés de NowCtx sont réveillés.
+  return (
+    <StoreCtx.Provider value={api}>
+      <NowCtx.Provider value={now}>{children}</NowCtx.Provider>
+    </StoreCtx.Provider>
+  );
 }
 
 // ════════════════════════════════════════════════
@@ -24414,7 +24534,8 @@ function HubHome({ isMobile, onGo, disabled }) {
 // PLAYER BARS
 // ════════════════════════════════════════════════
 function MobilePlayer() {
-  const { now, feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks, markListened } = useStore();
+  const { feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks, markListened } = useStore();
+  const now = useNow();
   const [isLiked, setIsLiked] = React.useState(false);
   // Jeu plein écran monté (Doodle Jump) → barre masquée même si Spotify joue.
   const playerHidden = usePlayerHidden();
@@ -24548,7 +24669,8 @@ function MobilePlayer() {
 }
 
 function PlayerBar() {
-  const { now, feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, markListened } = useStore();
+  const { feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, markListened } = useStore();
+  const now = useNow();
   // Jeu plein écran monté (Doodle Jump) → barre masquée même si Spotify joue.
   const playerHidden = usePlayerHidden();
 
@@ -24972,7 +25094,7 @@ async function playTrack(spotifyUri) {
 
 // React.memo + props explicites (pas de useStore) : seuls les items dont les props changent
 // re-render — sans ça, les ~1000 lignes du feed re-rendaient à chaque tick du poll player (5s)
-const FeedItem = React.memo(function FeedItem({ item, i, isMobile=false, isNowPlaying, removeFromFeed, setTrackLiked, navigateFeed }) {
+const FeedItem = React.memo(function FeedItem({ item, isMobile=false, isNowPlaying, removeFromFeed, setTrackLiked, navigateFeed }) {
   const [playing, setPlaying]       = React.useState(false);
   const [liked,   setLikedLocal]    = React.useState(item.liked || 0);
   const [swipeDx, setSwipeDx]       = React.useState(0);
@@ -28224,7 +28346,8 @@ function CollectionStatsSection() {
 }
 
 function StatsPanel() {
-  const { listenStats: ls, now } = useStore();
+  const { listenStats: ls } = useStore();
+  const now = useNow();
   const fmtN = n => Number(n).toLocaleString('fr-FR');
   // Format « X Mois X Jours X Heure » (mois = 30 j) — temps d'écoute + temps TV Time.
   // Mois et jours toujours affichés (« 0 mois 0 j 5 h » à moins de 24 h).
@@ -44868,11 +44991,37 @@ function RappelPanel() {
   );
 }
 
+// #opt — FENÊTRAGE de la liste. Le SQL rend jusqu'à 1 000 titres, et autant de <FeedItem>
+// montés d'un coup imposent une réconciliation complète à chaque rendu de FeedList. On n'en
+// rend qu'une tranche, étendue quand la sentinelle de fin approche du viewport.
+const FEED_PAGE = 60;
 function FeedList({ isMobile=false }) {
-  const { feed, listenStats, filteredFeed, now, artists,
+  const { feed, listenStats, filteredFeed, filteredFeedIndex, artists,
           filterType, setFilterType, sortBy, setSortBy,
           artistSearch, setArtistSearch, genreFilter, setGenreFilter, resetFilters,
           removeFromFeed, setTrackLiked, navigateFeed, blockedUntil } = useStore();
+  const now = useNow();
+
+  // ── Tranche visible ──────────────────────────────────────────────────────────
+  // ⚠ La fenêtre se REFERME dès que la liste change de nature (filtre, tri, recherche) :
+  // garder 600 lignes ouvertes après un filtre plus restrictif n'aurait aucun sens.
+  const [shown, setShown] = React.useState(FEED_PAGE);
+  React.useEffect(() => { setShown(FEED_PAGE); }, [filterType, sortBy, artistSearch, genreFilter]);
+  const windowed = typeof IntersectionObserver !== 'undefined';
+  // ⚠ Le titre EN COURS doit rester rendu même au-delà de la tranche, sinon la surbrillance
+  // « en lecture » disparaît dès que l'auto-avance dépasse ce qui est affiché.
+  const nowIdx  = now?.uri ? (filteredFeedIndex.get(now.uri) ?? -1) : -1;
+  const limit   = windowed ? Math.max(shown, nowIdx + 1) : filteredFeed.length;
+  const visible = filteredFeed.length <= limit ? filteredFeed : filteredFeed.slice(0, limit);
+  const moreRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!windowed || filteredFeed.length <= limit || !moreRef.current) return;
+    const io = new IntersectionObserver(
+      es => { if (es[0].isIntersecting) setShown(n => n + FEED_PAGE); },
+      { rootMargin: '600px' });   // marge large : la tranche suivante est prête avant d'arriver au bout
+    io.observe(moreRef.current);
+    return () => io.disconnect();
+  }, [windowed, filteredFeed.length, limit]);
 
   const hidden      = Math.max(0, (listenStats.remaining || 0) - feed.length);
   const filtersOn   = filterType !== 'all' || sortBy !== 'artist' || artistSearch.trim() || genreFilter;
@@ -44982,9 +45131,9 @@ function FeedList({ isMobile=false }) {
             la clé de tous les suivants → remount complet, React.memo inopérant.
             La clé est portée par le Fragment (la bannière de date n'a pas de clé propre :
             elle appartient à l'item qu'elle précède) */}
-        {filteredFeed.map((item, i) => (
+        {visible.map((item, i) => (
           <React.Fragment key={item.id}>
-            {showDayBanners && (i === 0 || dayOf(filteredFeed[i - 1]) !== dayOf(item)) && (
+            {showDayBanners && (i === 0 || dayOf(visible[i - 1]) !== dayOf(item)) && (
               <div style={{ display:'flex', alignItems:'center', gap:8, padding:'10px 2px 4px' }}>
                 <span style={{ fontSize:9, fontWeight:700, letterSpacing:'0.08em', color:C.dim, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>
                   📅 {fmtDayBanner(item.rawDate)}
@@ -44992,11 +45141,20 @@ function FeedList({ isMobile=false }) {
                 <div style={{ flex:1, height:1, background:C.border }} />
               </div>
             )}
-            <FeedItem item={item} i={i} isMobile={isMobile}
+            {/* ⚠ Aucune prop `i` : l'index n'était lu NULLE PART dans FeedItem et changeait
+                pour tous les items suivant une suppression — la comparaison superficielle de
+                React.memo échouait alors sur chacun d'eux, exactement ce que la clé stable
+                ci-dessus cherche à éviter. */}
+            <FeedItem item={item} isMobile={isMobile}
               isNowPlaying={now?.uri === item.spotifyUri}
               removeFromFeed={removeFromFeed} setTrackLiked={setTrackLiked} navigateFeed={navigateFeed} />
           </React.Fragment>
         ))}
+        {filteredFeed.length > visible.length && (
+          <div ref={moreRef} style={{ fontSize:10, color:C.dim, padding:'14px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+            ⋯ {filteredFeed.length - visible.length} titre{filteredFeed.length - visible.length > 1 ? 's' : ''} de plus
+          </div>
+        )}
         {filteredFeed.length === 0 && <div style={{ fontSize:11, color:C.dim, padding:'20px 0', textAlign:'center', fontFamily:'DM Mono,monospace' }}>Aucun titre pour ce filtre.</div>}
       </div>
     </div>
@@ -45408,7 +45566,8 @@ function ArtistRow({ a }) {
 // N'affiche QUE les contrôles : précédent / play-pause / suivant
 // ════════════════════════════════════════════════
 function CompactPlayer() {
-  const { now, feed, filteredFeed, filteredFeedIndex, seek, setTrackLiked, likedTracks, markListened } = useStore();
+  const { feed, filteredFeed, filteredFeedIndex, seek, setTrackLiked, likedTracks, markListened } = useStore();
+  const now = useNow();
   const [isLiked, setIsLiked] = React.useState(false);
 
   // Vérifier si le titre en cours est liké — local d'abord, API seulement si inconnu

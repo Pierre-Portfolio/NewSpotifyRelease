@@ -1,6 +1,6 @@
 // v7 : ajout de Leaflet auto-hébergé (vendor/leaflet.js + .css, section Maps) au précache.
 // v6 : bump de cache (force la maj des PWA installées) + le fetch réseau de l'app shell
-// bypasse désormais le cache HTTP du navigateur ({ cache: 'no-store' }). Sinon GitHub Pages
+// bypasse désormais le cache HTTP du navigateur ({ cache: 'no-cache' } depuis v378). Sinon GitHub Pages
 // sert l'index.html avec Cache-Control: max-age=600, et le network-first du SW récupérait
 // une copie PÉRIMÉE depuis le cache HTTP → la version affichée restait figée (ex. 3.0.0)
 // malgré un nouveau déploiement.
@@ -127,24 +127,50 @@
 // vêtement dans la même catégorie, avec retour au début aux extrémités).
 // v377 : bump de cache — Motus : « Je donne ma langue au chat » devient « 👀 Voir la
 // correction » et rejoint la barre du haut, à droite de « ↻ Nouveau mot ».
-const CACHE  = 'spotifyplus-v377';
-const ASSETS = ['./', './index.html', './vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
-                './vendor/leaflet.js', './vendor/leaflet.css',
-                './vendor/motus-words.js', './vendor/motus-dico.js'];
+// v378 : DEUX caches au lieu d'un. Le précache mélangeait l'app shell (qui change à chaque
+// commit) et les fichiers de `vendor/` (qui ne changent quasiment jamais) : bumper CACHE
+// purgeait tout à l'`activate`, et l'`install` suivante retéléchargeait 1,9 Mo immuable
+// (motus-dico 1,09 Mo + sql-wasm.wasm 639 Ko + Leaflet 162 Ko) — à CHAQUE déploiement, alors
+// même que Motus est censé être chargé à la demande.
+const CACHE  = 'spotifyplus-v378';          // app shell — bumpé à chaque déploiement
+// ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
+// Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
+const VENDOR = 'spotifyplus-vendor-v1';
+const ASSETS = ['./', './index.html'];
+const VENDOR_ASSETS = ['./vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
+                       './vendor/leaflet.js', './vendor/leaflet.css',
+                       './vendor/motus-words.js', './vendor/motus-dico.js'];
+
+// `addAll` refetch tout ce qu'on lui donne : on ne lui passe donc QUE ce qui manque, sinon
+// le simple fait de réinstaller le worker repayerait les 1,9 Mo qu'on cherche à garder.
+async function primeVendor() {
+  const c = await caches.open(VENDOR);
+  const missing = [];
+  for (const u of VENDOR_ASSETS) if (!(await c.match(u))) missing.push(u);
+  if (missing.length) await c.addAll(missing);
+}
 
 self.addEventListener('install', e => {
   self.skipWaiting();
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+  // ⚠ Le vendor ne doit JAMAIS faire échouer l'install de l'app shell : une seule URL en
+  // erreur ferait rejeter `addAll` en entier et le worker ne s'installerait pas du tout.
+  e.waitUntil(Promise.all([
+    caches.open(CACHE).then(c => c.addAll(ASSETS)),
+    primeVendor().catch(() => {}),
+  ]));
 });
 
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
-      // ⚠ `spotifyplus-compiled` (le code JSX déjà compilé, écrit par l'amorçage d'index.html)
-      // est PRÉSERVÉ : sans cette exception, chaque déploiement l'effacerait juste après que la
-      // page vient de l'écrire, et l'app repayerait ~20 s de compilation à l'ouverture suivante.
-      // Ce cache se purge lui-même (l'amorçage supprime les versions autres que la sienne).
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== 'spotifyplus-compiled').map(k => caches.delete(k))))
+      // ⚠ DEUX caches sont PRÉSERVÉS en plus du courant :
+      //   · `spotifyplus-compiled` — le code JSX déjà compilé, écrit par l'amorçage
+      //     d'index.html. Sans l'exception, chaque déploiement l'effacerait juste après que la
+      //     page vient de l'écrire, et l'app repayerait ~20 s de compilation à l'ouverture
+      //     suivante. Ce cache se purge lui-même (l'amorçage supprime les autres versions).
+      //   · `VENDOR` — les fichiers immuables de vendor/ (1,9 Mo). C'est TOUT l'intérêt de
+      //     l'avoir séparé : le purger ici le ferait retélécharger à chaque déploiement.
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== VENDOR && k !== 'spotifyplus-compiled').map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -188,10 +214,15 @@ self.addEventListener('fetch', e => {
     // « shell-updated » ci-dessous, qui permet à la page de le signaler tout de suite.
     // ⚠ S'il n'y a RIEN en cache (toute première visite), on attend le réseau sans plafond :
     // il n'y a rien d'autre à servir.
-    // { cache: 'no-store' } → on court-circuite le cache HTTP du navigateur (max-age=600
-    // de GitHub Pages) pour toujours récupérer le dernier index.html déployé. On fetch par
-    // URL (pas e.request) car une Request en mode 'navigate' + init lève une exception.
-    const net = fetch(e.request.url, { cache: 'no-store' }).then(res => {
+    // { cache: 'no-cache' } → le cache HTTP du navigateur ne peut plus servir une copie
+    // périmée sans contrôle (c'est le but : GitHub Pages envoie max-age=600), mais la requête
+    // reste CONDITIONNELLE — If-None-Match part avec l'ETag connu, et un shell inchangé
+    // revient en 304 de quelques centaines d'octets.
+    // ⚠ Surtout PAS 'no-store' (l'ancien réglage) : il fait comme s'il n'existait aucun cache
+    // HTTP, donc aucun en-tête conditionnel n'est envoyé et les 3,1 Mo repartaient EN ENTIER
+    // à chaque lancement, y compris quand rien n'avait changé.
+    // On fetch par URL (pas e.request) car une Request en mode 'navigate' + init lève une exception.
+    const net = fetch(e.request.url, { cache: 'no-cache' }).then(res => {
       // Ne mettre en cache QUE les réponses OK : sinon une page 404/5xx (GitHub Pages
       // en maintenance, erreur transitoire) écraserait './index.html' en cache et serait
       // servie hors-ligne à la place de l'app.
@@ -225,8 +256,13 @@ self.addEventListener('fetch', e => {
       }).catch(() => {});
       return cached;
     })());
-  } else {
-    // Autres ressources : cache-first comme avant
+  } else if (url.origin === location.origin) {
+    // Ressources locales (vendor/, icônes, data/) : cache-first, tous caches confondus —
+    // `caches.match` sans option balaie aussi bien CACHE que VENDOR.
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
   }
+  // ⚠ Tout ce qui est CROSS-ORIGIN sort du worker sans être touché. Avant, ces requêtes
+  // passaient elles aussi par `caches.match()` : le poll player toutes les 5 s, les appels
+  // IA, TMDB, les pochettes scdn.co et les tuiles OSM payaient un aller-retour vers Cache
+  // Storage pour un résultat toujours vide — rien de tout cela n'est jamais mis en cache.
 });
