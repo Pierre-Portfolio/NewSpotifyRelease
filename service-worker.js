@@ -179,7 +179,13 @@
 // v391 : code mort. `progress` et `offlineReady` (deux états sans le moindre lecteur, le
 // second remplacé par un bouton hors ligne toujours affiché), quatre champs exposés par le
 // store que personne ne lisait, la keyframe CSS `hub-pop` et l'écriture de `ytg_scopes`.
-const CACHE  = 'spotifyplus-v391';          // app shell — bumpé à chaque déploiement
+// v392 : correctifs. L'app shell est le chemin EXACT du scope (n'importe quel dossier
+// same-origin y était assimilé) ; une ressource locale absente du précache est enfin mise en
+// cache (elle marchait en ligne et disparaissait hors ligne) ; la synchro des likes ne grille
+// plus son cooldown de 24 h après un 429 ; localStorage bloqué ne démonte plus l'app ;
+// borne de temps sur les relais LoL ; `state` OAuth à usage unique ; clés `__proto__`
+// refusées à la restauration.
+const CACHE  = 'spotifyplus-v392';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
@@ -239,6 +245,13 @@ self.addEventListener('activate', e => {
   );
 });
 
+// Chemin EXACT de l'app shell, déduit de la portée d'enregistrement du worker
+// (ex. '/NewSpotifyRelease/'). ⚠ Le test précédent était `pathname.endsWith('/')`, donc
+// N'IMPORTE QUEL dossier same-origin — '/NewSpotifyRelease/data/' ou '/vendor/' — était
+// traité comme l'app shell et sa réponse écrite sous la clé './index.html'. C'est le même
+// trou que v388 a bouché pour `mode === 'navigate'`, en plus étroit : on le ferme pour de bon.
+const SCOPE_PATH = new URL(self.registration.scope).pathname;
+
 // Au-delà de ce délai, on sert l'app shell en cache plutôt que de continuer à attendre.
 // 1,5 s : au-dessus du temps de réponse habituel en Wi-Fi (l'utilisateur reçoit alors la
 // version fraîche), en dessous du seuil où l'attente devient une panne perçue.
@@ -266,7 +279,7 @@ self.addEventListener('fetch', e => {
   // était traitée comme l'app shell et sa réponse écrite sous la clé './index.html' — le shell
   // en cache devenait ce JSON, servi comme app au premier lancement sur réseau lent.
   const isAppShell = url.origin === location.origin &&
-    (url.pathname.endsWith('/') || url.pathname.endsWith('/index.html'));
+    (url.pathname === SCOPE_PATH || url.pathname === SCOPE_PATH + 'index.html');
 
   if (isAppShell) {
     // Network-first AVEC PLAFOND DE TEMPS.
@@ -342,7 +355,23 @@ self.addEventListener('fetch', e => {
   } else if (url.origin === location.origin) {
     // Ressources locales (vendor/, icônes) : cache-first, tous caches confondus —
     // `caches.match` sans option balaie aussi bien CACHE que VENDOR.
-    e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+    // ⚠ Un MISS est désormais MIS EN CACHE. Avant, la réponse réseau était servie telle
+    // quelle sans être écrite : tout fichier de vendor/ oublié dans VENDOR_ASSETS marchait
+    // en ligne et disparaissait hors ligne, sans le moindre signal. On l'écrit dans CACHE
+    // (et non VENDOR) : il est purgé au déploiement suivant, donc une version périmée ne
+    // peut pas s'installer à demeure — c'est précisément ce que VENDOR, lui, assume.
+    // ⚠ Le worker lui-même est EXCLU : le navigateur doit toujours aller le chercher au
+    // réseau pour détecter une mise à jour.
+    const isWorker = url.pathname === SCOPE_PATH + 'service-worker.js';
+    e.respondWith(caches.match(e.request).then(r => {
+      if (r) return r;
+      return fetch(e.request).then(res => {
+        if (isWorker || !res.ok || res.type !== 'basic') return res;
+        const copy = res.clone();
+        e.waitUntil(caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {}));
+        return res;
+      });
+    }));
   }
   // ⚠ Tout ce qui est CROSS-ORIGIN sort du worker sans être touché. Avant, ces requêtes
   // passaient elles aussi par `caches.match()` : le poll player toutes les 5 s, les appels

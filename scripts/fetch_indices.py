@@ -59,7 +59,11 @@ def fetch_yahoo(symbol, start=0):
             data = json.loads(_get(url))
             meta = data["chart"]["result"][0]["meta"]
             price = meta.get("regularMarketPrice")
-            prev = meta.get("chartPreviousClose", meta.get("previousClose"))
+            # ⚠ `or` et non le défaut de `.get` : Yahoo renvoie parfois la clé
+            # `chartPreviousClose` AVEC la valeur null, et `dict.get(k, defaut)` teste la
+            # PRÉSENCE de la clé, pas sa valeur — le repli `previousClose` n'était donc
+            # jamais utilisé et la variation tombait à None alors qu'elle était calculable.
+            prev = meta.get("chartPreviousClose") or meta.get("previousClose")
             if price is None:
                 continue
             pct = ((price - prev) / prev * 100) if prev else None

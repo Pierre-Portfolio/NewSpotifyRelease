@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.3.1';
+const APP_VERSION = '12.3.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -447,8 +447,12 @@ function lsSet(key, value) {
 const DROPBOX_APP_KEY = 'x9y0bei8lo9lx5i';
 const DBX_BACKUP_PATH = '/spotifyplus-sauvegarde.json';
 function dropboxConfigured() { return !!DROPBOX_APP_KEY; }
-function dropboxConnected() { return !!localStorage.getItem('dropbox_refresh') || !!localStorage.getItem('dropbox_access'); }
-function dropboxLogout() { ['dropbox_access','dropbox_expiry','dropbox_refresh','dropbox_pkce_verifier','dropbox_state'].forEach(k => localStorage.removeItem(k)); }
+// ⚠ Gardées, comme leurs équivalents pCloud : `localStorage` LÈVE à la simple lecture
+// quand les données de site sont bloquées (Safari privé, Chrome en contexte cloisonné), et
+// `dropboxConnected` est appelée PENDANT UN RENDU (`useState(dropboxConnected)`) — un throw
+// y démontait le panneau de sauvegarde au lieu de l'afficher « non connecté ».
+function dropboxConnected() { try { return !!localStorage.getItem('dropbox_refresh') || !!localStorage.getItem('dropbox_access'); } catch { return false; } }
+function dropboxLogout() { ['dropbox_access','dropbox_expiry','dropbox_refresh','dropbox_pkce_verifier','dropbox_state'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); }
 async function dropboxLogin() {
   if (!DROPBOX_APP_KEY) return;
   const verifier  = generateRandomString(64);
@@ -717,18 +721,23 @@ const GDRIVE_SCOPE_BASE  = 'https://www.googleapis.com/auth/drive.file';
 const GDRIVE_SCOPES      = GDRIVE_SCOPE_BASE + ' ' + GDRIVE_SCOPE_READ;
 function gdriveConfigured() { return !!GDRIVE_CLIENT_ID; }
 // Connecté = token présent ET non expiré (pas de refresh token possible côté navigateur)
+// ⚠ Gardées (même raison que Dropbox/pCloud) : `gdriveConnected`, `gdriveToken` et
+// `gdriveHasScope` sont lues PENDANT UN RENDU (`useState(gdriveConnected)`, MesActifsPanel).
 function gdriveConnected() {
-  const exp = parseInt(localStorage.getItem('gdrive_expiry') || '0') || 0;
-  return !!localStorage.getItem('gdrive_access') && Date.now() < exp - 60000;
+  try {
+    const exp = parseInt(localStorage.getItem('gdrive_expiry') || '0') || 0;
+    return !!localStorage.getItem('gdrive_access') && Date.now() < exp - 60000;
+  } catch { return false; }
 }
-function gdriveToken() { return gdriveConnected() ? localStorage.getItem('gdrive_access') : null; }
-function gdriveLogout() { ['gdrive_access','gdrive_expiry','gdrive_scopes','gdrive_file_id'].forEach(k => localStorage.removeItem(k)); }
+function gdriveToken() { try { return gdriveConnected() ? localStorage.getItem('gdrive_access') : null; } catch { return null; } }
+function gdriveLogout() { ['gdrive_access','gdrive_expiry','gdrive_scopes','gdrive_file_id'].forEach(k => { try { localStorage.removeItem(k); } catch {} }); }
 // Scopes réellement accordés (renvoyés par GIS ET par le fragment du repli redirigé).
 // ⚠ Token émis AVANT 7.6.36 → aucune liste stockée : on suppose TOUT accordé (comportement
 // d'avant, l'appel API dira 403 le cas échéant) pour ne pas casser une session en cours.
 function gdriveHasScope(scope) {
   if (!gdriveConnected()) return false;
-  const granted = localStorage.getItem('gdrive_scopes');
+  let granted = null;
+  try { granted = localStorage.getItem('gdrive_scopes'); } catch {}
   return !granted || granted.split(/\s+/).indexOf(scope) !== -1;
 }
 function gdriveStoreToken(token, expiresIn, scopes) {
@@ -889,10 +898,12 @@ function ytgLogout() { YTG_LS_KEYS.concat(['ytg_state']).forEach(k => { try { lo
 // Jeton YouTube valide, ou REPLI sur un jeton Drive émis AVANT la séparation (il portait
 // encore le scope youtube) tant qu'il n'a pas expiré → pas de coupure à la mise à jour.
 function ytgToken() {
-  const exp = parseInt(localStorage.getItem('ytg_expiry') || '0') || 0;
-  const tok = localStorage.getItem('ytg_access');
-  if (tok && Date.now() < exp - 60000) return tok;
-  if (gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_YT)) return localStorage.getItem('gdrive_access');
+  try {
+    const exp = parseInt(localStorage.getItem('ytg_expiry') || '0') || 0;
+    const tok = localStorage.getItem('ytg_access');
+    if (tok && Date.now() < exp - 60000) return tok;
+    if (gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_YT)) return localStorage.getItem('gdrive_access');
+  } catch {}
   return null;
 }
 function ytgConnected() { return !!ytgToken(); }
@@ -921,7 +932,10 @@ function ytgLoginFailed(type) {
 let _ytgAutoAsked = false;
 function ytgAutoLogin() {
   if (_ytgAutoAsked || !gdriveConfigured() || ytgConnected()) return;
-  const declined = parseInt(localStorage.getItem('ytg_declined') || '0') || 0;
+  // ⚠ `lsGet` : appelée depuis un effet de rendu (ActuYoutubeSection), donc un throw
+  // (données de site bloquées) remontait jusqu'à React et démontait tout le sous-arbre —
+  // c'est ce qui rendait l'onglet Actu, et tous les suivants, inaccessibles.
+  const declined = parseInt(lsGet('ytg_declined') || '0') || 0;
   if (Date.now() - declined < 24 * 3600 * 1000) return;
   _ytgAutoAsked = true;
   loadGis()
@@ -934,7 +948,7 @@ function ytgAutoLogin() {
 if (gdriveConfigured()) loadGis().catch(() => {});
 // Retrouve l'id du fichier de sauvegarde (cache localStorage → 1 seule recherche, puis PATCH direct)
 async function gdriveFindBackupId(token) {
-  const cached = localStorage.getItem('gdrive_file_id');
+  const cached = lsGet('gdrive_file_id');
   if (cached) return cached;
   const q = encodeURIComponent(`name='${GDRIVE_BACKUP_NAME}' and trashed=false`);
   const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)&pageSize=1`, {
@@ -2795,7 +2809,9 @@ function StoreProvider({ children }) {
   const knownUrisRef              = React.useRef(new Set());
   const listenedUrisRef           = React.useRef(new Set());
   const prevUriRef                = React.useRef(null);
-  const [loopEnabled, setLoopEnabled] = React.useState(() => localStorage.getItem('spotifyplus_loop') === '1');
+  // ⚠ `lsGet`/`lsSet` et non `localStorage` nu : cet initialiseur tourne au MONTAGE de
+  // StoreProvider — un throw (données de site bloquées) empêchait React de monter du tout.
+  const [loopEnabled, setLoopEnabled] = React.useState(() => lsGet('spotifyplus_loop') === '1');
   const loopEnabledRef            = React.useRef(false);
   // Paramétrage des modules (activer/désactiver les onglets) — persisté en localStorage
   const [moduleToggles, setModuleToggles] = React.useState(() => loadModuleToggles());
@@ -2826,7 +2842,7 @@ function StoreProvider({ children }) {
   const prevNowRef                = React.useRef({ playing:false, uri:null, current:0, duration:0 });
   React.useEffect(() => {
     loopEnabledRef.current = loopEnabled;
-    localStorage.setItem('spotifyplus_loop', loopEnabled ? '1' : '0'); // persistant : survit au changement d'onglet / F5
+    lsSet('spotifyplus_loop', loopEnabled ? '1' : '0'); // persistant : survit au changement d'onglet / F5
   }, [loopEnabled]);
   // ⚠ l'effet de sync feedRef est déclaré APRÈS le useState de feed (les deps [feed] sont évaluées pendant le rendu)
 
@@ -3167,9 +3183,18 @@ function StoreProvider({ children }) {
           } catch {}
         }
       } else if (code) {
-        // Anti-CSRF : le state retourné doit correspondre à celui généré au départ
-        const stateOk = returnedState && returnedState === lsGet('pkce_state');
+        // Anti-CSRF : le state retourné doit correspondre à celui généré au départ.
+        // ⚠ USAGE UNIQUE — il est CONSOMMÉ avant la comparaison, quelle que soit l'issue
+        // (même règle que le nonce Dropbox juste au-dessus). Il ne l'était que par
+        // `exchangeCode`, donc sur le seul chemin de succès : un `state` refusé restait
+        // valide indéfiniment en localStorage, alors qu'un jeton anti-rejeu ne doit jamais
+        // resservir. Le `verifier`, lui, est lu par `exchangeCode` : on ne le jette que
+        // lorsque le flux est mort.
+        let expectedState = null;
+        try { expectedState = localStorage.getItem('pkce_state'); localStorage.removeItem('pkce_state'); } catch {}
+        const stateOk = !!returnedState && returnedState === expectedState;
         if (!stateOk) {
+          try { localStorage.removeItem('pkce_verifier'); } catch {}
           authErrSet("Contrôle anti-CSRF échoué : le « state » renvoyé par Spotify ne correspond pas à celui du départ. Cela arrive si la connexion a été lancée depuis un autre onglet/navigateur, ou si les données du site ont été effacées entre-temps.");
         }
         const ok = stateOk && await exchangeCode(code);
@@ -3595,15 +3620,31 @@ function StoreProvider({ children }) {
       const uriRows = dbAll("SELECT spotify_uri FROM tracks WHERE listened = 0 LIMIT 300");
       if (uriRows.length === 0) return;
       const uris = uriRows.map(r => r.spotify_uri).filter(Boolean);
+      let answered = 0;
       for (let i = 0; i < uris.length; i += 40) { // /me/library/contains : max 40 URIs par requête
         if (i > 0) await sleep(400); // lisse le burst d'appels au login (jusqu'à 8 batchs)
         const batch = uris.slice(i, i + 40);
         const data = await libraryContains(batch);
-        if (!data) continue; // erreur, rate-limit ou scope manquant — on garde l'état local
+        if (!data) {
+          // Erreur, scope manquant ou 429 : on garde l'état local. ⚠ Un 429 a ouvert la
+          // fenêtre `_rlUntil`, donc TOUS les batchs suivants échoueront immédiatement —
+          // inutile de dérouler la boucle et ses pauses de 400 ms pour rien.
+          if (_rlCheck()) break;
+          continue;
+        }
+        // ⚠ Spotify doit renvoyer AUTANT de booléens que d'URIs demandées. S'il en renvoie
+        // moins, `data[j]` vaut `undefined` sur la fin du lot et on écrirait `liked = 0` :
+        // des likes effacés en base sur une réponse tronquée. On saute le lot entier.
+        if (data.length !== batch.length) continue;
+        answered++;
         batch.forEach((uri, j) => {
           dbRun("UPDATE tracks SET liked = ? WHERE spotify_uri = ?", [data[j] ? 1 : 0, uri]);
         });
       }
+      // ⚠ Le cooldown de 24 h ne se pose QUE si au moins un lot a répondu. Sinon un simple
+      // 429 au premier appel (ou un jeton sans `user-library-read`) suffisait à déclarer la
+      // synchro faite et à ne plus rien retenter de la journée, sans rien avoir écrit.
+      if (!answered) return;
       await saveDB();
       localStorage.setItem('spotifyplus_likes_synced_at', Date.now().toString());
       const likedUris = new Set(dbAll("SELECT spotify_uri FROM tracks WHERE liked = 1").map(r => r.spotify_uri));
@@ -11000,7 +11041,7 @@ const OSU_LEVEL_LS = 'spotifyplus_game_osu_level';
 // préfixe `spotifyplus_game_hi_`) et fusionnent au MAX comme les autres.
 const osuHiKey = id => 'osu_' + id;
 function GameOsu() {
-  const [level, setLevel] = React.useState(() => { const v = +localStorage.getItem(OSU_LEVEL_LS); return v >= 1 && v <= OSU_LEVELS.length ? v : 2; });
+  const [level, setLevel] = React.useState(() => { const v = +lsGet(OSU_LEVEL_LS); return v >= 1 && v <= OSU_LEVELS.length ? v : 2; });
   React.useEffect(() => { try { localStorage.setItem(OSU_LEVEL_LS, String(level)); } catch {} }, [level]);
   const lvl = OSU_LEVELS[level - 1];
   const [circles, setCircles] = React.useState([]);
@@ -11150,7 +11191,7 @@ const GH_LEVELS = [
 ];
 const GH_LEVEL_LS = 'spotifyplus_game_gh_level';
 function GameGuitarHero() {
-  const [level, setLevel] = React.useState(() => { const v = +localStorage.getItem(GH_LEVEL_LS); return v >= 1 && v <= GH_LEVELS.length ? v : 2; });
+  const [level, setLevel] = React.useState(() => { const v = +lsGet(GH_LEVEL_LS); return v >= 1 && v <= GH_LEVELS.length ? v : 2; });
   React.useEffect(() => { try { localStorage.setItem(GH_LEVEL_LS, String(level)); } catch {} }, [level]);
   const lvl = GH_LEVELS[level - 1];
   const [notes, setNotes] = React.useState([]);
@@ -13636,7 +13677,7 @@ const vetTotalPrix = items => items.reduce((s, it) => s + (vetPrix(it.prix) || 0
 // coché à chaque ouverture est tout l'intérêt. ⚠ Elle ne masque que l'AFFICHAGE — les prix
 // restent saisis dans les fiches, stockés et sauvegardés ; rien n'est effacé.
 const VET_PRIX_LS = 'spotifyplus_vetement_prix';
-const vetPrixShown = () => localStorage.getItem(VET_PRIX_LS) !== 'off';   // absent = affichés
+const vetPrixShown = () => lsGet(VET_PRIX_LS) !== 'off';   // absent = affichés (lsGet : lu au rendu)
 const vetPrixSet = on => lsSet(VET_PRIX_LS, on ? 'on' : 'off');
 // ── Mode image (8.9.10, demande utilisateur) ── Bouton 🖼️ à gauche du 💶 : les fiches
 // (listes de collapses par TYPE) laissent la place à une simple grille de photos SOUS le
@@ -13644,7 +13685,7 @@ const vetPrixSet = on => lsSet(VET_PRIX_LS, on ? 'on' : 'off');
 // `vetPrixShown` : absent = mode LISTE, seule la valeur 'on' bascule en images — le mode
 // liste reste le défaut, c'est lui qui permet d'éditer les fiches.
 const VET_IMG_LS = 'spotifyplus_vetement_img';
-const vetImgMode = () => localStorage.getItem(VET_IMG_LS) === 'on';
+const vetImgMode = () => lsGet(VET_IMG_LS) === 'on';   // lsGet : lu pendant le rendu
 const vetImgSet = on => lsSet(VET_IMG_LS, on ? 'on' : 'off');
 const vetEur = n => n.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
 // counts est DÉRIVÉ des fiches : autant de fiches d'un type = son compteur d'inventaire.
@@ -17068,7 +17109,7 @@ function HistoireFiche({ f, onPatch }) {
       {!!(f.images || []).length && (
         <div>
           <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:3 }}>
-            {f.images.map((im, i) => <HistImg key={i} im={im} />)}
+            {f.images.map((im, i) => <HistImg key={im.thumb || im.url || i} im={im} />)}
           </div>
           <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:3 }}>🖼️ Google Images — un clic ouvre la page d'origine</div>
         </div>
@@ -17139,11 +17180,17 @@ function HistoirePanel() {
     const img = await frigoPhotoData(f);
     if (!img) { setErr("Cette image n'a pas pu être lue — essaie une autre photo."); return; }
     let url = ''; try { url = URL.createObjectURL(f); } catch {}
-    setPhotos(ps => ps.concat([{ url, img }]).slice(0, HISTOIRE_PHOTOS));
+    // ⚠ `id` propre (piège 4) : cette liste se SUPPRIME par la croix ✕. Avec `key={i}`,
+    // retirer la 1re vignette faisait glisser toutes les suivantes d'un cran et React
+    // réutilisait les mauvais nœuds — la croix pouvait viser une autre photo que celle
+    // qu'on voyait. Un blob URL peut être vide (createObjectURL en échec), il ne fait donc
+    // pas une clé fiable.
+    setPhotos(ps => ps.concat([{ id: 'ph' + Date.now() + Math.random().toString(36).slice(2, 7), url, img }]).slice(0, HISTOIRE_PHOTOS));
   };
-  const dropPhoto = i => setPhotos(ps => {
-    const p = ps[i]; if (p && p.url) { try { URL.revokeObjectURL(p.url); } catch {} }
-    return ps.filter((_, k) => k !== i);
+  const dropPhoto = id => setPhotos(ps => {
+    const p = ps.find(x => x && x.id === id);
+    if (p && p.url) { try { URL.revokeObjectURL(p.url); } catch {} }
+    return ps.filter(x => !x || x.id !== id);
   });
   // ⚠ On repart de `histLoad()` (le disque) et non du state : la recherche d'images est
   // asynchrone et peut aboutir APRÈS un autre enregistrement — sinon on réécrirait une
@@ -17230,10 +17277,10 @@ function HistoirePanel() {
         </div>
         {!!photos.length && (
           <div style={{ display:'flex', gap:7, flexWrap:'wrap' }}>
-            {photos.map((p, i) => (
-              <div key={i} style={{ position:'relative' }}>
+            {photos.map(p => (
+              <div key={p.id} style={{ position:'relative' }}>
                 <img src={p.url} alt="" style={{ width:74, height:74, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}`, display:'block' }} />
-                <button onClick={() => dropPhoto(i)} aria-label="Retirer cette photo" title="Retirer cette photo"
+                <button onClick={() => dropPhoto(p.id)} aria-label="Retirer cette photo" title="Retirer cette photo"
                   style={{ position:'absolute', top:-6, right:-6, width:20, height:20, borderRadius:'50%', background:C.surfaceHigh,
                     border:`1px solid ${C.border}`, color:'#e05050', fontSize:11, lineHeight:1, cursor:'pointer', padding:0 }}>×</button>
               </div>
@@ -19050,6 +19097,14 @@ function restoreFailMsg(res) {
 // - finance (historique local des prix) : FUSIONNÉ — union par série, jamais écrasé.
 // - music (table `tracks`) : UPSERT prudent — pistes du feed (en attente) + historique
 //   restaurées, état écouté/liké jamais régressé (MAX), listened_at conservé.
+// ⚠ Identifiants VENUS D'UN FICHIER : `obj['__proto__'] = v` ne crée PAS une propriété, il
+// remplace le PROTOTYPE de l'objet (setter d'Object.prototype). Une sauvegarde trafiquée avec
+// une note d'id « __proto__ » ou une sous-collection nommée ainsi voyait donc son entrée
+// disparaître en silence de l'accumulateur — et le jour où l'une de ces fusions deviendrait
+// RÉCURSIVE, ce serait une vraie pollution de prototype. Toute clé d'objet dérivée du fichier
+// passe par ici. (Les Map/Set n'ont pas ce problème, seuls les objets nus l'ont.)
+const BAD_KEYS = ['__proto__', 'constructor', 'prototype'];
+const safeKey = k => (typeof k === 'string' || typeof k === 'number') && BAD_KEYS.indexOf(String(k)) === -1;
 function applyBackup(data) {
   if (!data || data.app !== 'spotifyplus') throw new Error('format invalide');
   let artistsRestored = 0, statsRestored = false;
@@ -19194,14 +19249,14 @@ function applyBackup(data) {
   if (Array.isArray(data.notes)) {
     try {
       const local = loadNotes();
-      const byId = {};
-      for (const n of local) if (n && n.id) byId[n.id] = n;
+      const byId = new Map();   // Map : un id « __proto__ » n'y touche à aucun prototype
+      for (const n of local) if (n && safeKey(n.id)) byId.set(n.id, n);
       for (const n of data.notes) {
-        if (!n || !n.id) continue;
-        const cur = byId[n.id];
-        if (!cur || (n.updatedAt || 0) > (cur.updatedAt || 0)) byId[n.id] = n;
+        if (!n || !safeKey(n.id)) continue;
+        const cur = byId.get(n.id);
+        if (!cur || (n.updatedAt || 0) > (cur.updatedAt || 0)) byId.set(n.id, n);
       }
-      saveNotes(Object.values(byId));
+      saveNotes([...byId.values()]);
     } catch {}
   }
   // Vérificateur du mot de passe global des notes cryptées — REMPLACÉ si présent et non vide.
@@ -19223,6 +19278,7 @@ function applyBackup(data) {
     try {
       const h = loadFinHist();
       for (const k of Object.keys(data.finance.series)) {
+        if (!safeKey(k)) continue;
         const arr = data.finance.series[k];
         if (!Array.isArray(arr)) continue;
         const merged = (h.series[k] || [])
@@ -19256,6 +19312,7 @@ function applyBackup(data) {
       const local = collLoad();
       const next = { ...local };
       for (const k of Object.keys(data.collection)) {
+        if (!safeKey(k)) continue;
         const inc = Array.isArray(data.collection[k]) ? data.collection[k] : [];
         const cur = Array.isArray(next[k]) ? next[k].slice() : [];
         const seen = new Set(cur.map(x => x && x.id));
@@ -19296,7 +19353,7 @@ function applyBackup(data) {
     try {
       let local = null; try { local = JSON.parse(localStorage.getItem('spotifyplus_vetements')); } catch {}
       const localPhotos = {};
-      if (local && Array.isArray(local.items)) local.items.forEach(it => { if (it && it.id && it.photo) localPhotos[it.id] = it.photo; });
+      if (local && Array.isArray(local.items)) local.items.forEach(it => { if (it && safeKey(it.id) && it.photo) localPhotos[it.id] = it.photo; });
       const items = Array.isArray(data.vetement.items) ? data.vetement.items.map(it => (it && localPhotos[it.id]) ? { ...it, photo: localPhotos[it.id] } : it) : [];
       put('spotifyplus_vetements', { counts: data.vetement.counts || {}, items,
                                      brands: Array.isArray(data.vetement.brands) ? data.vetement.brands : ((local && local.brands) || []) });
@@ -20337,6 +20394,7 @@ function saveLolCfg(cfg) { lsSet(LOL_CFG_LS, JSON.stringify(cfg)); }
 // un statut non-2xx : les erreurs Riot sont un JSON { status:{ status_code } } que les
 // proxies relaient — indispensable pour distinguer « pas en partie » (404 Spectator),
 // « clé expirée » (401/403) et « Riot ID introuvable » (404 account).
+const LOL_PROXY_TIMEOUT_MS = 8000;   // même plafond par tentative qu'`opggGet`
 async function lolApiGet(url) {
   const full = url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(lolKey());
   const tries = [
@@ -20346,8 +20404,10 @@ async function lolApiGet(url) {
   ];
   for (const u of tries) {
     try {
-      const r = await fetch(u);
-      const t = await r.text();
+      // ⚠ Piège 28 : borne de temps sur CHAQUE tentative. Sans elle, un relais qui accepte
+      // la connexion puis ne répond jamais bloquait la carte LoL indéfiniment — les trois
+      // essais étant en série, il n'y avait même pas de repli. Même délai qu'`opggGet`.
+      const t = await fetchTimeout(u, LOL_PROXY_TIMEOUT_MS, undefined, r => r.text());
       if (!t || !t.trim()) continue;
       try {
         const j = JSON.parse(t);
@@ -22734,7 +22794,7 @@ async function ytWlSyncName(pid) {
 // `create = false` → ne CRÉE jamais la playlist (retrait : rien à créer), renvoie null si absente.
 async function ytWlPlaylistId(skipCache, create = true) {
   if (!skipCache) {
-    const cached = localStorage.getItem(YTSUB_WL_ID_LS);
+    const cached = lsGet(YTSUB_WL_ID_LS);
     if (cached) { await ytWlSyncName(cached); return cached; }
   }
   let pageToken = '';
@@ -23069,6 +23129,11 @@ function ActuYoutubeSection() {
   const [visible, setVisible] = React.useState(YTSUB_PAGE);
   const [ytTab, setYtTab]     = React.useState('video');   // 'video' (≥ 3 min) | 'short' (< 3 min)
   const [connected]           = React.useState(() => ytgConnected());   // jeton YouTube dédié (7.6.67)
+  // Id de la playlist « à regarder » (lien du pied de section). ⚠ Lu par `lsGet` et UNE fois
+  // par montage : la lecture directe de `localStorage` en plein JSX levait quand les données
+  // de site sont bloquées, et refaisait deux `getItem` à chaque rendu. `ytWlIdSet` l'écrit
+  // au premier ajout — le lien apparaît alors au montage suivant, ce qui suffit ici.
+  const [ytWlId]              = React.useState(() => lsGet(YTSUB_WL_ID_LS));
   const [player, setPlayer]   = React.useState(null);      // { queue, i } — lecteur plein écran
   // Vidéos comptées vues pendant cette session (11.3.8) → pastille « ✓ vue ». Le
   // classement, lui, est écrit dans TV Time tout de suite ; ce Set n'est que l'affichage.
@@ -23283,8 +23348,8 @@ function ActuYoutubeSection() {
         </div>}
         <div style={{ fontSize:9, color:C.dim, marginTop:8, lineHeight:1.4 }}>
           🕒 ajoute la vidéo dans la playlist{' '}
-          {localStorage.getItem(YTSUB_WL_ID_LS)
-            ? <a href={'https://www.youtube.com/playlist?list=' + encodeURIComponent(localStorage.getItem(YTSUB_WL_ID_LS))} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a>
+          {ytWlId
+            ? <a href={'https://www.youtube.com/playlist?list=' + encodeURIComponent(ytWlId)} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a>
             : <span>« {YTSUB_WL_NAME} »</span>}
           {' '}de TON compte YouTube (créée privée au 1er ajout — l'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native).
           {' '}Une vidéo lue ici <b>à moitié</b> ({Math.round(ACTU_SEEN_RATIO * 100)} %) est comptée <b>vue</b> dans TV Time (chez le vidéaste si tu suis sa chaîne, sinon dans « {YT_UNSAVED_TITLE} ») et quitte la playlist d'attente.
@@ -37906,10 +37971,12 @@ function RappelPanel() {
       {showUpcoming ? (
         upcoming.length === 0
           ? <div style={{ fontSize:11, color:C.dim, fontStyle:'italic', fontFamily:'DM Mono,monospace' }}>Aucune date à venir renseignée</div>
-          : upcoming.map((r, i) => {
+          : upcoming.map(r => {
               const b = rappelBadge(r.days);
               return (
-                <div key={i} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8 }}>
+                // ⚠ `r.key` et non l'index (piège 4) : la croix rouge ci-dessous SUPPRIME
+                // une alerte, et une clé indexée décalait tous les items suivants.
+                <div key={r.key} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 10px', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8 }}>
                   <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>
                     {r.label}
                     {r.recur && <span style={{ marginLeft:6, fontSize:8, fontFamily:'DM Mono,monospace', color:RAPPEL_PURPLE, border:`1px solid ${RAPPEL_PURPLE}55`, borderRadius:4, padding:'1px 4px', whiteSpace:'nowrap' }}>{r.recur}</span>}
@@ -39908,17 +39975,26 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     try { caches.delete(CACHE).then(again, again); } catch (_) { again(); }
   }, BOOT_WATCHDOG_MS);
 
+  // ⚠ L'ORDRE DES MAILLONS COMPTE. Le `.catch(compileAndRun)` était attaché APRÈS le `.then`
+  // qui exécute le code : il rattrapait donc aussi ce qui lève DEDANS, c'est-à-dire APRÈS que
+  // `run()` a déjà injecté le bloc — et l'app repartait alors pour une compilation et une
+  // SECONDE exécution du même module global (redéclarations `const`, double montage React,
+  // minuteurs en double). Le repli vers le chemin complet ne doit couvrir QUE la lecture du
+  // cache ; ce qui casse ensuite se termine sur `fail`, et c'est le chien de garde (qui purge
+  // et recharge une fois) qui répare.
   try {
     if (!window.caches) return compileAndRun();
-    caches.open(CACHE)
+    var lookup = caches.open(CACHE)
       .then(function (c) { return c.match(KEY); })
       .then(function (res) {
         if (!res) return null;
         var stored = res.headers.get(HASH_HDR);
         return res.text().then(function (code) { return code ? { code: code, stored: stored } : null; });
       })
+      .catch(function () { return null; });   // cache illisible → chemin complet, sans rejouer
+    lookup
       .then(function (hit) { if (hit) { fromCache = true; run(hit.code); verifyLater(hit.stored); } else compileAndRun(); })
-      .catch(compileAndRun);
+      .catch(function (e) { fail(e); });   // `fail` est réassignée plus haut (filet) → appel indirect
   } catch (e) { compileAndRun(); }
 })();
 </script>
