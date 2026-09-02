@@ -168,7 +168,10 @@
 // v388 : correctifs. L'app shell n'est plus reconnu à `mode === 'navigate'` seul (n'importe
 // quelle navigation same-origin — data/actu.json ouvert dans un onglet — écrasait la copie de
 // l'app en cache par sa réponse) ; minuteur de la course réseau/cache libéré.
-const CACHE  = 'spotifyplus-v388';          // app shell — bumpé à chaque déploiement
+// v389 : sécurité. Sauvegardes chiffrées par défaut, clés d'API masquées (👁), code d'erreur
+// OAuth seul dans le bandeau (plus de texte libre venu de l'URL), MapFrame sans
+// allow-popups-to-escape-sandbox, state Dropbox legacy refusé.
+const CACHE  = 'spotifyplus-v389';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';

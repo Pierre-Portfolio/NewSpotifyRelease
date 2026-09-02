@@ -212,7 +212,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.2.8';
+const APP_VERSION = '12.2.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3105,13 +3105,20 @@ function StoreProvider({ children }) {
       // ce cas tombait dans le `if (!token)` plus bas et affichait le login sans un mot.
       if (oauthErr && !code) {
         window.history.replaceState({}, '', window.location.pathname);
-        setAuthError('Spotify a refusé la connexion : ' + (params.get('error_description') || oauthErr) + '.');
+        // ⚠ JAMAIS `error_description` : c'est du texte libre pris dans l'URL — un lien forgé
+        // …/?error=x&error_description=<n'importe quoi> l'affichait mot pour mot dans le bandeau
+        // rouge de l'app (levier de hameçonnage : « appelez ce numéro », « ressaisissez… »).
+        // On ne montre que le CODE, réduit à un identifiant, traduit s'il est connu.
+        const oauthKnown = { access_denied: 'consentement refusé sur la page Spotify', invalid_client: 'application non reconnue par Spotify (invalid_client)',
+                             invalid_scope: 'permissions demandées refusées (invalid_scope)', server_error: 'erreur côté Spotify (server_error), réessaie', temporarily_unavailable: 'Spotify temporairement indisponible' };
+        const oauthCode = String(oauthErr).replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'inconnu';
+        setAuthError('Spotify a refusé la connexion : ' + (oauthKnown[oauthCode] || ('code « ' + oauthCode + ' »')) + '.');
         setAuthState('login');
         return;
       }
-      // ⚠ Accepte 'dropbox.<nonce>' ET l'ancien 'dropbox' nu : un consentement parti AVANT
-      // ce déploiement revient encore avec l'ancienne forme, et le refuser perdrait la
-      // connexion en cours sans rien protéger de plus (PKCE couvre déjà ce cas).
+      // Le state doit être 'dropbox.<nonce>' : l'ancien 'dropbox' nu (accepté un temps pour
+      // les consentements partis avant le nonce) tombe sur l'alerte anti-CSRF ci-dessous —
+      // c'était la porte par laquelle un lien forgé contournait le nonce, PKCE seul restant.
       if (code && String(returnedState || '').split('.')[0] === 'dropbox') {
         // Retour du consentement Dropbox (state='dropbox') : échange le code, puis reprend
         // l'init Spotify normale (le token Spotify est déjà en localStorage)
@@ -3124,7 +3131,7 @@ function StoreProvider({ children }) {
         const dbxNonce = String(returnedState || '').slice('dropbox.'.length);
         let dbxExpected = null;
         try { dbxExpected = localStorage.getItem('dropbox_state'); localStorage.removeItem('dropbox_state'); } catch {}
-        const dbxStateOk = returnedState === 'dropbox' || (!!dbxNonce && dbxNonce === dbxExpected);
+        const dbxStateOk = !!dbxNonce && dbxNonce === dbxExpected;
         let dbxOk = false;
         if (dbxStateOk) { try { dbxOk = await dropboxExchange(code); } catch { dbxOk = false; } }
         window.history.replaceState({}, '', window.location.pathname);
@@ -18482,14 +18489,21 @@ function ApiKeyEditor({ lsKey, placeholder, onChanged }) {
     setSaved(true); setTimeout(() => setSaved(false), 1500);
     if (onChanged) onChanged();   // met à jour le rouge « clé non renseignée » de la ligne
   };
+  // ⚠ Masquée par défaut (type=password) : une clé affichée en clair part dans chaque capture
+  // d'écran et se lit par-dessus l'épaule. 👁 la révèle le temps de vérifier une saisie.
+  // `autoComplete="new-password"` : évite que le navigateur propose d'enregistrer la clé
+  // comme un mot de passe de site (ce que déclenche un champ password en `off`).
+  const [show, setShow] = React.useState(false);
   return (
     <div style={{ display:'flex', alignItems:'center', gap:6, padding:'2px 0 2px 2px' }}>
       <span style={{ fontSize:10, flexShrink:0 }}>🔑</span>
-      <input type="text" value={val} placeholder={placeholder || 'Clé non renseignée'} spellCheck={false} autoComplete="off" autoCapitalize="off"
+      <input type={show ? 'text' : 'password'} value={val} placeholder={placeholder || 'Clé non renseignée'} spellCheck={false} autoComplete="new-password" autoCapitalize="off"
         onChange={e => { setVal(e.target.value); setSaved(false); }}
         onKeyDown={e => { if (e.key === 'Enter') { e.currentTarget.blur(); } }}
         onBlur={save}
         style={{ flex:1, minWidth:0, fontSize:11, fontFamily:'DM Mono,monospace', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:6, color:C.text, padding:'5px 8px' }} />
+      <button type="button" onClick={() => setShow(v => !v)} title={show ? 'Masquer la clé' : 'Afficher la clé'} aria-label={show ? 'Masquer la clé' : 'Afficher la clé'}
+        style={{ flexShrink:0, background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:6, padding:'4px 7px', fontSize:11, cursor:'pointer' }}>{show ? '🙈' : '👁'}</button>
       <button onClick={save} title="Enregistrer la clé" style={{ flexShrink:0, background: saved ? `${API_COLOR}22` : 'none', border:`1px solid ${API_COLOR}66`, color:API_COLOR, borderRadius:6, padding:'5px 9px', fontSize:11, cursor:'pointer' }}>{saved ? '✓' : '💾'}</button>
     </div>
   );
@@ -18790,10 +18804,16 @@ async function buildBackupFull() {
 // tirés au hasard à chaque chiffrement). L'enveloppe garde `app`/`version`/`exported_at`
 // en clair pour rester identifiable, tout le reste est dans `enc`.
 // ⚠ La phrase de passe n'est JAMAIS stockée — ni en localStorage, ni en mémoire entre deux
-// exports. Oubliée = sauvegarde irrécupérable, exactement comme le coffre. C'est pour ça
-// que l'option est OPT-IN et que la phrase est demandée DEUX FOIS à l'activation.
-const BACKUP_ENC_LS = 'spotifyplus_backup_enc';   // 'on' = chiffrer ; absent = en clair
-function backupEncOn() { try { return localStorage.getItem(BACKUP_ENC_LS) === 'on'; } catch { return false; } }
+// exports. Oubliée = sauvegarde irrécupérable, exactement comme le coffre : c'est pour ça
+// qu'elle est demandée DEUX FOIS, et qu'annuler la saisie propose un export EN CLAIR
+// explicitement confirmé plutôt qu'un fichier illisible.
+// ⚠ ACTIF PAR DÉFAUT (12.2.9) : un trousseau en clair sur trois clouds ne peut pas être le
+// réglage d'origine. Absent = chiffré ; seule la valeur 'off' (interrupteur 🔓 d'À propos)
+// laisse en clair — même convention que MUSIC_AUTO_LS / PLAYERBAR_LS. Les 4 appelants de
+// `backupSeal` partent tous d'un clic (export, Dropbox, Drive, pCloud) : le `prompt` ne peut
+// jamais surgir hors geste utilisateur.
+const BACKUP_ENC_LS = 'spotifyplus_backup_enc';   // absent = chiffrer ; 'off' = en clair
+function backupEncOn() { try { return localStorage.getItem(BACKUP_ENC_LS) !== 'off'; } catch { return true; } }
 function backupEncSet(on) { return lsSet(BACKUP_ENC_LS, on ? 'on' : 'off'); }
 function isSealedBackup(d) { return !!(d && d.encrypted && isVaultBlob(d.enc)); }
 // Scelle une sauvegarde si l'option est active. Renvoie l'objet TEL QUEL si elle ne l'est
@@ -18802,8 +18822,15 @@ function isSealedBackup(d) { return !!(d && d.encrypted && isVaultBlob(d.enc)); 
 async function backupSeal(data) {
   if (!backupEncOn()) return data;
   let pw = null;
-  try { pw = prompt('🔒 Phrase de passe de la sauvegarde\n\nElle protège le fichier (clés d\'API, jeton GitHub, coffre…).\n⚠ Oubliée = sauvegarde définitivement illisible. Aucun moyen de la retrouver.'); } catch {}
-  if (!pw) return data;
+  try { pw = prompt('🔒 Phrase de passe de la sauvegarde\n\nElle protège le fichier (clés d\'API, jeton GitHub, coffre…).\n⚠ Oubliée = sauvegarde définitivement illisible. Aucun moyen de la retrouver.\n\n(Annuler = proposer un export EN CLAIR.)'); } catch {}
+  if (!pw) {
+    // Saisie annulée : le chiffrement étant le défaut, un export en clair doit être un choix
+    // EXPLICITE — sinon un simple « Annuler » réflexe enverrait le trousseau en clair sur un
+    // cloud. Refus ⇒ null : rien n'est écrit nulle part (les appelants le gèrent déjà).
+    let clear = false;
+    try { clear = confirm("Exporter la sauvegarde EN CLAIR ?\n\nElle contiendra ton jeton GitHub et toutes tes clés d'API lisibles par quiconque ouvre le fichier.\n\nOK = en clair · Annuler = ne rien exporter."); } catch {}
+    return clear ? data : null;
+  }
   let again = null;
   try { again = prompt('Retape la même phrase de passe (une faute de frappe rendrait la sauvegarde illisible).'); } catch {}
   if (again !== pw) { try { alert('Les deux saisies diffèrent — sauvegarde NON chiffrée, rien n\'a été enregistré de travers. Réessaie.'); } catch {} return null; }
@@ -23263,7 +23290,7 @@ function MapFrame({ src, title, credit, color, image, note, href }) {
           ? { width:'100%', height:'100%', objectFit:'contain', background:'#000', display:'block' }
           : { width:'100%', height:'65vh', objectFit:'contain', border:`1px solid ${C.border}`, borderRadius:8, background:'#000', display:'block' } } />
     : <iframe src={src} title={title} loading="lazy"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
         style={ full
           ? { width:'100%', height:'100%', border:'none', background:'#fff', display:'block' }
           : { width:'100%', height:'65vh', border:`1px solid ${C.border}`, borderRadius:8, background:'#fff', display:'block' } } />;
