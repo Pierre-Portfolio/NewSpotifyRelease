@@ -141,7 +141,11 @@
 // jamais relue) ; manifeste et icônes rejoignent le précache vendor (notification hors
 // ligne sans icône) ; plafond de temps sur les appels IA ; contrôles des 3 lecteurs
 // factorisés ; numéro de rang du feed rendu par compteur CSS (il levait une ReferenceError).
-const CACHE  = 'spotifyplus-v381';          // app shell — bumpé à chaque déploiement
+// v382 : bump de cache — retrait du code mort (~250 lignes) : bloc « MODULE DEV · STATS
+// GITHUB » entier (doublon plus ancien de GithubStatsSection, jamais rendu), flux OAuth
+// Drive implicite legacy, table HUB_CARDS (HubHome dérive de TOGGLE_MODULES), 6 schémas IA
+// et une quinzaine de constantes/helpers sans consommateur.
+const CACHE  = 'spotifyplus-v382';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';
