@@ -204,7 +204,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.2.2';
+const APP_VERSION = '12.2.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1679,7 +1679,14 @@ function cryptoHoldTip(d, px, err) {
 // (429 player ou stop synchro min. 15 min) survit au F5 — avant, _rlUntil repartait
 // à 0 au refresh et le poll player re-hammerait une API qui venait de throttle.
 const RL_LS_KEY = 'spotifyplus_blocked_until';
-let _rlUntil  = parseInt(localStorage.getItem(RL_LS_KEY) || '0') || 0;
+// ⚠ `try` OBLIGATOIRE, et pas par prudence de principe : c'était le SEUL des ~180 accès
+// localStorage du fichier à être nu, et le seul au niveau MODULE. Dans un contexte où
+// `localStorage` LÈVE à la simple lecture (Safari en navigation privée, Chrome réglé pour
+// bloquer les données de site, iframe à stockage cloisonné), cette ligne faisait échouer
+// TOUT le script compilé avant même la première fonction : React ne montait jamais et
+// l'écran d'attente #boot restait affiché pour toujours, sans un mot (piège 1, avec une
+// cause que rien n'annonçait). Une fenêtre 429 oubliée est infiniment moins grave.
+let _rlUntil  = (() => { try { return parseInt(localStorage.getItem(RL_LS_KEY) || '0') || 0; } catch { return 0; } })();
 let _rlNotify = null;
 function _rlSet(retryMs) {
   _rlUntil = Date.now() + retryMs + 2000;
@@ -1693,9 +1700,21 @@ function _rlCheck() {
 }
 // Retry-After blindé : un header malformé donnerait parseInt→NaN → _rlUntil=NaN (guard inopérant)
 // → retry immédiat en boucle sur une API qui vient de throttle
+// ⚠ La RFC autorise DEUX formats pour Retry-After : un nombre de secondes, ou une DATE
+// HTTP. `parseInt('Wed, 21 Oct 2026 07:28:00 GMT')` ne rend pas NaN mais 21 — la fenêtre
+// s'ouvrait alors pour 21 s au lieu de la vraie échéance, et on repartait cogner une API
+// qui venait de throttle. Spotify envoie des secondes aujourd'hui, ce garde est là pour le
+// jour où ça change (ou pour un relais qui réécrit l'en-tête).
 function _parseRetryAfterMs(raw, fallbackMs) {
-  const n = parseInt(raw);
-  return Number.isFinite(n) && n >= 0 ? n * 1000 : fallbackMs;
+  const t = String(raw == null ? '' : raw).trim();
+  if (!t) return fallbackMs;
+  if (/^\d+$/.test(t)) {                       // secondes : le seul cas purement numérique
+    const n = parseInt(t, 10);
+    return Number.isFinite(n) && n >= 0 ? n * 1000 : fallbackMs;
+  }
+  const at = Date.parse(t);                    // date HTTP
+  if (Number.isFinite(at)) return Math.max(0, at - Date.now());
+  return fallbackMs;
 }
 
 async function apiGet(url, _retried = false) {
@@ -2226,8 +2245,12 @@ function loadFeedFromDB({ artistSearch = '', filterType = 'all', sortBy = 'defau
     // le motif '"<genre>"' matche l'entrée JSON exacte. Ne couvre que les titres dont
     // l'artist_name correspond à un artiste scanné (les tracks Découvertes multi-artistes
     // "A, B" ne matchent pas — assumé).
-    where.push("artist_name IN (SELECT name FROM artists_scraped WHERE genres LIKE '%' || ? || '%')");
-    params.push('"' + genre + '"');
+    // ⚠ Mêmes jokers à échapper que la recherche par artiste juste au-dessus (% _ et
+    // l'échappeur \) : sans `ESCAPE`, un genre Spotify contenant un « _ » (il y en a :
+    // « lo-fi_beats » et compagnie chez certains artistes) faisait de ce caractère un
+    // joker « n'importe quel caractère » et élargissait le filtre en silence.
+    where.push("artist_name IN (SELECT name FROM artists_scraped WHERE genres LIKE '%' || ? || '%' ESCAPE '\\')");
+    params.push('"' + genre.replace(/[\\%_]/g, m => '\\' + m) + '"');
   }
   if (filterType === 'single')     where.push("release_type = 'single'");
   else if (filterType === 'dw')    where.push("release_type = 'discover_weekly'");
@@ -2850,18 +2873,23 @@ function StoreProvider({ children }) {
     // #opt : sans filtre actif ET quand le tri demandé est déjà celui que le SQL a rendu, le
     // filtre est un pass-through et le tri ne changerait rien → on retourne le tableau tel
     // quel au lieu d'allouer + re-trier ~1000 items à chaque fois.
-    // ⚠ Le test portait sur `sortBy === 'default'` SEUL — or l'état initial est 'artist'
-    // (voir le useState plus haut) : le raccourci ne se déclenchait donc JAMAIS dans la
-    // configuration par défaut, et chaque changement de feed (un par artiste pendant une
-    // synchro) refaisait un tri complet au collateur. `loadFeedFromDB` trie déjà par
-    // `artist_name COLLATE NOCASE` et par `id` : les deux valeurs sont ici équivalentes.
     // Le chemin mémoire ci-dessous DOUBLE volontairement le filtre/tri SQL de loadFeedFromDB :
     // il reste nécessaire pour la fenêtre de debounce 150ms (feed tient encore l'ancien
     // résultat SQL) ET pour les items ajoutés par la synchro en cours (setFeed d'append qui
     // ne repasse pas par SQL). Il ne s'exécute qu'au changement de feed/filtre (useMemo).
+    // ⚠ LE RACCOURCI NE COUVRE QUE `sortBy === 'default'`. Il avait été élargi à 'artist'
+    // (le tri par défaut) au motif que `loadFeedFromDB` trie déjà par artiste — vrai du
+    // résultat SQL, FAUX du feed en cours de synchro : `setFeed` ajoute un lot par artiste
+    // scrapé SANS repasser par SQL, et rendre `feed` tel quel laissait donc ces titres
+    // empilés en bas de liste au lieu de leur place alphabétique. C'est précisément le cas
+    // que ce chemin mémoire existe pour couvrir.
+    // Ce qui est gardé de l'optimisation : quand aucun filtre n'est actif on ne fait PAS la
+    // passe `filter()` sur ~1000 items (c'est elle qui coûtait), et `sortBy === 'default'`
+    // ne paie ni clone ni tri.
     const q = artistSearch.trim().toLowerCase();   // #opt : calculé UNE fois, pas par item (~1000×)
-    if (filterType === 'all' && (sortBy === 'default' || sortBy === 'artist') && !q && !genreArtists) return feed || [];
-    let r = (feed || []).filter(item => {
+    const noFilter = filterType === 'all' && !q && !genreArtists;
+    if (noFilter && sortBy === 'default') return feed || [];
+    let r = noFilter ? (feed || []) : (feed || []).filter(item => {
       if (filterType === 'single' && item.label !== 'Single') return false;
       if (filterType === 'album'  && item.label !== 'Album')  return false;
       if (filterType === 'dw'     && item.label !== 'Découvertes') return false;
@@ -3076,8 +3104,18 @@ function StoreProvider({ children }) {
       if (code && returnedState === 'dropbox') {
         // Retour du consentement Dropbox (state='dropbox') : échange le code, puis reprend
         // l'init Spotify normale (le token Spotify est déjà en localStorage)
-        await dropboxExchange(code).catch(() => {});
+        // ⚠ RÉSULTAT TESTÉ : un `.catch(() => {})` muet renvoyait l'utilisateur sur l'app
+        // comme si tout s'était bien passé — le bouton « Connecter Dropbox » revenait
+        // simplement à son état initial, sans le moindre message, alors que la cause est
+        // toujours la même (verifier PKCE perdu, code déjà consommé, stockage plein).
+        // Spotify a déjà ce diagnostic (authErrSet), Dropbox l'a maintenant aussi.
+        let dbxOk = false;
+        try { dbxOk = await dropboxExchange(code); } catch { dbxOk = false; }
         window.history.replaceState({}, '', window.location.pathname);
+        // ⚠ `alert` et NON `setAuthError` : ce dernier n'est rendu que par `Home` (l'écran de
+        // connexion), or un retour Dropbox réussi côté Spotify enchaîne sur `connected` — le
+        // message n'aurait jamais été affiché. Même choix que `gdriveLoginFailed`.
+        if (!dbxOk) { try { alert("Connexion Dropbox impossible : le code d'autorisation n'a pas pu être échangé.\n\nRelance « Connecter Dropbox » depuis le MÊME navigateur, sans effacer les données du site entre-temps (le vérificateur PKCE y est stocké)."); } catch {} }
       } else if (code) {
         // Anti-CSRF : le state retourné doit correspondre à celui généré au départ
         const stateOk = returnedState && returnedState === localStorage.getItem('pkce_state');
@@ -4119,8 +4157,13 @@ function StoreProvider({ children }) {
     await saveDB();
     setListenStats(loadListenStatsFromDB());
     setArtists(loadArtistsFromDB());
-    // Musique restaurée → recharge le feed (en attente, tri artiste par défaut), l'historique et les likés
-    setFeed(loadFeedFromDB({ sortBy: 'artist' }));
+    // Musique restaurée → recharge le feed, l'historique et les likés.
+    // ⚠ Via `reloadFeedRef` et non un `loadFeedFromDB({ sortBy:'artist' })` en dur : celui-ci
+    // ignorait les filtres actifs ET laissait `lastQueryRef` sur l'ancienne clé de requête —
+    // l'effet debouncé considérait donc la requête inchangée et ne re-querytait JAMAIS. Avec
+    // un filtre actif, restaurer une sauvegarde affichait le feed NON filtré jusqu'au
+    // prochain changement de filtre. La ref porte toujours la version à jour de `reloadFeed`.
+    reloadFeedRef.current();
     setHistory(loadHistoryFromDB());
     setLikedTracks(loadLikedTracksFromDB());
     setModuleToggles(loadModuleToggles()); // reflète un éventuel paramétrage restauré sans reload
@@ -46644,12 +46687,59 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
     document.head.appendChild(s);
   }
 
+  // ══════════════ FILET : « l'app n'a pas monté » ══════════════
+  // Jusqu'ici, TOUT échec après le `run()` du chemin rapide était sans issue : le code
+  // injecté par `textContent` lève dans son propre script, l'erreur ne remonte pas dans la
+  // chaîne de promesses, `fail()` n'était donc jamais appelé — l'écran d'attente restait
+  // figé DÉFINITIVEMENT, et la seule sortie était d'effacer les données du site.
+  // Deux causes réelles : une entrée de cache TRONQUÉE (éviction de quota en pleine
+  // écriture des 2,75 Mo) et n'importe quelle erreur au niveau MODULE du code compilé.
+  // Ce que fait le filet :
+  //  · un écouteur `error` global écrit la vraie erreur sur l'écran d'attente ;
+  //  · au bout de BOOT_WATCHDOG_MS, si #boot est TOUJOURS là (React le vide à son premier
+  //    rendu, sans une ligne de code), et seulement si le code venait du CACHE, on purge
+  //    ce cache et on recharge UNE fois — la recompilation depuis la source répare.
+  // ⚠ Le délai est généreux (45 s) : la compilation est SYNCHRONE, elle bloque le fil
+  //   principal, donc le minuteur ne peut même pas se déclencher pendant qu'elle tourne.
+  //   Il ne mesure que le temps écoulé APRÈS que le fil est redevenu libre.
+  // ⚠ On ne recharge PAS après un échec du chemin complet (Babel injoignable, erreur de
+  //   syntaxe dans la source) : recharger recompilerait la même source cassée en boucle.
+  //   Là, seul le message compte.
+  // ⚠ Drapeau en sessionStorage : une seule tentative par onglet, jamais de boucle de
+  //   rechargement. Effacé dès que l'app a monté.
+  var BOOT_WATCHDOG_MS = 45000;
+  var RETRY_LS = 'spotifyplus_boot_retry';
+  var fromCache = false, failed = false;
+  var _fail = fail;
+  fail = function (e) { failed = true; _fail(e); };
+
+  function mounted() { return !document.getElementById('boot'); }
+
+  window.addEventListener('error', function (ev) {
+    if (mounted() || failed) return;
+    fail((ev && ev.error) || new Error((ev && ev.message) || 'erreur inconnue au démarrage'));
+  });
+
+  setTimeout(function () {
+    if (mounted()) { try { sessionStorage.removeItem(RETRY_LS); } catch (_) {} return; }
+    if (!fromCache) {
+      if (!failed) fail(new Error("L'app ne s'est pas affichée. Ouvre la console du navigateur : l'erreur exacte y est."));
+      return;
+    }
+    var retried = false;
+    try { retried = sessionStorage.getItem(RETRY_LS) === '1'; } catch (_) {}
+    if (retried) return fail(new Error('Le code mis en cache est illisible et la recompilation n\'a pas aidé. Efface les données du site puis recharge.'));
+    try { sessionStorage.setItem(RETRY_LS, '1'); } catch (_) {}
+    var again = function () { location.reload(); };
+    try { caches.delete(CACHE).then(again, again); } catch (_) { again(); }
+  }, BOOT_WATCHDOG_MS);
+
   try {
     if (!window.caches) return compileAndRun();
     caches.open(CACHE)
       .then(function (c) { return c.match(KEY); })
       .then(function (res) { return res ? res.text() : null; })
-      .then(function (code) { if (code) run(code); else compileAndRun(); })
+      .then(function (code) { if (code) { fromCache = true; run(code); } else compileAndRun(); })
       .catch(compileAndRun);
   } catch (e) { compileAndRun(); }
 })();

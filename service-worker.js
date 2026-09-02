@@ -145,7 +145,12 @@
 // GITHUB » entier (doublon plus ancien de GithubStatsSection, jamais rendu), flux OAuth
 // Drive implicite legacy, table HUB_CARDS (HubHome dérive de TOGGLE_MODULES), 6 schémas IA
 // et une quinzaine de constantes/helpers sans consommateur.
-const CACHE  = 'spotifyplus-v382';          // app shell — bumpé à chaque déploiement
+// v383 : bump de cache — correctifs. Filet d'amorçage (l'écran d'attente ne peut plus
+// rester figé sans message ni issue) ; seul accès localStorage non protégé du fichier, au
+// niveau module, qui pouvait empêcher React de monter ; ordre du feed pendant une synchro ;
+// feed non filtré après restauration ; échec Dropbox annoncé ; Retry-After au format date ;
+// jokers LIKE échappés dans le filtre par genre.
+const CACHE  = 'spotifyplus-v383';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';
