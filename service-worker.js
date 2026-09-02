@@ -165,7 +165,7 @@
 // vers vendor/doodle.js et vendor/sport-data.js, chargés à la demande (précachés avec l'app
 // shell : ils changent avec elle) ; data/*.json en stale-while-revalidate (Actu et Finance
 // s'affichent hors ligne et sans attendre le réseau).
-const CACHE  = 'spotifyplus-v386';          // app shell — bumpé à chaque déploiement
+const CACHE  = 'spotifyplus-v387';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
