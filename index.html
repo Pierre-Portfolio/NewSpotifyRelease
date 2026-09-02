@@ -131,7 +131,6 @@
   /* Page d'accueil (Hub de Pierre) — dégradé animé, blobs colorés, chips flottantes */
   @keyframes hub-blob { 0%,100% { transform:translate(0,0) scale(1); } 33% { transform:translate(3%,-4%) scale(1.12); } 66% { transform:translate(-3%,3%) scale(0.94); } }
   @keyframes hub-float { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-4px); } }
-  @keyframes hub-pop { 0% { opacity:0; transform:translateY(10px) scale(0.96); } 100% { opacity:1; transform:translateY(0) scale(1); } }
   @keyframes hub-shine { to { background-position:200% center; } }
   .hub-title { background:linear-gradient(100deg,#1ed760,#38c98a,#2fc1c1,#4ea3f5,#6f7bf5,#b06cf5,#f5813c,#ee6a48,#1ed760); background-size:200% auto; -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; color:transparent; animation:hub-shine 6s linear infinite; }
   .hub-blob { position:absolute; border-radius:50%; filter:blur(60px); opacity:0.5; animation:hub-blob 14s ease-in-out infinite; pointer-events:none; }
@@ -212,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.3.0';
+const APP_VERSION = '12.3.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -692,7 +691,8 @@ async function pcloudDownload() {
 //   sont isolés des autres API Google), rien n'a changé côté client OAuth.
 //   → DEUX consentements et DEUX JETONS SÉPARÉS, chacun dans ses propres clés localStorage :
 //     • Drive  : gdrive_access / gdrive_expiry / gdrive_scopes  (drive.file [+ drive.readonly])
-//     • YouTube: ytg_access    / ytg_expiry    / ytg_scopes     (youtube seul)
+//     • YouTube: ytg_access    / ytg_expiry                    (youtube seul — pas de scopes
+//       mémorisés : il n'y en a qu'un, cf. ytgStoreToken)
 //   Un seul jeton ne peut PAS couvrir les deux (même en consentement incrémental : le
 //   include_granted_scopes referait une requête mixte → même erreur).
 // ⚠ 7.6.82 — LA SÉPARATION DES JETONS NE SUFFISAIT PAS, le bug 400 persistait : GIS met
@@ -873,11 +873,15 @@ function gdriveAutoLogin() {
 // d'en-tête). Le scope youtube a donc son PROPRE consentement et son propre jeton, stocké
 // dans les clés ytg_* — même mécanique que Drive (popup GIS, ~1 h, pas de refresh token).
 const YTG_LS_KEYS = ['ytg_access', 'ytg_expiry', 'ytg_scopes'];
-function ytgStoreToken(token, expiresIn, scopes) {
+// ⚠ Les scopes accordés ne sont PAS mémorisés, contrairement à Drive : le consentement
+// YouTube n'en porte qu'un seul (GDRIVE_SCOPE_YT), donc l'existence du jeton vaut réponse et
+// rien n'interroge jamais `ytg_scopes` — au contraire de `gdriveHasScope`, qui doit choisir
+// entre drive.file et drive.readonly. La clé reste dans YTG_LS_KEYS pour que la déconnexion
+// nettoie les installations qui l'ont encore.
+function ytgStoreToken(token, expiresIn) {
   try {
     localStorage.setItem('ytg_access', token);
     localStorage.setItem('ytg_expiry', String(Date.now() + (parseInt(expiresIn || '3600') || 3600) * 1000));
-    if (scopes) localStorage.setItem('ytg_scopes', scopes);
     localStorage.removeItem('ytg_declined');
   } catch {}
 }
@@ -2767,12 +2771,6 @@ function StoreProvider({ children }) {
   // Raison du dernier échec de connexion Spotify — affichée sur l'écran de connexion
   const [authError, setAuthError] = React.useState('');
   // ── MODE HORS LIGNE (7.6.93) ─────────────────────────────────────────────────────
-  // `offlineReady` : un jeton Spotify EXISTE mais /me n'a pas répondu (panne réseau /
-  // passerelle). L'écran de connexion propose alors « Continuer hors ligne » au lieu de
-  // n'offrir qu'un nouvel aller-retour OAuth qui échouerait pareil.
-  // `offline` : on tourne SANS profil vérifié — tout le hub local (DB, feed, TV Time,
-  // Note, Frigo, Stats…) fonctionne, seules les requêtes Spotify échoueront.
-  const [offlineReady, setOfflineReady] = React.useState(false);
   const [offline,      setOffline]      = React.useState(false);
 
   const [dbReady,  setDbReady]          = React.useState(false);
@@ -2837,7 +2835,6 @@ function StoreProvider({ children }) {
   const [likedTracks,   setLikedTracks] = React.useState([]);
   const [history,       setHistory]     = React.useState([]); // titres écoutés non purgés, plus récent en haut
   const [artists,       setArtists]     = React.useState([]); // artistes scrappés (table artists_scraped) + métadonnées
-  const [progress,      setProgress]    = React.useState(0);
   const [currentArtist, setCurrentArtist] = React.useState('');
   const [statusMsg,     setStatusMsg]   = React.useState('Prêt.');
   const [statusMode,    setStatusMode]  = React.useState('green');
@@ -3204,14 +3201,12 @@ function StoreProvider({ children }) {
           if (st === 403) msg += " → ouvre developer.spotify.com/dashboard, ton appli, « User Management », et ajoute-toi (nom + e-mail du compte Spotify) ; en Development Mode chaque compte doit y figurer.";
           if (st === 401) msg += " → le jeton a été refusé : déconnecte-toi puis reconnecte-toi.";
           setAuthError(msg);
-          // ⚠ 7.6.93 — le jeton EXISTE : la session n'est pas jetée et l'écran de connexion
-          // propose « Continuer hors ligne » plutôt que d'être un cul-de-sac (cf. offlineReady).
-          setOfflineReady(true);
+          // ⚠ 7.6.93 — le jeton EXISTE : la session n'est PAS jetée, et l'écran de connexion
+          // affiche de toute façon « 📴 Continuer sans Spotify » : ce n'est pas un cul-de-sac.
           setAuthState('login');
         }
       } catch (e) {
         setAuthError('Échec de la connexion à Spotify : ' + ((e && e.message) || 'erreur inconnue') + '.');
-        setOfflineReady(true);
         setAuthState('login');
       }
     })().catch(e => {
@@ -3220,7 +3215,6 @@ function StoreProvider({ children }) {
       // toujours — écran de chargement sans issue, et le filet d'amorçage n'y voit rien puisque
       // React a déjà remplacé #boot. On retombe sur l'écran de connexion avec la cause.
       setAuthError('Démarrage interrompu : ' + ((e && e.message) || 'erreur inconnue') + '.');
-      setOfflineReady(true);
       setAuthState('login');
     });
   }, []);
@@ -3757,7 +3751,7 @@ function StoreProvider({ children }) {
     const { skipCount = 0, resumeUrl = null, resumeOffset = 0 } = options;
     setResumableSession(null);
     setSync('running');
-    setLogs([]); setProgress(0);
+    setLogs([]);
     setStats({ artists:0, total:0, releases:0, tracks:0 });
     setEta(''); setStatus('Vérification du compte…', 'pulse');
 
@@ -3893,7 +3887,6 @@ function StoreProvider({ children }) {
           const artist = artists[i];
           artistsScanned++;
           setStats(s => ({ ...s, artists: artistsScanned }));
-          setProgress(Math.min(98, (artistsScanned / totalArtists) * 100));
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
@@ -4136,7 +4129,6 @@ function StoreProvider({ children }) {
         }
       }
 
-      setProgress(100);
       if (totalTracks === 0) {
         setStatus('Terminé — aucune nouvelle sortie.', 'green');
         log('Aucune sortie trouvée dans cette période.', 'info');
@@ -4333,11 +4325,11 @@ function StoreProvider({ children }) {
   // VRAIMENT. ⚠ Ne PAS y remettre une valeur qui bouge à intervalle régulier.
   const api = React.useMemo(() => ({
     ...stableFns,
-    authState, user, otherTab, authError, offline, offlineReady, enterOffline,
-    syncState, scraping, paused, rlWaiting, blockedUntil,
+    authState, user, otherTab, authError, offline, enterOffline,
+    scraping, paused, rlWaiting, blockedUntil,
     stats, dailyScrapings, quotaUntil, feed,
     delayChoice, setDelayChoice,
-    listenStats, setListenStats,
+    listenStats,
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
@@ -4345,17 +4337,17 @@ function StoreProvider({ children }) {
     dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
-    likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
+    likedTracks, history, artists, reloadArtists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, feedIndex, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, genreFilter, setGenreFilter,
     resumableSession,
   }), [
     stableFns,
-    authState, user, otherTab, authError, offline, offlineReady, enterOffline,
-    syncState, scraping, paused, rlWaiting, blockedUntil,
+    authState, user, otherTab, authError, offline, enterOffline,
+    scraping, paused, rlWaiting, blockedUntil,
     stats, dailyScrapings, quotaUntil, feed,
     delayChoice, setDelayChoice,
-    listenStats, setListenStats,
+    listenStats,
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
@@ -4363,7 +4355,7 @@ function StoreProvider({ children }) {
     dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
-    likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
+    likedTracks, history, artists, reloadArtists, navigateFeed, markListened,
     filteredFeed, filteredFeedIndex, feedIndex, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, genreFilter, setGenreFilter,
     resumableSession,
@@ -4371,8 +4363,8 @@ function StoreProvider({ children }) {
   // Avancement de la synchro — même patron que `now` : mémoïsé à part, il ne réveille que
   // les trois panneaux du collapse « ⚙ Scrapping ».
   const syncInfo = React.useMemo(() => ({
-    progress, currentArtist, statusMsg, statusMode, nextCall, nextCallTotal, eta, logs,
-  }), [progress, currentArtist, statusMsg, statusMode, nextCall, nextCallTotal, eta, logs]);
+    currentArtist, statusMsg, statusMode, nextCall, nextCallTotal, eta, logs,
+  }), [currentArtist, statusMsg, statusMode, nextCall, nextCallTotal, eta, logs]);
   // ⚠ NowCtx et SyncCtx sont IMBRIQUÉS dans StoreCtx et enveloppent le MÊME `children` :
   // quand `now` (ou le décompte, ou une ligne de log) change, StoreProvider se re-rend mais
   // `api` garde son identité (rien ne se propage côté store) et la référence de `children`
@@ -17395,8 +17387,8 @@ function Home({ isMobile }) {
               </span>
             </button>
             {/* ⚠ TOUJOURS affiché (demande utilisateur) : tout le hub hors Musique est local,
-                donc l'entrée hors ligne ne dépend plus de `offlineReady` (jeton présent mais
-                /me muet). Sans jeton, `enterOffline` ouvre simplement le hub sans profil.
+                donc l'entrée hors ligne ne dépend d'AUCUNE condition. Sans jeton,
+                `enterOffline` ouvre simplement le hub sans profil.
                 Hauteur = la MOITIÉ du CTA Spotify. */}
             <button onClick={enterOffline}
               style={{ width:'100%', height:ctaH/2, marginTop:8, background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.22)', borderRadius:10, padding:0, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:7, color:'#c9c9d6' }}>

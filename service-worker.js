@@ -176,7 +176,10 @@
 // (l'autosave d'une note cryptée repayait 600k itérations par pause de frappe) ; journal
 // d'écoutes en nombres bruts + cache mémoire ; index type→fiches dans Vêtement ; sondes du
 // précache vendor en parallèle.
-const CACHE  = 'spotifyplus-v390';          // app shell — bumpé à chaque déploiement
+// v391 : code mort. `progress` et `offlineReady` (deux états sans le moindre lecteur, le
+// second remplacé par un bouton hors ligne toujours affiché), quatre champs exposés par le
+// store que personne ne lisait, la keyframe CSS `hub-pop` et l'écriture de `ytg_scopes`.
+const CACHE  = 'spotifyplus-v391';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
