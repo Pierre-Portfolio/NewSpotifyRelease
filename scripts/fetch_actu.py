@@ -40,6 +40,22 @@ def _get(url, timeout=TIMEOUT):
         return r.read().decode("utf-8", "replace")
 
 
+# Relais publics empruntés depuis le dernier `via_reset()`. Ce que renvoie un relais est
+# committé dans le dépôt puis servi depuis l'origine de l'app : le rendu côté client est sûr
+# (React échappe le texte, `safeHref` filtre les liens), mais un relais défaillant ou hostile
+# pourrait faire passer un titre crédible pointant vers un site d'hameçonnage. On enregistre
+# donc le chemin réellement pris, section par section, et l'app l'affiche (ActuViaNotice).
+_VIA = set()
+
+
+def via_reset():
+    _VIA.clear()
+
+
+def via_seen():
+    return sorted(_VIA)
+
+
 def get_any(url):
     """Direct d'abord (les runners passent en général), puis proxies HTTP publics."""
     enc = urllib.parse.quote(url, safe="")
@@ -48,10 +64,12 @@ def get_any(url):
         "https://api.codetabs.com/v1/proxy/?quest=" + enc,
         "https://api.allorigins.win/raw?url=" + enc,
     ]
-    for u in tries:
+    for i, u in enumerate(tries):
         try:
             t = _get(u)
             if t and t.strip():
+                if i:
+                    _VIA.add(u.split("/")[2])
                 return t
         except Exception as e:  # noqa: BLE001 — on tente la source suivante
             print(f"   {u.split('/')[2]}: {e}", file=sys.stderr)
@@ -193,7 +211,10 @@ def og_image(article_url):
         m = re.search(pat, html, re.I)
         if m:
             url = urllib.parse.urljoin(base, htmllib.unescape(m.group(1)).strip())
-            if url.startswith("http"):
+            # ⚠ HTTPS obligatoire : `img-src` de la CSP ne liste que des origines https, une
+            # URL en http clair s'afficherait cassée côté app. `startswith("http")` laissait
+            # justement passer http:// — d'où des vignettes mortes.
+            if url.startswith("https://"):
                 return url
     return None
 
@@ -559,8 +580,10 @@ def main():
         "insolite": fetch_insolite,
     }
     out = {"updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    via = {}
     ok = 0
     for key, fn in sources.items():
+        via_reset()
         try:
             val = fn()
         except Exception as e:  # noqa: BLE001
@@ -570,6 +593,10 @@ def main():
         if got:
             out[key] = val
             ok += 1
+            relays = via_seen()
+            if relays:
+                via[key] = relays
+                print(f"   ⚠ {key} lu via relais public : {', '.join(relays)}", file=sys.stderr)
             n = len(val["items"]) if isinstance(val, dict) else len(val)
             print(f"{key}: {n} entrées")
         else:
@@ -602,6 +629,8 @@ def main():
               f"{direct} liens directs linkedin.com")
     out["images"] = new_cache
     out["links"] = links_new
+    # Provenance par section : {} = tout a été lu en direct (cf. ActuViaNotice côté app).
+    out["via"] = via
     total = sum(len(out.get(k) or []) for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite"))
     withimg = sum(1 for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite")
                   for a in (out.get(k) or []) if a.get("image"))

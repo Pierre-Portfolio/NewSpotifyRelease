@@ -134,7 +134,9 @@
 // même que Motus est censé être chargé à la demande.
 // v379 : bump de cache — lot de correctifs (jeton Spotify/Dropbox non écrit en silence sur
 // stockage plein, clés de jour en heure locale, filtre par genre en mémoire).
-const CACHE  = 'spotifyplus-v379';          // app shell — bumpé à chaque déploiement
+// v380 : bump de cache — durcissement sécurité (no-referrer sur les images à hôte
+// arbitraire, provenance des sources d'actu, garde same-origin de MapFrame, repli IA annoncé).
+const CACHE  = 'spotifyplus-v380';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';
