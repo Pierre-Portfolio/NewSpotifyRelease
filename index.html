@@ -49,6 +49,16 @@
   .logs-scroll::-webkit-scrollbar-track { background:#111; border-radius:99px; }
   .logs-scroll::-webkit-scrollbar-thumb { background:#3a3a3a; border-radius:99px; }
 
+  /* ── Numéro de rang du feed, tenu par le NAVIGATEUR ─────────────────────────────
+     Le rang est purement décoratif, mais le passer en prop (`i`) à <FeedItem> lui donnait
+     une prop qui change pour TOUS les titres suivant une suppression : la comparaison
+     superficielle de React.memo échouait alors sur chacun d'eux. Un compteur CSS donne le
+     même numéro sans qu'aucune prop ne bouge. Les bannières de date intercalées
+     n'incrémentent rien, la numérotation reste donc continue. */
+  .feed-list { counter-reset: feedrow; }
+  .feed-row  { counter-increment: feedrow; }
+  .feed-num::before { content: counter(feedrow); }
+
   /* ── Écran d'attente (avant le montage de React) ────────────────────────────────
      Le bloc de l'app est compilé DANS le navigateur : entre l'affichage du HTML et le
      premier rendu React, il s'écoule plusieurs secondes pendant lesquelles #root est vide.
@@ -194,7 +204,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.2.0';
+const APP_VERSION = '12.2.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2095,13 +2105,17 @@ function dbRun(sql, params = []) {
   _db.run(sql, params);
 }
 
+// ⚠ `try/finally` : sans lui, une requête qui LÈVE (colonne absente après une migration
+// ratée, base corrompue) sortait de la fonction sans libérer le statement — chaque erreur
+// fuyait sa poignée côté WASM, et sql.js garde toute la base en RAM.
 function dbAll(sql, params = []) {
   const stmt = _db.prepare(sql);
-  if (params.length) stmt.bind(params);
-  const rows = [];
-  while (stmt.step()) rows.push(stmt.getAsObject());
-  stmt.free();
-  return rows;
+  try {
+    if (params.length) stmt.bind(params);
+    const rows = [];
+    while (stmt.step()) rows.push(stmt.getAsObject());
+    return rows;
+  } finally { stmt.free(); }
 }
 
 // ⚠ NE PASSE PAS par dbAll : celui-ci convertit TOUTES les lignes du résultat en objets
@@ -2109,10 +2123,10 @@ function dbAll(sql, params = []) {
 // construite pour rien. Ici on avance d'un seul cran et on libère.
 function dbGet(sql, params = []) {
   const stmt = _db.prepare(sql);
-  if (params.length) stmt.bind(params);
-  const row = stmt.step() ? stmt.getAsObject() : null;
-  stmt.free();
-  return row;
+  try {
+    if (params.length) stmt.bind(params);
+    return stmt.step() ? stmt.getAsObject() : null;
+  } finally { stmt.free(); }
 }
 
 function loadListenStatsFromDB() {
@@ -2244,7 +2258,13 @@ function loadFeedFromDB({ artistSearch = '', filterType = 'all', sortBy = 'defau
   let order = 'id ASC';
   if (sortBy === 'date_asc')    order = 'release_date ASC, id ASC';
   else if (sortBy === 'artist') order = 'artist_name COLLATE NOCASE ASC, id ASC';
-  const sql = `SELECT * FROM tracks WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 1000`;
+  // ⚠ Colonnes ÉNUMÉRÉES et non `SELECT *` : `mapFeedRow` n'en lit que 10, et sql.js
+  // matérialise chaque ligne en objet JavaScript — sur 1 000 titres, `listened`,
+  // `listened_at` et `id` étaient construits puis jetés à chaque requête (et il y en a une
+  // par changement de filtre, de tri ou de recherche).
+  const sql = `SELECT spotify_uri, artist_name, title, release_title, release_type,
+                      release_date, cover_url, duration_ms, liked, added_at
+               FROM tracks WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 1000`;
   return dbAll(sql, params).map(mapFeedRow);
 }
 
@@ -19187,6 +19207,27 @@ function aiPartsToOpenAi(parts) {
     { type:'text', text },
   ];
 }
+// ── Plafond de temps sur TOUT appel IA (piège 28) ─────────────────────────────
+// ⚠ Sans lui, la chaîne de replis ne sert à rien : `geminiGenerate` ne passe au fournisseur
+// suivant que sur un `throw`, jamais sur une lenteur. Une connexion qui PEND (fournisseur
+// saturé, réseau mobile qui décroche sans couper) laissait donc le module tourner
+// indéfiniment sur son spinner, sans jamais essayer les 7 autres IA configurées.
+// 2 min : au-dessus du pire cas légitime (Gemini qui INGÈRE une vidéo YouTube via
+// `file_data`, l'appel le plus lourd de l'app), très en dessous d'une attente perçue
+// comme une panne. Le message doit être reconnaissable dans la feuille de résumé.
+const AI_TIMEOUT_MS = 120000;
+async function aiFetch(url, init, label) {
+  const ctrl  = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS) : null;
+  try {
+    return await fetch(url, ctrl ? Object.assign({}, init, { signal: ctrl.signal }) : init);
+  } catch (e) {
+    // AbortError → message explicite ; le repli sur le fournisseur suivant se fait tout seul
+    // puisque `geminiGenerate` attrape n'importe quel throw.
+    if (e && e.name === 'AbortError') throw new Error(`${label || 'IA'} n'a pas répondu en ${AI_TIMEOUT_MS / 1000} s.`);
+    throw e;
+  } finally { if (timer) clearTimeout(timer); }
+}
 async function aiOpenAiChat(prov, parts) {
   const key = aiProviderKey(prov);
   if (!key) throw new Error('NO_KEY');
@@ -19194,11 +19235,11 @@ async function aiOpenAiChat(prov, parts) {
   const model  = (hasImg && prov.visionModel) ? prov.visionModel : prov.model;
   // ⚠ `url` peut être une FONCTION (Cloudflare : l'identifiant de compte est dans le chemin).
   const url = typeof prov.url === 'function' ? prov.url(aiLs(prov.ls2)) : prov.url;
-  const r = await fetch(url, {
+  const r = await aiFetch(url, {
     method:'POST',
     headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + key },
     body: JSON.stringify({ model, messages:[{ role:'user', content: aiPartsToOpenAi(parts) }], temperature:0.3 }),
-  });
+  }, prov.name);
   if (!r.ok) {
     if (r.status === 401 || r.status === 403) throw new Error(`Clé ${prov.name} invalide ou non autorisée.`);
     if (r.status === 429) throw new Error(`Quota ${prov.name} atteint — réessaie plus tard.`);
@@ -19228,7 +19269,7 @@ async function geminiCall(parts, opts) {
   const fails = [];
   for (const m of models) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(key)}`;
-    let r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+    let r = await aiFetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) }, 'Gemini');
     // ⚠ 11.4.6 — UN 500/503 N'EST PAS UNE ERREUR DE NOTRE CÔTÉ : c'est une panne passagère
     // de Google, et elle tombe surtout sur le RÉSUMÉ DE VIDÉO (« Erreur IA (HTTP 500) »
     // signalé par l'utilisateur) — ingérer une vidéo YouTube est ce que l'API fait de plus
@@ -19238,7 +19279,7 @@ async function geminiCall(parts, opts) {
     // renvoyer « clé invalide ».
     if (r.status >= 500) {
       await new Promise(ok => setTimeout(ok, GEMINI_5XX_WAIT_MS));
-      r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+      r = await aiFetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) }, 'Gemini');
     }
     if (r.status === 404 || r.status === 403 || r.status >= 500) { fails.push(`${m} → ${r.status}`); continue; }
     if (!r.ok) {
@@ -20040,7 +20081,7 @@ function ReventePanel() {
         let fileId;
         try {
           fileId = await gdriveUploadMedia(token, { name: revPhotoName(id, next, blob.type), parentId: folder, blob });
-        } catch (e) {
+        } catch {
           // Dossier caché disparu côté Drive → on oublie l'id mémorisé et on retente 1×.
           gdriveHubFolderReset(REV_DRIVE_SUB);
           folder = await gdriveHubSubfolder(token, REV_DRIVE_SUB);
@@ -24616,34 +24657,45 @@ function HubHome({ isMobile, onGo, disabled }) {
 // ════════════════════════════════════════════════
 // PLAYER BARS
 // ════════════════════════════════════════════════
-function MobilePlayer() {
-  const { feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, setTrackLiked, likedTracks, markListened } = useStore();
+// ── CONTRÔLES DE LECTURE PARTAGÉS PAR LES 3 LECTEURS ──────────────────────────
+// `MobilePlayer`, `PlayerBar` et `CompactPlayer` répétaient MOT POUR MOT le même effet
+// « ce titre est-il liké ? » et les mêmes `togglePlayPause` / `prevTrack` / `nextTrack` /
+// `toggleLoop` / `toggleLike` — ~60 lignes chacun. Le risque n'était pas la longueur mais
+// la DÉRIVE : `PlayerBar` et `CompactPlayer` avaient gagné un `if (!now) return` que
+// `MobilePlayer` n'avait pas, et rien ne garantissait qu'un correctif de l'auto-avance
+// (le `leaving` passé à `markListened` avant de jouer le suivant) atterrisse dans les trois.
+// ⚠ `opts.like === false` coupe l'effet de like : `PlayerBar` (desktop) n'affiche pas de
+// cœur et ne doit donc PAS dépenser un `/me/library/contains` à chaque changement de titre.
+// L'effet reste déclaré dans tous les cas (règle des hooks), il ne fait juste rien.
+function usePlayerControls(opts) {
+  const wantLike = !(opts && opts.like === false);
+  const { feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled,
+          seek, setTrackLiked, likedTracks, markListened } = useStore();
   const now = useNow();
   const [isLiked, setIsLiked] = React.useState(false);
-  // Jeu plein écran monté (Doodle Jump) → barre masquée même si Spotify joue.
-  const playerHidden = usePlayerHidden();
 
-  // Vérifier si le titre en cours est liké — local d'abord, API seulement si inconnu
+  // Titre en cours liké ? Local d'abord (la DB fait foi), API seulement si inconnu.
   React.useEffect(() => {
+    if (!wantLike) return;
     const feedItem = now?.uri ? feed.find(f => f.spotifyUri === now.uri) : null;
     const inLocal  = likedTracks.some(t => t.spotifyUri === now?.uri) || !!feedItem?.liked;
     setIsLiked(inLocal);
     if (!now?.uri) return;
-    // Titre connu localement (feed ou likés) : la DB fait foi, pas besoin d'une
-    // requête /me/library/contains à chaque changement de titre
+    // Titre connu localement (feed ou likés) : pas besoin d'un /me/library/contains.
     if (feedItem || inLocal) return;
     libraryContains([now.uri])
       .then(data => { if (data) setIsLiked(data[0]); })
       .catch(() => {});
-  }, [now?.uri]);
+  }, [now?.uri, wantLike]);
 
-  if (playerHidden || !now) return null;
-
-  const _cuMob = _effUri(now.uri);
-  const currentIndex = _cuMob ? (filteredFeedIndex.get(_cuMob) ?? -1) : -1;
+  // ⚠ Curseur optimiste `_effUri` : le poll player est périmé jusqu'à 5 s, `_navUri` prend
+  // le relais tant qu'il est frais (voir _effUri).
+  const _cu = _effUri(now?.uri);
+  const currentIndex = _cu ? (filteredFeedIndex.get(_cu) ?? -1) : -1;
   const hasFeed      = filteredFeed.length > 0;
 
   const togglePlayPause = async () => {
+    if (!now) return;
     if (now.playing) await apiPut('https://api.spotify.com/v1/me/player/pause');
     else             await apiPut('https://api.spotify.com/v1/me/player/play');
   };
@@ -24668,7 +24720,7 @@ function MobilePlayer() {
     await apiPut(`https://api.spotify.com/v1/me/player/repeat?state=${next ? 'track' : 'off'}`);
   };
   const toggleLike = async () => {
-    if (!now.uri) return;
+    if (!now?.uri) return;
     if (isLiked) {
       const res = await libraryRemove(now.uri);
       if (libraryWriteFailed(res)) return;
@@ -24681,6 +24733,19 @@ function MobilePlayer() {
       setTrackLiked(now.uri, true);
     }
   };
+  // `seek` est réexposé tel quel : les trois lecteurs ont leurs propres boutons de saut
+  // (+1:00 sur mobile, la barre de progression sur desktop), qui n'ont rien de commun.
+  return { now, filteredFeed, currentIndex, hasFeed, isLiked, loopEnabled, seek,
+           togglePlayPause, prevTrack, nextTrack, toggleLoop, toggleLike };
+}
+
+function MobilePlayer() {
+  const { now, filteredFeed, currentIndex, hasFeed, isLiked, loopEnabled, seek,
+          togglePlayPause, prevTrack, nextTrack, toggleLoop, toggleLike } = usePlayerControls();
+  // Jeu plein écran monté (Doodle Jump) → barre masquée même si Spotify joue.
+  const playerHidden = usePlayerHidden();
+
+  if (playerHidden || !now) return null;
 
   const btnCtrl = { background:'none', border:'none', cursor:'pointer', padding:10, display:'flex', alignItems:'center', justifyContent:'center' };
 
@@ -24752,46 +24817,13 @@ function MobilePlayer() {
 }
 
 function PlayerBar() {
-  const { feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled, seek, markListened } = useStore();
-  const now = useNow();
+  // ⚠ `like:false` : la barre desktop n'affiche pas de cœur — inutile de dépenser un
+  // /me/library/contains à chaque changement de titre.
+  const { now, filteredFeed, currentIndex, hasFeed, loopEnabled, seek,
+          togglePlayPause, prevTrack, nextTrack, toggleLoop } = usePlayerControls({ like:false });
   // Jeu plein écran monté (Doodle Jump) → barre masquée même si Spotify joue.
   const playerHidden = usePlayerHidden();
 
-  const togglePlayPause = async () => {
-    if (!now) return;
-    if (now.playing) {
-      await apiPut('https://api.spotify.com/v1/me/player/pause');
-    } else {
-      await apiPut('https://api.spotify.com/v1/me/player/play');
-    }
-  };
-
-  const toggleLoop = async () => {
-    const next = !loopEnabled;
-    setLoopEnabled(next);
-    await apiPut(`https://api.spotify.com/v1/me/player/repeat?state=${next ? 'track' : 'off'}`);
-  };
-
-  const _cu = _effUri(now?.uri);
-  const currentIndex = _cu ? (filteredFeedIndex.get(_cu) ?? -1) : -1;
-
-  const prevTrack = async () => {
-    const idx = currentIndex > 0 ? currentIndex - 1 : filteredFeed.length - 1;
-    if (filteredFeed[idx]) await playTrack(filteredFeed[idx].spotifyUri);
-  };
-  const nextTrack = async () => {
-    // URI du titre quitté (avant calcul du suivant) : on le retire tout de suite, sans
-    // attendre le poll 5s. Couvre le double-clic rapide où now.uri saute le titre intermédiaire.
-    const leaving = currentIndex >= 0 ? filteredFeed[currentIndex]?.spotifyUri : null;
-    const idx = currentIndex >= 0 && currentIndex < filteredFeed.length - 1 ? currentIndex + 1 : 0;
-    if (!filteredFeed[idx]) return;
-    await playTrack(filteredFeed[idx].spotifyUri);
-    const dur = filteredFeed[idx].duration_ms;
-    if (dur > 0) setTimeout(() => seek(Math.floor(dur * 0.25)), 400);
-    if (leaving) markListened(leaving);
-  };
-
-  const hasFeed = filteredFeed.length > 0;
   const btnStyle = active => ({ background:'none', border:'none', cursor: active ? 'pointer' : 'default', display:'flex', alignItems:'center', justifyContent:'center', padding:6, borderRadius:6, opacity: active ? 0.7 : 0.25 });
 
   if (playerHidden) return null;
@@ -25240,7 +25272,7 @@ const FeedItem = React.memo(function FeedItem({ item, isMobile=false, isNowPlayi
   const swipeColor = swipeDx < -30 ? '#e0505033' : swipeDx > 30 ? `${C.accent}33` : 'transparent';
 
   return (
-    <div className={item.removing ? 'feed-removing' : ''}
+    <div className={'feed-row' + (item.removing ? ' feed-removing' : '')}
       title="Lancer ce titre"
       style={{ display:'flex', alignItems:'center', gap: isMobile?10:12, padding: isMobile?'7px 4px':'7px 8px', borderRadius:8, cursor:'pointer',
         transition: swiping.current ? 'none' : 'background 0.15s, transform 0.2s',
@@ -25260,7 +25292,7 @@ const FeedItem = React.memo(function FeedItem({ item, isMobile=false, isNowPlayi
                 <div key={n} className="eq-bar" style={{ width:3, height:h, background:C.accent }} />
               ))}
             </div>
-          : <span style={{ fontSize: isMobile?10:11, color:C.dim, fontFamily:'DM Mono,monospace' }}>{i+1}</span>
+          : <span className="feed-num" style={{ fontSize: isMobile?10:11, color:C.dim, fontFamily:'DM Mono,monospace' }} />
         }
       </div>
 
@@ -26518,7 +26550,7 @@ function loadMaps() {
 function saveMaps(data, preJson) {
   if (!preJson) { data.version = 1; data.updated_at = new Date().toISOString(); }
   try { localStorage.setItem(MAPS_LS_KEY, preJson || JSON.stringify(data)); _mapsCache = data; return true; }
-  catch (e) { alert('⚠ Stockage local plein : impossible d\'enregistrer les trajets.\nSupprime des données (ou importe un fichier plus court).'); return false; }
+  catch { alert('⚠ Stockage local plein : impossible d\'enregistrer les trajets.\nSupprime des données (ou importe un fichier plus court).'); return false; }
 }
 
 // Parse tous les formats de coordonnées rencontrés dans les exports Google :
@@ -27279,7 +27311,7 @@ async function lolApiGet(url) {
         if (j && j.status && typeof j.status.status_code === 'number') return { __error: j.status.status_code };
         return j;
       } catch { continue; }              // le proxy a renvoyé sa propre page d'erreur (HTML) → suivant
-    } catch (e) {}
+    } catch {}
   }
   return null;
 }
@@ -28959,7 +28991,7 @@ function VosEcoutesPanel() {
         const res = await restoreBackup(data);
         const warn = restoreFailMsg(res);
         alert(`${warn ? warn + '\n\n' : '✓ '}Sauvegarde restaurée : ${res.artistsRestored} artiste(s)${res.musicRestored ? ` + ${res.musicRestored} piste(s)` : ''}${res.statsRestored ? ' + stats' : ''} + to do / remember.\nRecharge la page pour voir les to do / rappels restaurés.`);
-      } catch (e) { alert('Fichier illisible ou invalide.'); }
+      } catch { alert('Fichier illisible ou invalide.'); }
     };
     r.readAsText(f);
   };
@@ -32972,7 +33004,7 @@ async function meteoRainCheck() {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) return;
     h = (await res.json())?.hourly;
-  } catch (e) { return; }
+  } catch { return; }
   finally { clearTimeout(to); }
   if (!h?.time?.length) return;
 
@@ -33091,7 +33123,7 @@ async function reverseGeocode(lat, lon) {
       const c = j.city || j.locality || j.principalSubdivision;
       if (c) return c;
     }
-  } catch (e) {}
+  } catch {}
   // 2) Photon (Komoot) — CORS large, basé OSM
   try {
     const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&lang=fr`);
@@ -33101,7 +33133,7 @@ async function reverseGeocode(lat, lon) {
       const c = p.city || p.name || p.locality || p.district || p.county || p.state;
       if (c) return c;
     }
-  } catch (e) {}
+  } catch {}
   // 3) Nominatim (OpenStreetMap) — rate-limit 1 req/s
   try {
     const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=12&accept-language=fr`);
@@ -33111,7 +33143,7 @@ async function reverseGeocode(lat, lon) {
       const c = a.city || a.town || a.village || a.municipality || a.suburb || a.county || a.state;
       if (c) return c;
     }
-  } catch (e) {}
+  } catch {}
   // Tous les providers réseau ont échoué (bloqueur, rate-limit, hors-ligne) →
   // ville française la plus proche calculée localement (jamais null)
   return nearestCityFR(lat, lon);
@@ -33229,7 +33261,7 @@ function MeteoLoc({ loc, full }) {
     if (detail) return;                            // déjà chargé pour ce lieu
     setLoading(true);
     try { setDetail(await fetchMeteoDetail(loc.lat, loc.lon, full ? 7 : 3)); }
-    catch (e) { setDetail({ days: [], hourly: {} }); }
+    catch { setDetail({ days: [], hourly: {} }); }
     finally { setLoading(false); }
   };
 
@@ -33287,7 +33319,7 @@ function MeteoPanel() {
       try {
         const days = await fetchMeteo(lat, lon, nDays);
         if (!cancelled) setData(prev => ({ ...prev, [key]: { name, days, lat, lon } }));
-      } catch (e) {
+      } catch {
         if (!cancelled) setData(prev => ({ ...prev, [key]: { name, error:true, lat, lon } }));
       }
     };
@@ -33318,7 +33350,7 @@ function MeteoPanel() {
       try {
         const days = await fetchMeteo(searchLoc.lat, searchLoc.lon, full ? 7 : 3);
         if (!cancelled) setData(prev => ({ ...prev, searched: { name: searchLoc.name, days, lat: searchLoc.lat, lon: searchLoc.lon } }));
-      } catch (e) {
+      } catch {
         if (!cancelled) setData(prev => ({ ...prev, searched: { name: searchLoc.name, error: true, lat: searchLoc.lat, lon: searchLoc.lon } }));
       }
     })();
@@ -33333,7 +33365,7 @@ function MeteoPanel() {
       const loc = await geocodeCity(q);
       if (loc) setSearchLoc(loc);
       else setSearchErr('Ville introuvable');
-    } catch (e) { setSearchErr('Recherche indisponible'); }
+    } catch { setSearchErr('Recherche indisponible'); }
     finally { setSearching(false); }
   };
 
@@ -33513,7 +33545,7 @@ async function corsFetchText(url) {
           if (t && t.trim()) return t;
         }
       }
-    } catch (e) {}
+    } catch {}
     finally { if (timer) clearTimeout(timer); }
   }
   return null;
@@ -33533,7 +33565,7 @@ async function fetchStooq(symbol) {
     if (isNaN(close)) return null;
     const pct = (!isNaN(open) && open) ? ((close - open) / open) * 100 : undefined;
     return { price: close, pct };
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 
 // ── Twelve Data : API boursière qui autorise le CORS nativement (plus besoin de
@@ -33556,7 +33588,7 @@ async function fetchTD(symbol) {
     if (isNaN(price)) return null;
     const pct = j.percent_change != null ? parseFloat(j.percent_change) : undefined;
     return { price, pct: isNaN(pct) ? undefined : pct };
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 
 // Cours unifié : Twelve Data (clé, CORS natif) en priorité, repli Stooq (via proxy)
@@ -33576,7 +33608,7 @@ async function fetchMetal(symbol) {
     if (!r.ok) return null;
     const j = await r.json();
     return j && j.price != null ? { price: j.price } : null;
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 async function fetchGold() { return fetchMetal('XAU'); }
 
@@ -33602,7 +33634,7 @@ async function fetchAlphaCommodity(func, interval = 'monthly') {
     const prev  = pts[1] ? parseFloat(pts[1].value) : null;
     const pct   = (prev != null && prev) ? ((price - prev) / prev) * 100 : undefined;
     return { price, pct };
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 // Pétrole WTI ($/baril) : endpoint dédié, granularité quotidienne.
 async function fetchAlphaOil() { return fetchAlphaCommodity('WTI', 'daily'); }
@@ -33624,7 +33656,7 @@ async function fetchIndicesJSON() {
     if (!r.ok) return null;
     const j = await r.json();
     return j && j.indices ? j.indices : null;
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 
 // ════════════════════════════════════════════════
@@ -33636,7 +33668,18 @@ async function fetchIndicesJSON() {
 //  • alpha       (pétrole WTI, sucre)           : série complète Alpha Vantage (⚠ 1 req du quota ~25/j)
 // Tout est mis en cache session (_chartCache) : rouvrir un graphique ne refetch jamais.
 // ════════════════════════════════════════════════
+// ⚠ CACHE BORNÉ (~1 an de points quotidiens par entrée, un objet {t,v} par point) : il
+// n'avait ni plafond ni éviction et ne grossissait que — ouvrir 30 graphiques dans une
+// session laissait 30 séries en RAM, en plus de la base SQLite déjà entièrement chargée.
+// FIFO sur l'ordre d'insertion des clés, comme `NOTE_DEC_CACHE_MAX` côté notes.
 const _chartCache = {};
+const CHART_CACHE_MAX = 24;
+function chartCacheSet(key, val) {
+  const ks = Object.keys(_chartCache);
+  if (ks.length >= CHART_CACHE_MAX) delete _chartCache[ks[0]];
+  _chartCache[key] = val;
+  return val;
+}
 const CHART_RANGE_DAYS = { '24h':1, '7j':7, '1m':31, '3m':92, '1a':366, '5a':1830, '10a':3660 };
 
 // Périodes proposées selon la source. Défaut = '7j' quand la période existe (indices,
@@ -33673,11 +33716,11 @@ const FIN_HIST_MAX_AGE = 366 * 864e5;       // on ne garde pas plus d'~1 an d'hi
 let _finHistCache = null;                    // cache mémoire (évite le JSON.parse à chaque notify)
 function loadFinHist() {
   if (_finHistCache) return _finHistCache;
-  try { _finHistCache = JSON.parse(localStorage.getItem(FIN_HIST_LS)) || null; } catch (e) { _finHistCache = null; }
+  try { _finHistCache = JSON.parse(localStorage.getItem(FIN_HIST_LS)) || null; } catch { _finHistCache = null; }
   if (!_finHistCache || typeof _finHistCache !== 'object' || !_finHistCache.series) _finHistCache = { version: 1, series: {} };
   return _finHistCache;
 }
-function saveFinHist() { try { localStorage.setItem(FIN_HIST_LS, JSON.stringify(loadFinHist())); } catch (e) {} }
+function saveFinHist() { try { localStorage.setItem(FIN_HIST_LS, JSON.stringify(loadFinHist())); } catch {} }
 // Jour calendaire LOCAL d'un timestamp (dédup « 1 point/jour »)
 function _finDayKey(t) { const d = new Date(t); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
 // Ajoute un point à une série — max 1 par jour calendaire par série, purge > 1 an. → true si ajouté
@@ -33728,7 +33771,7 @@ function finHistSnapshot() {
     dirty = finHistRecord(h, 'alpha:WTI',     f.oil && f.oil.price) || dirty;     // Pétrole WTI
     dirty = finHistRecord(h, 'fx:EURUSD',     f.eurusd) || dirty;                 // EUR/USD
     if (dirty) saveFinHist();
-  } catch (e) {}
+  } catch {}
 }
 // Clé de série locale pour un spec de graphique (mêmes clés que finHistSnapshot)
 function finHistKey(spec) {
@@ -33761,7 +33804,7 @@ async function fetchStooqHistory(symbol) {
   }
   pts.sort((a, b) => a.t - b.t);
   if (pts.length < 2) return null;
-  _chartCache[key] = pts; return pts;
+  return chartCacheSet(key, pts);
 }
 
 // Historique EUR/USD via Frankfurter (BCE) — 1 an de fixings quotidiens en 1 requête.
@@ -33777,8 +33820,8 @@ async function fetchFxHistory() {
       .map(d => ({ t: new Date(d).getTime(), v: j.rates[d] && j.rates[d].USD }))
       .filter(p => p.v != null && !isNaN(p.t));
     if (pts.length < 2) return null;
-    _chartCache[key] = pts; return pts;
-  } catch (e) { return null; }
+    return chartCacheSet(key, pts);
+  } catch { return null; }
 }
 
 // Série complète Alpha Vantage (WTI daily / SUGAR monthly) — même endpoint que
@@ -33799,8 +33842,8 @@ async function fetchAlphaSeries(func, interval) {
       .filter(p => !isNaN(p.t))
       .sort((a, b) => a.t - b.t);
     if (pts.length < 2) return null;
-    _chartCache[key] = pts; return pts;
-  } catch (e) { return null; }
+    return chartCacheSet(key, pts);
+  } catch { return null; }
 }
 
 // Points du graphique pour un spec + une période → [{ t, v }] triés, ou null si échec.
@@ -33816,7 +33859,7 @@ async function fetchChartPoints(spec, range) {
       const j = await r.json();
       const pts = chartDownsample((j.prices || []).map(p => ({ t: p[0], v: p[1] })).filter(p => p.v != null));
       if (pts.length < 2) return null;
-      _chartCache[key] = pts; return pts;
+      return chartCacheSet(key, pts);
     }
     let all = null;
     if (spec.kind === 'frankfurter') all = await fetchFxHistory();
@@ -33826,7 +33869,7 @@ async function fetchChartPoints(spec, range) {
     const since = Date.now() - (CHART_RANGE_DAYS[range] || 92) * 864e5;
     const pts = chartDownsample(all.filter(p => p.t >= since));
     return pts.length >= 2 ? pts : null;
-  } catch (e) { return null; }
+  } catch { return null; }
 }
 
 function fmtChartDate(t, range) {
@@ -34059,7 +34102,7 @@ const _finance = {
 };
 function _finNotify() {
   finHistSnapshot();   // échantillonne les prix affichés (repli local des graphiques)
-  _finance.subs.forEach(fn => { try { fn(); } catch (e) {} });
+  _finance.subs.forEach(fn => { try { fn(); } catch {} });
 }
 
 // Piste Alpha Vantage : appels SÉQUENTIELS avec une pause (400ms) pour ne pas burster
@@ -34151,7 +34194,7 @@ async function startFinanceLight() {
           const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
           const j = await r.json();
           rate = j.rates && j.rates.USD != null ? j.rates.USD : null;
-        } catch (e) {}
+        } catch {}
       }
       _finance.eurusd = rate; _finNotify();
     }, 'EUR/USD');
@@ -34189,10 +34232,10 @@ async function startFinanceLight() {
 // jeton Google Drive obtenu par un geste de l'utilisateur.
 const FIN_AUTO_LS     = 'spotifyplus_finance_autosync';      // 'off' = désactivé (absent = activé)
 const FIN_AUTO_DAY_LS = 'spotifyplus_finance_autosync_day';  // jour du dernier relevé RÉUSSI
-function finAutoOn()      { try { return localStorage.getItem(FIN_AUTO_LS) !== 'off'; } catch (e) { return true; } }
+function finAutoOn()      { try { return localStorage.getItem(FIN_AUTO_LS) !== 'off'; } catch { return true; } }
 function finAutoSet(on)   { return lsSet(FIN_AUTO_LS, on ? 'on' : 'off'); }
-function finAutoDay()     { try { return localStorage.getItem(FIN_AUTO_DAY_LS) || ''; } catch (e) { return ''; } }
-function finAutoSetDay(k) { try { localStorage.setItem(FIN_AUTO_DAY_LS, k); } catch (e) {} }
+function finAutoDay()     { try { return localStorage.getItem(FIN_AUTO_DAY_LS) || ''; } catch { return ''; } }
+function finAutoSetDay(k) { try { localStorage.setItem(FIN_AUTO_DAY_LS, k); } catch {} }
 // Clé de jour LOCALE partagée avec TV Time et le scrapping musique (`tvDayKey`).
 function finAutoDue()     { return finAutoOn() && finAutoDay() !== tvDayKey(); }
 // Au moins une valeur Light est-elle arrivée ? ⚠ C'est la condition pour marquer la journée :
@@ -34850,7 +34893,7 @@ async function rsiFetchAsset(a, force) {
         n: win.length, tf: a.tf,
       };
     }
-  } catch (e) { res = null; }
+  } catch { res = null; }
   _rsiCache[a.k] = { at: Date.now(), res };
   return res;
 }
@@ -36510,7 +36553,7 @@ function tvSyncSetDay(k)  { try { localStorage.setItem(TV_SYNC_DAY_LS, k); } cat
 // rafraîchissement au montage du panneau (TTL 6 h / 24 h) restent actifs — ouvrir le module
 // soi-même EST un geste de l'utilisateur, ce n'est pas un « lancement automatique ».
 const TV_AUTO_LS = 'spotifyplus_tvtime_autosync';
-function tvAutoOn()    { try { return localStorage.getItem(TV_AUTO_LS) !== 'off'; } catch (e) { return true; } }
+function tvAutoOn()    { try { return localStorage.getItem(TV_AUTO_LS) !== 'off'; } catch { return true; } }
 function tvAutoSet(on) { return lsSet(TV_AUTO_LS, on ? 'on' : 'off'); }
 function tvSyncDailyDue() { return tvAutoOn() && tvSyncDay() !== tvDayKey(); }
 
@@ -40368,7 +40411,7 @@ function NourriturePanel() {
       const list = await foodSearchNutrition(q);
       setResults(list);
       if (!list.length) setSearchErr('Aucun aliment trouvé dans Open Food Facts.');
-    } catch (err) {
+    } catch {
       setSearchErr('Open Food Facts indisponible — suggestion IA ou saisie manuelle.');
       setResults(null);
     } finally {
@@ -42516,7 +42559,7 @@ function GestionMdpPanel() {
     const t = nextTags !== undefined ? nextTags : tags;
     setEntries(e); setTags(t);
     _mdpSession.entries = e; _mdpSession.tags = t;
-    try { saveVaultBlob(await mdpEncrypt(masterRef.current, { entries: e, tags: t })); } catch (err) { setErr('Échec du chiffrement'); }
+    try { saveVaultBlob(await mdpEncrypt(masterRef.current, { entries: e, tags: t })); } catch { setErr('Échec du chiffrement'); }
   };
 
   const createVault = async () => {
@@ -42531,7 +42574,7 @@ function GestionMdpPanel() {
       try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}  // efface l'ancien clair migré
       masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:initial, tags:[] };
       setEntries(initial); setTags([]); setPhase('unlocked'); setPw(''); setPw2(''); mdpBumpActivity();
-    } catch (e) { setErr('Erreur de création du coffre'); }
+    } catch { setErr('Erreur de création du coffre'); }
     setBusy(false);
   };
 
@@ -42545,7 +42588,7 @@ function GestionMdpPanel() {
       if ((blob.v || 1) < MDP_VAULT_V || Array.isArray(data)) { try { saveVaultBlob(await mdpEncrypt(pw, vault)); } catch {} }
       masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:vault.entries, tags:vault.tags };
       setEntries(vault.entries); setTags(vault.tags); setPhase('unlocked'); setPw(''); mdpBumpActivity();
-    } catch (e) { setErr('Mot de passe maître incorrect'); }
+    } catch { setErr('Mot de passe maître incorrect'); }
     setBusy(false);
   };
 
@@ -42707,7 +42750,7 @@ function GestionMdpPanel() {
         _mdpSession = { unlocked:false, pw:null, entries:null, tags:null }; masterRef.current = null;
         setEntries([]); setTags([]); setPw(''); setErr(''); setMsg('Sauvegarde importée — déverrouille avec son mot de passe maître.');
         setPhase('locked');
-      } catch (e) { setErr('Fichier illisible'); }
+      } catch { setErr('Fichier illisible'); }
     };
     r.readAsText(f);
     ev.target.value = '';
@@ -45267,7 +45310,7 @@ function FeedList({ isMobile=false }) {
         </div>
       )}
 
-      <div style={{ display:'flex', flexDirection:'column' }}>
+      <div className="feed-list" style={{ display:'flex', flexDirection:'column' }}>
         {/* Clé stable (URI seule) : avec l'index concaténé, retirer un titre changeait
             la clé de tous les suivants → remount complet, React.memo inopérant.
             La clé est portée par le Fragment (la bannière de date n'a pas de clé propre :
@@ -45282,10 +45325,10 @@ function FeedList({ isMobile=false }) {
                 <div style={{ flex:1, height:1, background:C.border }} />
               </div>
             )}
-            {/* ⚠ Aucune prop `i` : l'index n'était lu NULLE PART dans FeedItem et changeait
-                pour tous les items suivant une suppression — la comparaison superficielle de
-                React.memo échouait alors sur chacun d'eux, exactement ce que la clé stable
-                ci-dessus cherche à éviter. */}
+            {/* ⚠ Aucune prop `i` : elle changeait pour tous les items suivant une
+                suppression et faisait échouer la comparaison superficielle de React.memo sur
+                chacun d'eux. Le numéro de rang, lui, n'a pas disparu : il est rendu par le
+                compteur CSS `.feed-list/.feed-row/.feed-num` (voir le <style> du <head>). */}
             <FeedItem item={item} isMobile={isMobile}
               isNowPlaying={now?.uri === item.spotifyUri}
               removeFromFeed={removeFromFeed} setTrackLiked={setTrackLiked} navigateFeed={navigateFeed} />
@@ -45707,61 +45750,8 @@ function ArtistRow({ a }) {
 // N'affiche QUE les contrôles : précédent / play-pause / suivant
 // ════════════════════════════════════════════════
 function CompactPlayer() {
-  const { feed, filteredFeed, filteredFeedIndex, seek, setTrackLiked, likedTracks, markListened } = useStore();
-  const now = useNow();
-  const [isLiked, setIsLiked] = React.useState(false);
-
-  // Vérifier si le titre en cours est liké — local d'abord, API seulement si inconnu
-  React.useEffect(() => {
-    const feedItem = now?.uri ? feed.find(f => f.spotifyUri === now.uri) : null;
-    const inLocal  = likedTracks.some(t => t.spotifyUri === now?.uri) || !!feedItem?.liked;
-    setIsLiked(inLocal);
-    if (!now?.uri) return;
-    if (feedItem || inLocal) return;
-    libraryContains([now.uri])
-      .then(data => { if (data) setIsLiked(data[0]); })
-      .catch(() => {});
-  }, [now?.uri]);
-
-  const _cu = _effUri(now?.uri);
-  const currentIndex = _cu ? (filteredFeedIndex.get(_cu) ?? -1) : -1;
-  const hasFeed      = filteredFeed.length > 0;
-
-  const togglePlayPause = async () => {
-    if (!now) return;
-    if (now.playing) await apiPut('https://api.spotify.com/v1/me/player/pause');
-    else             await apiPut('https://api.spotify.com/v1/me/player/play');
-  };
-  const prevTrack = async () => {
-    const idx = currentIndex > 0 ? currentIndex - 1 : filteredFeed.length - 1;
-    if (filteredFeed[idx]) await playTrack(filteredFeed[idx].spotifyUri);
-  };
-  const nextTrack = async () => {
-    // URI du titre quitté (avant calcul du suivant) : on le retire tout de suite, sans
-    // attendre le poll 5s. Couvre le double-clic rapide où now.uri saute le titre intermédiaire.
-    const leaving = currentIndex >= 0 ? filteredFeed[currentIndex]?.spotifyUri : null;
-    const idx = currentIndex >= 0 && currentIndex < filteredFeed.length - 1 ? currentIndex + 1 : 0;
-    if (!filteredFeed[idx]) return;
-    await playTrack(filteredFeed[idx].spotifyUri);
-    const dur = filteredFeed[idx].duration_ms;
-    if (dur > 0) setTimeout(() => seek(Math.floor(dur * 0.25)), 400);
-    if (leaving) markListened(leaving);
-  };
-
-  const toggleLike = async () => {
-    if (!now?.uri) return;
-    if (isLiked) {
-      const res = await libraryRemove(now.uri);
-      if (libraryWriteFailed(res)) return;
-      setIsLiked(false);
-      setTrackLiked(now.uri, false);
-    } else {
-      const res = await librarySave(now.uri);
-      if (libraryWriteFailed(res)) return;
-      setIsLiked(true);
-      setTrackLiked(now.uri, true);
-    }
-  };
+  const { now, filteredFeed, currentIndex, hasFeed, isLiked, seek,
+          togglePlayPause, prevTrack, nextTrack, toggleLike } = usePlayerControls();
 
   const btn = { background:'none', border:'none', cursor:'pointer', padding:12, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 };
 
@@ -46908,9 +46898,14 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
      Chemin COMPLET : rien en cache → Babel est chargé, compile, on exécute, puis on mémorise
                       APRÈS le démarrage pour ne pas retarder l'affichage.
 
-     ⚠ Clé de cache = APP_VERSION + longueur de la source. APP_VERSION est déjà incrémentée à
-       chaque commit (règle du projet), la longueur rattrape le cas où on aurait oublié : sans
+     ⚠ Clé de cache = APP_VERSION + EMPREINTE de la source. APP_VERSION est déjà incrémentée à
+       chaque commit (règle du projet), l'empreinte rattrape le cas où on aurait oublié : sans
        cette seconde moitié, un oubli de bump servirait l'ANCIEN code compilé indéfiniment.
+       ⚠ C'était la LONGUEUR de la source, et une longueur ne change pas quand on renomme un
+       symbole à longueur égale, qu'on échange deux lignes ou qu'on corrige un `<=` en `>=` :
+       un bump oublié sur un commit de ce genre servait l'ancien code pour toujours. Le hash
+       ci-dessous (FNV-1a 32 bits, quelques dizaines de ms sur 3 Mo, une seule fois par
+       lancement) voit n'importe quelle modification.
      ⚠ Cache Storage, pas localStorage : 2,75 Mo, contre un quota de ~5 Mo partagé par tout le Hub.
      ⚠ Le cache `spotifyplus-compiled` est explicitement PRÉSERVÉ par le service worker, qui
        supprime sinon tout cache dont le nom ne correspond pas au sien (voir son `activate`).
@@ -46924,7 +46919,25 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   var el  = document.getElementById('app-src');
   var src = el.textContent;
   var ver = (/APP_VERSION\s*=\s*'([^']+)'/.exec(src) || [, '0'])[1];
-  var KEY = new URL('__compiled__?v=' + ver + '-' + src.length, location.href).href;
+  // FNV-1a 32 bits — volontairement trivial : pas de dépendance, pas d'async (SubtleCrypto
+  // est asynchrone et retarderait la lecture du cache), et suffisant pour distinguer deux
+  // révisions du fichier. Ce n'est PAS un usage cryptographique.
+  // ⚠ Les DEUX octets de chaque unité de code sont mélangés : le fichier est plein
+  // d'accents et d'emoji, ne prendre que l'octet bas ferait de « é » et de « e » la même
+  // chose. La longueur reste dans la clé — elle est gratuite et rend une collision de hash
+  // sans conséquence tant que l'édition change aussi la taille.
+  function fnv1a(t) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charCodeAt(i);
+      h ^= c & 0xff;
+      h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+      h ^= (c >>> 8) & 0xff;
+      h = (h + (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)) >>> 0;
+    }
+    return h.toString(36);
+  }
+  var KEY = new URL('__compiled__?v=' + ver + '-' + src.length + '-' + fnv1a(src), location.href).href;
   var CACHE = 'spotifyplus-compiled';
 
   // Exécute le code compilé dans la portée globale.

@@ -136,14 +136,28 @@
 // stockage plein, clés de jour en heure locale, filtre par genre en mémoire).
 // v380 : bump de cache — durcissement sécurité (no-referrer sur les images à hôte
 // arbitraire, provenance des sources d'actu, garde same-origin de MapFrame, repli IA annoncé).
-const CACHE  = 'spotifyplus-v380';          // app shell — bumpé à chaque déploiement
+// v381 : bump de cache — optimisations. L'app shell n'est plus précaché qu'UNE fois
+// (`ASSETS` portait './' ET './index.html' : 3,1 Mo téléchargés deux fois, dont une copie
+// jamais relue) ; manifeste et icônes rejoignent le précache vendor (notification hors
+// ligne sans icône) ; plafond de temps sur les appels IA ; contrôles des 3 lecteurs
+// factorisés ; numéro de rang du feed rendu par compteur CSS (il levait une ReferenceError).
+const CACHE  = 'spotifyplus-v381';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';
-const ASSETS = ['./', './index.html'];
+// ⚠ UNE SEULE entrée pour l'app shell. La liste portait aussi './' : deux URL distinctes
+// pour le MÊME fichier de 3,1 Mo, donc `addAll` le téléchargeait DEUX FOIS et en gardait
+// deux copies — alors que la copie sous './' n'était jamais relue (le `fetch` handler lit
+// et écrit toujours la clé normalisée './index.html', et toute navigation same-origin
+// finissant par '/' part de toute façon dans la branche app shell).
+const ASSETS = ['./index.html'];
+// Fichiers immuables et légers du shell, précachés avec le vendor : sans eux, une PWA
+// lancée hors ligne n'a ni manifeste ni icône — et `notify()` affiche ses notifications
+// sans le moindre visuel (elle demande ./icon-192.png, qui n'était nulle part en cache).
 const VENDOR_ASSETS = ['./vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
                        './vendor/leaflet.js', './vendor/leaflet.css',
-                       './vendor/motus-words.js', './vendor/motus-dico.js'];
+                       './vendor/motus-words.js', './vendor/motus-dico.js',
+                       './manifest.json', './icon-192.png', './icon-512.png'];
 
 // `addAll` refetch tout ce qu'on lui donne : on ne lui passe donc QUE ce qui manque, sinon
 // le simple fait de réinstaller le worker repayerait les 1,9 Mo qu'on cherche à garder.
