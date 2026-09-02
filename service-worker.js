@@ -150,7 +150,12 @@
 // niveau module, qui pouvait empêcher React de monter ; ordre du feed pendant une synchro ;
 // feed non filtré après restauration ; échec Dropbox annoncé ; Retry-After au format date ;
 // jokers LIKE échappés dans le filtre par genre.
-const CACHE  = 'spotifyplus-v383';          // app shell — bumpé à chaque déploiement
+// v384 : bump de cache — badge de repli IA. Quand la première IA n'a pas répondu et
+// qu'une autre a pris le relais, un badge orange « ⤵ Gemini → Groq » (avec 📷 si la
+// requête emportait une photo) s'affiche à côté du résultat : Histoire, Actu, résumé de
+// vidéo, Santé. La fiche d'Histoire annonçait « rédigée par Gemini » même quand un autre
+// fournisseur l'avait écrite — elle nomme désormais le bon.
+const CACHE  = 'spotifyplus-v384';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';

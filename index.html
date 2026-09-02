@@ -204,7 +204,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.2.3';
+const APP_VERSION = '12.2.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -19215,6 +19215,31 @@ let _aiFellBack = null;
 function aiLastFallback() { return _aiFellBack; }
 function aiLabel(id) { const p = AI_PROVIDERS.find(x => x.id === id); return p ? p.name : 'IA'; }
 
+// ── BADGE DE REPLI IA (11.5.0) ────────────────────────────────────────────────
+// `_aiFellBack` était calculé à chaque repli et n'était lu NULLE PART : le seul signal
+// était un `console.warn`. Or c'est l'information la plus sensible de toute la chaîne — le
+// fournisseur choisi n'a pas répondu, la requête (LA PHOTO comprise : frigo, assiette,
+// vêtement, façade d'immeuble) est repartie chez un autre, qui n'a ni la même juridiction
+// ni la même politique de conservation. `ModuleAiModal` le dit en général ; ce badge le dit
+// pour CE résultat-là.
+// ⚠ `aiMeta()` capture fournisseur ET repli AU MÊME INSTANT, juste après l'appel : les deux
+// sont des variables module-level que l'appel IA suivant écrase.
+function aiMeta() { return { ai: aiLastProvider(), fb: aiLastFallback() }; }
+function AiFallbackBadge({ fb }) {
+  if (!fb || !fb.to) return null;
+  const from = aiLabel(fb.from), to = aiLabel(fb.to);
+  return (
+    <span title={`${from} n'a pas répondu (quota, clé refusée ou réseau) — la requête est repartie telle quelle chez ${to}.`
+        + (fb.vision ? ` ⚠ Elle contenait une PHOTO : c'est ${to} qui l'a reçue, pas ${from}.` : '')
+        + ' Pour interdire définitivement un fournisseur : À propos → ⚙️ Paramétrage → 🤖.'}
+      style={{ display:'inline-flex', alignItems:'center', gap:3, fontSize:9, fontWeight:700, whiteSpace:'nowrap',
+        color:'#e0a050', background:'#e0a05018', border:'1px solid #e0a05055', borderRadius:5,
+        padding:'1px 5px', marginLeft:5, fontFamily:'DM Mono,monospace', cursor:'help', verticalAlign:'middle' }}>
+      {fb.vision ? '📷⤵' : '⤵'} {from} → {to}
+    </span>
+  );
+}
+
 // parts (format Gemini) → contenu OpenAI. ⚠ Sans image on envoie une CHAÎNE simple et non
 // un tableau de blocs : plusieurs fournisseurs compatibles OpenAI refusent le tableau pour
 // du texte pur.
@@ -23918,6 +23943,10 @@ function histNormalize(j, ville, grounded, nPhotos) {
     sources:   (Array.isArray(j.sources) ? j.sources : []).map(u => safeHref(String(u || ''))).filter(Boolean).slice(0, 8),
     photos: nPhotos || 0,          // jamais l'image elle-même : juste le NOMBRE de photos jointes
     images: [],                    // vignettes Google Images (URL seulement), remplies après coup
+    // ⚠ Le fournisseur RÉEL, pas « Gemini » écrit en dur : la fiche l'affirmait alors que la
+    // chaîne de replis a pu la faire rédiger par n'importe lequel des 8 — et sur une fiche
+    // d'Histoire la requête porte des PHOTOS. `fb` retient le repli pour le badge.
+    ...aiMeta(),
     grounded: !!grounded, at: Date.now(),
   };
 }
@@ -24146,8 +24175,9 @@ function HistoireFiche({ f, onPatch }) {
         </div>
       )}
       <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.55 }}>
-        Fiche rédigée par Gemini le {histDateFr(f.at)}{f.photos ? ` à partir de ${f.photos} photo(s)` : ' sans photo'}
+        Fiche rédigée par {aiLabel(f.ai || 'gemini')} le {histDateFr(f.at)}{f.photos ? ` à partir de ${f.photos} photo(s)` : ' sans photo'}
         {f.grounded ? ', avec recherche web.' : " — SANS recherche web (connaissances du modèle seules) : vérifie les dates et les noms."}
+        <AiFallbackBadge fb={f.fb} />
       </div>
     </div>
   );
@@ -30774,7 +30804,7 @@ function ActuCard({ href, main, sub, right, rightColor, image, fav }) {
 // ses enfants à la fermeture (piège 5) — replier la section pendant la génération
 // perdrait sinon la réponse déjà payée.
 // ══════════════════════════════════════════════════════════════════
-const ACTU_IA_LS     = 'spotifyplus_actu_ia';   // { day, monde, france, at, ai } — re-fetchable, hors backup
+const ACTU_IA_LS     = 'spotifyplus_actu_ia';   // { day, monde, france, at, ai, fb } — re-fetchable, hors backup
 const ACTU_IA_MAX    = 5;                       // puces par bloc (demande utilisateur)
 const ACTU_IA_TITLES = 18;                      // titres envoyés à l'IA par bloc
 const ACTU_IA_DAYS   = 3;                       // fraîcheur des titres retenus (la veille + marge)
@@ -30798,17 +30828,21 @@ function actuFetchFrance() {
   ], ACTU_IA_TITLES);
 }
 
-const _actuIa = { day:'', monde:[], france:[], at:0, ai:'', busy:false, err:'', loaded:false, subs:new Set() };
+const _actuIa = { day:'', monde:[], france:[], at:0, ai:'', fb:null, busy:false, err:'', loaded:false, subs:new Set() };
 function actuIaSet(patch) { Object.assign(_actuIa, patch); _actuIa.subs.forEach(f => { try { f(); } catch {} }); }
 function actuIaLoad() {
   let o = null;
   try { o = JSON.parse(localStorage.getItem(ACTU_IA_LS)); } catch {}
   if (!o || typeof o !== 'object') return;
   const arr = a => (Array.isArray(a) ? a : []).map(String).slice(0, ACTU_IA_MAX);
-  actuIaSet({ day: String(o.day || ''), monde: arr(o.monde), france: arr(o.france), at: o.at || 0, ai: String(o.ai || '') });
+  // ⚠ `fb` relu et RE-VALIDÉ champ par champ, comme le reste : il vient du localStorage,
+  // donc d'une source qu'on ne contrôle pas, et il finit dans un `title` de badge.
+  const f = o.fb;
+  const fb = (f && typeof f === 'object' && f.to) ? { from: String(f.from || ''), to: String(f.to), vision: !!f.vision } : null;
+  actuIaSet({ day: String(o.day || ''), monde: arr(o.monde), france: arr(o.france), at: o.at || 0, ai: String(o.ai || ''), fb });
 }
 function actuIaSave() {
-  lsSet(ACTU_IA_LS, JSON.stringify({ day:_actuIa.day, monde:_actuIa.monde, france:_actuIa.france, at:_actuIa.at, ai:_actuIa.ai }));
+  lsSet(ACTU_IA_LS, JSON.stringify({ day:_actuIa.day, monde:_actuIa.monde, france:_actuIa.france, at:_actuIa.at, ai:_actuIa.ai, fb:_actuIa.fb }));
 }
 function actuIaFresh() { return _actuIa.day === actuIaDayKey() && (_actuIa.monde.length > 0 || _actuIa.france.length > 0); }
 
@@ -30878,7 +30912,7 @@ async function actuIaRun(data) {
       .filter(Boolean).slice(0, ACTU_IA_MAX);
     const mo = clean(j.monde), fa = clean(j.france);
     if (!mo.length && !fa.length) throw new Error("L'IA n'a renvoyé aucune puce.");
-    actuIaSet({ day: actuIaDayKey(), monde: mo, france: fa, at: Date.now(), ai: aiLastProvider(), busy:false, err:'' });
+    actuIaSet({ day: actuIaDayKey(), monde: mo, france: fa, at: Date.now(), ...aiMeta(), busy:false, err:'' });
     actuIaSave();
   } catch (e) {
     actuIaSet({ busy:false, err: actuIaErrMsg(e) });
@@ -30898,7 +30932,7 @@ function ActuAiSummary({ data }) {
     return () => { _actuIa.subs.delete(force); };
   }, []);
 
-  const { busy, err, monde, france, at, ai } = _actuIa;
+  const { busy, err, monde, france, at, ai, fb } = _actuIa;
   const hasKey = aiAnyKey(false, 'actu');
   const has = monde.length > 0 || france.length > 0;
   const bloc = (title, list) => (
@@ -30929,7 +30963,7 @@ function ActuAiSummary({ data }) {
         {bloc('🌍 MONDE', monde)}
         {bloc('🇫🇷 FRANCE', france)}
         <div style={{ fontSize:9, color:C.dim, marginTop:8 }}>
-          Résumé du <b>{actuIaYesterday()}</b>, écrit par l'IA{ai ? ` (${ai})` : ''} à partir des titres de presse rapatriés{at ? ` le ${new Date(at).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}` : ''}. Regénéré une fois par jour. ⚠ Reformulation de titres, pas une source : vérifie dans les sections ci-dessous avant de citer.
+          Résumé du <b>{actuIaYesterday()}</b>, écrit par l'IA{ai ? ` (${ai})` : ''} à partir des titres de presse rapatriés{at ? ` le ${new Date(at).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}` : ''}. Regénéré une fois par jour. ⚠ Reformulation de titres, pas une source : vérifie dans les sections ci-dessous avant de citer.<AiFallbackBadge fb={fb} />
         </div>
       </>)}
     </div>
@@ -38096,6 +38130,7 @@ function YtSummarySheet({ video, mod, split, onSplit, onClose }) {
         <GeminiIcon size={14} />
         <div style={{ flex:1, minWidth:0, fontSize:11.5, fontWeight:700, color:'#fff', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
           Résumé IA{st.state === 'ok' && aiLastProvider() ? ` · ${aiLabel(aiLastProvider())}` : ''}
+          {st.state === 'ok' && <AiFallbackBadge fb={aiLastFallback()} />}
         </div>
         <button onClick={() => onSplit(split > 40 ? 25 : YT_SPLIT_DEF)}
           title={split > 40 ? 'Agrandir le résumé (ou glisse la barre ↕)' : 'Réduire le résumé (ou glisse la barre ↕)'}
@@ -39947,7 +39982,7 @@ async function foodAiSuggest(q) {
   return {
     name: String(j.nom).slice(0, 80), brand: '', kcal100: Math.round(kcal),
     c100: num(j.glucides), p100: num(j.proteines), f100: num(j.graisses),
-    ai: aiLastProvider(), note: j.note ? String(j.note).slice(0, 80) : '',
+    ...aiMeta(), note: j.note ? String(j.note).slice(0, 80) : '',
   };
 }
 
@@ -39974,7 +40009,7 @@ async function foodPhotoAnalyze(img) {
   return {
     name: String(j.plat).slice(0, 80), brand: '', kcal100: Math.round(kcal / por * 100),
     c100: per100(num(j.glucides)), p100: per100(num(j.proteines)), f100: per100(num(j.graisses)),
-    ai: aiLastProvider(), photo: true, portionG: por, items,
+    ...aiMeta(), photo: true, portionG: por, items,
     note: [j.note ? String(j.note) : '', items.join(' + ')].filter(Boolean).join(' · ').slice(0, 140),
   };
 }
@@ -40002,6 +40037,7 @@ function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav }) {
           <div style={{ fontSize:11, color:C.text, wordBreak:'break-word', lineHeight:1.2 }}>
             {aiTint && <span style={{ color:aiTint, fontWeight:700 }}>✨ {aiLabel(r.ai)} · </span>}
             {r.name}
+            <AiFallbackBadge fb={r.fb} />
           </div>
           <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
             {r.brand ? r.brand + ' · ' : ''}{r.kcal100} kcal/100 g{r.note ? ' · ' + r.note : ''}

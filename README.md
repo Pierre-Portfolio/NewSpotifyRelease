@@ -99,6 +99,7 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 - **YouTube se connecte séparément de Drive** (Google interdit de demander les deux ensemble) : bouton dédié dans Actu → Vidéos YouTube.
 - **👍 sur un commentaire YouTube** (lecteur plein écran d'Actu et de TV Time) : l'API YouTube **ne sait pas** liker un commentaire. Le bouton mémorise donc le like dans le Hub *et* ouvre le commentaire sur youtube.com (ou dans l'appli) — un tap sur le 👍 là-bas pose le vrai like. Re-cliquer sur un 👍 allumé efface juste la marque locale.
 - **Choisir quelle IA sert quel module** : À propos → ⚙️ *Paramétrage* → bouton **🤖** de la ligne du module (grisé si le module ne se sert pas de l'IA). Les IA cochées sont essayées **de haut en bas** jusqu'à ce que l'une réponde : décocher ne retire aucune fonction, ça raccourcit la liste de secours. Réglage inclus dans l'export/import.
+- **Savoir quelle IA a répondu** : quand la première n'a pas pu et qu'une autre a pris le relais, un badge orange **⤵ Gemini → Groq** s'affiche à côté du résultat (avec 📷 si la requête emportait une photo). Survole-le pour le détail. Jusqu'ici le repli était silencieux à l'écran.
 
 ---
 
