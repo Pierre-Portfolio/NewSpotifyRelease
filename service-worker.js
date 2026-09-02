@@ -155,7 +155,12 @@
 // requête emportait une photo) s'affiche à côté du résultat : Histoire, Actu, résumé de
 // vidéo, Santé. La fiche d'Histoire annonçait « rédigée par Gemini » même quand un autre
 // fournisseur l'avait écrite — elle nomme désormais le bon.
-const CACHE  = 'spotifyplus-v384';          // app shell — bumpé à chaque déploiement
+// v385 : bump de cache — sécurité. `safeHref` sur toutes les URL venant d'une IA ou d'une
+// API tierce (les sources d'une fiche Histoire et les offres IA de Bon Plan pouvaient
+// porter un `javascript:` exécuté au clic, CSP `unsafe-inline`) ; sauvegarde chiffrable
+// (l'export contenait le jeton GitHub et toutes les clés d'API en clair) ; nonce anti-CSRF
+// sur Dropbox ; clé Gemini en en-tête au lieu de la query string ; form-action 'none'.
+const CACHE  = 'spotifyplus-v385';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';

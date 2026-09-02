@@ -131,6 +131,8 @@ Détient l'auth, le feed (+ `filteredFeed` et `filteredFeedIndex` Map URI→inde
 
 **`buildBackup()`** (synchrone) → une clé par section + les clés/pseudos d'API (**liste exacte dans le code** ; y ajouter toute nouvelle section persistée). **`buildBackupFull()`** = + `note_media` (IndexedDB, donc **asynchrone** — téléchargement et 3 destinations cloud). Export partiel : `EXPORT_SECTIONS` → `downloadBackup(sec)`.
 
+**Chiffrement optionnel** (`BACKUP_ENC_LS`, `'on'` = actif ; **absent = en clair**, comme avant) : `backupSeal(data)` scelle en `{app, version, exported_at, scope, encrypted:true, enc}` avec la primitive du coffre (`mdpEncrypt`), `backupOpen(data)` ouvre. ⚠ `backupSeal` s'applique **APRÈS** le découpage d'un export partiel, aux **4** sorties (fichier + 3 clouds) ; `backupOpen` est appelé dans **`restoreBackup`** seul — c'est l'unique entonnoir des 4 chemins de restauration. ⚠ La phrase de passe n'est stockée nulle part : oubliée = fichier illisible. `backupSeal` renvoie `null` si les deux saisies diffèrent (rien n'est écrit) et l'objet **tel quel** si l'option est inactive.
+
 **Règles de fusion** (`restoreBackup`, complet ou partiel, clés absentes ignorées) :
 - **⚠ Cumuls et compteurs : au MAX, JAMAIS en somme** (artistes, `games.hi`, `api_calls`) — la sauvegarde contient déjà l'historique local, additionner **doublerait** à chaque ré-import.
 - Union / le plus avancé : tvtime, listens (cap 5000), notes (`updatedAt` le plus récent), finance, food (`weightMerge` pour les pesées), collection / revente / note_media (par id, **le local gagne**).
@@ -139,7 +141,7 @@ Détient l'auth, le feed (+ `filteredFeed` et `filteredFeedIndex` Map URI→inde
 - **⚠ Volontairement EXCLUS** : tous les caches re-fetchables (actu, indices, cours, Steam, LoL, chess, speedrun, github, yt_subs, delta, displate, clés de jour des synchros auto) et **toutes les images** (voir piège 15).
 
 **3 destinations** (UI partagée `DropboxSync`/`GoogleDriveSync`/`PCloudSync`, prop `mode='save'|'restore'`) :
-- **Dropbox** : OAuth PKCE offline.
+- **Dropbox** : OAuth PKCE offline. `state = 'dropbox.<nonce>'` (`dropbox_state`) — le nonce anti-CSRF manquait, seul PKCE couvrait le retour forgé ; l'ancien `'dropbox'` nu est encore accepté pour un consentement parti avant le déploiement.
 - **Google Drive** : **Google Identity Services, modèle « token »** (le flux implicite par redirection n'existe plus). `loadGis()` charge lazy `accounts.google.com/gsi/client` (**non versionné ⇒ pas de SRI**), **préchargé au boot** pour que `requestAccessToken()` parte SYNCHRONE d'un clic (sinon popup bloquée). Scopes séparés `GDRIVE_SCOPE_BASE` (`drive.file`) / `GDRIVE_SCOPE_READ` (`drive.readonly`, Finance → Mes Actifs) ; **YouTube a son propre consentement et son propre jeton** (`ytg_*`). ⚠ **`include_granted_scopes: false` obligatoire** (sinon Google recolle les scopes déjà accordés → combinaison interdite `youtube` + `drive.file` → erreur 400). ⚠ **Aucun repli par redirection** ; échec → `gdriveLoginFailed` / `ytgLoginFailed`. ⚠ **La PWA installée casse** (jeton renvoyé vers `storagerelay://`) → se connecter **une fois depuis un onglet Chrome normal**.
 - **pCloud** : OAuth **implicite** (le flux `code` exige un client_secret). ⚠ **2 régions** (`api.` / `eapi.pcloud.com`) mémorisées dans `pcloud_host` — la mauvaise donne « invalid access token ». ⚠ **L'API répond TOUJOURS en HTTP 200** avec `result` ≠ 0 → `pcloudApi()` teste `result`, pas `res.ok`. Hôte de contenu éphémère `c###.pcloud.com` (joker CSP).
 
