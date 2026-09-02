@@ -171,7 +171,12 @@
 // v389 : sécurité. Sauvegardes chiffrées par défaut, clés d'API masquées (👁), code d'erreur
 // OAuth seul dans le bandeau (plus de texte libre venu de l'URL), MapFrame sans
 // allow-popups-to-escape-sandbox, state Dropbox legacy refusé.
-const CACHE  = 'spotifyplus-v389';          // app shell — bumpé à chaque déploiement
+// v390 : optimisations. Avancement de la synchro sorti du contexte du store (il le recréait
+// 1×/s pendant un scrapping, réveillant ses 27 abonnés) ; clé PBKDF2 dérivée mise en cache
+// (l'autosave d'une note cryptée repayait 600k itérations par pause de frappe) ; journal
+// d'écoutes en nombres bruts + cache mémoire ; index type→fiches dans Vêtement ; sondes du
+// précache vendor en parallèle.
+const CACHE  = 'spotifyplus-v390';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
@@ -198,8 +203,11 @@ const VENDOR_ASSETS = ['./vendor/sql-wasm.js', './vendor/sql-wasm.wasm',
 // le simple fait de réinstaller le worker repayerait les 1,9 Mo qu'on cherche à garder.
 async function primeVendor() {
   const c = await caches.open(VENDOR);
-  const missing = [];
-  for (const u of VENDOR_ASSETS) if (!(await c.match(u))) missing.push(u);
+  // ⚠ Les 15 sondes EN PARALLÈLE : la boucle séquentielle payait 15 allers-retours vers
+  // Cache Storage l'un après l'autre à chaque installation du worker, c'est-à-dire à chaque
+  // déploiement, alors qu'elles ne dépendent pas les unes des autres.
+  const hits = await Promise.all(VENDOR_ASSETS.map(u => c.match(u)));
+  const missing = VENDOR_ASSETS.filter((_, i) => !hits[i]);
   if (missing.length) await c.addAll(missing);
 }
 

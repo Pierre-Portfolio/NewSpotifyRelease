@@ -434,10 +434,16 @@ def item_time(a):
 def recent_first(items, max_days):
     """Jette les parutions plus vieilles que max_days, trie de la plus récente à la plus
     ancienne. Un item sans date lisible est gardé mais renvoyé en fin de liste (on ne peut
-    pas juger de sa fraîcheur). Miroir exact d'actuRecentFirst côté client."""
+    pas juger de sa fraîcheur). Miroir exact d'actuRecentFirst côté client.
+
+    ⚠ La date est parsée UNE fois par item (décoration). La version précédente appelait
+    `item_time` deux fois dans le filtre puis deux fois dans la clé de tri, soit quatre
+    `parsedate_to_datetime` par article, sur toutes les sections."""
     floor = time.time() - max_days * 86400 if max_days else None
-    kept = [a for a in (items or []) if item_time(a) is None or not floor or item_time(a) >= floor]
-    return sorted(kept, key=lambda a: (item_time(a) is None, -(item_time(a) or 0)))
+    dated = [(item_time(a), a) for a in (items or [])]
+    kept = [(t, a) for (t, a) in dated if t is None or not floor or t >= floor]
+    kept.sort(key=lambda p: (p[0] is None, -(p[0] or 0)))
+    return [a for (_, a) in kept]
 
 
 LINKEDIN_HOST_RE = re.compile(r"(^|\.)linkedin\.com$", re.I)

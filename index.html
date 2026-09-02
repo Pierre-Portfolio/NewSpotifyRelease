@@ -212,7 +212,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.2.9';
+const APP_VERSION = '12.3.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -409,6 +409,9 @@ function spotifyHasScope(s) {
 }
 function logoutClear() {
   ['spotify_token','spotify_token_expiry','spotify_refresh','pkce_verifier','pkce_state',SPOTIFY_SCOPES_LS].forEach(k => localStorage.removeItem(k));
+  // Clé AES du coffre dérivée en mémoire (voir _mdpKeyCache) : rien ne doit lui survivre.
+  // ⚠ Déclaration de fonction, donc hissée — l'appeler d'ici ne pose pas de TDZ.
+  try { mdpKeyCacheClear(); } catch {}
 }
 
 // ── Écriture localStorage centralisée ──────────────────────────────────────────
@@ -2747,6 +2750,16 @@ const useStore = () => React.useContext(StoreCtx);
 // `useStore()` : `now` n'est plus dans l'objet du store.
 const NowCtx = React.createContext(null);
 const useNow = () => React.useContext(NowCtx);
+// ── L'AVANCEMENT DE LA SYNCHRO A LE SIEN, POUR LA MÊME RAISON ────────────────
+// Même piège que `now`, en pire : `nextCall` est décrémenté par un setInterval de 1 000 ms
+// (le décompte « prochain appel dans… »), et `logs` gagne une ligne à chaque étape d'un
+// artiste scrapé. Tant que ces valeurs vivaient dans `api`, l'objet du store était recréé
+// UNE FOIS PAR SECONDE pendant toute une synchro et les 27 abonnés de `useStore()` se
+// re-rendaient avec — canvas de jeu, TV Time, Finance compris. Or elles ne sont lues que
+// par les TROIS panneaux du collapse « ⚙ Scrapping » (état, décompte, logs).
+// ⚠ Les composants qui les affichent appellent `useSyncInfo()` EN PLUS de `useStore()`.
+const SyncCtx = React.createContext(null);
+const useSyncInfo = () => React.useContext(SyncCtx);
 
 function StoreProvider({ children }) {
   const [authState, setAuthState] = React.useState('loading');
@@ -2931,6 +2944,17 @@ function StoreProvider({ children }) {
   }, [filteredFeed]);
   const filteredFeedIndexRef = React.useRef(new Map());
   React.useEffect(() => { filteredFeedIndexRef.current = filteredFeedIndex; }, [filteredFeedIndex]);
+
+  // #opt : index URI → ITEM du feed COMPLET (non filtré). `usePlayerControls` cherchait le
+  // titre en cours avec `feed.find(…)` — un balayage de 1 000 items, dans CHACUN des trois
+  // lecteurs, à chaque changement de titre. ⚠ Distinct de `filteredFeedIndex` : la question
+  // posée est « ce titre est-il connu localement ? », donc un titre exclu par un filtre doit
+  // quand même répondre oui, sinon on dépenserait un /me/library/contains pour rien.
+  const feedIndex = React.useMemo(() => {
+    const m = new Map();
+    for (const it of (feed || [])) if (!m.has(it.spotifyUri)) m.set(it.spotifyUri, it);
+    return m;
+  }, [feed]);
 
   // Dernière position CONNUE dans filteredFeed (mémorisée à chaque navigation / lecture d'un
   // titre présent dans la liste). Sert de repli à navigateFeed quand le titre en cours a été
@@ -4303,14 +4327,15 @@ function StoreProvider({ children }) {
   // ⚠ MÉMOÏSÉ, et déclaré APRÈS tout ce qu'il liste (règle « Babel hoisting » du projet).
   // Sans ce useMemo, l'objet était recréé à chaque rendu de StoreProvider et faisait
   // re-rendre les 27 consommateurs du contexte — dont, toutes les 5 s, ceux qui n'ont rien
-  // à voir avec la lecture. `now` a été sorti (NowCtx) et les 8 fonctions instables passent
-  // par `stableFns`, si bien qu'`api` ne change plus que quand une donnée change VRAIMENT.
+  // à voir avec la lecture. `now` a été sorti (NowCtx), l'avancement de la synchro aussi
+  // (SyncCtx : il changeait 1×/s pendant tout un scrapping) et les 8 fonctions instables
+  // passent par `stableFns`, si bien qu'`api` ne change plus que quand une donnée change
+  // VRAIMENT. ⚠ Ne PAS y remettre une valeur qui bouge à intervalle régulier.
   const api = React.useMemo(() => ({
     ...stableFns,
     authState, user, otherTab, authError, offline, offlineReady, enterOffline,
     syncState, scraping, paused, rlWaiting, blockedUntil,
-    stats, progress, currentArtist, statusMsg, statusMode,
-    nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs,
+    stats, dailyScrapings, quotaUntil, feed,
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
     loopEnabled, setLoopEnabled,
@@ -4321,15 +4346,14 @@ function StoreProvider({ children }) {
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
-    filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
+    filteredFeed, filteredFeedIndex, feedIndex, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, genreFilter, setGenreFilter,
     resumableSession,
   }), [
     stableFns,
     authState, user, otherTab, authError, offline, offlineReady, enterOffline,
     syncState, scraping, paused, rlWaiting, blockedUntil,
-    stats, progress, currentArtist, statusMsg, statusMode,
-    nextCall, nextCallTotal, eta, dailyScrapings, quotaUntil, feed, logs,
+    stats, dailyScrapings, quotaUntil, feed,
     delayChoice, setDelayChoice,
     listenStats, setListenStats,
     loopEnabled, setLoopEnabled,
@@ -4340,17 +4364,25 @@ function StoreProvider({ children }) {
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
     likedTracks, setLikedTracks, history, artists, reloadArtists, navigateFeed, markListened,
-    filteredFeed, filteredFeedIndex, filterType, setFilterType, sortBy, setSortBy,
+    filteredFeed, filteredFeedIndex, feedIndex, filterType, setFilterType, sortBy, setSortBy,
     artistSearch, setArtistSearch, genreFilter, setGenreFilter,
     resumableSession,
   ]);
-  // ⚠ NowCtx est IMBRIQUÉ dans StoreCtx et enveloppe le MÊME `children` : quand `now` change,
-  // StoreProvider se re-rend mais `api` garde son identité (rien ne se propage côté store) et
-  // la référence de `children` est inchangée — React saute donc le rendu du sous-arbre, seuls
-  // les abonnés de NowCtx sont réveillés.
+  // Avancement de la synchro — même patron que `now` : mémoïsé à part, il ne réveille que
+  // les trois panneaux du collapse « ⚙ Scrapping ».
+  const syncInfo = React.useMemo(() => ({
+    progress, currentArtist, statusMsg, statusMode, nextCall, nextCallTotal, eta, logs,
+  }), [progress, currentArtist, statusMsg, statusMode, nextCall, nextCallTotal, eta, logs]);
+  // ⚠ NowCtx et SyncCtx sont IMBRIQUÉS dans StoreCtx et enveloppent le MÊME `children` :
+  // quand `now` (ou le décompte, ou une ligne de log) change, StoreProvider se re-rend mais
+  // `api` garde son identité (rien ne se propage côté store) et la référence de `children`
+  // est inchangée — React saute donc le rendu du sous-arbre, seuls les abonnés du contexte
+  // concerné sont réveillés.
   return (
     <StoreCtx.Provider value={api}>
-      <NowCtx.Provider value={now}>{children}</NowCtx.Provider>
+      <SyncCtx.Provider value={syncInfo}>
+        <NowCtx.Provider value={now}>{children}</NowCtx.Provider>
+      </SyncCtx.Provider>
     </StoreCtx.Provider>
   );
 }
@@ -4507,7 +4539,7 @@ function useHidePlayerBar(active) {
   }, [active]);
 }
 function usePlayerHidden() {
-  const [v, setV] = React.useState(playerBarHidden());
+  const [v, setV] = React.useState(playerBarHidden);
   React.useEffect(() => {
     const h = b => setV(b);
     _hidePlayer.subs.add(h);
@@ -12601,7 +12633,7 @@ function frigoPhotoData(file) {
 }
 
 function FrigoAiSection({ data, onAdd }) {
-  const [key, setKey] = React.useState(geminiKey());
+  const [key, setKey] = React.useState(geminiKey);
   const [keyDraft, setKeyDraft] = React.useState('');
   // Photo → ingrédients
   const [photoBusy, setPhotoBusy] = React.useState(false);
@@ -14280,6 +14312,19 @@ function VetementPanel() {
   // ⚠ Déclarés APRÈS `flt` et AVANT le JSX qui les lit (règle Babel hoisting du projet).
   const filtersOn = vetFiltersOn(flt);
   const shown = filtersOn ? data.items.filter(it => vetMatch(it, flt)) : data.items;
+  // ⚠ INDEX type → fiches, construit UNE fois. Le rendu par sous-catégorie faisait quatre
+  // balayages de `shown` PAR GROUPE (types visibles, compte du groupe, fiches du groupe,
+  // fiches d'un type) : avec 9 sous-catégories, 35 types et N fiches, ça donnait un coût en
+  // O(groupes × types × N) à CHAQUE rendu, filtres et frappe compris. L'ordre d'insertion
+  // suit celui de `shown`, donc l'ordre affiché est identique à celui des `.filter()`.
+  const shownByType = React.useMemo(() => {
+    const m = new Map();
+    for (const it of shown) {
+      const a = m.get(it.type);
+      if (a) a.push(it); else m.set(it.type, [it]);
+    }
+    return m;
+  }, [shown]);
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
@@ -14424,9 +14469,9 @@ function VetementPanel() {
         {VET_GROUPS.map(([g, gLbl]) => {
           // HORS filtre : TOUS les types du groupe (même à 0 fiche) → leur « + » sert de point
           // d'entrée. Sous filtre : seulement ceux qui ont une fiche correspondante.
-          const types = filtersOn ? vetTypesOfGroup(g).filter(([t]) => shown.some(it => it.type === t)) : vetTypesOfGroup(g);
+          const types = filtersOn ? vetTypesOfGroup(g).filter(([t]) => shownByType.has(t)) : vetTypesOfGroup(g);
           if (!types.length) return null;
-          const nGroup = types.reduce((n, [t]) => n + shown.filter(it => it.type === t).length, 0);
+          const nGroup = types.reduce((n, [t]) => n + (shownByType.get(t) || []).length, 0);
           // 8.9.10 · MODE IMAGE — la sous-catégorie ne contient plus de sous-collapse par
           // TYPE mais une simple grille de photos, TOUS types confondus, dans l'ordre de
           // VET_TYPES (celui de `shown`).
@@ -14438,13 +14483,17 @@ function VetementPanel() {
           // pour que le sous-arbre soit bien remonté au changement de mode (même raison
           // que `filtersOn`). Contrepartie assumée : les photos des groupes ouverts sont
           // téléchargées d'un coup (cache mémoire de `gdriveBlobUrl` → une seule fois).
-          const gItems = imgOn ? shown.filter(it => types.some(([t]) => t === it.type)) : null;
+          // ⚠ On garde un balayage de `shown` (et non un flatMap sur `types`) : l'ordre
+          // affiché doit rester celui de `shown`, pas celui de VET_TYPES. Le Set rend juste
+          // le test d'appartenance O(1) au lieu d'un `some()` sur tous les types du groupe.
+          const gTypes = imgOn ? new Set(types.map(([t]) => t)) : null;
+          const gItems = imgOn ? shown.filter(it => gTypes.has(it.type)) : null;
           if (imgOn && !gItems.length) return null;
           return (
             <StatsCollapse key={g + (filtersOn ? '-on' : '-off') + (imgOn ? '-img' : '')} title={`${gLbl}${nGroup ? ' · ' + nGroup : ''}`} color={VETEMENT_COLOR} defaultOpen={filtersOn || imgOn}>
         {imgOn ? <VetImgGrid items={gItems} photos={photos} photoRev={photoRev} prixOn={prixOn}
           onZoom={fid => openZoom(gItems, gLbl, fid)} /> : types.map(([t, lbl]) => {
-          const group = shown.filter(it => it.type === t);
+          const group = shownByType.get(t) || [];
           // HORS filtre on rend même un type VIDE (0 fiche) : son titre porte le « + » qui
           // permet d'ajouter la 1re pièce. Sous filtre, un type sans résultat est masqué.
           if (filtersOn && !group.length) return null;
@@ -17441,7 +17490,11 @@ function HubHome({ isMobile, onGo, disabled }) {
   const padX  = isMobile ? 16 : 30;
   const fill  = !isMobile;   // desktop : remplir la hauteur pour tout voir sans scroll
   // Pastille « pas encore vu aujourd'hui » (mobile uniquement)
-  const visits = isMobile ? loadTileVisits() : null;
+  // ⚠ Lu UNE FOIS PAR MONTAGE (JSON.parse), pas à chaque rendu : `HubHome` est branché sur
+  // `useStore()` et se re-rendait donc à chaque changement du store. Un `useMemo([])` suffit
+  // et reste juste : l'accueil est monté/démonté par `{tab === 'home' && …}`, donc revenir
+  // dessus après avoir ouvert un module relit le disque et la pastille disparaît bien.
+  const visits = React.useMemo(() => (isMobile ? loadTileVisits() : null), [isMobile]);
   const todayStr = tileTodayStr();
   // Nouvelles sorties : la pastille verte signale que le scrapping est PRÊT (ni bloqué par
   // le rate-limit 429, ni par le quota 24h), pas « pas encore vu aujourd'hui »
@@ -17522,7 +17575,7 @@ function HubHome({ isMobile, onGo, disabled }) {
 // L'effet reste déclaré dans tous les cas (règle des hooks), il ne fait juste rien.
 function usePlayerControls(opts) {
   const wantLike = !(opts && opts.like === false);
-  const { feed, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled,
+  const { feedIndex, filteredFeed, filteredFeedIndex, loopEnabled, setLoopEnabled,
           seek, setTrackLiked, likedTracks, markListened } = useStore();
   const now = useNow();
   const [isLiked, setIsLiked] = React.useState(false);
@@ -17530,7 +17583,7 @@ function usePlayerControls(opts) {
   // Titre en cours liké ? Local d'abord (la DB fait foi), API seulement si inconnu.
   React.useEffect(() => {
     if (!wantLike) return;
-    const feedItem = now?.uri ? feed.find(f => f.spotifyUri === now.uri) : null;
+    const feedItem = now?.uri ? feedIndex.get(now.uri) : null;   // O(1) — cf. feedIndex du store
     const inLocal  = likedTracks.some(t => t.spotifyUri === now?.uri) || !!feedItem?.liked;
     setIsLiked(inLocal);
     if (!now?.uri) return;
@@ -17748,7 +17801,8 @@ function PlayerBar() {
 // PANELS PARTAGÉS
 // ════════════════════════════════════════════════
 function ScrapingStatusPanel({ compact=false }) {
-  const s = useStore();
+  const s  = useStore();
+  const sy = useSyncInfo();   // statusMode / statusMsg / currentArtist : hors du store (SyncCtx)
   const total = Math.max(s.stats.total, 1);
   const pct   = (s.stats.artists / total) * 100;
   const label = s.scraping
@@ -17762,7 +17816,7 @@ function ScrapingStatusPanel({ compact=false }) {
   return (
     <div style={{ borderRadius:10, background:C.surface, border:`1px solid ${C.border}`, padding: compact?'10px 12px':'14px 16px' }}>
       <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom: compact?8:12 }}>
-        <StatusDot active={s.scraping} mode={s.statusMode} />
+        <StatusDot active={s.scraping} mode={sy.statusMode} />
         <span style={{ fontSize: compact?11:12, fontWeight:700, letterSpacing:'0.06em' }}>SCRAPING {label}</span>
       </div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap: compact?6:10, marginBottom: compact?10:14 }}>
@@ -17785,9 +17839,9 @@ function ScrapingStatusPanel({ compact=false }) {
         </div>
       )}
       <div style={{ marginTop: compact?8:10, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-        <span style={{ fontSize: compact?10:11, color:C.dim }}>{s.statusMsg}</span>
-        {s.currentArtist && (
-          <span style={{ fontSize: compact?10:11, background:'#1e1e1e', border:`1px solid ${C.border}`, borderRadius:99, padding:'2px 10px', color:C.muted }}>{s.currentArtist}</span>
+        <span style={{ fontSize: compact?10:11, color:C.dim }}>{sy.statusMsg}</span>
+        {sy.currentArtist && (
+          <span style={{ fontSize: compact?10:11, background:'#1e1e1e', border:`1px solid ${C.border}`, borderRadius:99, padding:'2px 10px', color:C.muted }}>{sy.currentArtist}</span>
         )}
       </div>
     </div>
@@ -17858,20 +17912,21 @@ function DateRangePanel({ compact=false }) {
 }
 
 function NextCallPanel({ compact=false }) {
-  const s = useStore();
-  if (!s.scraping || s.nextCall <= 0) return null;
-  const pct = s.nextCallTotal > 0 ? (s.nextCall / s.nextCallTotal) * 100 : 0;
+  const s  = useStore();
+  const sy = useSyncInfo();   // le décompte change 1×/s : il vit dans SyncCtx, pas dans le store
+  if (!s.scraping || sy.nextCall <= 0) return null;
+  const pct = sy.nextCallTotal > 0 ? (sy.nextCall / sy.nextCallTotal) * 100 : 0;
   return (
     <div style={{ borderRadius:10, background: compact?C.surface:C.surfaceHigh, border:`1px solid ${C.border}`, padding: compact?'10px 12px':'10px 14px' }}>
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:6 }}>
         <span style={{ fontSize:10, fontWeight:700, color:C.dim, letterSpacing:'0.07em' }}>PROCHAIN APPEL DANS…</span>
-        <span style={{ fontSize: compact?12:13, fontFamily:'DM Mono,monospace', color:C.accent }}>{s.nextCall}s</span>
+        <span style={{ fontSize: compact?12:13, fontFamily:'DM Mono,monospace', color:C.accent }}>{sy.nextCall}s</span>
       </div>
       <ProgressBar pct={pct} color={C.accent} height={4} />
-      {s.eta && (
+      {sy.eta && (
         <div style={{ display:'flex', justifyContent:'space-between', marginTop:6, fontSize:10, color:C.muted }}>
           <span>Temps total restant</span>
-          <span style={{ fontFamily:'DM Mono,monospace', color:C.accent }}>{s.eta}</span>
+          <span style={{ fontFamily:'DM Mono,monospace', color:C.accent }}>{sy.eta}</span>
         </div>
       )}
       {s.scraping && (() => {
@@ -17917,7 +17972,7 @@ function NextCallPanel({ compact=false }) {
 }
 
 function LogsPanel({ compact=false }) {
-  const { logs } = useStore();
+  const { logs } = useSyncInfo();   // une ligne par étape de scrapping : hors du store (SyncCtx)
   const ref = React.useRef(null);
   React.useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
   return (
@@ -19074,11 +19129,12 @@ function applyBackup(data) {
   // Journal d'écoutes (graphique) — FUSIONNÉ : union des timestamps (dédup), tri, cap 5000
   if (Array.isArray(data.listens)) {
     try {
+      // ⚠ `listenTs` : une sauvegarde d'avant le format compact porte des `{ts}`, une
+      // récente des nombres bruts — les deux doivent fusionner.
       const cur = loadListenLog();
-      const seen = new Set(cur.map(e => e && e.ts));
-      const merged = cur.concat(data.listens.filter(e => e && typeof e.ts === 'number' && !seen.has(e.ts)))
-        .sort((a, b) => a.ts - b.ts);
-      saveListenLog(merged);
+      const seen = new Set(cur);
+      const add = data.listens.map(listenTs).filter(t => t !== null && !seen.has(t));
+      saveListenLog(cur.concat(add).sort((a, b) => a - b));
     } catch {}
   }
   if (data.rappels && typeof data.rappels === 'object') put('spotifyplus_rappels', data.rappels);
@@ -19339,9 +19395,39 @@ function _lastNDays(n) {
 // ⚠ SURVIT À LA PURGE (contrairement à tracks.listened_at, supprimé par « Purger les
 // écoutes ») → alimente durablement le graphique Écoutes/jour. Inclus dans le backup (fusionné).
 const LISTEN_LOG_KEY = 'spotifyplus_listens';
-function loadListenLog() { try { return JSON.parse(localStorage.getItem(LISTEN_LOG_KEY)) || []; } catch { return []; } }
-function saveListenLog(v) { lsSet(LISTEN_LOG_KEY, JSON.stringify(v.slice(-5000))); }
-function recordListen()   { const ts = Date.now(); try { const l = loadListenLog(); l.push({ ts }); saveListenLog(l); } catch {} return ts; }
+const LISTEN_LOG_MAX = 5000;
+// ⚠ FORMAT : un tableau de NOMBRES bruts (`[1756..., 1756...]`), pas d'objets `{ts}`. À
+// 5 000 entrées, `[{"ts":1756…}]` pesait ~90 Ko de localStorage — sur un quota de ~5 Mo
+// partagé par TOUT le Hub — contre ~35 Ko en nombres. `listenTs` lit les DEUX formes : les
+// anciens journaux et les sauvegardes d'avant ce changement restent lisibles tels quels.
+const listenTs = e => (typeof e === 'number' ? e : (e && typeof e.ts === 'number' ? e.ts : null));
+// ⚠ Cache mémoire : `recordListen` part à CHAQUE titre écouté (le poll pousse une entrée
+// toutes les 5 s en lecture continue). Sans lui, chaque écoute faisait un JSON.parse ET un
+// JSON.stringify du journal ENTIER sur le chemin critique du marquage.
+let _listenLog = null;
+function loadListenLog() {
+  if (_listenLog) return _listenLog;
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(LISTEN_LOG_KEY)); } catch {}
+  _listenLog = Array.isArray(raw) ? raw.map(listenTs).filter(t => t !== null) : [];
+  return _listenLog;
+}
+function saveListenLog(v) {
+  _listenLog = v.map(listenTs).filter(t => t !== null).slice(-LISTEN_LOG_MAX);
+  return lsSet(LISTEN_LOG_KEY, JSON.stringify(_listenLog));
+}
+function recordListen() {
+  const ts = Date.now();
+  try {
+    const l = loadListenLog();
+    l.push(ts);
+    if (l.length > LISTEN_LOG_MAX) l.splice(0, l.length - LISTEN_LOG_MAX);
+    // ⚠ Piège 14 : on LIT le booléen. Stockage plein ⇒ rien n'a été écrit ⇒ on retire
+    // l'entrée du cache, sinon le graphique afficherait une écoute que le disque ignore.
+    if (!lsSet(LISTEN_LOG_KEY, JSON.stringify(l))) l.pop();
+  } catch {}
+  return ts;
+}
 // undo du retrait — retire l'entrée EXACTE posée par le retrait (par son ts) plutôt que la
 // dernière : une écoute légitime a pu s'intercaler entre le retrait et le clic « Annuler »
 // (le poll player pousse une entrée toutes les 5 s), un simple pop() supprimerait la mauvaise.
@@ -19349,17 +19435,17 @@ function unrecordListen(ts) {
   try {
     const l = loadListenLog();
     if (ts != null) {
-      for (let i = l.length - 1; i >= 0; i--) { if (l[i] && l[i].ts === ts) { l.splice(i, 1); break; } }
+      for (let i = l.length - 1; i >= 0; i--) { if (l[i] === ts) { l.splice(i, 1); break; } }
     } else { l.pop(); }
-    saveListenLog(l);
+    lsSet(LISTEN_LOG_KEY, JSON.stringify(l));
   } catch {}
 }
 // Écoutes par jour — depuis le journal persistant (pas tracks.listened_at) → survit à la purge
 function listensPerDay(n = 14) {
   const days = _lastNDays(n), counts = {};
   try {
-    loadListenLog().forEach(e => {
-      const d = new Date(e.ts);
+    loadListenLog().forEach(ts => {
+      const d = new Date(ts);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       counts[key] = (counts[key] || 0) + 1;
     });
@@ -19971,7 +20057,7 @@ function MapsPanel() {
 // endroits différents d'À propos (les saves groupés, puis les restores groupés).
 function DropboxSync({ mode = 'save' }) {
   const { restoreBackup } = useStore();
-  const [connected, setConnected] = React.useState(dropboxConnected());
+  const [connected, setConnected] = React.useState(dropboxConnected);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
   // Sauvegarder = vert, Restaurer = bleu (demande utilisateur — couleur par action, pas par provider)
@@ -20034,7 +20120,7 @@ function DropboxSync({ mode = 'save' }) {
 // ID pour pouvoir configurer depuis le téléphone sans toucher au code.
 function PCloudSync({ mode = 'save' }) {
   const { restoreBackup } = useStore();
-  const [connected, setConnected] = React.useState(pcloudConnected());
+  const [connected, setConnected] = React.useState(pcloudConnected);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
   const [cid, setCid]   = React.useState('');
@@ -20116,7 +20202,7 @@ function PCloudSync({ mode = 'save' }) {
 // automatiquement en « Connecter » (reconnexion en 1 clic).
 function GoogleDriveSync({ mode = 'save' }) {
   const { restoreBackup } = useStore();
-  const [connected, setConnected] = React.useState(gdriveConnected());
+  const [connected, setConnected] = React.useState(gdriveConnected);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
   // Sauvegarder = vert, Restaurer = bleu (demande utilisateur — couleur par action, pas par provider)
@@ -21752,7 +21838,7 @@ function VosEcoutesPanel() {
   // Module dont la pop-up 🤖 « quelle IA pour ce module » est ouverte (null = aucune).
   const [aiCfgMod, setAiCfgMod] = React.useState(null);
   // Affichage de la barre de lecture Spotify (bas de l'écran) — préférence persistée.
-  const [barOn, setBarOn] = React.useState(playerBarPref());
+  const [barOn, setBarOn] = React.useState(playerBarPref);
   const toggleBar = () => { const on = !barOn; playerBarSet(on); setBarOn(on); };
   const quotaActive = quotaUntil > Date.now();
   const restoreRef = React.useRef(null);
@@ -25183,13 +25269,16 @@ function CompareDeals({ isWatched, toggleWatch }) {
   // asynchrone : tant qu'il manque, on prend un repli plutôt que de comparer 1 $ à 1 €.
   const rate  = eur || 0.92;
   const inEur = v => (typeof v === 'number' ? v : +v) * rate;
-  const kept = (deals || []).filter(d => {
+  // ⚠ Mémoïsé : `visible` (juste en dessous) le consomme et dépend exactement des mêmes
+  // entrées. Laissé hors du useMemo, ce filtre rebalayait toute la liste des promos à
+  // CHAQUE rendu du panneau, y compris pour ouvrir la pop-up d'un tableau d'offres.
+  const kept = React.useMemo(() => (deals || []).filter(d => {
     const save = Math.round(+d.savings || 0);
     if (filter === 'm50') return save >= 50;
     if (filter === 'm75') return save >= 75;
     if (filter === 'aaa') return (d.__eur ? dNormal(d) : inEur(dNormal(d))) >= 27;
     return true;
-  });
+  }), [deals, filter, eur]);
   // ⚠ 11.4.1 — `/deals` renvoie UNE LIGNE PAR BOUTIQUE : le même jeu revenait plusieurs fois
   // dans la liste. On REGROUPE par jeu (`gameID`, à défaut le titre normalisé) et on
   // n'affiche que la MEILLEURE offre ; les autres vivent dans la pop-up du tableau.
@@ -25217,7 +25306,7 @@ function CompareDeals({ isWatched, toggleWatch }) {
     }
     // ⚠ 11.4.8 — 2e passe : Deluxe + Ultimate du même jeu ne font plus qu'une ligne.
     return cmpMergeEditions(out).sort((a, b) => (+b.best.savings || 0) - (+a.best.savings || 0));
-  }, [deals, filter, eur]);
+  }, [kept, eur]);   // `kept` porte déjà deals + filter, `eur` sert au tri des offres
   const usd = v => '$' + (+v).toFixed(2);
   // ⚠ `isEur` = l'offre est DÉJÀ en euros (Steam, Epic) : la convertir une seconde fois
   // afficherait un prix faux. Un prix nul est un jeu OFFERT (jeu de la semaine Epic).
@@ -27114,7 +27203,7 @@ function ActifBar({ label, value, pct, color, valueTxt }) {
 }
 
 function MesActifsPanel() {
-  const [data, setData]       = React.useState(loadActifs());
+  const [data, setData]       = React.useState(loadActifs);
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState(null);
   const [range, setRange]     = React.useState('1a');      // période du graphe : '1a' | 'tout'
@@ -35151,17 +35240,42 @@ function _mdpUnb64(s) { return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
 // transparent dans unlock) — le déchiffrement lit les itérations selon blob.v.
 const MDP_VAULT_V  = 2;
 const MDP_KDF_ITER = { 1: 300000, 2: 600000 };
+// ── Cache des clés dérivées ──────────────────────────────────────────────────
+// 600 000 itérations PBKDF2-SHA256 coûtent 0,3 à 0,8 s sur téléphone. Or la sauvegarde
+// AUTOMATIQUE d'une note cryptée part 700 ms après la dernière frappe et appelle
+// `mdpEncrypt` : sans ce cache, on repayait la dérivation ENTIÈRE à chaque pause de frappe,
+// sur le fil de l'app. On mémorise donc {mot de passe, sel, itérations} → clé AES, et
+// `mdpEncrypt` REJOUE le sel déjà connu au lieu d'en tirer un neuf (c'est ce qui rend le
+// cache utilisable : un sel neuf forcerait une nouvelle dérivation à chaque écriture).
+// ⚠ Ce qui doit rester NEUF à chaque chiffrement, c'est l'IV, pas le sel. L'IV est le nonce
+// d'AES-GCM : le réutiliser avec la même clé casse la confidentialité ET l'authentification.
+// Le sel, lui, ne sert qu'à empêcher une table précalculée de couvrir plusieurs coffres —
+// le rejouer entre deux écritures DU MÊME coffre par LE MÊME mot de passe ne donne rien à
+// un attaquant qui a déjà les deux blobs.
+// ⚠ Vidé par `_mdpAutoLock` et `logoutClear` : la clé ne survit pas au verrouillage.
+const _mdpKeyCache = [];          // [{ pw, salt, saltKey, iter, key }] — 4 entrées max
+function mdpKeyCacheClear() { _mdpKeyCache.length = 0; }
 async function _mdpDeriveKey(password, salt, iterations) {
+  const saltKey = _mdpB64(salt);
+  const hit = _mdpKeyCache.find(e => e.pw === password && e.iter === iterations && e.saltKey === saltKey);
+  if (hit) return hit.key;
   const base = await crypto.subtle.importKey('raw', _mdpTextEnc.encode(password), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
+  const key = await crypto.subtle.deriveKey(
     { name:'PBKDF2', salt, iterations, hash:'SHA-256' },
     base, { name:'AES-GCM', length:256 }, false, ['encrypt', 'decrypt']);
+  _mdpKeyCache.unshift({ pw: password, salt, saltKey, iter: iterations, key });
+  if (_mdpKeyCache.length > 4) _mdpKeyCache.length = 4;
+  return key;
 }
 async function mdpEncrypt(password, dataObj) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iv   = crypto.getRandomValues(new Uint8Array(12));
-  const key  = await _mdpDeriveKey(password, salt, MDP_KDF_ITER[MDP_VAULT_V]);
-  const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, _mdpTextEnc.encode(JSON.stringify(dataObj)));
+  const iter  = MDP_KDF_ITER[MDP_VAULT_V];
+  // Sel rejoué s'il est déjà en cache pour CE mot de passe (voir le bloc ci-dessus) :
+  // sans ça le cache ne servirait jamais, chaque écriture repartant sur un sel inconnu.
+  const known = _mdpKeyCache.find(e => e.pw === password && e.iter === iter);
+  const salt  = known ? known.salt : crypto.getRandomValues(new Uint8Array(16));
+  const iv    = crypto.getRandomValues(new Uint8Array(12));   // ⚠ TOUJOURS neuf (nonce GCM)
+  const key   = await _mdpDeriveKey(password, salt, iter);
+  const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, _mdpTextEnc.encode(JSON.stringify(dataObj)));
   return { v:MDP_VAULT_V, salt:_mdpB64(salt), iv:_mdpB64(iv), ct:_mdpB64(ct) };
 }
 async function mdpDecrypt(password, blob) {
@@ -35200,6 +35314,7 @@ function _mdpClearIdle() { if (_mdpIdleTimer) { clearTimeout(_mdpIdleTimer); _md
 function _mdpAutoLock() {
   _mdpClearIdle();
   _mdpSession = { unlocked:false, pw:null, entries:null };
+  mdpKeyCacheClear();   // la clé AES dérivée ne doit pas survivre au verrouillage
   _mdpLockSubs.forEach(fn => { try { fn(); } catch {} });
 }
 // Réarme le compte à rebours à chaque interaction avec le coffre (déverrouillage, ajout,
@@ -36753,7 +36868,7 @@ function ChessStatsSection() {
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState('');
   const [showCfg, setShowCfg] = React.useState(false);
-  const [nameInput, setNameInput] = React.useState(chessUser());
+  const [nameInput, setNameInput] = React.useState(chessUser);
   const configured = !!chessUser();
   const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
 
@@ -36930,8 +37045,8 @@ function ClashRoyaleStatsSection() {
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState('');
   const [showCfg, setShowCfg] = React.useState(false);
-  const [tagInput, setTagInput] = React.useState(crTag());
-  const [keyInput, setKeyInput] = React.useState(crKey());
+  const [tagInput, setTagInput] = React.useState(crTag);
+  const [keyInput, setKeyInput] = React.useState(crKey);
   const configured = !!(crTag() && crKey());
   const fmtN = n => Number(n || 0).toLocaleString('fr-FR');
 
@@ -37432,7 +37547,7 @@ function SpeedrunSection() {
   const [loading, setLoading] = React.useState(false);
   const [err, setErr]         = React.useState('');
   const [showCfg, setShowCfg] = React.useState(false);
-  const [nameInput, setNameInput] = React.useState(srUser());
+  const [nameInput, setNameInput] = React.useState(srUser);
   const configured = !!srUser();
 
   const ERR = {
