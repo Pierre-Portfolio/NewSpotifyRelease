@@ -201,7 +201,7 @@ Détient l'auth, le feed (+ `filteredFeed` et `filteredFeedIndex` Map URI→inde
 **Données / stockage**
 14. **`lsSet` écrit la valeur telle quelle** → un objet devient `"[object Object]"`. Toujours `JSON.stringify` soi-même, et **lire le booléen de retour** (quota plein = rien n'a été écrit : ne pas afficher un ajout fantôme).
 15. **Ne jamais stocker d'images** (data URL) en localStorage ni dans le backup : quota ~5 Mo partagé par tout le Hub. Photos → Drive, médias lourds → IndexedDB dédiée.
-16. **Clé de jour toujours LOCALE** (`getFullYear/getMonth/getDate`), jamais `toISOString()` (UTC → bascule vers 01-02 h en France, donc un jour de décalage).
+16. **Clé de jour toujours LOCALE** : `localDayStr()` (helper canonique, `todoTodayStr` en est un alias), jamais `toISOString()` (UTC → bascule vers 01-02 h en France, donc un jour de décalage).
 17. **Fusion des sauvegardes : au MAX ou en union, jamais en somme.**
 18. **`_db.run(sql, params)`** = tableau **positionnel** pour les `?`, jamais un objet.
 19. `releaseInRange` : `release_date` peut être `YYYY`, `YYYY-MM` ou `YYYY-MM-DD` → traiter comme une **période**, `new Date("2026")` donne le 1er janvier.

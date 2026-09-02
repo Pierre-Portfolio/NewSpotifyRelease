@@ -177,7 +177,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.1.8';
+const APP_VERSION = '12.1.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -195,6 +195,14 @@ function generateRandomString(len) {
     }
   }
   return out.join('');
+}
+// ── Jour courant 'YYYY-MM-DD' en heure LOCALE (piège 16) ──────────────────────
+// ⚠ JAMAIS `toISOString().slice(0, 10)` pour une clé de jour : c'est de l'UTC, et en France
+// (UTC+1/+2) il rend encore LA VEILLE entre minuit et 1 h ou 2 h du matin. Toutes les clés
+// « une fois par jour » et toutes les dates saisies par l'app passent par ici.
+function localDayStr(d) {
+  const x = d || new Date();
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
 }
 async function generateCodeChallenge(verifier) {
   const data   = new TextEncoder().encode(verifier);
@@ -308,10 +316,18 @@ function refreshToken() {
     });
     const data = await res.json();
     if (data.access_token) {
-      localStorage.setItem('spotify_token', data.access_token);
-      localStorage.setItem('spotify_token_expiry', Date.now() + data.expires_in * 1000);
-      if (data.refresh_token) localStorage.setItem('spotify_refresh', data.refresh_token); // rotation : stocker le nouveau
+      // ⚠ Écriture par `lsSet`, avec RETOUR TESTÉ — comme loginWithSpotify et exchangeCode,
+      // qui se protégeaient déjà. Un `setItem` nu levait sur un localStorage plein, le
+      // `.catch(() => false)` de l'IIFE avalait l'exception, et `getToken()` rendait ensuite
+      // l'ANCIEN jeton expiré : 401 en boucle pour toujours, sans un mot à l'écran.
+      const okTok = lsSet('spotify_token', data.access_token);
+      const okExp = lsSet('spotify_token_expiry', String(Date.now() + data.expires_in * 1000));
+      if (data.refresh_token) lsSet('spotify_refresh', data.refresh_token); // rotation : stocker le nouveau
       spotifyStoreScopes(data.scope);
+      if (!okTok || !okExp) {
+        authErrSet("Stockage local saturé : le jeton Spotify renouvelé n'a pas pu être enregistré. Libère de l'espace (purge des écoutes, sauvegarde puis réinitialisation) puis recharge la page.");
+        return false;
+      }
       return true;
     }
     if (data.error === 'invalid_grant') {
@@ -392,7 +408,10 @@ async function dropboxLogin() {
   if (!DROPBOX_APP_KEY) return;
   const verifier  = generateRandomString(64);
   const challenge = await generateCodeChallenge(verifier);
-  localStorage.setItem('dropbox_pkce_verifier', verifier);
+  // ⚠ Retour TESTÉ (même garde que loginWithSpotify) : sur un stockage plein, le `setItem`
+  // nu levait AVANT la redirection — le bouton ne faisait alors strictement rien, sans le
+  // moindre message. `lsSet` alerte l'utilisateur une fois par session.
+  if (!lsSet('dropbox_pkce_verifier', verifier)) return;
   const params = new URLSearchParams({
     client_id: DROPBOX_APP_KEY, response_type: 'code', redirect_uri: REDIRECT_URI,
     code_challenge: challenge, code_challenge_method: 'S256',
@@ -418,10 +437,12 @@ async function dropboxExchange(code) {
   const d = await res.json();
   localStorage.removeItem('dropbox_pkce_verifier');
   if (d.access_token) {
-    localStorage.setItem('dropbox_access', d.access_token);
-    localStorage.setItem('dropbox_expiry', String(Date.now() + (d.expires_in || 14400) * 1000));
-    if (d.refresh_token) localStorage.setItem('dropbox_refresh', d.refresh_token);
-    return true;
+    // Retour testé : un jeton non enregistré ferait annoncer une connexion réussie alors que
+    // la synchro échouerait au premier envoi.
+    const ok = lsSet('dropbox_access', d.access_token);
+    lsSet('dropbox_expiry', String(Date.now() + (d.expires_in || 14400) * 1000));
+    if (d.refresh_token) lsSet('dropbox_refresh', d.refresh_token);
+    return ok;
   }
   return false;
 }
@@ -436,8 +457,9 @@ async function dropboxToken() {
     });
     const d = await res.json();
     if (d.access_token) {
-      localStorage.setItem('dropbox_access', d.access_token);
-      localStorage.setItem('dropbox_expiry', String(Date.now() + (d.expires_in || 14400) * 1000));
+      // Le jeton frais est renvoyé même si l'écriture échoue : l'appel en cours doit aboutir.
+      lsSet('dropbox_access', d.access_token);
+      lsSet('dropbox_expiry', String(Date.now() + (d.expires_in || 14400) * 1000));
       return d.access_token;
     }
   }
@@ -2337,7 +2359,10 @@ async function importDiscoverWeekly(addLog, opts = {}) {
 
   addLog('── Import Découvertes de la semaine ──', 'info');
 
-  const today = new Date().toISOString().slice(0, 10);
+  // ⚠ Jour LOCAL (piège 16) : sert de `release_date` aux titres importés. En UTC, un import
+  // lancé après minuit heure française les datait de la veille — mauvaise bannière de date
+  // dans le feed et tri `date_asc` faussé.
+  const today = localDayStr();
   let tracksData = null, sourcePid = null;
 
   // 0) LA PLAYLIST FIXE (DW_FIXED_URL) — dès la 1re connexion de la semaine, on interroge
@@ -2583,7 +2608,7 @@ async function dwCaptureFromContext(contextUri, addLog) {
     if (!tracks.length) return 0;
     let purged = new Set();
     try { purged = new Set(dbAll("SELECT spotify_uri FROM purged_uris").map(r => r.spotify_uri)); } catch {}
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDayStr();   // jour LOCAL (piège 16), cf. dwImport
     const seen = new Set();
     let added = 0;
     for (const t of tracks) {
@@ -2791,6 +2816,22 @@ function StoreProvider({ children }) {
   const [genreFilter,  setGenreFilter]  = React.useState(''); // '' = tous — filtre SQL uniquement (via artists_scraped.genres)
   const resetFilters = () => { setFilterType('all'); setSortBy('artist'); setArtistSearch(''); setGenreFilter(''); };
 
+  // ⚠ Le filtre par GENRE n'existait qu'en SQL : pendant la fenêtre de debounce de 150 ms et
+  // pour les titres ajoutés par la synchro en cours (setFeed d'append, qui ne repasse pas par
+  // SQL), des titres d'un autre genre s'affichaient malgré le filtre. On reproduit ici la
+  // règle du SQL : les artistes SCANNÉS dont les genres portent l'entrée exacte. Un artiste
+  // absent d'artists_scraped ne passe pas — les titres Découvertes multi-artistes « A, B »
+  // restent donc hors du filtre, exactement comme en SQL.
+  // ⚠ Déclaré AVANT filteredFeed, qui le liste en dépendance (règle « Babel hoisting »).
+  const genreArtists = React.useMemo(() => {
+    if (!genreFilter) return null;
+    const set = new Set();
+    for (const a of artists) {
+      if (a.name && Array.isArray(a.genres) && a.genres.includes(genreFilter)) set.add(a.name);
+    }
+    return set;
+  }, [artists, genreFilter]);
+
   const filteredFeed = React.useMemo(() => {
     // #opt : sans filtre actif ET quand le tri demandé est déjà celui que le SQL a rendu, le
     // filtre est un pass-through et le tri ne changerait rien → on retourne le tableau tel
@@ -2805,11 +2846,12 @@ function StoreProvider({ children }) {
     // résultat SQL) ET pour les items ajoutés par la synchro en cours (setFeed d'append qui
     // ne repasse pas par SQL). Il ne s'exécute qu'au changement de feed/filtre (useMemo).
     const q = artistSearch.trim().toLowerCase();   // #opt : calculé UNE fois, pas par item (~1000×)
-    if (filterType === 'all' && (sortBy === 'default' || sortBy === 'artist') && !q) return feed || [];
+    if (filterType === 'all' && (sortBy === 'default' || sortBy === 'artist') && !q && !genreArtists) return feed || [];
     let r = (feed || []).filter(item => {
       if (filterType === 'single' && item.label !== 'Single') return false;
       if (filterType === 'album'  && item.label !== 'Album')  return false;
       if (filterType === 'dw'     && item.label !== 'Découvertes') return false;
+      if (genreArtists && !genreArtists.has(item.artist)) return false;
       if (q) return (item.artist || '').toLowerCase().includes(q);
       return true;
     });
@@ -2821,7 +2863,7 @@ function StoreProvider({ children }) {
       if (sortBy === 'artist')    return _feedCollator.compare(a.artist || '', b.artist || '');
       return 0;
     });
-  }, [feed, filterType, sortBy, artistSearch]);
+  }, [feed, filterType, sortBy, artistSearch, genreArtists]);
 
   const filteredFeedRef = React.useRef([]);
   React.useEffect(() => { filteredFeedRef.current = filteredFeed; }, [filteredFeed]);
@@ -25181,7 +25223,7 @@ const FeedItem = React.memo(function FeedItem({ item, isMobile=false, isNowPlayi
         }
       </div>
 
-      <AlbumArt size={38} letter={item.artist[0]} color={item.isNew ? C.accent : item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.blue} image={item.image} />
+      <AlbumArt size={38} letter={(item.artist || '?')[0]} color={item.isNew ? C.accent : item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.blue} image={item.image} />
 
       <div style={{ flex:1, minWidth:0 }}>
         <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color: isNowPlaying ? C.accent : C.text }}>
@@ -41868,11 +41910,9 @@ const TODO_HOLD_MS = 3000;
 function loadTodos() { try { return JSON.parse(localStorage.getItem(TODO_LS_KEY)) || []; } catch { return []; } }
 function saveTodos(t) { lsSet(TODO_LS_KEY, JSON.stringify(t)); }
 
-// Jour courant au format 'YYYY-MM-DD' (local) — sert au reset quotidien des tâches "Quotidien"
-function todoTodayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
+// Jour courant au format 'YYYY-MM-DD' (local) — sert au reset quotidien des tâches "Quotidien".
+// Alias historique de `localDayStr`, gardé pour les nombreux appelants du module To do.
+function todoTodayStr() { return localDayStr(); }
 
 // Journal des tâches terminées (validées) — { ts, fav } — alimente les stats To do.
 // Enregistré quand une tâche est supprimée (×) ou qu'une tâche Quotidien est validée pour le jour.
@@ -43006,9 +43046,13 @@ function rememberStats() {
 function notifyDueReminders() {
   const alerts = rememberAllWithDelta().filter(r => r.days === 30 || r.days === 7 || r.days === 1 || r.days <= 0);
   if (!alerts.length) return;
-  const today = new Date().toISOString().slice(0, 10);
+  // ⚠ Jour LOCAL (piège 16) : `rememberAllWithDelta` calcule ses échéances en heure locale,
+  // et une clé UTC vaut encore la veille entre minuit et 2 h — l'alerte du jour J était donc
+  // avalée jusqu'à 2 h du matin dès lors que l'app avait déjà notifié la veille.
+  const today = localDayStr();
   const KEY = 'spotifyplus_remember_notified';
-  try { if (localStorage.getItem(KEY) === today) return; localStorage.setItem(KEY, today); } catch {}
+  try { if (localStorage.getItem(KEY) === today) return; } catch {}
+  lsSet(KEY, today);
   const when = d => d < 0 ? `en retard de ${-d} j` : d === 0 ? "aujourd'hui" : d === 1 ? 'demain' : `dans ${d} j`;
   const names = alerts.map(a => `${a.label} (${when(a.days)})`).join(', ');
   notify('Spotify+ — Alertes', alerts.length === 1 ? `Rappel : ${names}` : `${alerts.length} rappels : ${names}`);
@@ -45188,7 +45232,7 @@ function LikerPanel() {
     <div style={{ display:'flex', flexDirection:'column' }}>
       {likedTracks.map(item => (
         <div key={item.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px', borderRadius:8, background:'transparent' }}>
-          <AlbumArt size={38} letter={item.artist[0]} color={item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.accent} image={item.image} />
+          <AlbumArt size={38} letter={(item.artist || '?')[0]} color={item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.accent} image={item.image} />
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{item.title}</div>
             <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
@@ -45256,7 +45300,7 @@ function HistoryPanel() {
     <div style={{ display:'flex', flexDirection:'column' }}>
       {history.map(item => (
         <div key={item.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px', borderRadius:8, background:'transparent' }}>
-          <AlbumArt size={38} letter={item.artist[0]} color={item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.accent} image={item.image} />
+          <AlbumArt size={38} letter={(item.artist || '?')[0]} color={item.label === 'Découvertes' ? 'oklch(0.65 0.18 300)' : C.accent} image={item.image} />
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{item.title}</div>
             <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>

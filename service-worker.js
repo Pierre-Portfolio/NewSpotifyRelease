@@ -132,7 +132,9 @@
 // purgeait tout à l'`activate`, et l'`install` suivante retéléchargeait 1,9 Mo immuable
 // (motus-dico 1,09 Mo + sql-wasm.wasm 639 Ko + Leaflet 162 Ko) — à CHAQUE déploiement, alors
 // même que Motus est censé être chargé à la demande.
-const CACHE  = 'spotifyplus-v378';          // app shell — bumpé à chaque déploiement
+// v379 : bump de cache — lot de correctifs (jeton Spotify/Dropbox non écrit en silence sur
+// stockage plein, clés de jour en heure locale, filtre par genre en mémoire).
+const CACHE  = 'spotifyplus-v379';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v1';
