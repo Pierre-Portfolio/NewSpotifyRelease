@@ -27,6 +27,7 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "data", "indices.json")
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 TIMEOUT = 12  # court : on passe vite au proxy suivant
+MAX_BODY = 1024 * 1024  # lecture bornée : un relais qui déverse des Mo ne doit pas tuer le runner
 
 # Proxies keyless. (gabarit, encode?) — {u} = URL Yahoo (encodée si encode=True).
 PROXIES = [
@@ -40,7 +41,7 @@ PROXIES = [
 def _get(url, timeout=TIMEOUT):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+        return r.read(MAX_BODY)
 
 
 def fetch_yahoo(symbol, start=0):

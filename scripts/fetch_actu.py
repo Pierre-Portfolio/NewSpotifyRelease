@@ -30,6 +30,10 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "data", "actu.json")
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 TIMEOUT = 15
+# ⚠ Lecture BORNÉE : un relais public défaillant (ou hostile) qui renverrait des dizaines de
+# Mo ferait sinon tomber le runner en mémoire. Un flux RSS ou une page fait quelques centaines
+# de Ko ; au-delà de 4 Mo le contenu est tronqué, le parseur fait avec ce qu'il a.
+MAX_BODY = 4 * 1024 * 1024
 
 
 def _get(url, timeout=TIMEOUT):
@@ -37,7 +41,7 @@ def _get(url, timeout=TIMEOUT):
         "User-Agent": UA, "Accept": "*/*", "Accept-Language": "fr-FR,fr;q=0.9",
     })
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+        return r.read(MAX_BODY).decode("utf-8", "replace")
 
 
 # Relais publics empruntés depuis le dernier `via_reset()`. Ce que renvoie un relais est
@@ -153,7 +157,7 @@ def _post(url, body, timeout=IMG_TIMEOUT):
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
     })
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+        return r.read(MAX_BODY).decode("utf-8", "replace")
 
 
 def gn_id(link):

@@ -165,7 +165,10 @@
 // vers vendor/doodle.js et vendor/sport-data.js, chargés à la demande (précachés avec l'app
 // shell : ils changent avec elle) ; data/*.json en stale-while-revalidate (Actu et Finance
 // s'affichent hors ligne et sans attendre le réseau).
-const CACHE  = 'spotifyplus-v387';          // app shell — bumpé à chaque déploiement
+// v388 : correctifs. L'app shell n'est plus reconnu à `mode === 'navigate'` seul (n'importe
+// quelle navigation same-origin — data/actu.json ouvert dans un onglet — écrasait la copie de
+// l'app en cache par sa réponse) ; minuteur de la course réseau/cache libéré.
+const CACHE  = 'spotifyplus-v388';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
@@ -244,8 +247,12 @@ async function notifyShellUpdated(id) {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  const isAppShell = e.request.mode === 'navigate' ||
-    (url.origin === location.origin && (url.pathname.endsWith('/') || url.pathname.endsWith('/index.html')));
+  // ⚠ UNIQUEMENT la racine ou index.html. Avant : `mode === 'navigate' || …`, donc N'IMPORTE
+  // QUELLE navigation same-origin (data/actu.json ou service-worker.js ouverts dans un onglet)
+  // était traitée comme l'app shell et sa réponse écrite sous la clé './index.html' — le shell
+  // en cache devenait ce JSON, servi comme app au premier lancement sur réseau lent.
+  const isAppShell = url.origin === location.origin &&
+    (url.pathname.endsWith('/') || url.pathname.endsWith('/index.html'));
 
   if (isAppShell) {
     // Network-first AVEC PLAFOND DE TEMPS.
@@ -284,10 +291,12 @@ self.addEventListener('fetch', e => {
     e.respondWith((async () => {
       const cached = await caches.match('./index.html');
       if (!cached) return net;   // toute première visite : rien d'autre à servir
+      let raceTimer = null;
       const fresh = await Promise.race([
         net.then(r => (r && r.ok) ? r : null, () => null),
-        new Promise(r => setTimeout(() => r(null), SHELL_TIMEOUT_MS)),
+        new Promise(r => { raceTimer = setTimeout(() => r(null), SHELL_TIMEOUT_MS); }),
       ]);
+      clearTimeout(raceTimer);
       if (fresh) return fresh;   // le réseau a gagné : l'utilisateur a déjà la version fraîche
       // On sert le cache. Si le téléchargement en cours rapporte un shell DIFFÉRENT de celui
       // qu'on vient de servir, la page tourne sur une version périmée → on le lui dit.

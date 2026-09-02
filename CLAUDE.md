@@ -226,7 +226,7 @@ Détient l'auth, le feed (+ `filteredFeed` et `filteredFeedIndex` Map URI→inde
 **Sécurité**
 29. **`dangerouslySetInnerHTML` proscrit** → `DOMParser` pour extraire du texte d'un HTML tiers.
 30. **`safeHref` avant tout `<a href>`** (la CSP autorise `unsafe-inline`, donc un `javascript:` s'exécuterait) — y compris sur une URL proposée par une IA.
-31. **Service worker** : ne cacher que `res.ok` (sinon un 404 écrase l'app), app shell en **network-first plafonné à 1,5 s** avec `{cache:'no-store'}`. Ne jamais revenir en cache-**first** pour l'app shell (les PWA installées ne recevaient plus les mises à jour) — le plafond n'en est pas un : la version fraîche est demandée à chaque lancement, elle ne bloque simplement plus l'affichage. ⚠ Notifier `matchAll()` afficherait le bandeau sur la page SUIVANTE : un téléchargement de fond survit à la page qui l'a lancé.
+31. **Service worker** : ne cacher que `res.ok` (sinon un 404 écrase l'app), app shell en **network-first plafonné à 1,5 s** avec `{cache:'no-cache'}` (revalidation conditionnelle ; **jamais `no-store`**, qui renverrait les 3 Mo entiers à chaque lancement). Ne jamais revenir en cache-**first** pour l'app shell (les PWA installées ne recevaient plus les mises à jour) — le plafond n'en est pas un : la version fraîche est demandée à chaque lancement, elle ne bloque simplement plus l'affichage. ⚠ Notifier `matchAll()` afficherait le bandeau sur la page SUIVANTE : un téléchargement de fond survit à la page qui l'a lancé.
 
 **Environnement d'agent**
 32. **Le proxy réseau bloque de nombreux hôtes** (Google News, LinkedIn, Steam, CoinGecko, docs.google.com, YouTube, instagram…) → écrire un parsing défensif et **dire explicitement « non vérifiable côté agent »** plutôt que d'affirmer.

@@ -212,7 +212,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.2.7';
+const APP_VERSION = '12.2.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -329,8 +329,15 @@ async function exchangeCode(code) {
 // Mutex : les refresh tokens Spotify PKCE sont à usage unique (rotation).
 // Deux refresh simultanés (poll player + scraping) consommeraient le même token → invalid_grant → déconnexion.
 let _refreshPromise = null;
+// ⚠ Échec du refresh (hors ligne, accounts.spotify.com injoignable, 5xx) : aucun nouvel essai
+// avant REFRESH_RETRY_MS. Sans ce repli, chaque `apiGet` d'un jeton expiré relançait un refresh
+// dans `getToken`, PUIS un second sur le 401 qui suivait : trois requêtes vouées à l'échec par
+// tick du poll, toutes les 5 s, tant que le réseau ne revenait pas.
+let _refreshFailedAt = 0;
+const REFRESH_RETRY_MS = 30000;
 function refreshToken() {
   if (_refreshPromise) return _refreshPromise;
+  if (Date.now() - _refreshFailedAt < REFRESH_RETRY_MS) return Promise.resolve(false);
   _refreshPromise = (async () => {
     const refresh = localStorage.getItem('spotify_refresh');
     if (!refresh) {
@@ -372,7 +379,8 @@ function refreshToken() {
       window.location.reload();
     }
     return false;
-  })().catch(() => false);
+  })().then(ok => { _refreshFailedAt = ok ? 0 : Date.now(); return ok; },
+            () => { _refreshFailedAt = Date.now(); return false; });
   _refreshPromise.finally(() => { _refreshPromise = null; });
   return _refreshPromise;
 }
@@ -3132,7 +3140,7 @@ function StoreProvider({ children }) {
         }
       } else if (code) {
         // Anti-CSRF : le state retourné doit correspondre à celui généré au départ
-        const stateOk = returnedState && returnedState === localStorage.getItem('pkce_state');
+        const stateOk = returnedState && returnedState === lsGet('pkce_state');
         if (!stateOk) {
           authErrSet("Contrôle anti-CSRF échoué : le « state » renvoyé par Spotify ne correspond pas à celui du départ. Cela arrive si la connexion a été lancée depuis un autre onglet/navigateur, ou si les données du site ont été effacées entre-temps.");
         }
@@ -3140,7 +3148,7 @@ function StoreProvider({ children }) {
         window.history.replaceState({}, '', window.location.pathname);
         if (!ok) { setAuthError(authErrTake()); setAuthState('login'); return; }
       }
-      const token = localStorage.getItem('spotify_token');
+      const token = lsGet('spotify_token');
       if (!token) { setAuthState('login'); return; }
       try {
         const me = await apiGet('https://api.spotify.com/v1/me');
@@ -3175,7 +3183,15 @@ function StoreProvider({ children }) {
         setOfflineReady(true);
         setAuthState('login');
       }
-    })();
+    })().catch(e => {
+      // ⚠ Filet : tout ce qui lève AVANT le `try` ci-dessus (retour pCloud, échange Dropbox, un
+      // `localStorage` qui lève à la lecture) laissait `authState` sur son état initial pour
+      // toujours — écran de chargement sans issue, et le filet d'amorçage n'y voit rien puisque
+      // React a déjà remplacé #boot. On retombe sur l'écran de connexion avec la cause.
+      setAuthError('Démarrage interrompu : ' + ((e && e.message) || 'erreur inconnue') + '.');
+      setOfflineReady(true);
+      setAuthState('login');
+    });
   }, []);
 
   // ── Poll lecture en cours toutes les 5s ──
@@ -30685,7 +30701,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       if (seekTimerRef.current) { clearTimeout(seekTimerRef.current); seekTimerRef.current = null; }
       clear();
     };
-  }, [vid, index, queue.length, autoNext, showComments]);
+  }, [vid, index, queue.length, autoNext, showComments, showSum]);   // ⚠ showSum : `armable` le lit — absent des deps, ouvrir le résumé ne désarmait pas l'auto-avance
 
   // Swipe horizontal (7.7.8, sens inversé) : GAUCHE = suivante, DROITE = précédente.
   // Swipe VERTICAL (7.7.9, ⚠ INVERSÉ en 8.0.0 à la demande de l'utilisateur) : HAUT = suivante,
@@ -33365,7 +33381,17 @@ function NourriturePanel() {
         {searchErr && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{searchErr}</div>}
         {results && results.length > 0 && (
           <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:260, overflowY:'auto' }}>
-            {results.map((r, i) => <FoodResultRow key={i} r={r} onAdd={addFromResult} fav={favSet.has(foodFavId(r))} onFav={toggleFav} />)}
+            {(() => {
+              // ⚠ Clé = identité du résultat (nom|marque), JAMAIS l'index : la ligne garde un état
+              // (grammes saisis) et une nouvelle recherche réutilisait la ligne n°k avec les
+              // grammes de l'ancienne. Suffixe pour les rares doublons d'identité (deux entrées
+              // Open Food Facts au même nom + marque).
+              const seen = new Map();
+              return results.map(r => {
+                const id = foodFavId(r); const n = (seen.get(id) || 0) + 1; seen.set(id, n);
+                return <FoodResultRow key={n > 1 ? `${id}#${n}` : id} r={r} onAdd={addFromResult} fav={favSet.has(id)} onFav={toggleFav} />;
+              });
+            })()}
           </div>
         )}
         {/* Saisie manuelle des kcal (repli si l'aliment n'est pas dans la base) */}
