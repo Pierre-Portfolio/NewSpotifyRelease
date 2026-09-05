@@ -1893,6 +1893,10 @@ function doodleMakeRbMob(x, y) {
   return { x, y, w: D_RBMOB_W, h: D_RBMOB_H, type: 1, alive: true, kind: 'rbmob', icon: '🌈',
            rare: true, hp: D_RBMOB_HP, homing: D_RBMOB_V, wt: Math.random() * 6.28 };
 }
+// ⚠ Les deux poids de copie sont déclarés ICI, bien au-dessus de leur usage réel
+// (`doodleCopyW`) : le TEXTE de la tuile 🎰 les lit dans D_TILES, table évaluée plus haut que le
+// reste du fichier. Les laisser près de la fonction, c'était une TDZ — donc un écran noir (piège 2).
+const D_COPY_W_RARE = 0.2, D_COPY_W_BIOME = 0.4;
 // ⏲️ 12.5.2 — LE BALANCIER (demande utilisateur) : un pendule pendu SOUS la dalle, qui
 // bascule de gauche à droite sans fin et tue au contact — les créatures comme le doodler.
 // ⚠ C'est le seul danger du jeu qui soit à la fois PERMANENT (il ne s'arme pas, ne se
@@ -1936,7 +1940,7 @@ const D_TILES = [
   { k: 'lift',    icon:'🛗', name: 'Ascenseur',     txt: 'monte et descend sans arrêt le long de sa ligne' },
   { k: 'rebound', icon:'🦘', name: 'Rebond',        txt: 'les 3 prochains sauts montent deux fois plus haut' },
   { k: 'invert',  icon:'🔃', name: 'Inversion',     txt: 'inverse la gauche et la droite pendant ' + Math.round(D_INVERT_LIFE / 60) + ' secondes' },
-  { k: 'slot',    icon:'🎰', name: 'Machine à sous', txt: 'met le jeu en pause et tire 3 tuiles, aussitôt ajoutées à la partie — trois tuiles DIFFÉRENTES, et jamais une que tu possèdes déjà' },
+  { k: 'slot',    icon:'🎰', name: 'Machine à sous', txt: 'met le jeu en pause et tire 3 tuiles, aussitôt ajoutées à la partie — trois tuiles DIFFÉRENTES, et jamais une que tu possèdes déjà. Elle sait aussi copier une tuile de BIOME, bien plus rarement : un poids de ' + Math.round(D_COPY_W_BIOME * 100) + ' % pour les deux tuiles ordinaires d\'un biome et de ' + Math.round(D_COPY_W_RARE * 100) + ' % pour sa rare, contre 100 % pour une tuile du catalogue' },
   { k: 'freeze',  icon:'⏸️', name: 'Pause',          txt: 'fige tous les monstres pour le reste de la partie… ou double leur vitesse. Une chance sur deux, et chaque nouvelle dalle annule la précédente' },
   { k: 'balloon', icon:'🎈', name: 'Ballon',         txt: 'un ballon gonfle sous toi, t\'emporte en l\'air, puis éclate' },
   { k: 'target',  icon:'🎯', name: 'Cible',          txt: 'atterris pile au centre et tu gagnes un butin de coffre ; sinon elle se détruit' },
@@ -3010,14 +3014,28 @@ function doodleTileAny(k) { return D_TILES.find(t => t.k === k) || doodleBiomeTi
 // tomber sur une tuile déjà débloquée — voire trois fois sur la même — et c'était un rouleau
 // pour rien. Le vivier exclut donc les tuiles présentes et les tuiles bannies, et le tirage se
 // fait SANS REMISE : les trois sont distincts.
+// ⚠ 12.5.4 — ELLE SAIT AUSSI COPIER UNE TUILE DE BIOME (demande utilisateur), mais nettement
+// moins souvent : D_COPY_W_BIOME pour les deux tuiles ordinaires d'un biome, D_COPY_W_RARE pour
+// sa rare, contre 1 pour une tuile du catalogue débloquable. Copier la tuile rare d'un biome,
+// c'est l'emporter avec soi dans TOUS les biomes suivants — elle doit se mériter.
+// ⚠ Le poids porte sur le TIRAGE, à l'inverse de D_BIOME_TILE_RARE dans la génération de
+// rangées, qui filtre APRÈS coup : là-bas la rangée retombe en plateforme ordinaire, ici il
+// n'y a rien où retomber — un rouleau doit sortir quelque chose.
 // ⚠ Le vivier peut se vider (fin de partie très avancée) : on rend alors moins de `n` tuiles, et
 // l'affichage s'y règle — compléter avec des doublons aurait re-promis ce qu'on possède déjà.
+function doodleCopyW(k) {
+  if (!D_BIOME_TILES.has(k)) return 1;
+  const d = doodleBiomeTileDef(k);
+  return d && d.w ? D_COPY_W_RARE : D_COPY_W_BIOME;
+}
 function doodleCopyRoll(s, n) {
-  const pool = D_TILES.map(t => t.k)
+  const pool = [...D_TILES.map(t => t.k), ...D_BIOME_TILE_LIST.map(t => t.k)]
     .filter(k => k !== 'slot' && s.tiles.indexOf(k) < 0 && (s.banned || []).indexOf(k) < 0);
   const out = [];
   for (let i = 0; i < n && pool.length; i++) {
-    const j = Math.floor(Math.random() * pool.length);
+    let tot = 0; for (const k of pool) tot += doodleCopyW(k);
+    let r = Math.random() * tot, j = 0;
+    for (; j < pool.length - 1; j++) { r -= doodleCopyW(pool[j]); if (r < 0) break; }
     out.push(pool[j]); pool.splice(j, 1);
   }
   return out;
