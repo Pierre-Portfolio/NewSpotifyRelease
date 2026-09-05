@@ -1146,6 +1146,19 @@ const D_STICKY_HOLD = 180;
 // ±15 % directement à la vitesse aurait fait ±32 % de hauteur, ce qui n'est plus « un petit peu ».
 // ⚠ Elle ne meurt pas en éclatant : c'est une dalle à hasard, pas une dalle à usage unique.
 const D_POP_LO = 0.85, D_POP_HI = 1.15, D_POP_LIFE = 26;
+// 🍿 12.4.9 — LA BARQUETTE PROJETTE DES GRAINS (demande utilisateur) : D_POP_THROW grains
+// partent en gerbe au premier rebond, vers le HAUT ou vers le BAS de la dalle, à pile ou face.
+// ⚠ UNE SEULE FOIS PAR DALLE (`p.thrown`) : une gerbe à chaque passage aurait noyé l'écran, et
+// c'est la première bouchée qui saute — les suivantes, la barquette les a déjà lâchées.
+// ⚠ Purement DÉCORATIFS, comme les 👥 clones : ils ne portent pas, ne blessent pas et ne se
+// ramassent pas. Des grains qui feraient quelque chose auraient changé une tuile de hasard en
+// tuile à effet, ce qui n'est pas ce qui est demandé.
+// ⚠ Ils vivent dans `s.parts`, le tableau des particules : il porte déjà la gravité (d'où l'arc
+// des grains lancés vers le haut), le défilement de la caméra et le nettoyage en fin de vie. Un
+// tableau à eux, c'était les trois à réécrire. Le drapeau `pop` les fait seulement dessiner en
+// FLOCON à trois bosses au lieu du carré ordinaire — un carré de 3 px ne dit pas « pop-corn ».
+// ⚠ L'animation d'éclatement de la barquette (`p.pop`) est CONSERVÉE : la gerbe s'y ajoute.
+const D_POP_THROW = 4, D_POP_THROW_V = 3.2, D_POP_THROW_LIFE = 58;
 // 🧱 10.2.5 — PÂTE À MODELER (demande utilisateur) : elle S'ENFONCE un peu à chaque rebond.
 // ⚠ Le pas est petit devant l'écart entre deux rangées (D_GAP_SAFE = 92) : la dalle se dérobe
 // sous les pieds sans jamais ouvrir d'un coup un trou infranchissable. ⚠ Aucun plafond : elle
@@ -1936,7 +1949,7 @@ const D_TILES = [
   { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'son canon te suit et elle tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — pendant les ' + (D_TLASER_TEL / 60).toFixed(1).replace('.', ',') + ' s qui précèdent le coup, un rayon de visée en pointillés s\'allonge devant elle et deux anneaux se referment sur son œil : c\'est le moment de bouger. Se prendre le tir fait mal' },
   { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
-  { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire' },
+  { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire. Au premier rebond, elle projette en plus ' + D_POP_THROW + ' grains en gerbe, vers le haut ou vers le bas à pile ou face — de la pure décoration' },
   { k: 'sticky',   icon:'🍯', name: 'Collante',       txt: 'tu restes collé dessus ' + Math.round(D_STICKY_HOLD / 60) + ' secondes, puis tu repars d\'un saut ordinaire' },
   { k: 'origami',  icon:'🪷', name: 'Origami',        txt: 'elle se plie et se déplie sans fin en trois formes : dalle ordinaire, super saut, puis dalle qu\'on traverse — la forme se voit avant d\'atterrir' },
   { k: 'soap',     icon:'🧼', name: 'Savon',          txt: 'tu glisses pendant ' + Math.round(D_SOAP_LIFE / 60) + ' secondes dans la direction inverse de celle d\'où tu arrivais' },
@@ -6791,7 +6804,17 @@ function doodleDraw(ctx, s, W, H) {
     ctx.restore();
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   }
-  s.parts.forEach(pt => { ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c; ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz); });
+  s.parts.forEach(pt => {
+    ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c;
+    // 🍿 Les grains projetés par la barquette : trois bosses qui tournent, le même flocon que
+    // celui dessiné dans la tuile. Un carré de 3 px se lit comme une étincelle, pas un grain.
+    if (pt.pop) {
+      ctx.save(); ctx.translate(pt.x, pt.y); ctx.rotate(pt.spin || 0);
+      [[-2.3, 0], [2.3, 0], [0, -2.3]].forEach(([ox, oy]) => { ctx.beginPath(); ctx.arc(ox, oy, pt.sz, 0, Math.PI * 2); ctx.fill(); });
+      ctx.restore(); return;
+    }
+    ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz);
+  });
   ctx.globalAlpha = 1;
   ctx.fillStyle = '#3a7d1e';
   // 🔆 Le laser se dessine en trait allongé dans son axe de tir, halo compris : une bille
