@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.3.4';
+const APP_VERSION = '12.3.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -23161,6 +23161,47 @@ function ytSeenMarkAnywhere(v) {
   saveTvItems(next);
   return true;
 }
+// Tous les ids de vidéos DÉJÀ cochées « vues » dans TV Time (vraies chaînes + pseudo-chaîne
+// « Hub Pierre »). Actu s'en sert pour afficher l'état de son bouton 👁 dès le montage :
+// sans ça la pastille repartirait à zéro à chaque ouverture alors que TV Time, lui, s'en
+// souvient. Lecture seule du localStorage, comme `ytSeenMarkAnywhere`.
+function ytSeenIdSet() {
+  const out = new Set();
+  for (const it of loadTvItems()) {
+    if (it.type !== 'youtube') continue;
+    for (const id of (it.watchedIds || [])) out.add(id);
+  }
+  return out;
+}
+// Inverse d'`ytSeenMarkAnywhere` (bouton 👁 décoché dans Actu) : la vidéo est décochée LÀ
+// où elle était cochée. Deux cas, comme au marquage :
+//   · vraie chaîne/playlist → retirée de `watchedIds`, et la chaîne passée en « Vus » parce
+//     que c'était sa dernière vidéo redevient « En cours » (même règle qu'ytUnmarkVideoSeen
+//     du panneau — sans son `prevStatus`, qu'Actu n'a pas : « En cours » est le seul statut
+//     cohérent avec une vidéo qui redevient à voir) ;
+//   · pseudo-chaîne « Hub Pierre » → `ytUnsavedRemove`, qui la fait DISPARAÎTRE si c'était
+//     sa dernière vidéo.
+// Idempotent : renvoie false si rien n'était coché. La vidéo n'est PAS remise dans la
+// playlist d'attente : `ytWlDropSeen` l'en avait sortie côté YouTube, on ne devine pas
+// qu'elle y était.
+function ytSeenUnmarkAnywhere(id) {
+  if (!id) return false;
+  const items = loadTvItems();
+  const owner = items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.watchedIds || []).includes(id));
+  if (owner) {
+    saveTvItems(items.map(it => {
+      if (it.type !== 'youtube' || it.id !== owner.id) return it;
+      const nx = { ...it, watchedIds: (it.watchedIds || []).filter(x => x !== id) };
+      if (nx.status === 'done') { nx.status = 'watching'; nx.doneAt = null; }
+      return nx;
+    }));
+    return true;
+  }
+  const next = ytUnsavedRemove(items, id);
+  if (next === items) return false;
+  saveTvItems(next);
+  return true;
+}
 // Une vidéo vue sort AUSSI de la playlist « Hub Pierre » si elle y était en attente.
 // ⚠ Best effort et silencieux : on ne va sur le réseau que si le mémo local ou le contenu
 // réel (mémorisé) la connaît, et un échec laisse simplement la vidéo en attente.
@@ -23205,13 +23246,15 @@ function ActuYoutubeSection() {
   // au premier ajout — le lien apparaît alors au montage suivant, ce qui suffit ici.
   const [ytWlId]              = React.useState(() => lsGet(YTSUB_WL_ID_LS));
   const [player, setPlayer]   = React.useState(null);      // { queue, i } — lecteur plein écran
-  // Vidéos comptées vues pendant cette session (11.3.8) → pastille « ✓ vue ». Le
-  // classement, lui, est écrit dans TV Time tout de suite ; ce Set n'est que l'affichage.
-  const [seenIds, setSeenIds] = React.useState(() => new Set());
+  // Vidéos comptées vues (11.3.8) → pastille « ✓ vue » et bouton 👁 coché. ⚠ Initialisé
+  // depuis TV TIME (`ytSeenIdSet`) et pas à vide : le marquage est écrit en localStorage
+  // tout de suite, une simple réouverture d'Actu remettait sinon toutes les pastilles à zéro.
+  const [seenIds, setSeenIds] = React.useState(() => ytSeenIdSet());
   // ⚠ Miroir en REF de `seenIds` : le lecteur rapporte sa position plusieurs fois par
   // seconde, et relire l'état React ferait repartir `ytSeenMarkAnywhere` (donc tout le
   // localStorage de TV Time) à chaque rapport. La ref tranche AVANT.
-  const seenRef = React.useRef(new Set());
+  const seenRef = React.useRef();
+  if (!seenRef.current) seenRef.current = new Set(seenIds);
   const sentinelRef           = React.useRef(null);
 
   const refresh = React.useCallback(async (force) => {
@@ -23287,6 +23330,16 @@ function ActuYoutubeSection() {
     ytWlDropSeen(v.id).then(dropped => { if (dropped) setAdded(new Set(loadYtWlAdded())); });
   }, []);
 
+  // Bouton 👁 (demande utilisateur) : cocher/décocher « vue » à la main, sans avoir à lire
+  // la vidéo — le clic écrit dans TV Time exactement comme le visionnage à ACTU_SEEN_RATIO.
+  const toggleSeen = React.useCallback(v => {
+    if (!v || !v.id) return;
+    if (!seenRef.current.has(v.id)) return markSeen(v);
+    ytSeenUnmarkAnywhere(v.id);
+    seenRef.current.delete(v.id);
+    setSeenIds(prev => { const n = new Set(prev); n.delete(v.id); return n; });
+  }, [markSeen]);
+
   // Ouvre le lecteur plein écran sur `v`, avec TOUT l'onglet courant en file.
   // ⚠ La file est construite ici (et non dans le rendu) : `YtFullscreenPlayer` garde son
   // index, un nouveau tableau à chaque render ferait repartir ses effets sans arrêt.
@@ -23348,6 +23401,17 @@ function ActuYoutubeSection() {
           <a href={watch} target="_blank" rel="noopener noreferrer" title="Ouvrir dans un nouvel onglet du navigateur"
             style={{ fontSize:13, color:YT_COLOR, background:'none', border:`1px solid ${YT_COLOR}66`, textDecoration:'none',
               borderRadius:20, width:32, height:32, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', flexShrink:0 }}>↗</a>
+          {/* 👁 Vu / ✓ vue — ENTRE ↗ et 🕒 (demande utilisateur). Coche la vidéo dans TV Time
+              (chez le vidéaste si sa chaîne y est suivie, sinon « Hub Pierre ») et la sort de
+              la playlist d'attente ; re-cliquer décoche. */}
+          <button onClick={() => toggleSeen(v)}
+            title={watched ? 'Vue dans TV Time — cliquer pour décocher' : 'Marquer comme vue dans TV Time'}
+            aria-label={watched ? 'Décocher « vue »' : 'Marquer comme vue'} aria-pressed={watched}
+            style={{ fontSize:13, color: watched ? '#4caf50' : C.dim, background:'none',
+              border:`1px solid ${watched ? '#4caf5066' : C.border}`,
+              borderRadius:20, width:32, height:32, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer', flexShrink:0 }}>
+            {watched ? '✓' : '👁'}
+          </button>
           <button onClick={onAction} title={saved ? 'Déjà dans la playlist' : 'Ajouter à la playlist YouTube « ' + YTSUB_WL_NAME + ' »'} disabled={saved || busy}
             style={{ fontSize:12, color: saved ? C.dim : actionColor, background:'none', border:`1px solid ${saved ? C.border : actionColor + '66'}`,
               borderRadius:20, width:32, height:32, display:'flex', alignItems:'center', justifyContent:'center',
@@ -23426,7 +23490,7 @@ function ActuYoutubeSection() {
             ? <a href={'https://www.youtube.com/playlist?list=' + encodeURIComponent(ytWlId)} target="_blank" rel="noopener noreferrer" style={{ color:YT_COLOR }}>« {YTSUB_WL_NAME} » ↗</a>
             : <span>« {YTSUB_WL_NAME} »</span>}
           {' '}de TON compte YouTube (créée privée au 1er ajout — l'API YouTube n'autorise pas d'écrire dans la « À regarder plus tard » native).
-          {' '}Une vidéo lue ici <b>à moitié</b> ({Math.round(ACTU_SEEN_RATIO * 100)} %) ou <b>résumée par l'IA</b> est comptée <b>vue</b> dans TV Time (chez le vidéaste si tu suis sa chaîne, sinon dans « {YT_UNSAVED_TITLE} ») et quitte la playlist d'attente.
+          {' '}Une vidéo lue ici <b>à moitié</b> ({Math.round(ACTU_SEEN_RATIO * 100)} %), <b>résumée par l'IA</b> ou cochée <b>👁</b> est comptée <b>vue</b> dans TV Time (chez le vidéaste si tu suis sa chaîne, sinon dans « {YT_UNSAVED_TITLE} ») et quitte la playlist d'attente. Re-cliquer sur ✓ la décoche.
         </div>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginTop:8 }}>
           <span style={{ fontSize:9, color:C.dim }}>{data && data.fetched_at ? `Mis à jour ${actuAgo(new Date(data.fetched_at).toISOString())}` : ''}</span>
