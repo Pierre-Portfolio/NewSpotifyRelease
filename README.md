@@ -58,7 +58,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 | **🔌 API** | Liste locale de toutes les API utilisées par le Hub, saisie des clés, compteur d'appels par API, export JSON |
 | **🏷️ Bon Plan** | Ta liste de jeux suivis avec prix cible, promos du moment (CheapShark + Steam + Epic, jeu offert de la semaine compris), bibliothèque et liste de souhaits Steam, recherche de bons plans par IA |
 | **🗃️ Collection** | Cartes (Pokémon, Magic), Displate, Funko Pop, jeux vidéo, pierres, montres, vins. Recherche par catalogue, ajout manuel, estimation par photo, scan d'une photo pour ajouter plusieurs pièces |
-| **💼 Emploi** | Les critères de l'emploi de tes rêves (métiers, lieux, salaire, fraîcheur, contrat…) + les offres du moment filtrées dessus |
+| **💼 Emploi** | Les critères de l'emploi de tes rêves (métiers, lieux, salaire, fraîcheur, contrat…) — les offres du moment sont cherchées et filtrées automatiquement dessus, sur 5 sources |
 | **💹 Finance** | Cours (crypto, indices, or, devises, actions) en mode Light ou Full, historique constitué jour après jour, calculatrice, tableau de bord BullRun, et **Mes Actifs** (lecture de ton classeur Google Drive) |
 | **🧊 Frigo** | Contenu par compartiment + dates de péremption, et un assistant IA : photo → liste d'ingrédients, recettes réalisables avec ce que tu as, recette d'un plat |
 | **🏛️ Histoire** | Une ville + une photo → l'IA identifie l'œuvre, la résume et explique son lien avec la ville ; sous la fiche, un fil de questions pour creuser |
