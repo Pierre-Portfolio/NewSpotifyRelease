@@ -1228,14 +1228,6 @@ const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5, 
 // et perdre la lecture de ses munitions n'était pas ce qui était demandé.
 // ⚠ La bascule est PROGRESSIVE (D_SHROOM_EASE) au début comme à la fin : un retournement
 // instantané fait perdre le fil de l'endroit où l'on est, ce qui n'est plus jouable du tout.
-// 🛒 10.3.0 — TYROLIENNE (demande utilisateur) : elle naît TOUJOURS par deux, comme les 🚇
-// Tuyaux, et un câble relie les deux dalles. S'y accrocher, c'est descendre jusqu'à l'autre bout.
-// ⚠ La prise se fait au CONTACT du câble, pas de la dalle : une tyrolienne qu'il faudrait viser
-// pile n'aurait pas été jouable au doigt (même raison que la 🌿 Liane).
-// ⚠ La glissade va TOUJOURS vers le bas : remonter une tyrolienne à la force du poignet aurait
-// été une échelle gratuite vers le haut de l'écran, et la montée n'a pas besoin de ça.
-// ⚠ Repos après le lâcher (`zipCool`) : sans lui, on se raccrocherait au câble à la frame
-// suivante et la descente se rejouerait sans fin.
 // ☠️ 10.3.1 — DESTRUCTRICE DE MONSTRES (demande utilisateur) : le rebond tue TOUT ce qui vit à
 // D_SLAYER_R d'altitude de la dalle. ⚠ C'est une BANDE horizontale, pas un cercle : la demande
 // porte sur l'altitude, et un rayon circulaire aurait épargné les créatures des deux bords.
@@ -1569,7 +1561,6 @@ function doodleLightPhase(p, t) { return Math.floor((t + (p.ph || 0)) / D_LIGHT_
 // à l'image, et au-delà. ⚠ L'onde dessinée lit la MÊME constante, elle s'écarte donc d'autant
 // — c'est ce qui garde la promesse « l'effet montre sa propre zone » quand la zone déborde.
 const D_SLAYER_R = 450, D_SLAYER_LIFE = 26;
-const D_ZIP_DY = [72, 128], D_ZIP_MINX = 110, D_ZIP_GRAB = 13, D_ZIP_V = 0.019, D_ZIP_SAG = 16, D_ZIP_COOL = 40;
 // 🍄 10.8.0 — LE CHAMPIGNON NE RETOURNE PLUS L'ÉCRAN (demande utilisateur) : il fait un TRIP.
 // Pendant D_SHROOM_LIFE frames (10 s) l'image ondule, les couleurs coulent, et des créatures
 // qui n'existent pas se mettent à rôder.
@@ -1698,8 +1689,8 @@ const D_PAINTS = [
   { k:'revenant', icon:'💀', name:'Revenant',       body:'#f2f0e6', dark:'#a8a08c', eye:'#3a362c', life:0,   txt:'la prochaine mort te relève au lieu de t\'achever — chute dans le vide comprise' },
 ];
 // 🌈 Instable : le vivier des effets qu'elle peut rejouer. ⚠ C'est une LISTE BLANCHE et non une
-// liste d'exclusions : la plupart des tuiles lisent un état porté par LEUR dalle (`p.pipe`,
-// `p.zip`, `p.tama`, `p.egg`…) et rejouées sur une dalle étrangère elles ne feraient rien, ou
+// liste d'exclusions : la plupart des tuiles lisent un état porté par LEUR dalle
+// (`p.pipe`, `p.tama`, `p.egg`…) et rejouées sur une dalle étrangère elles ne feraient rien, ou
 // pire, la transformeraient en une chose qu'elle n'est pas. Ne restent ici que les effets qui
 // se suffisent à eux-mêmes. ⚠ Aucune tuile MORTELLE dedans : un rebond ne doit jamais tuer par
 // surprise à cause d'une teinte qu'on porte.
@@ -1829,7 +1820,7 @@ function doodlePerkRaise(s, cible) {
 const D_BAMB_N = 3;
 const D_BAMB_CLEAR = ['roll', 'mim', 'gvx', 'vy2', 'y0', 'span2', 'ax', 'ay', 'boo', 'conf',
   'fade', 'fuse', 'tent', 'pcool', 'steam', 'lava', 'laz', 'grap', 'grapCool', 'egg', 'ori',
-  'lit', 'tama', 'meals', 'tlaz', 'lazFire', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
+  'lit', 'tama', 'meals', 'tlaz', 'lazFire', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'pool', 'pop', 'eat'];
 function doodleBambooify(s, p) {
   s.bambLeft--;
   p.type = 'bambooed';
@@ -1983,7 +1974,6 @@ const D_TILES = [
   { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : VERTE elle t\'offre 1 bonus (une seule fois par dalle), JAUNE on glisse, ROUGE elle te prend ' + D_LIGHT_TAKE + ' niveaux de bonus et ' + D_LIGHT_AMMO + ' balles' },
   { k: 'fog',      icon:'🌁', name: 'Brouillard',     txt: 'toutes les dalles disparaissent pour le saut qui suit — elles réapparaissent dès que tu en retouches une' },
   { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre' },
-  { k: 'zip',      icon:'🛒', name: 'Tyrolienne',     txt: 'elles naissent par deux et un câble les relie : touche le câble et tu glisses jusqu\'à l\'autre bout, où tu repars d\'un saut' },
   { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'son canon te suit et elle tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — pendant les ' + (D_TLASER_TEL / 60).toFixed(1).replace('.', ',') + ' s qui précèdent le coup, un rayon de visée en pointillés s\'allonge devant elle et deux anneaux se referment sur son œil : c\'est le moment de bouger. Se prendre le tir fait mal' },
   { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
@@ -2812,7 +2802,7 @@ function doodleBossStart(s, W, H) {
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
   s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
-  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.zip = null; s.grab = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
+  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
   s.banner = { txt: `💀 ${kind.name}`, sub: `plus de saut — déplace-toi et tire · ${hp} points de vie · 🛡️ ${D_BOSS_SH} balles après chaque sort`, life: D_BANNER_LIFE * 1.6 };
@@ -3222,28 +3212,6 @@ function doodleWaterFlows(s, H) {
     }
   }
   return { falls, wet };
-}
-// 🛒 Les câbles de tyrolienne présents à l'écran : une entrée par PAIRE, du pylône haut vers le
-// bas. ⚠ Source UNIQUE pour le dessin et pour la prise, comme les arcs électriques : deux
-// parcours séparés, et un câble dessiné finirait par ne pas être celui auquel on s'accroche.
-function doodleZipLines(s) {
-  const by = new Map();
-  for (const q of s.platforms) {
-    if (!q.zip || q.dead) continue;
-    const l = by.get(q.zip) || []; l.push(q); by.set(q.zip, l);
-  }
-  const out = [];
-  for (const l of by.values()) {
-    if (l.length < 2) continue;
-    const [a, b] = l[0].y <= l[1].y ? [l[0], l[1]] : [l[1], l[0]];
-    out.push({ a, b, x1: a.x + a.w / 2, y1: a.y + 2, x2: b.x + b.w / 2, y2: b.y + 2 });
-  }
-  return out;
-}
-// Point du câble à l'avancement `u` (0 = pylône haut, 1 = pylône bas). Le câble PEND : sans la
-// flèche, deux dalles reliées par un trait droit n'auraient rien eu d'une tyrolienne.
-function doodleZipAt(z, u) {
-  return { x: z.x1 + (z.x2 - z.x1) * u, y: z.y1 + (z.y2 - z.y1) * u + Math.sin(u * Math.PI) * D_ZIP_SAG };
 }
 // ⚙️⚡ Fenêtre active d'une tuile à cycle. La phase est propre à chaque dalle (voir doodleSpawnRow).
 function doodleCycleOn(p, t) {
@@ -4854,18 +4822,6 @@ function doodleTileDraw(ctx, p, t) {
         ctx.stroke();
       });
     });
-    return;
-  }
-  // 🛒 Tyrolienne : pylône de bois surmonté d'une potence et de sa poulie — c'est d'elle que
-  // part le câble, il faut donc qu'on la voie même quand la jumelle est hors de l'écran.
-  if (p.type === 'zip') {
-    doodleRR(ctx, x, y, w, h, 6, '#a87a4a');
-    ctx.fillStyle = '#6b4a24'; ctx.fillRect(x, y + h - 4, w, 4);
-    const cx = x + w / 2;
-    ctx.strokeStyle = '#6b727b'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(cx, y + h - 4); ctx.lineTo(cx, y - 8); ctx.moveTo(cx - 7, y - 8); ctx.lineTo(cx + 7, y - 8); ctx.stroke();
-    ctx.fillStyle = '#c9ced6'; ctx.strokeStyle = '#4b5058'; ctx.lineWidth = 1.2;
-    ctx.beginPath(); ctx.arc(cx, y - 3, 3.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     return;
   }
   // 🍄 Champignon : chapeau bombé à pois qui CHANGENT de couleur au fil du temps — c'est le
@@ -6725,21 +6681,6 @@ function doodleDraw(ctx, s, W, H) {
       ctx.beginPath(); ctx.moveTo(q.x + q.w / 2, q.y + q.h / 2); ctx.lineTo(s.px, s.py); ctx.stroke();
     }
     ctx.restore();
-    // 🛒 Câbles de tyrolienne : AVANT les filets d'eau, ils passent derrière. La poulie ne se
-    // dessine que si quelqu'un est dessus — un chariot vide aurait laissé croire à un objet à prendre.
-    for (const z of doodleZipLines(s)) {
-      ctx.save(); ctx.strokeStyle = '#6b727b'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
-      ctx.beginPath();
-      for (let i = 0; i <= 20; i++) { const pt = doodleZipAt(z, i / 20); i ? ctx.lineTo(pt.x, pt.y) : ctx.moveTo(pt.x, pt.y); }
-      ctx.stroke();
-      ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 0.9; ctx.stroke();
-      if (s.zip && s.zip.a === z.a && s.zip.b === z.b) {
-        const pt = doodleZipAt(z, s.zip.u);
-        ctx.fillStyle = '#ffd54a'; ctx.strokeStyle = '#8a5a2c'; ctx.lineWidth = 1.4;
-        ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      }
-      ctx.restore();
-    }
     // 💧 Filets d'eau : APRÈS les dalles (ils coulent devant) et depuis la MÊME liste que la
     // capture. ⚠ 10.5.1 — la cascade était un rectangle dégradé surmonté d'un fil qui serpente :
     // une barre de 7 px, pas de l'eau. Elle est refaite en QUATRE couches, du fond vers l'avant —
@@ -7366,15 +7307,6 @@ function doodleTileBirth(s, p, diff) {
       s.rrN = Math.min(D_RR_MAX, (s.rrN == null ? D_RR_START : s.rrN) + 1);
       s.rrP = (s.rrP == null ? 1 : s.rrP) * D_RR_DECAY;
     }
-  }
-  // 🛒 Tyrolienne : la dalle tirée devient un pylône, et sa JUMELLE naît plus bas, franchement
-  // écartée — deux pylônes côte à côte auraient donné un câble vertical qu'on ne peut pas suivre.
-  if (type === 'zip') {
-    const id = (s.zipSeq = (s.zipSeq || 0) + 1);
-    p.zip = id;
-    let x2 = 6 + Math.random() * (DOODLE_W - w - 12);
-    for (let k = 0; k < 12 && Math.abs(x2 - x) < D_ZIP_MINX; k++) x2 = 6 + Math.random() * (DOODLE_W - w - 12);
-    s.platforms.push({ x: x2, y: ny + D_ZIP_DY[0] + Math.random() * (D_ZIP_DY[1] - D_ZIP_DY[0]), w, h: D_PLAT_H, type: 'zip', zip: id, dead: false });
   }
   // 🚇 Tuyaux : la dalle tirée devient une bouche, et sa JUMELLE naît aussitôt une à deux
   // rangées plus bas, sur une abscisse franchement écartée — deux bouches côte à côte se
