@@ -175,7 +175,29 @@ const D_LOOT = [
   // ⚠ Elle ne couvre QUE le courant. Le ⚙️ Piège à picots partage la ligne de code de la
   // ⚡ Électrifiée mais reste mortel : ce sont des piques de métal, pas de l'électricité.
   { k:'shZap',  icon:'🧤', label:'Immunité électrique', txt:'le courant ne t\'atteint plus : la ⚡ Électrifiée et l\'📡 Arc électrique crépitent sur toi sans mordre', max: 1, w: 1.5 },
+  // 🧴 12.4.4 — PANACÉE (demande utilisateur) : le butin qui EFFACE d'un coup tout ce qui joue
+  // contre le doodler à l'instant où le coffre s'ouvre — les malus à durée de la ☠️ case
+  // malchance, les effets de tuile qui durent (🍄 vertige, 🎨 couleurs inversées, 🏜️ sable,
+  // 🌨️ gel des bonus, 🪐 gravité, 🌁 brouillard, ❄️ glissade) ET le danger DÉJÀ ARMÉ des dalles
+  // visibles : une 🌵 pique sortie se rétracte, une 🧨 mèche s'éteint, un 🔴 laser et un 🥚 gavé
+  // rechargent depuis zéro, et la fenêtre active des tuiles à cycle (⚙️ picots, ⚡ Électrifiée)
+  // se referme sur-le-champ.
+  // ⚠ La liste des états soignés est CELLE DU BANDEAU (`doodlePerkHud`) : ce que le joueur voit
+  // affiché comme malus est exactement ce que la panacée enlève. Deux listes séparées, et l'une
+  // aurait fini par promettre ce que l'autre ne fait pas.
+  // ⚠ Elle ne touche à RIEN de ce qui peut servir : ni au ⏱️ Ralentisseur (tout ralentit, les
+  // créatures comprises — c'est aussi souvent une aide), ni aux 🖌️ teintes, ni aux tuiles bannies.
+  // Une panacée qui reprend un avantage n'est plus un butin.
+  // ⚠ INSTANTANÉE : comme les 📦 munitions, elle ne pose AUCUN niveau dans `s.wpn` (d'où
+  // `D_LOOT_INST`) — un compteur que le 🚦 feu rouge effacerait ou que le 🪙 pari doublerait
+  // n'aurait décrit qu'un effet déjà bu.
+  { k:'cure',   icon:'🧴', label:'Panacée', txt:'tous tes malus en cours s\'effacent, et le danger déjà armé des dalles visibles se désamorce', max: Infinity, w: 2.5 },
 ];
+// ⚠ Les butins INSTANTANÉS : ils agissent à la seconde où le coffre s'ouvre et ne posent aucun
+// niveau dans `s.wpn`. Tout ce qui parcourt D_LOOT pour LIRE, doubler, voler ou effacer un
+// niveau doit les sauter — sans quoi le 🪙 pari « doublerait » une panacée déjà bue et le vivier
+// des butins croirait la trouver au plafond.
+const D_LOOT_INST = new Set(['ammo', 'cure']);
 // Vrai tant que le doodler porte les gants. ⚠ Lu DIRECTEMENT sur `s.wpn` et non par
 // `doodleWpnOf` : ce dernier renvoie 0 pendant un gel, et l'immunité aurait lâché juste au
 // moment où le joueur compte dessus.
@@ -237,7 +259,7 @@ function doodleMissileSteer(s, b, sf) {
   b.vx = Math.cos(a) * D_MISSILE_V; b.vy = Math.sin(a) * D_MISSILE_V;     // ⚠ vitesse RÉIMPOSÉE : elle ne doit dépendre que du cap, jamais s'éroder au fil des virages
 }
 function doodleMissile(s) { return { x: s.px, y: s.py - 18, vx: 0, vy: -D_MISSILE_V, pierce: 0, boom: true, boomR: D_MISSILE_BOOM, laser: false, missile: true, life: D_MISSILE_LIFE, sz: doodleBigMul(s) }; }
-function doodleLootLvl(s, k) { return k === 'ammo' ? 0 : (s.wpn[k] || 0); }
+function doodleLootLvl(s, k) { return D_LOOT_INST.has(k) ? 0 : (s.wpn[k] || 0); }
 // ⚠ Encaissement CENTRALISÉ : trois endroits infligent des dégâts (pique armée, monstre, trou
 // noir) et dupliquaient chacun leur cascade de protections — c'était la garantie qu'un
 // bouclier finisse par n'être honoré que dans deux cas sur trois. Renvoie false = mort.
@@ -273,6 +295,13 @@ function doodleLootGrant(s) {
     for (const x of pool) { if (r < x.w) { l = x; break; } r -= x.w; }
   }
   if (l.k === 'ammo') s.ammo += D_AMMO_PICK;
+  // 🧴 Panacée : elle agit tout de suite et NOMME ce qu'elle a balayé — « rien à soigner » est
+  // une information, pas un butin raté. D'où le toast à elle et le retour anticipé.
+  else if (l.k === 'cure') {
+    const got = doodleCure(s);
+    s.toast = { txt: got.length ? `🧴 Panacée — ${got.join(' ')} balayé${got.length > 1 ? 's' : ''}` : '🧴 Panacée — rien à soigner, tu es net', life: D_TOAST_LIFE * 1.4 };
+    return l;
+  }
   else {
     s.wpn[l.k]++;
     if (l.k === 'shTime') s.shTimeLeft += D_SHTIME;
@@ -1472,7 +1501,9 @@ function doodleUltReward(s) {
     if (t.k === 'slot') s.nextSlot = s.score + D_SLOT_STEP;   // 🎰 la dalle garantie repart de ce point, comme au déblocage normal
   }
   for (const l of D_LOOT) {
-    if (l.k === 'ammo') { s.ammo = Math.max(s.ammo, D_ULT_AMMO); continue; }
+    // ⚠ Les butins INSTANTANÉS n'ont pas de niveau à monter : les porter à `D_ULT_STACK` aurait
+    // écrit un compteur que personne ne lit. On les JOUE une fois, ce qu'ils sont.
+    if (D_LOOT_INST.has(l.k)) { if (l.k === 'ammo') s.ammo = Math.max(s.ammo, D_ULT_AMMO); else doodleCure(s); continue; }
     const cible = l.max === Infinity ? D_ULT_STACK : l.max;
     if (s.wpn[l.k] >= cible) continue;
     const gagne = cible - s.wpn[l.k];
@@ -1937,7 +1968,7 @@ function doodleGambleGrant(s) {
   const fresh = [], more = [];
   for (const p of D_PERKS) (s.perks[p.k] > 0 ? more : fresh).push({ icon: p.icon, label: p.label, cap: Infinity, lvl: () => s.perks[p.k], give: () => { s.perks[p.k]++; s.armorLeft = Math.max(s.armorLeft, s.perks.armor); } });
   for (const l of D_LOOT) {
-    if (l.k === 'ammo') continue;
+    if (D_LOOT_INST.has(l.k)) continue;                              // 🧴 📦 rien à doubler : ils n'ont pas de niveau
     const lvl = s.wpn[l.k] || 0;
     if (lvl >= l.max) continue;                                     // déjà au plafond de D_LOOT : hors des deux paniers
     (lvl > 0 ? more : fresh).push({ icon: l.icon, label: l.label, lvl: () => s.wpn[l.k] || 0, give: () => doodleGambleLoot(s, l) });
@@ -1954,7 +1985,7 @@ function doodleGamble(s) {
   if (win) {
     let held = 0;
     for (const p of D_PERKS) if (s.perks[p.k] > 0) held++;
-    for (const l of D_LOOT) if (l.k !== 'ammo' && s.wpn[l.k] > 0) held++;
+    for (const l of D_LOOT) if (!D_LOOT_INST.has(l.k) && s.wpn[l.k] > 0) held++;
     const got = [];
     for (let i = 0, n = Math.max(D_GAMBLE_MIN, held); i < n; i++) { const g = doodleGambleGrant(s); if (g) got.push(g); }
     s.gambleGot = got;
@@ -1962,7 +1993,7 @@ function doodleGamble(s) {
     for (let i = 0, n = s.tiles.length; i < n; i++) doodleTileUnlock(s);
   } else {
     for (const k of Object.keys(s.perks)) s.perks[k] = 0;
-    for (const l of D_LOOT) if (l.k !== 'ammo') s.wpn[l.k] = 0;
+    for (const l of D_LOOT) if (!D_LOOT_INST.has(l.k)) s.wpn[l.k] = 0;
     s.shTimeLeft = 0; s.armorLeft = 0; s.shur = [];
     s.tiles = []; s.nextSlot = null;
   }
@@ -4948,6 +4979,50 @@ function doodleUnluckyGrant(s, x, y) {
   else s[m.k] = D_MALUS_LIFE;
   s.toast = { txt: `${m.icon} ${m.label} · ${m.txt}`, life: D_TOAST_LIFE };
   return m;
+}
+// 🧴 Les états soignés par la Panacée qui ne sont PAS des malus de la ☠️ case malchance : ils
+// viennent de tuiles et vivent chacun dans son compteur. ⚠ Même ordre et mêmes icônes que le
+// bandeau des effets (`doodlePerkHud`) — c'est là que le joueur les lit, et c'est donc là que
+// se juge ce que « tous les malus » veut dire.
+const D_CURE_STATES = [
+  { k:'frost',    icon:'🌨️' },   // gel des bonus
+  { k:'sandLeft', icon:'🏜️' },   // tempête de sable
+  { k:'gravLeft', icon:'🪐' },   // gravité doublée
+  { k:'shroom',   icon:'🍄' },   // écran retourné
+  { k:'neg',      icon:'🎨' },   // couleurs inversées
+  { k:'slip',     icon:'❄️' },   // glissade en cours
+];
+// 🧴 Panacée : voir le commentaire de son entrée dans D_LOOT. Renvoie les icônes de ce qui a
+// réellement été effacé — le toast les nomme, sinon le butin passerait pour n'avoir rien fait.
+function doodleCure(s) {
+  const got = [];
+  for (const m of D_MALUS) if (s[m.k] > 0) { s[m.k] = 0; got.push(m.icon); }        // 🌀 🪨 🌫️ les malus à durée
+  for (const c of D_CURE_STATES) if (s[c.k] > 0) { s[c.k] = 0; got.push(c.icon); }
+  s.slipVx = 0;
+  if (s.blind) { s.blind = false; got.push('🌁'); }
+  s.hall = [];   // 🍄 les hallucinations s'en vont avec le champignon qui les faisait naître
+  // Le danger DÉJÀ ARMÉ des dalles, sur tout le plateau : ce qui est sorti rentre, ce qui charge
+  // repart de zéro. ⚠ Rien n'est détruit ni consommé — les tuiles se réarment ensuite comme
+  // avant. La panacée achète du temps, elle ne vide pas le décor.
+  let n = 0;
+  for (const q of s.platforms) {
+    if (q.dead) continue;
+    if (q.armed) { q.armed = false; n++; }                                          // 🌵 les piques rentrent
+    if (q.fuse > 0) { q.fuse = 0; n++; }                                            // 🧨 la mèche s'éteint
+    if (q.laz != null && q.laz < D_TLASER_GAP) { q.laz = D_TLASER_GAP; n++; }        // 🔴 le laser recharge
+    if (q.tlaz != null && q.tlaz < D_TAMA_GAP) { q.tlaz = D_TAMA_GAP; n++; }         // 🥚 le gavé aussi
+    const et = doodleEffType(q);
+    if ((et === 'picots' || et === 'zap') && doodleCycleOn(q, s.tw || 0)) {
+      // ⚠ On REPOUSSE la phase au lieu d'inventer un drapeau « éteinte » : la fenêtre se juge
+      // partout par `doodleCycleOn`, dessin compris, et un drapeau de plus aurait laissé
+      // l'éclair dessiné sur une dalle devenue inoffensive.
+      const cyc = et === 'zap' ? D_ZAP_CYCLE : D_PICOT_CYCLE, on = et === 'zap' ? D_ZAP_ON : D_PICOT_ON;
+      q.ph = (((on - (s.tw || 0)) % cyc) + cyc) % cyc;
+      n++;
+    }
+  }
+  if (n) got.push('⚡');
+  return got;
 }
 // Bandeau des bonus acquis, en haut à gauche : sans lui, des bonus « permanents » seraient
 // invisibles et on ne saurait jamais lesquels on a.
