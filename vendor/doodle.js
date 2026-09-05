@@ -1044,7 +1044,7 @@ const D_PERK_STEP = 1000;
 const D_TILE_STEP = 500;
 const D_PERKS = [
   { k: 'jump',    icon: '🦵', label: 'Ressort',  txt: 'saut plus haut' },
-  { k: 'magnet',  icon: '🧲', label: 'Aimant',   txt: 'attire les bonus' },
+  { k: 'magnet',  icon: '🧲', label: 'Aimant',   txt: 'attire les bonus ET les coffres' },
   { k: 'armor',   icon: '🛡️', label: 'Carapace', txt: 'encaisse un coup' },
   { k: 'gun',     icon: '🔫', label: 'Canon',    txt: 'tir triple' },
   { k: 'feather', icon: '🪶', label: 'Plume',    txt: 'chute plus douce' },
