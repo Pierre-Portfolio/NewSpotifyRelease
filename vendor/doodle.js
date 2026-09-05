@@ -1887,7 +1887,7 @@ const D_TILES = [
   // faisait sortir. Bouchées, ce sont deux dalles ordinaires, et le second rebond est classique.
   { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre — une seule fois, puis les deux bouches se bouchent et ne sont plus que des dalles ordinaires' },
   // 🪙 9.9.1 — QUITTE OU DOUBLE (demande utilisateur) : une seule fois par dalle, pile ou face.
-  { k: 'gamble',  icon:'🪙', name: 'Quitte ou double', txt: 'une chance sur deux de DOUBLER le NOMBRE de tes effets (autant de neufs que tu en as, au moins ' + D_GAMBLE_MIN + ') et de tes tuiles… une chance sur deux de TOUT perdre' },
+  { k: 'gamble',  icon:'🪙', name: 'Quitte ou double', txt: 'une chance sur deux de DOUBLER le NOMBRE de tes effets (autant de neufs que tu en as, au moins ' + D_GAMBLE_MIN + ') et de tes tuiles… une chance sur deux d\'en perdre la MOITIÉ, tirée au hasard — jamais tout' },
   // 🕯️ 9.9.6 — ESPRITS (demande utilisateur) : trois apparitions qui fondent sur toi chacune
   // leur tour pour te voler un bonus. Elles ne font AUCUN dégât.
   { k: 'spirit',  icon:'🕯️', name: 'Esprits',      txt: 'trois esprits t\'encerclent et fondent sur toi l\'un après l\'autre pour te voler un bonus — esquive-les' },
@@ -1992,10 +1992,38 @@ function doodleGamble(s) {
     // Autant de tuiles nouvelles qu'il y en a déjà : le compte DOUBLE, à concurrence de la table.
     for (let i = 0, n = s.tiles.length; i < n; i++) doodleTileUnlock(s);
   } else {
-    for (const k of Object.keys(s.perks)) s.perks[k] = 0;
-    for (const l of D_LOOT) if (!D_LOOT_INST.has(l.k)) s.wpn[l.k] = 0;
-    s.shTimeLeft = 0; s.armorLeft = 0; s.shur = [];
-    s.tiles = []; s.nextSlot = null;
+    // ⚠ 12.4.6 — LA PERTE DIVISE PAR DEUX, elle n'efface plus tout (demande utilisateur). Une
+    // partie d'une heure remise à zéro par un pile ou face, c'était une tuile qu'on n'avait
+    // aucune raison de toucher : le pari doit coûter, pas annuler la partie.
+    // ⚠ On retire la MOITIÉ DES NIVEAUX PORTÉS, tirés au hasard dans tout ce qu'on a — et non
+    // la moitié de chaque compteur. C'est le miroir exact du gain, qui accorde autant d'effets
+    // NEUFS qu'on en tient déjà : les deux faces se lisent alors sur la même unité, le niveau.
+    // Diviser chaque compteur aurait tout de même vidé le joueur qui n'a que des effets à 1.
+    // ⚠ `Math.floor` : à un seul niveau porté, on ne perd rien. C'est voulu — celui qui n'a
+    // presque rien ne peut pas être « divisé par deux », et la face perdante n'est jamais
+    // l'anéantissement qu'elle était.
+    const unites = [], perdus = [];
+    for (const pk of D_PERKS) for (let i = 0; i < s.perks[pk.k]; i++) unites.push({ icon: pk.icon, label: pk.label, take: () => { s.perks[pk.k]--; } });
+    for (const l of D_LOOT) {
+      if (D_LOOT_INST.has(l.k)) continue;                               // 🧴 📦 pas de niveau : rien à reprendre
+      for (let i = 0; i < (s.wpn[l.k] || 0); i++) unites.push({ icon: l.icon, label: l.label, take: () => { s.wpn[l.k]--; } });
+    }
+    for (let n = Math.floor(unites.length / 2); n > 0; n--) {
+      const u = unites.splice(Math.floor(Math.random() * unites.length), 1)[0];
+      u.take(); perdus.push(`${u.icon} ${u.label}`);
+    }
+    // ⚠ Les trois compteurs QUI SUIVENT un butin sont recalés sur leur niveau restant, jamais
+    // divisés à part : ce sont des conséquences, pas des effets. Deux divisions séparées, et
+    // l'orbite aurait gardé des lames que le butin ne porte plus.
+    s.armorLeft = Math.min(s.armorLeft, s.perks.armor);
+    s.shTimeLeft = Math.min(s.shTimeLeft, (s.wpn.shTime || 0) * D_SHTIME);
+    if (s.shur) s.shur = s.shur.slice(0, (s.wpn.shuriken || 0) * D_SHURIKEN_N);
+    // … et la moitié des tuiles débloquées, puisque le gain en double le nombre.
+    const tuiles0 = s.tiles.length;
+    for (let n = Math.floor(tuiles0 / 2); n > 0; n--) s.tiles.splice(Math.floor(Math.random() * s.tiles.length), 1);
+    if (s.tiles.indexOf('slot') < 0) s.nextSlot = null;                 // 🎰 la dalle garantie n'a plus de tuile à honorer
+    s.gambleGot = perdus;
+    s.gambleTiles = tuiles0 - s.tiles.length;
   }
   return win;
 }
