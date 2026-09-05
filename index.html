@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.3.6';
+const APP_VERSION = '12.3.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16591,37 +16591,278 @@ function CollectionPanel() {
 
 // ══════════════════════════════════════════════════════════════════
 // MARCHÉ DE L'EMPLOI (module « Emploi ») — 100 % client :
-//  • 💰 Comparer son salaire à la moyenne du secteur (table indicative locale)
-//  • 📋 Offres du moment (APIs keyless CORS : The Muse + Remotive, repli proxies)
+//  • 🎯 Critères de l'emploi de tes rêves (le FORMULAIRE, seule source de vérité)
+//  • 📋 Offres du moment (APIs keyless CORS, repli proxies) filtrées par ces critères
+//
+// ⚠ UN SEUL JEU DE CRITÈRES : le formulaire ci-dessous n'est pas un réglage décoratif,
+// c'est l'ENTRÉE de la recherche d'offres — `EmploiOffresSection` ne demande plus rien,
+// elle relit `emploiCrit()`. Ajouter un critère = l'ajouter à `EMPLOI_CRIT_KEYS` (sinon
+// il n'est ni persisté ni sauvegardé) ET à `emploiMatch()` / `emploiAiPrompt()` (sinon il
+// est saisi pour rien).
+// ⚠ Tout est rangé dans la SEULE clé `spotifyplus_emploi`, déjà portée par `buildBackup()`
+// (`emploi`) et remplacée telle quelle au restore : un nouveau champ voyage tout seul.
 // ══════════════════════════════════════════════════════════════════
 const EMPLOI_COLOR = '#57a0e0';   // bleu (entre Bon Plan et Finance dans l'arc-en-ciel)
 const EMPLOI_LS = 'spotifyplus_emploi';
-// Salaires BRUTS ANNUELS moyens en France par secteur — ORDRES DE GRANDEUR indicatifs
-// (pas une source officielle en temps réel), utilisés pour situer un salaire.
-const EMPLOI_SECTORS = [
-  { key:'tech',      label:'Informatique / Tech',        avg:45000 },
-  { key:'ingenierie',label:'Ingénierie',                 avg:44000 },
-  { key:'juridique', label:'Juridique / Droit',          avg:45000 },
-  { key:'finance',   label:'Finance / Banque / Assur.',  avg:43000 },
-  { key:'rh',        label:'Ressources humaines',        avg:38000 },
-  { key:'sante',     label:'Santé / Médical',            avg:40000 },
-  { key:'marketing', label:'Marketing / Communication',  avg:36000 },
-  { key:'industrie', label:'Industrie',                  avg:36000 },
-  { key:'btp',       label:'BTP / Construction',         avg:34000 },
-  { key:'public',    label:'Fonction publique',          avg:33000 },
-  { key:'commerce',  label:'Commerce / Vente',           avg:32000 },
-  { key:'edu',       label:'Enseignement / Éducation',   avg:32000 },
-  { key:'logistique',label:'Logistique / Transport',     avg:31000 },
-  { key:'artisanat', label:'Artisanat',                  avg:28000 },
-  { key:'hotellerie',label:'Hôtellerie / Restauration',  avg:27000 },
-  { key:'agri',      label:'Agriculture',                avg:26000 },
+
+// Critères persistés. ⚠ `EMPLOI_CRIT_KEYS` (dérivé de ces défauts) est la liste blanche
+// écrite dans localStorage : une clé absente d'ici n'est PAS sauvegardée — et les anciennes
+// clés du module (salary/period/sector, l'ex-comparateur de salaire) disparaissent au
+// premier enregistrement, ce qui vaut migration.
+const EMPLOI_DEFAULTS = {
+  metiers: [],          // multi — mots-clés de poste, chacun devient une requête
+  lieux: [],            // multi — villes / pays / « Remote »
+  remote: 'any',        // any | remote | hybrid | onsite
+  salMin: '', salMax: '', salPeriod: 'year',   // brut, 'month' | 'year'
+  maxDays: 30,          // ⚠ FRAÎCHEUR : une offre publiée il y a PLUS de N jours est masquée
+  expMin: '', expMax: '',                       // années d'expérience
+  contrats: [],         // multi — clés d'EMPLOI_CONTRATS
+  taille: 'any',        // clé d'EMPLOI_TAILLES
+  secteurs: [],         // multi — libres (suggestions EMPLOI_SECTEURS)
+  langues: [],          // multi
+  exclude: [],          // multi — mots-clés éliminatoires (titre / entreprise / résumé)
+  linkedin: '',         // URL du profil (ouverte telle quelle, jamais envoyée nulle part)
+  profil: '',           // résumé libre du parcours — sert de contexte au tri IA
+};
+const EMPLOI_CRIT_KEYS = Object.keys(EMPLOI_DEFAULTS);
+const EMPLOI_CONTRATS = [
+  ['cdi', 'CDI'], ['cdd', 'CDD'], ['alternance', 'Alternance'],
+  ['stage', 'Stage'], ['freelance', 'Freelance'], ['interim', 'Intérim'],
 ];
+const EMPLOI_REMOTE = [
+  ['any', 'Peu importe'], ['remote', '100 % télétravail'], ['hybrid', 'Hybride'], ['onsite', 'Sur site'],
+];
+const EMPLOI_TAILLES = [
+  ['any', 'Peu importe'], ['startup', 'Start-up (< 50)'], ['pme', 'PME (50-250)'],
+  ['eti', 'ETI (250-5000)'], ['groupe', 'Grand groupe (> 5000)'],
+];
+// Suggestions cliquables — de simples raccourcis de saisie, la valeur reste du texte libre.
+const EMPLOI_SECTEURS = ['Informatique / Tech', 'Ingénierie', 'Finance / Banque', 'Santé',
+  'Marketing / Communication', 'Industrie', 'BTP', 'Commerce', 'Enseignement', 'Logistique',
+  'Juridique', 'Ressources humaines', 'Fonction publique', 'Environnement'];
+const EMPLOI_LANGUES = ['Français', 'Anglais', 'Espagnol', 'Allemand', 'Italien'];
+const EMPLOI_EXCLUDE = ['stage', 'alternance', 'commercial', 'nuit', 'astreinte'];
+
 function emploiLoad() {
   try { const d = JSON.parse(localStorage.getItem(EMPLOI_LS)); if (d && typeof d === 'object') return d; } catch {}
   return {};
 }
-function emploiSave(d) { lsSet(EMPLOI_LS, JSON.stringify(d)); }
+// Critères complets (défauts + ce qui est stocké), toujours avec des tableaux pour les multi :
+// une sauvegarde ancienne ou tronquée ne doit jamais faire planter un `.map()` de rendu.
+function emploiCrit() {
+  const raw = emploiLoad(), out = {};
+  for (const k of EMPLOI_CRIT_KEYS) {
+    const def = EMPLOI_DEFAULTS[k], v = raw[k];
+    if (Array.isArray(def)) out[k] = Array.isArray(v) ? v.map(String) : [];
+    else out[k] = (v === undefined || v === null) ? def : v;
+  }
+  return out;
+}
+function emploiSaveCrit(c) {
+  const out = {};
+  for (const k of EMPLOI_CRIT_KEYS) out[k] = c[k];
+  return lsSet(EMPLOI_LS, JSON.stringify(out));
+}
+// Salaire saisi → brut ANNUEL (les APIs qui donnent un salaire le donnent à l'année).
+function emploiAnnual(v, period) {
+  const n = parseFloat(String(v == null ? '' : v).replace(',', '.').replace(/[^\d.]/g, ''));
+  if (!isFinite(n) || n <= 0) return null;
+  return period === 'month' ? Math.round(n * 12) : Math.round(n);
+}
 function emploiEuro(n) { return Math.round(n).toLocaleString('fr-FR') + ' €'; }
+// Un critère est « renseigné » ? Sert au compteur du titre et au pré-remplissage.
+function emploiCritCount(c) {
+  let n = 0;
+  for (const k of EMPLOI_CRIT_KEYS) {
+    const v = c[k], def = EMPLOI_DEFAULTS[k];
+    if (Array.isArray(def)) { if (v.length) n++; }
+    else if (k === 'maxDays') { if (+v !== +def) n++; }
+    else if (String(v || '') !== String(def || '')) n++;
+  }
+  return n;
+}
+
+// ── Petits champs réutilisés par le formulaire ───────────────────────
+const EMPLOI_INPUT = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'7px 9px', fontSize:13, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
+function EmploiField({ label, hint, children }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+      <div style={{ fontSize:10.5, fontWeight:800, letterSpacing:'0.05em', color:C.muted }}>{label}</div>
+      {children}
+      {hint ? <div style={{ fontSize:10, color:C.dim, lineHeight:1.4 }}>{hint}</div> : null}
+    </div>
+  );
+}
+// Groupe de pastilles. `multi` : la valeur est un TABLEAU de clés, sinon une clé unique.
+function EmploiPills({ options, value, onChange, multi }) {
+  const on = k => multi ? value.indexOf(k) >= 0 : value === k;
+  const hit = k => {
+    if (!multi) return onChange(k);
+    onChange(on(k) ? value.filter(x => x !== k) : [...value, k]);
+  };
+  return (
+    <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+      {options.map(([k, lbl]) => (
+        <button key={k} onClick={() => hit(k)}
+          style={{ background: on(k) ? `${EMPLOI_COLOR}28` : 'none', border:`1px solid ${on(k) ? EMPLOI_COLOR : C.border}`,
+                   color: on(k) ? EMPLOI_COLOR : C.dim, borderRadius:14, padding:'5px 11px', fontSize:11.5,
+                   fontWeight:700, cursor:'pointer', fontFamily:'inherit' }}>{lbl}</button>
+      ))}
+    </div>
+  );
+}
+// Saisie multi-valeurs (Entrée ou « + » pour valider, × pour retirer) + suggestions cliquables.
+function EmploiChips({ values, onChange, placeholder, suggestions }) {
+  const [txt, setTxt] = React.useState('');
+  const add = raw => {
+    const s = String(raw || '').trim();
+    if (!s) return;
+    if (values.some(v => v.toLowerCase() === s.toLowerCase())) { setTxt(''); return; }
+    onChange([...values, s].slice(0, 20)); setTxt('');
+  };
+  const rest = (suggestions || []).filter(s => !values.some(v => v.toLowerCase() === s.toLowerCase()));
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+      {values.length > 0 && (
+        <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+          {values.map(v => (
+            <span key={v} style={{ display:'inline-flex', alignItems:'center', gap:5, background:`${EMPLOI_COLOR}1e`,
+                                   border:`1px solid ${EMPLOI_COLOR}55`, color:C.text, borderRadius:14, padding:'4px 6px 4px 10px', fontSize:11.5 }}>
+              {v}
+              <button onClick={() => onChange(values.filter(x => x !== v))} title="Retirer"
+                style={{ background:'none', border:'none', color:C.dim, cursor:'pointer', fontSize:12, lineHeight:1, padding:'0 2px', fontFamily:'inherit' }}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ display:'flex', gap:5 }}>
+        <input value={txt} onChange={e => setTxt(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(txt); } }}
+          placeholder={placeholder} style={{ ...EMPLOI_INPUT, flex:1, minWidth:0 }} />
+        <button onClick={() => add(txt)} disabled={!txt.trim()}
+          style={{ background:`${EMPLOI_COLOR}18`, border:`1px solid ${EMPLOI_COLOR}66`, color: txt.trim() ? EMPLOI_COLOR : C.dim,
+                   borderRadius:6, padding:'7px 12px', fontSize:13, fontWeight:800, cursor: txt.trim() ? 'pointer' : 'default', fontFamily:'inherit' }}>+</button>
+      </div>
+      {rest.length > 0 && (
+        <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
+          {rest.map(s => (
+            <button key={s} onClick={() => add(s)}
+              style={{ background:'none', border:`1px dashed ${C.border}`, color:C.dim, borderRadius:12, padding:'3px 8px', fontSize:10.5, cursor:'pointer', fontFamily:'inherit' }}>+ {s}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 🎯 CRITÈRES DE L'EMPLOI DE TES RÊVES ─────────────────────────────
+// Le formulaire écrit dans `spotifyplus_emploi` à CHAQUE frappe (pas de bouton
+// « enregistrer » : le module est relu par la recherche, un critère non enregistré serait
+// un critère perdu). `onChange` publie aussi vers le parent, qui en informe la section
+// Offres — les deux collapses sont montés en même temps et doivent voir la même chose.
+function EmploiCriteresSection({ crit, setCrit }) {
+  const set = (k, v) => { const next = { ...crit, [k]: v }; setCrit(next); emploiSaveCrit(next); };
+  const n = emploiCritCount(crit);
+  const salMin = emploiAnnual(crit.salMin, crit.salPeriod);
+  const salMax = emploiAnnual(crit.salMax, crit.salPeriod);
+  const linked = safeHref(crit.linkedin);
+  return (
+    <StatsCollapse title={`🎯 CRITÈRES DE L'EMPLOI DE TES RÊVES${n ? ' · ' + n : ''}`} color={EMPLOI_COLOR} defaultOpen={true}>
+      <div style={{ fontSize:11, color:C.dim, lineHeight:1.5 }}>
+        Tout ce qui est saisi ici est <b style={{ color:C.text }}>automatiquement appliqué</b> à « 📋 Offres du moment » —
+        et part dans la sauvegarde avec le reste du Hub.
+      </div>
+
+      <EmploiField label="🎯 MÉTIERS VISÉS" hint="Chaque métier devient une requête envoyée aux sources d'offres.">
+        <EmploiChips values={crit.metiers} onChange={v => set('metiers', v)} placeholder="Développeur web, Data analyst…" />
+      </EmploiField>
+
+      <EmploiField label="📍 LIEUX" hint="Ville, région ou pays. Vide = partout.">
+        <EmploiChips values={crit.lieux} onChange={v => set('lieux', v)} placeholder="Paris, Lyon, France…"
+          suggestions={['France', 'Paris', 'Lyon', 'Remote']} />
+      </EmploiField>
+
+      <EmploiField label="🏠 TÉLÉTRAVAIL">
+        <EmploiPills options={EMPLOI_REMOTE} value={crit.remote} onChange={v => set('remote', v)} />
+      </EmploiField>
+
+      <EmploiField label="💶 SALAIRE BRUT SOUHAITÉ"
+        hint={salMin || salMax
+          ? `Fourchette retenue : ${salMin ? emploiEuro(salMin) : '—'} → ${salMax ? emploiEuro(salMax) : '—'} brut/an. Une offre SANS salaire affiché n'est jamais écartée (la plupart n'en publient pas).`
+          : "Une offre sans salaire affiché n'est jamais écartée : la plupart n'en publient pas."}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
+          <input type="number" inputMode="decimal" value={crit.salMin} onChange={e => set('salMin', e.target.value)}
+            placeholder="Minimum" style={{ ...EMPLOI_INPUT, flex:1, minWidth:90 }} />
+          <span style={{ fontSize:12, color:C.dim }}>→</span>
+          <input type="number" inputMode="decimal" value={crit.salMax} onChange={e => set('salMax', e.target.value)}
+            placeholder="Maximum" style={{ ...EMPLOI_INPUT, flex:1, minWidth:90 }} />
+          <EmploiPills options={[['month', '/ mois'], ['year', '/ an']]} value={crit.salPeriod} onChange={v => set('salPeriod', v)} />
+        </div>
+      </EmploiField>
+
+      <EmploiField label="🗓 FRAÎCHEUR DE L'OFFRE"
+        hint={`Les offres publiées il y a plus de ${crit.maxDays} jour${crit.maxDays > 1 ? 's' : ''} ne sont pas affichées. 0 = pas de limite.`}>
+        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+          <input type="range" min="0" max="90" step="1" value={crit.maxDays}
+            onChange={e => set('maxDays', +e.target.value)} style={{ flex:1, accentColor:EMPLOI_COLOR }} />
+          <span style={{ fontSize:12, fontWeight:800, color:EMPLOI_COLOR, width:74, textAlign:'right', fontFamily:'DM Mono,monospace' }}>
+            {+crit.maxDays === 0 ? 'illimité' : `≤ ${crit.maxDays} j`}
+          </span>
+        </div>
+      </EmploiField>
+
+      <EmploiField label="🎓 ANNÉES D'EXPÉRIENCE" hint="Écarte les offres qui exigent explicitement plus (ou moins) que ta fourchette.">
+        <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+          <input type="number" inputMode="numeric" value={crit.expMin} onChange={e => set('expMin', e.target.value)}
+            placeholder="Min" style={{ ...EMPLOI_INPUT, flex:1, minWidth:70 }} />
+          <span style={{ fontSize:12, color:C.dim }}>→</span>
+          <input type="number" inputMode="numeric" value={crit.expMax} onChange={e => set('expMax', e.target.value)}
+            placeholder="Max" style={{ ...EMPLOI_INPUT, flex:1, minWidth:70 }} />
+          <span style={{ fontSize:11.5, color:C.dim }}>ans</span>
+        </div>
+      </EmploiField>
+
+      <EmploiField label="📄 TYPE DE CONTRAT" hint="Vide = tous les contrats.">
+        <EmploiPills options={EMPLOI_CONTRATS} value={crit.contrats} onChange={v => set('contrats', v)} multi />
+      </EmploiField>
+
+      <EmploiField label="🏢 TAILLE D'ENTREPRISE">
+        <EmploiPills options={EMPLOI_TAILLES} value={crit.taille} onChange={v => set('taille', v)} />
+      </EmploiField>
+
+      <EmploiField label="🏭 SECTEURS">
+        <EmploiChips values={crit.secteurs} onChange={v => set('secteurs', v)} placeholder="Secteur d'activité…" suggestions={EMPLOI_SECTEURS} />
+      </EmploiField>
+
+      <EmploiField label="🗣 LANGUES">
+        <EmploiChips values={crit.langues} onChange={v => set('langues', v)} placeholder="Langue parlée…" suggestions={EMPLOI_LANGUES} />
+      </EmploiField>
+
+      <EmploiField label="🚫 MOTS-CLÉS À EXCLURE" hint="Une offre dont le titre, l'entreprise ou le résumé contient l'un de ces mots est retirée.">
+        <EmploiChips values={crit.exclude} onChange={v => set('exclude', v)} placeholder="Mot-clé rédhibitoire…" suggestions={EMPLOI_EXCLUDE} />
+      </EmploiField>
+
+      <EmploiField label="🔗 PROFIL LINKEDIN" hint="Simple raccourci personnel : l'adresse n'est envoyée à aucune API, elle reste dans ta sauvegarde.">
+        <div style={{ display:'flex', gap:6 }}>
+          <input value={crit.linkedin} onChange={e => set('linkedin', e.target.value)}
+            placeholder="https://www.linkedin.com/in/…" style={{ ...EMPLOI_INPUT, flex:1, minWidth:0 }} />
+          {linked ? (
+            <a href={linked} target="_blank" rel="noopener noreferrer"
+              style={{ background:`${EMPLOI_COLOR}18`, border:`1px solid ${EMPLOI_COLOR}66`, color:EMPLOI_COLOR, borderRadius:6,
+                       padding:'7px 11px', fontSize:12, fontWeight:700, textDecoration:'none', flexShrink:0 }}>↗</a>
+          ) : null}
+        </div>
+      </EmploiField>
+
+      <EmploiField label="🧑 TON PROFIL EN QUELQUES LIGNES"
+        hint="Parcours, compétences, ce que tu cherches vraiment — c'est ce texte qui permet à l'IA de classer les offres par pertinence.">
+        <textarea value={crit.profil} onChange={e => set('profil', e.target.value)} rows={4}
+          placeholder="5 ans en développement front React, je cherche une équipe produit, pas de management…"
+          style={{ ...EMPLOI_INPUT, width:'100%', resize:'vertical', lineHeight:1.5 }} />
+      </EmploiField>
+    </StatsCollapse>
+  );
+}
 
 async function emploiGetJson(url) {
   try { const r = await fetch(url); if (r.ok) { const j = await r.json(); if (j) return j; } } catch {}
@@ -16665,59 +16906,7 @@ async function emploiSearchJobs(query, location) {
   return out;
 }
 
-function EmploiSalarySection() {
-  const cfg = emploiLoad();
-  const [salary, setSalary] = React.useState(cfg.salary || '');
-  const [period, setPeriod] = React.useState(cfg.period || 'year');
-  const [sector, setSector] = React.useState(cfg.sector || EMPLOI_SECTORS[0].key);
-  const persist = (s, p, sec) => emploiSave({ ...emploiLoad(), salary: s, period: p, sector: sec });
-  const inputStyle = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'7px 9px', fontSize:13, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
-  const sec = EMPLOI_SECTORS.find(s => s.key === sector) || EMPLOI_SECTORS[0];
-  const raw = parseFloat(String(salary).replace(',', '.'));
-  const annual = isFinite(raw) && raw > 0 ? (period === 'month' ? raw * 12 : raw) : null;
-  const delta = annual != null ? annual - sec.avg : null;
-  const pct = annual != null ? Math.round((annual / sec.avg - 1) * 100) : null;
-  const maxV = annual != null ? Math.max(annual, sec.avg) : sec.avg;
-  return (
-    <StatsCollapse title="💰 MON SALAIRE VS SECTEUR" color={EMPLOI_COLOR} defaultOpen={true}>
-      <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
-        <input type="number" inputMode="decimal" value={salary}
-          onChange={e => { setSalary(e.target.value); persist(e.target.value, period, sector); }}
-          placeholder="Mon salaire brut" style={{ ...inputStyle, flex:1, minWidth:120 }} />
-        <div style={{ display:'flex', gap:2 }}>
-          {[['month','/ mois'], ['year','/ an']].map(([p, lbl]) => (
-            <button key={p} onClick={() => { setPeriod(p); persist(salary, p, sector); }}
-              style={{ background: period === p ? `${EMPLOI_COLOR}28` : 'none', border:`1px solid ${period === p ? EMPLOI_COLOR : C.border}`, color: period === p ? EMPLOI_COLOR : C.dim, borderRadius:6, padding:'7px 10px', fontSize:12, fontWeight:700, cursor:'pointer' }}>{lbl}</button>
-          ))}
-        </div>
-      </div>
-      <select value={sector} onChange={e => { setSector(e.target.value); persist(salary, period, e.target.value); }}
-        style={{ ...inputStyle, width:'100%' }}>
-        {EMPLOI_SECTORS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-      </select>
-      <div style={{ fontSize:11.5, color:C.dim }}>Moyenne du secteur : <b style={{ color:C.text }}>{emploiEuro(sec.avg)}</b> brut/an (≈ {emploiEuro(sec.avg / 12)}/mois).</div>
-      {annual != null && (
-        <div style={{ display:'flex', flexDirection:'column', gap:8, marginTop:2 }}>
-          {[['Moi', annual, EMPLOI_COLOR], ['Secteur', sec.avg, C.dim]].map(([lbl, v, col]) => (
-            <div key={lbl} style={{ display:'flex', alignItems:'center', gap:8 }}>
-              <span style={{ fontSize:11, width:56, color:C.muted }}>{lbl}</span>
-              <div style={{ flex:1, height:16, background:'#1a1a1e', borderRadius:8, overflow:'hidden' }}>
-                <div style={{ width:`${Math.max(4, (v / maxV) * 100)}%`, height:'100%', background:col, borderRadius:8 }} />
-              </div>
-              <span style={{ fontSize:11.5, width:78, textAlign:'right', color:C.text, fontWeight:700 }}>{emploiEuro(v)}</span>
-            </div>
-          ))}
-          <div style={{ fontSize:13, fontWeight:700, textAlign:'center', marginTop:2, color: delta >= 0 ? '#3ec46d' : '#e0705a' }}>
-            {delta >= 0 ? '▲' : '▼'} {delta >= 0 ? '+' : ''}{emploiEuro(delta)}/an ({pct >= 0 ? '+' : ''}{pct} %) {delta >= 0 ? 'au-dessus' : 'en dessous'} de la moyenne
-          </div>
-        </div>
-      )}
-      <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Moyennes indicatives (ordres de grandeur France, brut annuel) — pas une source officielle en temps réel.</div>
-    </StatsCollapse>
-  );
-}
-
-function EmploiOffersSection() {
+function EmploiOffersSection({ crit }) {
   const [q, setQ] = React.useState('');
   const [loc, setLoc] = React.useState('France');
   const [jobs, setJobs] = React.useState([]);
@@ -16760,11 +16949,15 @@ function EmploiOffersSection() {
   );
 }
 
+// Les DEUX collapses partagent le même objet de critères : le formulaire écrit,
+// la recherche lit. Le state vit donc ici (initialiseur paresseux — piège 14 : la
+// lecture localStorage ne doit pas repartir à chaque rendu).
 function EmploiPanel() {
+  const [crit, setCrit] = React.useState(() => emploiCrit());
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-      <EmploiSalarySection />
-      <EmploiOffersSection />
+      <EmploiCriteresSection crit={crit} setCrit={setCrit} />
+      <EmploiOffersSection crit={crit} />
     </div>
   );
 }
@@ -18843,7 +19036,8 @@ function buildBackup() {
     // Histoire : fiches d'œuvres rédigées par l'IA (⚠ JAMAIS les photos, qui ne sont
     // de toute façon pas conservées — seul le texte de la fiche vit ici)
     histoire: (() => { const a = lsJson(HISTOIRE_LS); return Array.isArray(a) ? a : null; })(),
-    // Emploi : salaire + secteur choisi
+    // Emploi : TOUS les critères de recherche (métiers, lieux, salaire, fraîcheur, contrat,
+    // exclusions, LinkedIn, résumé de profil) — une seule clé, donc un nouveau critère voyage seul
     emploi: lsJson('spotifyplus_emploi') || null,
     // Sport : exercices cochés par partie du corps
     sport: lsJson('spotifyplus_sport') || null,
@@ -18890,7 +19084,7 @@ const EXPORT_SECTIONS = [
   { key:'revente',  label:'Revente',      icon:'🏷️', hint:'articles + annonces rédigées (photos sur Drive)', fields:['revente'] },
   { key:'collection', label:'Collection',  icon:'🗃️', hint:'cartes, Displate, Pop, jeux… (références, pas les images)', fields:['collection'] },
   { key:'histoire', label:'Histoire',     icon:'🏛️', hint:"fiches d'œuvres (résumé + lien avec la ville)", fields:['histoire'] },
-  { key:'emploi',   label:'Emploi',       icon:'💼', hint:'salaire + secteur',           fields:['emploi'] },
+  { key:'emploi',   label:'Emploi',       icon:'💼', hint:'critères de recherche + profil', fields:['emploi'] },
   { key:'sport',    label:'Sport',        icon:'🏋️', hint:'exercices cochés',           fields:['sport'] },
   { key:'note',     label:'Note',         icon:'🗒️', hint:'notes + pièces jointes (cryptées incluses, telles quelles)', fields:['notes', 'notes_enc_check'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
