@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.3.8';
+const APP_VERSION = '12.3.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -12184,6 +12184,8 @@ const AI_MODULES = {
     why:"CheapShark couvre les jeux PC, et rien d'autre : aucune API gratuite ne compare les prix du reste. Pour « Tous produits », l'IA fait la recherche web et rend un tableau de prix — depuis une page sans serveur, c'est la seule source possible." },
   collection: { label:'Recherche Pop · photo → objet · scan',
     why:"Aucun catalogue interrogeable n'existe pour les figurines Funko Pop, les pierres, les montres ni les vins (Pokémon et Magic, eux, ont leur vraie API). L'IA tient lieu de catalogue, et sait en plus reconnaître l'objet et estimer son prix depuis une photo." },
+  emploi: { label:'Tri des offres par pertinence',
+    why:"Les cinq sources d'offres rendent des listes brutes, chacune dans son coin : aucune ne sait qu'un « développeur front senior à Lyon, pas de management » colle mieux qu'un autre. L'IA relit les offres DÉJÀ rapatriées avec tes critères et ton profil, les classe et dit en une phrase ce qui colle ou ce qui cloche. Elle ne cherche rien : sans elle, l'ordre reste celui du score local." },
   frigo: { label:'Photo → ingrédients · recettes',
     why:"Photographier une étagère et en sortir la liste des aliments, puis croiser ça avec des recettes réalisables : aucune base d'aliments ne fait ni l'un ni l'autre. Sans IA, il ne reste que la saisie à la main." },
   histoire: { label:"Fiche d'œuvre · fil de questions",
@@ -17150,6 +17152,78 @@ async function emploiSearchJobs(crit) {
   return { jobs: kept.slice(0, EMPLOI_MAX), dropped, total: seen.size };
 }
 
+// ── TRI PAR PERTINENCE PAR L'IA ─────────────────────────────────────
+// ⚠ L'IA CLASSE, elle ne CHERCHE pas : les offres viennent des cinq APIs, elles sont déjà
+// filtrées par `emploiReject`, et seul leur ORDRE (plus une phrase d'explication) sort du
+// modèle. Rien n'est inventé — un `id` inconnu de la liste envoyée est ignoré au retour, et
+// une offre que l'IA a oubliée reste affichée, à sa place du score local.
+// ⚠ Pas de `opts.tools` : la recherche web ancrée n'existe que chez Gemini (NO_GROUNDING
+// ailleurs) et n'apporte rien ici — tout ce qu'il faut juger est dans le prompt.
+const EMPLOI_AI_MAX = 40;              // offres soumises à l'IA (au-delà, le prompt explose)
+function emploiAiPrompt(crit, jobs) {
+  const sMin = emploiAnnual(crit.salMin, crit.salPeriod), sMax = emploiAnnual(crit.salMax, crit.salPeriod);
+  const L = [];
+  if (crit.metiers.length) L.push('Métiers visés : ' + crit.metiers.join(', '));
+  if (crit.lieux.length) L.push('Lieux souhaités : ' + crit.lieux.join(', '));
+  if (crit.remote !== 'any') L.push('Télétravail : ' + (EMPLOI_REMOTE.find(r => r[0] === crit.remote) || [, ''])[1]);
+  if (sMin || sMax) L.push(`Salaire brut annuel visé : ${sMin || '?'} à ${sMax || '?'} €`);
+  if (crit.expMin !== '' || crit.expMax !== '') L.push(`Expérience : ${crit.expMin || 0} à ${crit.expMax || '?'} ans`);
+  if (crit.contrats.length) L.push('Contrats acceptés : ' + crit.contrats.map(k => (EMPLOI_CONTRATS.find(c => c[0] === k) || [, k])[1]).join(', '));
+  if (crit.taille !== 'any') L.push("Taille d'entreprise : " + (EMPLOI_TAILLES.find(t => t[0] === crit.taille) || [, ''])[1]);
+  if (crit.secteurs.length) L.push('Secteurs : ' + crit.secteurs.join(', '));
+  if (crit.langues.length) L.push('Langues : ' + crit.langues.join(', '));
+  if (crit.exclude.length) L.push('À fuir : ' + crit.exclude.join(', '));
+  if (crit.profil.trim()) L.push('Profil du candidat : ' + crit.profil.trim().slice(0, 700));
+  const list = jobs.slice(0, EMPLOI_AI_MAX).map(j => ({
+    id: j.id, titre: j.title, entreprise: j.company, lieu: j.location,
+    remote: j.remote, contrat: j.contract || '?',
+    salaire: j.salMin != null ? `${j.salMin}${j.salMax != null ? '-' + j.salMax : ''} €/an` : (j.salText || '?'),
+    publiee: j.at ? new Date(j.at).toISOString().slice(0, 10) : '?',
+    resume: (j.excerpt || '').slice(0, 300),
+  }));
+  return [
+    "Tu classes des offres d'emploi pour un candidat, de la PLUS pertinente à la moins pertinente.",
+    '',
+    'CRITÈRES DU CANDIDAT :',
+    L.length ? L.join('\n') : '(aucun critère précisé — classe par qualité et clarté de l\'offre)',
+    '',
+    'OFFRES À CLASSER (JSON) :',
+    JSON.stringify(list),
+    '',
+    'RÈGLES STRICTES :',
+    "- N'utilise QUE les offres ci-dessus. N'en invente aucune, ne complète aucun champ de mémoire.",
+    '- Réutilise les `id` EXACTEMENT tels qu\'ils sont écrits.',
+    '- `score` = 0 à 100, à quel point l\'offre colle aux critères ET au profil.',
+    "- `pourquoi` = UNE phrase de 15 mots maximum, en français, qui dit ce qui colle ou ce qui cloche.",
+    '- Classe toutes les offres reçues, une seule fois chacune.',
+    '',
+    'Réponds UNIQUEMENT par ce JSON, sans texte autour :',
+    '{"classement":[{"id":"...","score":0,"pourquoi":"..."}]}',
+  ].join('\n');
+}
+// Rend la liste RÉORDONNÉE (mêmes objets, enrichis de `aiScore` / `why`) + la méta du
+// fournisseur. Une offre absente de la réponse garde son rang local, à la suite.
+async function emploiAiRank(crit, jobs) {
+  const txt = await aiGenerate('emploi', [{ text: emploiAiPrompt(crit, jobs) }]);
+  const meta = aiMeta();
+  const j = geminiExtract(txt, '{', '}');
+  const rows = (j && Array.isArray(j.classement)) ? j.classement : null;
+  if (!rows || !rows.length) throw new Error("Réponse de l'IA illisible.");
+  const byId = new Map(jobs.map(o => [o.id, o]));
+  const out = [];
+  for (const r of rows) {
+    const o = byId.get(String(r && r.id));
+    if (!o || out.indexOf(o) >= 0) continue;                 // id inventé ou doublon
+    const sc = Math.round(parseFloat(r.score));
+    o.aiScore = isFinite(sc) ? Math.max(0, Math.min(100, sc)) : null;
+    o.why = String(r.pourquoi || '').slice(0, 160);
+    out.push(o);
+  }
+  if (!out.length) throw new Error("L'IA n'a reconnu aucune des offres envoyées.");
+  for (const o of jobs) if (out.indexOf(o) < 0) out.push(o);  // oubliées → à la suite
+  return { jobs: out, meta };
+}
+
 // ── 📋 OFFRES DU MOMENT ─────────────────────────────────────────────
 // ⚠ PLUS AUCUN CHAMP DE SAISIE ICI : la recherche part des critères du collapse du dessus.
 // Deux champs (« métier », « lieu ») coexistaient avec un formulaire de critères = deux
@@ -17188,8 +17262,12 @@ function EmploiJobCard({ j }) {
           : j.salText ? <span style={{ color:'#3ec46d', fontWeight:700 }}>💶 {j.salText}</span> : null}
         {j.contract ? <span style={{ color:C.muted, border:`1px solid ${C.border}`, borderRadius:4, padding:'0 4px' }}>{(EMPLOI_CONTRATS.find(c => c[0] === j.contract) || [, j.contract])[1]}</span> : null}
         {j.remote ? <span style={{ color:EMPLOI_COLOR }}>🏠 télétravail</span> : null}
-        <span style={{ marginLeft:'auto', color:C.dim, fontFamily:'DM Mono,monospace' }}>{j.score}%</span>
+        <span style={{ marginLeft:'auto', color: j.aiScore != null ? EMPLOI_COLOR : C.dim, fontWeight: j.aiScore != null ? 800 : 400, fontFamily:'DM Mono,monospace' }}
+          title={j.aiScore != null ? "Pertinence estimée par l'IA" : 'Score local (métier, lieu, salaire, fraîcheur)'}>
+          {j.aiScore != null ? '🤖 ' : ''}{j.aiScore != null ? j.aiScore : j.score}%
+        </span>
       </div>
+      {j.why ? <div style={{ fontSize:10.5, color:C.muted, fontStyle:'italic', lineHeight:1.4 }}>🤖 {j.why}</div> : null}
     </a>
   );
 }
@@ -17203,17 +17281,38 @@ function EmploiOffersSection({ crit }) {
   // les DERNIERS (piège 6 — sans ref, le callback garderait ceux de son rendu).
   const critRef = React.useRef(crit);
   critRef.current = crit;
+  const [ai, setAi] = React.useState(null);          // { ai, fb } du tri par pertinence
+  const [aiErr, setAiErr] = React.useState('');
+  const [ranking, setRanking] = React.useState(false);
+  // Tri par pertinence : lancé TOUT SEUL dans la foulée de la recherche (c'est l'ordre
+  // attendu du module), silencieux si aucune IA n'est cochée pour `emploi`.
+  const rank = React.useCallback(async list => {
+    setAi(null); setAiErr('');
+    if (!list.length || !aiAnyKey(false, 'emploi')) return;
+    setRanking(true);
+    try {
+      const r = await emploiAiRank(critRef.current, list);
+      setJobs(r.jobs.slice()); setAi(r.meta);
+    } catch (e) {
+      const m = String((e && e.message) || '');
+      setAiErr(m.includes('NO_KEY') ? '' : 'Tri par pertinence indisponible (' + (m || 'erreur IA') + ') — ordre du score local.');
+    }
+    setRanking(false);
+  }, []);
   const search = React.useCallback(async () => {
-    setLoading(true); setErr('');
+    setLoading(true); setErr(''); setAi(null); setAiErr('');
+    let found = null;
     try {
       const res = await emploiSearchJobs(critRef.current);
+      found = res.jobs;
       setJobs(res.jobs); setInfo({ dropped: res.dropped, total: res.total, at: Date.now() });
       if (!res.jobs.length) setErr(res.total
         ? `Les ${res.total} offres remontées ont toutes été écartées par tes critères — élargis la fraîcheur, le salaire ou les exclusions.`
         : 'Aucune offre remontée. Ajoute un métier dans les critères, ou réessaie : les sources publiques répondent de façon inégale.');
     } catch { setErr('Impossible de récupérer les offres (réseau).'); setJobs([]); }
     setLoading(false);
-  }, []);
+    if (found && found.length) await rank(found);
+  }, [rank]);
   const recap = emploiRecap(crit);
   return (
     <StatsCollapse title={`📋 OFFRES DU MOMENT${jobs.length ? ' · ' + jobs.length : ''}`} color={EMPLOI_COLOR} defaultOpen={false}>
@@ -17226,6 +17325,14 @@ function EmploiOffersSection({ crit }) {
         </button>
         {info ? <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>{info.total} vues · {info.dropped} écartées</span> : null}
       </div>
+      {ranking && <div style={{ fontSize:11.5, color:EMPLOI_COLOR }}>🤖 Classement des offres par pertinence…</div>}
+      {!ranking && ai && (
+        <div style={{ fontSize:10.5, color:C.dim, lineHeight:1.5 }}>
+          🤖 Classées par pertinence par <b style={{ color:C.text }}>{aiLabel(ai.ai)}</b> à partir de tes critères et de ton profil — l'IA n'a fait que réordonner les offres reçues, elle n'en a cherché ni inventé aucune.
+          <AiFallbackBadge fb={ai.fb} />
+        </div>
+      )}
+      {!ranking && aiErr && <div style={{ fontSize:10.5, color:C.muted }}>{aiErr}</div>}
       {recap.length ? (
         <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
           {recap.map(t => (
