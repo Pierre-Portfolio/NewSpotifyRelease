@@ -1132,14 +1132,22 @@ const D_CLAY_SINK = 8;
 // ⚠ Tirer la fait éclater SUR-LE-CHAMP (demande utilisateur) : c'est la porte de sortie, sinon
 // on subirait la montée sans aucun moyen de l'interrompre.
 const D_BUBBLE_LIFE = 105, D_BUBBLE_VY = -2.6;
-// 🥚 10.2.7 — TAMAGOTCHI (demande utilisateur) : elle n'est PAS solide tant qu'on ne l'a pas
-// nourrie d'une balle ; elle avale le tir et devient une plateforme.
-// ⚠ L'état vit dans `p.tama` (false = affamée, true = repue) et c'est `doodleSolid` qui le lit :
-// une dalle non solide se traverse aussi pour les coffres et les météorites, ce qu'un test posé
-// au seul endroit de l'atterrissage aurait laissé passer.
+// 🥚 10.2.7 — TAMAGOTCHI (demande utilisateur) : elle a un APPÉTIT de D_TAMA_MEALS balles et
+// chaque repas la change. Affamée (0) elle n'est pas solide, on la traverse ; repue (1) elle est
+// heureuse et REND UN SUPER SAUT ; rassasiée (2) elle jaunit, fin d'appétit, et redevient une
+// dalle ordinaire ; gavée (3) elle vire au rouge et TIRE sur le doodler.
+// ⚠ DEUX champs et non un compteur seul : `p.tama` (false = affamée, true = nourrie) reste le
+// seul état que lit `doodleSolid` — une dalle non solide se traverse aussi pour les coffres et
+// les météorites, ce qu'un test posé au seul endroit de l'atterrissage aurait laissé passer — et
+// `p.meals` compte les repas pour le reste (saut, couleur, colère).
 // ⚠ Elle avale la balle AVANT le test des monstres : sans quoi une balle explosive aurait pu
-// nourrir la dalle ET tuer, alors que la dalle est censée la CONSOMMER.
+// nourrir la dalle ET tuer, alors que la dalle est censée la CONSOMMER. Au-delà du 3e repas elle
+// ne mange plus : la balle poursuit sa route vers ce qu'il y a derrière.
+// ⚠ Le tir de la furieuse part dans `s.tshots`, le tableau des projectiles HOSTILES, comme celui
+// de la 🔴 dalle laser : il porte déjà le défilement de la caméra, la boîte de collision, les
+// teintes qui parent et le nettoyage hors écran. Un second tableau, c'était les oublier tous.
 const D_TAMA_EAT = 20;   // frames d'animation de mastication
+const D_TAMA_MEALS = 3, D_TAMA_GAP = 200, D_TAMA_TEL = 40, D_TAMA_V = 1.85;
 // 🔴 10.2.8 — LASER (demande utilisateur) : la dalle TIRE sur le doodler, une fois toutes les
 // 5 secondes, et le trait va « relativement lentement ».
 // ⚠ D_TLASER_V est sous la moitié de la vitesse d'un tir de boss : c'est ce qui rend l'esquive
@@ -1738,13 +1746,14 @@ function doodlePerkRaise(s, cible) {
 // lisent pas sur le type (`gvx`, `conf`, `fuse`, `egg`…) et une dalle convertie aurait continué
 // de dériver, de cracher ou d'exploser sous son écorce de bambou.
 // ⚠ `ori` et `tama` en font partie : `doodleSolid` les lit, et un bambou qu'on traverse ne
-// serait plus une plateforme.
+// serait plus une plateforme. `meals`/`tlaz` aussi : sans eux un 🥚 gavé changé en bambou
+// continuerait de tirer depuis son écorce.
 // ⚠ Le ressort et le trampoline sont CONSERVÉS : ce sont des objets posés sur la dalle, pas
 // l'effet de la tuile — les retirer aurait été une punition que personne n'a demandée.
 const D_BAMB_N = 3;
 const D_BAMB_CLEAR = ['roll', 'mim', 'gvx', 'vy2', 'y0', 'span2', 'ax', 'ay', 'boo', 'conf',
   'fade', 'fuse', 'tent', 'pcool', 'steam', 'lava', 'laz', 'grap', 'grapCool', 'egg', 'ori',
-  'lit', 'tama', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
+  'lit', 'tama', 'meals', 'tlaz', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
 function doodleBambooify(s, p) {
   s.bambLeft--;
   p.type = 'bambooed';
@@ -1871,7 +1880,7 @@ const D_TILES = [
   { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre' },
   { k: 'zip',      icon:'🛒', name: 'Tyrolienne',     txt: 'elles naissent par deux et un câble les relie : touche le câble et tu glisses jusqu\'à l\'autre bout, où tu repars d\'un saut' },
   { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'elle te vise et tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — il s\'annonce avant de partir, et se prendre le tir fait mal' },
-  { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. Tire dedans, elle avale la balle et devient une vraie plateforme' },
+  { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
   { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire' },
   { k: 'sticky',   icon:'🍯', name: 'Collante',       txt: 'tu restes collé dessus ' + Math.round(D_STICKY_HOLD / 60) + ' secondes, puis tu repars d\'un saut ordinaire' },
@@ -4619,28 +4628,66 @@ function doodleTileDraw(ctx, p, t) {
     ctx.strokeStyle = '#241f26'; ctx.lineWidth = 1.2; ctx.stroke();
     return;
   }
-  // 🥚 Tamagotchi : petite console ovale à écran. Affamée elle est TRANSLUCIDE et pointillée
-  // (on la traverse, il faut que ça se voie), la bouche ouverte et les yeux tristes ; repue,
-  // elle devient une vraie dalle pleine, les yeux fermés de contentement.
+  // 🥚 Tamagotchi : petite console ovale à écran, et QUATRE visages qui disent où en est son
+  // appétit — c'est le seul endroit d'où le joueur peut savoir ce que lui rendra le prochain
+  // rebond, et combien de balles il a déjà englouties.
+  // Affamée (0 repas) elle est TRANSLUCIDE et pointillée (on la traverse, il faut que ça se voie),
+  // la bouche grande ouverte ; repue (1) elle est verte, les yeux fermés de contentement, et des
+  // chevrons montent de son écran — le super saut qu'elle rendra ; rassasiée (2) elle jaunit, les
+  // paupières tombent et la bouche devient un trait : fin d'appétit, saut ordinaire ; gavée (3)
+  // elle vire au rouge, sourcils en colère et crocs, et son œil s'allume à la charge du tir.
+  // ⚠ La coque garde 3 pastilles de repas : la couleur seule ne dit pas s'il reste une bouchée
+  // avant la colère, et c'est précisément la question qu'on se pose avant de tirer.
   if (p.type === 'tamagotchi') {
-    const fed = p.tama === true, cx = x + w / 2, cy = y + h / 2;
+    const n = p.meals || 0, fed = p.tama === true, cx = x + w / 2, cy = y + h / 2;
+    const mad = n >= D_TAMA_MEALS, full = n === 2;
+    const body = !fed ? '#9aa3ad' : mad ? '#e2564a' : full ? '#e8c341' : '#8fd0a8';
+    const foot = !fed ? '#6b727b' : mad ? '#8f2f28' : full ? '#9a7c14' : '#3f8a5c';
+    // 🔴 La charge du tir se voit venir, comme sur la dalle laser : sans annonce, un trait lent
+    // reste un trait qu'on ne voit pas partir.
+    const tel = mad ? Math.max(0, 1 - (p.tlaz == null ? D_TAMA_GAP : p.tlaz) / D_TAMA_TEL) : 0;
     ctx.save();
     if (!fed) { ctx.globalAlpha = 0.5; ctx.setLineDash([4, 3]); }
-    doodleRR(ctx, x, y, w, h, 7, fed ? '#8fd0a8' : '#9aa3ad');
-    ctx.fillStyle = fed ? '#3f8a5c' : '#6b727b'; ctx.fillRect(x + 3, y + h - 4, w - 6, 3);
+    if (tel > 0) { ctx.fillStyle = `rgba(226,86,74,${0.18 + tel * 0.35})`; ctx.beginPath(); ctx.ellipse(cx, cy, w * 0.6, h * 0.9, 0, 0, Math.PI * 2); ctx.fill(); }
+    doodleRR(ctx, x, y, w, h, 7, body);
+    ctx.fillStyle = foot; ctx.fillRect(x + 3, y + h - 4, w - 6, 3);
     ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x + 2, y + 1, w - 4, h - 3, 6) : ctx.rect(x + 2, y + 1, w - 4, h - 3);
     ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#e8f4e2';                                     // l'écran
+    ctx.fillStyle = mad ? '#ffe0dc' : '#e8f4e2';                    // l'écran
     ctx.beginPath(); ctx.ellipse(cx, cy, 13, 5, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#2b2b33';
-    if (fed) {                                                     // yeux fermés + sourire
+    if (mad) {                                                     // sourcils froncés + crocs
+      ctx.lineWidth = 1.5;
+      [[-5, 1], [5, -1]].forEach(([ox, sg]) => {
+        ctx.beginPath(); ctx.moveTo(cx + ox - 2.6 * sg, cy - 3.4); ctx.lineTo(cx + ox + 2.6 * sg, cy - 1.6); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx + ox, cy - 0.2, tel > 0.6 && Math.floor(t / 3) % 2 ? 2.1 : 1.5, 0, Math.PI * 2); ctx.fill();
+      });
+      ctx.beginPath(); ctx.moveTo(cx - 4, cy + 3.4); ctx.lineTo(cx + 4, cy + 3.4); ctx.stroke();
+      [-2.4, 0, 2.4].forEach(ox => { ctx.beginPath(); ctx.moveTo(cx + ox - 1.1, cy + 3.4); ctx.lineTo(cx + ox, cy + 1.4); ctx.lineTo(cx + ox + 1.1, cy + 3.4); ctx.closePath(); ctx.fill(); });
+    } else if (full) {                                             // paupières lourdes + bouche en trait
+      ctx.lineWidth = 1.5;
+      [-5, 5].forEach(ox => { ctx.beginPath(); ctx.moveTo(cx + ox - 2.2, cy - 1.4); ctx.lineTo(cx + ox + 2.2, cy - 1.4); ctx.stroke(); ctx.beginPath(); ctx.arc(cx + ox, cy + 0.4, 1.2, 0, Math.PI * 2); ctx.fill(); });
+      ctx.beginPath(); ctx.moveTo(cx - 3.4, cy + 3); ctx.lineTo(cx + 3.4, cy + 3); ctx.stroke();
+    } else if (fed) {                                              // yeux fermés + sourire, et le super saut annoncé
+      ctx.lineWidth = 1.4;
       [-5, 5].forEach(ox => { ctx.beginPath(); ctx.arc(cx + ox, cy - 1, 2.2, Math.PI, 0); ctx.stroke(); });
       ctx.beginPath(); ctx.arc(cx, cy + 1, 3, 0, Math.PI); ctx.stroke();
+      ctx.strokeStyle = '#3f8a5c'; ctx.lineWidth = 1.6;
+      for (let i = 0; i < 2; i++) {
+        const yy = y - 2 - i * 4 - ((t * 0.08 + i) % 1) * 3;
+        ctx.beginPath(); ctx.moveTo(cx - 4, yy + 3); ctx.lineTo(cx, yy); ctx.lineTo(cx + 4, yy + 3); ctx.stroke();
+      }
+      ctx.strokeStyle = '#2b2b33';
     } else {                                                       // yeux ronds + bouche grande ouverte
       [-5, 5].forEach(ox => { ctx.beginPath(); ctx.arc(cx + ox, cy - 1, 1.6, 0, Math.PI * 2); ctx.fill(); });
       const m = p.eat > 0 ? 1 + Math.abs(Math.sin(t * 0.6)) * 1.5 : 1.8;
       ctx.beginPath(); ctx.ellipse(cx, cy + 2, 2.6, m, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    // Les 3 pastilles de repas, sur la coque, à gauche de l'écran
+    for (let i = 0; i < D_TAMA_MEALS; i++) {
+      ctx.fillStyle = i < n ? (mad ? '#ffd0c9' : '#2b2b33') : 'rgba(43,43,51,0.22)';
+      ctx.beginPath(); ctx.arc(x + 7, y + 4 + i * 4, 1.5, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
     return;
@@ -6911,7 +6958,7 @@ function doodleTileBirth(s, p, diff) {
   if (type2 === 'egg') p.egg = D_EGG_JUMPS;   // 🪺 le compte à rebours, en sauts du joueur
   if (type2 === 'flag') p.flag = Math.floor(Math.random() * ((typeof FLAGS !== 'undefined' && FLAGS.length) || 1));   // 🚩 le pays hissé
   if (type2 === 'tamagotchi') {
-    p.tama = false;
+    p.tama = false; p.meals = 0;   // ⚠ le compteur de repas naît AVEC elle : `(p.meals || 0)` partout ailleurs ne dirait pas la différence entre « pas encore mangé » et « pas un tamagotchi »
     const tx = (x + w / 2 < DOODLE_W / 2) ? DOODLE_W - w - 8 : 8;
     s.platforms.push({ x: tx, y: ny, w, h: D_PLAT_H, type: 'green', dead: false });
   }
