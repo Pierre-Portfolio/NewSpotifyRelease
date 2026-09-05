@@ -1214,6 +1214,10 @@ const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5;
 // ⚠ Écart pris par le PLUS COURT chemin, bords traversants compris — comme le pilotage et
 // l'attraction gravitationnelle, sinon elle traverserait tout l'écran pour rejoindre un joueur
 // qui vient de sortir par le bord opposé.
+// ⚠ 12.4.2 — LA POURSUITE S'ARRÊTE AU PREMIER REBOND (`p.glued`, demande utilisateur) : elle
+// suivait sans relâche, se retrouvait donc toujours sous les pieds au retour, et on rebondissait
+// dessus indéfiniment sans jamais quitter sa hauteur. Figée après le premier passage, elle rend
+// un second rebond de dalle ordinaire — celui qu'on rate si on ne s'est pas déplacé.
 const D_GLUE_V = 1.6;
 // 🪞 10.3.7 — MIMÉTIQUE (demande utilisateur) : elle prend l'APPARENCE ET L'EFFET de la dernière
 // dalle sur laquelle le joueur a rebondi.
@@ -1837,7 +1841,11 @@ const D_TILES = [
   { k: 'shuffle', icon:'🔀', name: 'Randomiseur',   txt: 'toutes les dalles visibles échangent leurs places au hasard' },
   // 🚇 9.8.6 — TUYAUX (demande utilisateur) : ils naissent TOUJOURS par deux, à portée de vue
   // l'un de l'autre, et se répondent. Sauter dans l'un ressort par l'autre.
-  { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre' },
+  // ⚠ 12.4.2 — UNE SEULE TRAVERSÉE POUR LA PAIRE (demande utilisateur) : les deux bouches se
+  // bouchent ensemble à la sortie. Sans ça, on retombait sur celle d'arrivée, qui renvoyait vers
+  // celle de départ, qui renvoyait… — un aller-retour sans fin, à la même hauteur, dont rien ne
+  // faisait sortir. Bouchées, ce sont deux dalles ordinaires, et le second rebond est classique.
+  { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre — une seule fois, puis les deux bouches se bouchent et ne sont plus que des dalles ordinaires' },
   // 🪙 9.9.1 — QUITTE OU DOUBLE (demande utilisateur) : une seule fois par dalle, pile ou face.
   { k: 'gamble',  icon:'🪙', name: 'Quitte ou double', txt: 'une chance sur deux de DOUBLER le NOMBRE de tes effets (autant de neufs que tu en as, au moins ' + D_GAMBLE_MIN + ') et de tes tuiles… une chance sur deux de TOUT perdre' },
   // 🕯️ 9.9.6 — ESPRITS (demande utilisateur) : trois apparitions qui fondent sur toi chacune
@@ -1855,7 +1863,7 @@ const D_TILES = [
   { k: 'quest',    icon:'🎯', name: 'Quête',          txt: 'elle te confie un défi tiré au sort parmi ceux qui ne tournent pas déjà ; le réussir fait tomber du ciel une PLUIE DE COFFRES — un par tranche de ' + D_QUEST_RAIN_PER + ' points d\'altitude, un au minimum. Ils se posent où ils tombent : à toi d\'aller les chercher. Les ' + D_QUESTS.length + ' défis peuvent courir de front, et les avoir tous les ' + D_QUESTS.length + ' en même temps rapporte ' + D_QUEST_TRIO + ' butins de plus, tout de suite. 🏅 Une fois les ' + D_QUESTS.length + ' RÉUSSIS, la QUÊTE ULTIME s\'ouvre d\'elle-même — abats ' + D_ULT_KILLS + ' créatures, rebondis sur ' + D_ULT_KINDS + ' sortes de tuiles et terrasse ' + D_ULT_BOSS + ' boss : elle débloque 100 % des tuiles d\'un coup et pousse toutes les améliorations et tous les bonus permanents à leur maximum' },
   { k: 'alive',    icon:'👀', name: 'Vivante',        txt: 'elle a des yeux, elle te regarde et elle se traîne vers toi — sans jamais s\'éloigner beaucoup de l\'endroit où elle est née' },
   { k: 'mimic',    icon:'🪞', name: 'Mimétique',      txt: 'elle prend l\'apparence ET l\'effet de la dernière dalle sur laquelle tu as rebondi — elle change donc au fil de la partie' },
-  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur mais se déplace sans relâche pour rester juste sous toi' },
+  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur et se déplace pour rester juste sous toi — jusqu\'à ton premier rebond dessus : le pot est vidé, elle se fige et n\'est plus qu\'une dalle ordinaire' },
   { k: 'chameleon', icon:'🦎', name: 'Caméléon',      txt: 'elle prend l\'apparence d\'une tuile DÉJÀ PRÉSENTE dans la partie — débloquée ou venue d\'un biome traversé — et n\'en a aucun des effets : c\'est une plateforme ordinaire. Sans rien à imiter, elle reste une dalle verte' },
   { k: 'grapple',  icon:'🪝', name: 'Grappin',        txt: 'elle lance un grappin sur toi de temps en temps : s\'il t\'accroche, il te ramène sur la dalle, où tu repars d\'un saut' },
   { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : verte elle est ordinaire, jaune on glisse, rouge elle efface tes bonus et tes améliorations' },
@@ -3585,15 +3593,25 @@ function doodleTileDraw(ctx, p, t) {
   // 🩹 Pot de colle : tube de colle blanche couché sur la dalle, bouchon orange, et une traînée
   // gluante derrière lui — c'est elle qui dit qu'il vient de se déplacer.
   if (p.type === 'glue') {
-    doodleRR(ctx, x, y, w, h, 6, '#e8e2d2');
+    doodleRR(ctx, x, y, w, h, 6, p.glued ? '#cfc9ba' : '#e8e2d2');
     ctx.fillStyle = '#b8b09a'; ctx.fillRect(x, y + h - 4, w, 4);
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    for (let i = 0; i < 3; i++) { const dx = x + 8 + i * 18, dl = 3 + Math.sin(t * 0.1 + i * 2) * 2; ctx.fillRect(dx, y + h - 3, 3, 3 + dl); }
+    // ⚠ Les gouttes ne pendent QUE tant que le pot poursuit : une traînée gluante sous une dalle
+    // qui ne bouge plus aurait promis une poursuite qui n'aura pas lieu.
+    if (!p.glued) {
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      for (let i = 0; i < 3; i++) { const dx = x + 8 + i * 18, dl = 3 + Math.sin(t * 0.1 + i * 2) * 2; ctx.fillRect(dx, y + h - 3, 3, 3 + dl); }
+    }
     doodleRR(ctx, x + w / 2 - 13, y + 2, 26, h - 7, 3, '#f8f4ea');       // le tube
     ctx.fillStyle = '#e8913a';
     ctx.fillRect(x + w / 2 + 11, y + 4, 5, h - 11);                       // le bouchon
     ctx.fillStyle = '#c9c1ae';
     ctx.fillRect(x + w / 2 - 9, y + 4, 12, 2);                            // l'étiquette
+    // Vidé : le tube est barré d'un creux et la dalle prend le voile des tuiles épuisées.
+    if (p.glued) {
+      ctx.strokeStyle = '#a89f8c'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(x + w / 2 - 8, y + h / 2 - 1); ctx.lineTo(x + w / 2 + 6, y + h / 2 + 1); ctx.stroke();
+      doodleTileSpent(ctx, p);
+    }
     return;
   }
   // 🦎 Caméléon : il se dessine comme la tuile copiée, et RIEN d'autre ne le trahit. ⚠ Une
@@ -4453,7 +4471,20 @@ function doodleTileDraw(ctx, p, t) {
     ctx.fillStyle = 'rgba(255,255,255,0.16)'; ctx.fillRect(cx - fw + 1, cy + 1.2, (fw - 1) * 2, 1);   // le reflet sur la lèvre
     ctx.strokeStyle = col; ctx.lineWidth = 1.1;                                          // anneau de paire
     doodleRR(ctx, cx - cw + 0.55, cy + 0.55, cw * 2 - 1.1, ch - 1.1, 2, 'rgba(0,0,0,0)'); ctx.stroke();
-    if (p.pcool > 0) doodleTileSpent(ctx, p);       // au repos : la bouche se voile
+    // ⚠ Le tuyau ÉPUISÉ doit se voir de loin, sinon on saute dessus en comptant sur un voyage
+    // qui n'aura pas lieu : deux planches clouées en croix par-dessus la gueule, et le voile
+    // des tuiles usées. Le repos (`pcool`) ne porte que le voile — il ne dure qu'un instant.
+    if (p.pused) {
+      ctx.save(); ctx.translate(cx, cy + ch / 2);
+      [-0.42, 0.42].forEach(a => {
+        ctx.save(); ctx.rotate(a);
+        ctx.fillStyle = '#a9793f'; ctx.fillRect(-cw - 2, -2.2, (cw + 2) * 2, 4.4);
+        ctx.fillStyle = '#6d4a22'; ctx.fillRect(-cw - 2, 0.9, (cw + 2) * 2, 1.3);
+        ctx.restore();
+      });
+      ctx.restore();
+    }
+    if (p.pused || p.pcool > 0) doodleTileSpent(ctx, p);       // épuisé ou au repos : la bouche se voile
     return;
   }
   // 🔀 Randomiseur : les deux flèches croisées du symbole « aléatoire ». Elles oscillent tant
