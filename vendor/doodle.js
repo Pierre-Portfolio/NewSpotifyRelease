@@ -1518,6 +1518,17 @@ function doodleUltReward(s) {
 }
 const D_GRAP_GAP = 240, D_GRAP_REACH = 170, D_GRAP_V = 3.4, D_GRAP_HIT = 13, D_GRAP_PULL = 4.6;
 const D_LIGHT_STEP = 120;
+// 🚦 12.4.7 — LE FEU DONNE ET REPREND (demande utilisateur), il n'efface plus tout. Le rouge
+// coûte D_LIGHT_TAKE niveaux de bonus et D_LIGHT_AMMO balles ; le vert, qui ne faisait rien,
+// rend un bonus.
+// ⚠ Le rouge passe par `doodleSpiritSteal`, le vol d'un niveau au hasard : il porte déjà les
+// exclusions justes (ni boucliers, ni munitions, ni butin instantané) et laisse ce qui protège.
+// Recopier une seconde règle de vol, c'était garantir que les deux finissent par diverger.
+// ⚠ Le cadeau du vert est UNE FOIS PAR DALLE (`p.gift`), la punition du rouge non. Le feu change
+// de couleur toutes les 2 s et un rebond en dure une : sans ce garde-fou, on attendait le vert
+// sous la dalle et on y rebondissait en boucle pour ramasser un bonus permanent à chaque passage.
+// Une punition, elle, ne se farme pas — elle reste donc répétable, comme avant.
+const D_LIGHT_TAKE = 2, D_LIGHT_AMMO = 20;
 function doodleLightPhase(p, t) { return Math.floor((t + (p.ph || 0)) / D_LIGHT_STEP) % 3; }
 // ⚠ 10.5.0 — PORTÉE TRIPLÉE (demande utilisateur) : 150 → 450 points d'altitude. La bande
 // couvre désormais bien plus que l'écran (480 px de haut) : la dalle nettoie tout ce qui vit
@@ -1906,7 +1917,7 @@ const D_TILES = [
   { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur et se déplace pour rester juste sous toi — jusqu\'à ton premier rebond dessus : le pot est vidé, elle se fige et n\'est plus qu\'une dalle ordinaire' },
   { k: 'chameleon', icon:'🦎', name: 'Caméléon',      txt: 'elle prend l\'apparence d\'une tuile DÉJÀ PRÉSENTE dans la partie — débloquée ou venue d\'un biome traversé — et n\'en a aucun des effets : c\'est une plateforme ordinaire. Sans rien à imiter, elle reste une dalle verte' },
   { k: 'grapple',  icon:'🪝', name: 'Grappin',        txt: 'elle lance un grappin sur toi de temps en temps : s\'il t\'accroche, il te ramène sur la dalle, où tu repars d\'un saut' },
-  { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : verte elle est ordinaire, jaune on glisse, rouge elle efface tes bonus et tes améliorations' },
+  { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : VERTE elle t\'offre 1 bonus (une seule fois par dalle), JAUNE on glisse, ROUGE elle te prend ' + D_LIGHT_TAKE + ' niveaux de bonus et ' + D_LIGHT_AMMO + ' balles' },
   { k: 'fog',      icon:'🌁', name: 'Brouillard',     txt: 'toutes les dalles disparaissent pour le saut qui suit — elles réapparaissent dès que tu en retouches une' },
   { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre' },
   { k: 'zip',      icon:'🛒', name: 'Tyrolienne',     txt: 'elles naissent par deux et un câble les relie : touche le câble et tu glisses jusqu\'à l\'autre bout, où tu repars d\'un saut' },
@@ -4603,6 +4614,12 @@ function doodleTileDraw(ctx, p, t) {
       ctx.fillStyle = on ? cols[i] : '#4a4a55';
       ctx.beginPath(); ctx.arc(cx, y + h / 2, 4.4, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = '#15151a'; ctx.lineWidth = 1.2; ctx.stroke();
+      // ⚠ Le cadeau du vert ne se prend qu'une fois : une fois pris, l'ampoule verte est BARRÉE.
+      // Sans ça, on continue d'attendre le vert sous une dalle qui n'a plus rien à donner.
+      if (i === 0 && p.gift) {
+        ctx.strokeStyle = '#e2564a'; ctx.lineWidth = 1.6;
+        ctx.beginPath(); ctx.moveTo(cx - 4, y + h / 2 - 4); ctx.lineTo(cx + 4, y + h / 2 + 4); ctx.stroke();
+      }
     }
     return;
   }
