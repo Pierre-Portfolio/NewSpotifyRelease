@@ -53,7 +53,7 @@ L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · 
 
 | Module | Ce qu'il fait |
 |---|---|
-| **📰 Actu** | Résumé de la veille par IA (5 puces monde, 5 puces France), actualité (monde, régional, Wikipédia, bourse, IA, cyber, insolite, jeux), cartes interactives (aurores, séismes, guerre, qualité de l'air et de l'eau, transports…), fuites de données, vidéos de tes abonnements YouTube (lecteur plein écran de TV Time) |
+| **📰 Actu** | Résumé de la veille par IA (5 puces monde, 5 puces France), actualité (monde, régional, Wikipédia, bourse, IA, cyber, insolite, jeux), bug & pannes (état officiel des services en ligne + fiches Downdetector), cartes interactives (aurores, séismes, guerre, qualité de l'air et de l'eau, transports…), fuites de données, vidéos de tes abonnements YouTube (lecteur plein écran de TV Time) |
 | **🔔 Alertes** | Échéances par rubrique (administratif, anniversaires, logement, véhicule, santé, travail, finance, jeux…), rappels persos, récurrences, calendrier mensuel, alertes automatiques Frigo et Steam. Certaines rubriques ont aussi des champs de **texte libre** (le type d'huile moteur à côté de la vidange), qui ne déclenchent jamais d'alerte |
 | **🔌 API** | Liste locale de toutes les API utilisées par le Hub, saisie des clés, compteur d'appels par API, export JSON |
 | **🏷️ Bon Plan** | Ta liste de jeux suivis avec prix cible, promos du moment (CheapShark + Steam + Epic, jeu offert de la semaine compris), bibliothèque et liste de souhaits Steam, recherche de bons plans par IA |
