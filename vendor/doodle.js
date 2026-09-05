@@ -1185,7 +1185,19 @@ const D_TAMA_MEALS = 3, D_TAMA_GAP = 200, D_TAMA_TEL = 40, D_TAMA_V = 1.85;
 // ⚠ D_TLASER_TEL frames de charge AVANT le départ, et la charge se voit (l'œil de la dalle
 // grossit et s'allume) : sans annonce, un tir lent reste un tir qu'on ne voit pas venir.
 // ⚠ Il BLESSE via `doodleHurt` comme tout le reste : jamais de mort sèche que rien ne pare.
-const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5;
+// ⚠ 12.4.8 — L'ANNONCE DU TIR EST UNE VRAIE ANIMATION (demande utilisateur) : l'œil qui
+// grossit ne disait ni QUAND le coup part, ni OÙ il va. La tourelle porte maintenant un CANON
+// qui suit le doodler (`p.aimX`/`p.aimY`, posés par la boucle et relus par le dessin, comme le
+// regard de la 👀 Vivante — deux calculs séparés auraient fini par viser deux endroits), un
+// rayon de visée en pointillés qui s'allonge à mesure que la charge monte, deux anneaux qui
+// convergent dans l'œil, et un flash de gueule au départ (`p.lazFire`).
+// ⚠ Le rayon de visée SUIT la cible jusqu'au départ, et c'est honnête : le tir est visé à
+// l'instant où il part, le trait montre donc exactement où il ira. C'est le PROJECTILE qui ne
+// se recorrige pas, jamais l'annonce.
+// ⚠ 🫥 Invisible / 🫒 Camouflage : `p.seen` passe à faux, le canon se fige et le rayon
+// s'éteint — une tourelle qui continuerait de suivre une cible qu'elle ne voit pas mentirait
+// sur la seule chose que ces deux teintes promettent.
+const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5, D_TLASER_FLASH = 10;
 // 🍄 10.2.9 — CHAMPIGNON HALLUCINOGÈNE (demande utilisateur) : l'écran SE RETOURNE pendant 3 s.
 // ⚠ C'est un retournement du DESSIN, pas des commandes : le pilotage continue de répondre en
 // coordonnées de plateau, si bien que gauche et droite paraissent inversés — c'est précisément
@@ -1795,7 +1807,7 @@ function doodlePerkRaise(s, cible) {
 const D_BAMB_N = 3;
 const D_BAMB_CLEAR = ['roll', 'mim', 'gvx', 'vy2', 'y0', 'span2', 'ax', 'ay', 'boo', 'conf',
   'fade', 'fuse', 'tent', 'pcool', 'steam', 'lava', 'laz', 'grap', 'grapCool', 'egg', 'ori',
-  'lit', 'tama', 'meals', 'tlaz', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
+  'lit', 'tama', 'meals', 'tlaz', 'lazFire', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'zip', 'pool', 'pop', 'eat'];
 function doodleBambooify(s, p) {
   s.bambLeft--;
   p.type = 'bambooed';
@@ -1921,7 +1933,7 @@ const D_TILES = [
   { k: 'fog',      icon:'🌁', name: 'Brouillard',     txt: 'toutes les dalles disparaissent pour le saut qui suit — elles réapparaissent dès que tu en retouches une' },
   { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre' },
   { k: 'zip',      icon:'🛒', name: 'Tyrolienne',     txt: 'elles naissent par deux et un câble les relie : touche le câble et tu glisses jusqu\'à l\'autre bout, où tu repars d\'un saut' },
-  { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'elle te vise et tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — il s\'annonce avant de partir, et se prendre le tir fait mal' },
+  { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'son canon te suit et elle tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — pendant les ' + (D_TLASER_TEL / 60).toFixed(1).replace('.', ',') + ' s qui précèdent le coup, un rayon de visée en pointillés s\'allonge devant elle et deux anneaux se referment sur son œil : c\'est le moment de bouger. Se prendre le tir fait mal' },
   { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
   { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire' },
@@ -4693,15 +4705,58 @@ function doodleTileDraw(ctx, p, t) {
   // qu'on n'a pas vu partir.
   if (p.type === 'lazer') {
     const left = p.laz == null ? D_TLASER_GAP : p.laz, tel = Math.max(0, 1 - left / D_TLASER_TEL);
+    const cx = x + w / 2, cy = y + h / 2;
+    const seen = p.seen !== false;                                    // 🫥 🫒 elle a perdu sa cible
+    const ang = Math.atan2(p.aimY == null ? 1 : p.aimY, p.aimX == null ? 0 : p.aimX);
+    const rec = p.lazFire > 0 ? (p.lazFire / D_TLASER_FLASH) * 4 : 0;   // le recul du canon au départ
     doodleRR(ctx, x, y, w, h, 6, '#4a4048');
     ctx.fillStyle = '#241f26'; ctx.fillRect(x, y + h - 4, w, 4);
     ctx.fillStyle = '#6b6270';                                        // le socle de la tourelle
-    ctx.fillRect(x + w / 2 - 9, y + 2, 18, h - 6);
-    const r = 3.4 + tel * 3.4;
-    if (tel > 0) { ctx.fillStyle = `rgba(226,86,74,${0.25 + tel * 0.45})`; ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, r + 5, 0, Math.PI * 2); ctx.fill(); }
-    ctx.fillStyle = tel > 0.6 && Math.floor(t / 3) % 2 ? '#ffe9a8' : '#e2564a';
-    ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(cx - 9, y + 2, 18, h - 6);
+    // ── le rayon de VISÉE : il part de la gueule et s'allonge à mesure que la charge monte ──
+    // ⚠ Dessiné AVANT le canon : sorti de la gueule, il doit passer dessous, sinon la tourelle
+    // paraît percée de part en part.
+    if (seen && tel > 0) {
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+      ctx.strokeStyle = `rgba(226,86,74,${0.18 + tel * 0.55})`; ctx.lineWidth = 0.9 + tel * 1.4;
+      ctx.setLineDash([3, 4]); ctx.lineDashOffset = -t * 0.7;
+      ctx.beginPath(); ctx.moveTo(20, 0); ctx.lineTo(20 + 8 + tel * 30, 0); ctx.stroke();
+      ctx.setLineDash([]); ctx.restore();
+    }
+    // ── l'œil, qui grossit et s'allume (l'annonce d'origine, conservée) ──
+    const r = 4.2 + tel * 3.2;
+    if (tel > 0) { ctx.fillStyle = `rgba(226,86,74,${0.22 + tel * 0.35})`; ctx.beginPath(); ctx.arc(cx, cy, r + 4, 0, Math.PI * 2); ctx.fill(); }
+    ctx.fillStyle = !seen ? '#7a5a5a' : tel > 0.6 && Math.floor(t / 3) % 2 ? '#ffe9a8' : '#e2564a';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#241f26'; ctx.lineWidth = 1.2; ctx.stroke();
+    // ── deux anneaux qui CONVERGENT dans l'œil : c'est la charge qui se voit se remplir ──
+    // ⚠ Tracés APRÈS l'œil et son halo : dessous, ils disparaissaient sous le rouge au moment
+    // précis où ils doivent le plus se voir — la fin de la charge.
+    if (seen && tel > 0) {
+      for (let i = 0; i < 2; i++) {
+        const u = (tel * 2.4 + i * 0.5) % 1;                           // 0 = large, 1 = rentré dans l'œil
+        ctx.strokeStyle = `rgba(255,240,190,${(1 - u) * 0.9})`; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(cx, cy, r + 1 + (1 - u) * 10, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    // ── le CANON, tourné vers la cible, et sa gueule qui s'allume ──
+    // ⚠ Dessiné EN DERNIER : sous l'œil, le halo de la charge l'avalait entièrement et la
+    // tourelle n'avait plus de direction lisible à l'instant où elle compte.
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    // ⚠ Le fût part de +1 et non du centre, et il est plus étroit que l'œil : sinon il masque
+    // l'œil rouge, la seule chose qui dit « laser » quand la tourelle est au repos.
+    ctx.fillStyle = '#241f26'; ctx.fillRect(1 - rec, -3.4, 17, 6.8);           // l'ombre du fût
+    ctx.fillStyle = '#7d7484'; ctx.fillRect(1 - rec, -2.6, 17, 5.2);
+    ctx.fillStyle = '#a89fb0'; ctx.fillRect(1 - rec, -2.6, 17, 1.8);           // le jour sur le dessus
+    ctx.fillStyle = '#241f26'; ctx.fillRect(14.6 - rec, -3.4, 2.4, 6.8);       // la bague de gueule
+    if (seen && (tel > 0 || rec > 0)) {
+      const g = Math.max(tel, p.lazFire > 0 ? p.lazFire / D_TLASER_FLASH : 0);
+      ctx.fillStyle = `rgba(255,233,168,${0.3 + g * 0.65})`;
+      ctx.beginPath(); ctx.arc(18 - rec, 0, 1.4 + g * 4.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${g * 0.8})`;
+      ctx.beginPath(); ctx.arc(18 - rec, 0, 0.8 + g * 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
     return;
   }
   // 🥚 Tamagotchi : petite console ovale à écran, et QUATRE visages qui disent où en est son
