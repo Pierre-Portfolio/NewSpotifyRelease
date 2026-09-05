@@ -2257,29 +2257,45 @@ function doodleSegDist(px, py, x1, y1, x2, y2) {
 // bruit du doigt), l'adhérence tombe à D_BELT_GRIP, et surtout la dérive se VOIT — chevrons
 // de vitesse derrière le doodler, traînée de poussière au sol et pastille de décompte au HUD.
 // 💫 10.1.8 — ATTRACTION GRAVITATIONNELLE (demande utilisateur), tuile du biome Cosmos en
-// remplacement de la 🌠 Étoile filante : tant qu'elle est À L'ÉCRAN, elle tire le doodler vers
-// elle. ⚠ Elle s'ajoute à `s.px` APRÈS le pilotage, exactement comme la dérive du ➡️ Tapis
-// roulant : passer par `s.vx` n'aurait rien fait, le pilotage au doigt réécrit `s.vx` à chaque
-// frame et l'attraction serait restée invisible « le doigt sur le curseur ».
-// ⚠ Attraction HORIZONTALE seulement : une composante verticale se serait battue contre le saut
-// et la gravité, les deux seules choses que le joueur ne pilote pas — on aurait cassé le jeu,
-// pas ajouté une sensation.
-// ⚠ La poussée FOND à l'approche (`|dx| / D_PULL_SOFT`) : à force constante, le doodler
-// vibrerait autour de l'abscisse de la dalle au lieu de s'y poser.
-// ⚠ Et le TOTAL est borné : trois dalles à l'écran ne doivent pas confisquer le pilotage.
-// ⚠ 10.5.2 puis 10.8.4 — ATTRACTION RENFORCÉE DEUX FOIS (demandes utilisateur) : +20 % puis
-// +40 %, soit 0,85 → 1,02 → 1,43 par dalle. Le TOTAL suit à chaque fois (1,7 → 2,04 → 2,86) :
-// relever la seule poussée sans relever le plafond n'aurait rien changé dès qu'il y a deux
-// dalles à l'écran, c'est-à-dire précisément quand ça se sent.
-// ⚠ 10.8.4 — LA PORTÉE AUSSI (+40 %) : la dalle ne tirait que TANT QU'ELLE ÉTAIT À L'ÉCRAN,
-// c'est-à-dire sur une fenêtre d'une hauteur d'écran. Elle tire désormais depuis D_PULL_REACH
-// au-delà des deux bords — on est happé par une dalle qu'on n'a pas encore vue, ou qu'on vient
-// de dépasser, et c'est exactement ce que « plus de portée » veut dire ici.
-// ⚠ 11.1.7 — ENCORE +20 % SUR LES DEUX (demande utilisateur), en compensation de sa raréfaction :
-// force 1,43 → 1,72 (plafond 2,86 → 3,43, il suit toujours) et fenêtre 1,4 H → 1,68 H, soit
-// 0,34 H de débord de chaque côté. La tuile se croise moins souvent, elle se sent davantage.
-const D_PULL_V = 1.72, D_PULL_SOFT = 46, D_PULL_MAX = 3.43;
-const D_PULL_REACH = Math.round(DOODLE_H * 0.34);  // 0,34 H de chaque côté = fenêtre de 1,68 H
+// 🟦 12.5.6 — « SAUVÉ PAR LE TARDIS » remplace l'💫 Attraction gravitationnelle (demande
+// utilisateur). La tuile rare du 🌌 Cosmos ne tire plus le doodler : elle l'EMBARQUE.
+// Le rebond appelle la cabine bleue, qui arrive par un côté à la hauteur de la dalle, s'ouvre,
+// referme ses portes sur le doodler, monte à la verticale, puis le repose sur la PROCHAINE
+// tuile TARDIS — ou, si l'on a quitté le biome entre-temps, sur la première dalle venue.
+// ⚠ C'est un ÉTAT EXCLUSIF (`s.tardis`), au même rang que la 🌿 Liane et le 🌳 Arbre : pendant
+// le voyage on n'est ni en saut, ni en chute, ni en vol, et les dangers ne mordent pas — la
+// tuile promet un SAUVETAGE, un monstre qui tuerait à travers la coque l'aurait démentie.
+// ⚠ Quatre phases, et un `p.tar` qui n'autorise qu'un embarquement par dalle : sans lui, se
+// reposer sur la même tuile relançait le voyage à l'infini.
+//   'come' la cabine glisse depuis un bord, à la hauteur de la dalle de départ
+//   'load' les portes s'ouvrent, le doodler entre (il n'est plus dessiné)
+//   'rise' la montée verticale, le temps de trouver une destination
+//   'drop' les portes s'ouvrent au-dessus de la dalle d'arrivée et le déposent
+// ⚠ La MONTÉE passe par `s.vy` et non par `s.py` : seule une vitesse négative fait défiler la
+// caméra (voir la boucle « caméra »), et poser la position aurait sorti le doodler du cadre
+// sans que le monde bouge — c'est exactement le piège déjà documenté sur le 🌳 Arbre géant.
+// ⚠ Le voyage est PLAFONNÉ (D_TARDIS_MAX) : sans borne, un joueur qui ne recroise jamais de
+// tuile TARDIS avant le palier suivant serait monté indéfiniment. Au plafond, la cabine se pose
+// sur la dalle suivante comme si l'on avait changé de biome.
+// ⚠ La destination est la dalle la plus BASSE parmi celles qui sont AU-DESSUS des pieds : c'est
+// « la prochaine », et la cabine n'a donc jamais à redescendre pour déposer.
+const D_TARDIS_W = 30, D_TARDIS_H = 48;   // la cabine, un peu plus haute que large
+const D_TARDIS_IN = 5.2;                  // vitesse d'arrivée latérale, px/frame
+const D_TARDIS_V = 3.0;                   // vitesse de montée, px/frame (~180 px/s)
+const D_TARDIS_LOAD = 34, D_TARDIS_DROP = 42;   // frames d'ouverture des portes, à l'aller et au retour
+const D_TARDIS_MAX = 300;                 // garde-fou : 5 s de montée au plus, soit ~900 px
+// La dalle d'arrivée : la plus BASSE de celles qui sont au-dessus des pieds du doodler.
+// ⚠ `onlyTardis` restreint aux tuiles TARDIS (hors celle de départ) tant qu'on est dans le
+// biome ; une fois sorti — ou au plafond — n'importe quelle dalle solide fait l'affaire.
+function doodleTardisTarget(s, onlyTardis, from) {
+  let best = null;
+  for (const q of s.platforms) {
+    if (q === from || q.dead || !doodleSolid(q) || q.y >= s.py + D_FEET - 6) continue;
+    if (onlyTardis && doodleEffType(q) !== 'tardis') continue;
+    if (!best || q.y > best.y) best = q;
+  }
+  return best;
+}
 const D_BELT_LIFE_S = 3;                       // ➡️ durée de l'entraînement, en SECONDES réelles
 const D_BELT_V = 3.3, D_BELT_LIFE = D_BELT_LIFE_S * 60, D_BELT_GRIP = 0.3;
 const D_STEER_V = 7.2;                         // pas maximal du pilotage au doigt, en px/frame
@@ -2557,7 +2573,7 @@ const D_BIOMES = [
   // 🪐 Gravité.
   { k:'cosmos',  name:'Cosmos',   icon:'🌌', paper:'#e6e4f6', rule:'#c9c4ea', marge:'#8f7fd8',
     tiles:[
-      { k:'pull',     icon:'💫', name:'Attraction gravitationnelle', w:D_BIOME_TILE_RARE, txt:'elle t\'attire vers elle — même le doigt posé sur le curseur — et elle tire de bien au-delà de l\'écran' },
+      { k:'tardis',   icon:'🟦', name:'Sauvé par le TARDIS', own:true, w:D_BIOME_TILE_RARE, txt:'une cabine bleue arrive par un côté, s\'ouvre, te récupère à l\'intérieur et t\'emmène droit vers le haut — puis te dépose sur la PROCHAINE tuile TARDIS. Si tu as quitté le biome avant d\'en croiser une, elle te pose sur la première dalle venue. Rien ne peut te toucher pendant le voyage, et une cabine ne vient qu\'une fois par dalle' },
       { k:'bhole',    icon:'🕳️', name:'Trou noir', own:true, txt:'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
       { k:'gravity',  icon:'🪐', name:'Gravité',   own:true, txt:'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
     ],
@@ -2802,7 +2818,7 @@ function doodleBossStart(s, W, H) {
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
   s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
-  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
+  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
   s.banner = { txt: `💀 ${kind.name}`, sub: `plus de saut — déplace-toi et tire · ${hp} points de vie · 🛡️ ${D_BOSS_SH} balles après chaque sort`, life: D_BANNER_LIFE * 1.6 };
@@ -3280,6 +3296,85 @@ function doodleCloudBody(ctx, x, y, w, h, fill, edge) {
   [[0.2, 7.5], [0.47, 10], [0.76, 8]].forEach(([f, r]) => { ctx.beginPath(); ctx.arc(x + w * f, y + h * 0.44, r, 0, Math.PI * 2); ctx.fill(); });
   ctx.fillRect(x + 5, y + 2, w - 10, h - 3);
   if (edge) { ctx.fillStyle = edge; ctx.fillRect(x + 5, y + h - 3.5, w - 10, 3.5); }   // la sous-face, qui dit où l'on pose le pied
+}
+// 🟦 La cabine du TARDIS, en style Doodle : aplats vifs, gros contour sombre. Origine =
+// MILIEU DU BAS (elle se pose sur le sommet d'une dalle). ⚠ Une seule primitive pour les quatre
+// usages — la dalle, l'arrivée, le voyage, le dépôt : redessiner la cabine à chaque endroit,
+// c'était garantir qu'elles finissent par ne plus se ressembler.
+// ⚠ `open` (0→1) écarte les DEUX battants et découvre l'intérieur noir : des portes qui
+// s'effaceraient au lieu de coulisser n'auraient rien dit de « elle s'ouvre pour te récupérer ».
+function doodleTardisBox(ctx, cx, by, sc, open, t, alpha) {
+  const w = D_TARDIS_W * sc, h = D_TARDIS_H * sc, x = cx - w / 2, y = by - h;
+  ctx.save();
+  if (alpha != null) ctx.globalAlpha *= alpha;
+  const BLEU = '#1f4f8f', SOMBRE = '#12315a', BORD = '#0b1c33';
+  // la lanterne, qui bat comme un phare — c'est elle qui dit que la cabine est en marche
+  const lum = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(t * 0.16));
+  ctx.fillStyle = 'rgba(255,244,190,' + (0.30 * lum).toFixed(3) + ')';
+  ctx.beginPath(); ctx.arc(cx, y - h * 0.10, w * 0.38, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff4be'; ctx.strokeStyle = BORD; ctx.lineWidth = 1.6 * sc;
+  ctx.beginPath(); ctx.arc(cx, y - h * 0.10, w * 0.11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  // le toit : une corniche plus large que le corps, comme sur la vraie cabine
+  ctx.fillStyle = SOMBRE; ctx.strokeStyle = BORD; ctx.lineWidth = 2 * sc;
+  ctx.beginPath(); ctx.rect(x - w * 0.09, y - h * 0.055, w * 1.18, h * 0.075); ctx.fill(); ctx.stroke();
+  // le corps
+  ctx.fillStyle = BLEU;
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.fill(); ctx.stroke();
+  // le bandeau « POLICE BOX » : quatre traits clairs, illisibles à cette taille mais reconnaissables
+  ctx.fillStyle = '#f2f5f8'; ctx.fillRect(x + w * 0.06, y + h * 0.055, w * 0.88, h * 0.075);
+  ctx.fillStyle = BORD;
+  for (let i = 0; i < 5; i++) ctx.fillRect(x + w * (0.14 + i * 0.16), y + h * 0.078, w * 0.075, h * 0.028);
+  // l'intérieur, découvert par l'ouverture des portes
+  const ow = (w / 2 - w * 0.06) * Math.max(0, Math.min(1, open || 0));
+  if (ow > 0.3) {
+    ctx.fillStyle = '#07101d';
+    ctx.fillRect(cx - ow, y + h * 0.16, ow * 2, h * 0.82);
+    // la lueur de la salle de contrôle : sans elle, l'ouverture n'est qu'un trou noir
+    ctx.fillStyle = 'rgba(122,206,255,0.30)';
+    ctx.fillRect(cx - ow, y + h * 0.16, ow * 2, h * 0.82);
+  }
+  // les deux battants, écartés d'autant
+  for (const sgn of [-1, 1]) {
+    const dw = w / 2 - w * 0.06;
+    const dx = cx + sgn * ow + (sgn < 0 ? -dw : 0);
+    ctx.fillStyle = BLEU; ctx.strokeStyle = BORD; ctx.lineWidth = 1.6 * sc;
+    ctx.beginPath(); ctx.rect(dx, y + h * 0.16, dw, h * 0.82); ctx.fill(); ctx.stroke();
+    // fenêtre haute à quatre carreaux
+    ctx.fillStyle = '#cfe6f5';
+    ctx.fillRect(dx + dw * 0.16, y + h * 0.20, dw * 0.68, h * 0.16);
+    ctx.strokeStyle = SOMBRE; ctx.lineWidth = 1 * sc;
+    ctx.beginPath();
+    ctx.moveTo(dx + dw * 0.5, y + h * 0.20); ctx.lineTo(dx + dw * 0.5, y + h * 0.36);
+    ctx.moveTo(dx + dw * 0.16, y + h * 0.28); ctx.lineTo(dx + dw * 0.84, y + h * 0.28);
+    ctx.stroke();
+    // deux panneaux pleins en dessous
+    ctx.strokeStyle = SOMBRE; ctx.lineWidth = 1.2 * sc;
+    ctx.strokeRect(dx + dw * 0.16, y + h * 0.42, dw * 0.68, h * 0.20);
+    ctx.strokeRect(dx + dw * 0.16, y + h * 0.66, dw * 0.68, h * 0.20);
+  }
+  // la poignée, sur le battant de droite
+  ctx.fillStyle = '#e8c45a';
+  ctx.beginPath(); ctx.arc(cx + ow + w * 0.07, y + h * 0.55, w * 0.045, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+// Où se trouve la cabine, selon la phase. ⚠ Source UNIQUE, partagée par le dessin et par la mise
+// à jour : deux calculs séparés auraient fini par ouvrir les portes ailleurs que là où le
+// doodler entre.
+function doodleTardisPos(s) {
+  const td = s.tardis;
+  if (!td) return null;
+  if (td.ph === 'rise') return { x: s.px, y: s.py + D_FEET };
+  if (td.ph === 'drop' && td.tg && !td.tg.dead) return { x: td.tg.x + td.tg.w / 2, y: td.tg.y };
+  if (td.ph === 'drop') return { x: s.px, y: s.py + D_FEET };
+  return { x: td.bx, y: td.p && !td.p.dead ? td.p.y : s.py + D_FEET };
+}
+// L'écartement des portes à cet instant : elles s'ouvrent, laissent passer, puis se referment.
+function doodleTardisOpen(s) {
+  const td = s.tardis;
+  if (!td) return 0;
+  if (td.ph === 'load') { const u = td.t / D_TARDIS_LOAD; return u < 0.35 ? u / 0.35 : u > 0.70 ? Math.max(0, 1 - (u - 0.70) / 0.30) : 1; }
+  if (td.ph === 'drop') { const u = td.t / D_TARDIS_DROP; return u < 0.30 ? u / 0.30 : u > 0.75 ? Math.max(0, 1 - (u - 0.75) / 0.25) : 1; }
+  return 0;
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
@@ -4767,6 +4862,26 @@ function doodleTileDraw(ctx, p, t) {
     ctx.beginPath(); ctx.moveTo(cx, y + h / 2); ctx.lineTo(cx, y + h / 2 - 2.4); ctx.stroke();
     return;
   }
+  // 🟦 Sauvé par le TARDIS : dalle d'ardoise sombre, marquée au sol des empreintes de la cabine
+  // et surmontée d'une lanterne qui bat — c'est ce qui la fait repérer de loin dans le Cosmos.
+  // ⚠ La cabine n'est PAS dessinée sur la dalle : elle arrive à l'appel, et la voir déjà posée
+  // aurait démenti l'arrivée par le côté.
+  if (p.type === 'tardis') {
+    doodleRR(ctx, x, y, w, h, 6, '#233a5e');
+    ctx.fillStyle = '#12213a'; ctx.fillRect(x, y + h - 4, w, 4);
+    const cx = x + w / 2;
+    ctx.strokeStyle = 'rgba(122,206,255,0.85)'; ctx.lineWidth = 1.4;
+    ctx.strokeRect(cx - 9, y + 3, 18, h - 7);                      // l'empreinte au sol de la cabine
+    ctx.strokeStyle = 'rgba(122,206,255,0.40)';
+    ctx.strokeRect(cx - 13, y + 2, 26, h - 5);
+    const lum = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * 0.14));      // la lanterne, posée au-dessus
+    ctx.fillStyle = 'rgba(255,244,190,' + (0.26 * lum).toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(cx, y - 6, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff4be'; ctx.strokeStyle = '#0b1c33'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(cx, y - 6, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    if (p.tar) doodleTileSpent(ctx, p);                            // une cabine par dalle : on doit voir qu'elle est passée
+    return;
+  }
   // 🚦 Feu tricolore : boîtier noir à trois lampes, une seule allumée. ⚠ Les deux éteintes
   // restent visibles en sombre : c'est ce qui dit qu'il en existe trois et que ça va tourner.
   if (p.type === 'light') {
@@ -5391,7 +5506,7 @@ function doodleCase(ctx, p, t) {
 }
 // Tuile de biome : une plateforme aux couleurs du biome, marquée de son émoji. Même gabarit
 // que les autres dalles — c'est la marque, pas la forme, qui dit ce qu'elle fait.
-const D_BIOME_TILE_COLS = { vine:['#6fbf47','#2f7a24'], sand:['#e8c98a','#b58a4a'], gust:['#bfe9f5','#7fc9e0'], pull:['#c3b7f2','#7b63c8'] };
+const D_BIOME_TILE_COLS = { vine:['#6fbf47','#2f7a24'], sand:['#e8c98a','#b58a4a'], gust:['#bfe9f5','#7fc9e0'] };
 // 🧊 Plaque de glace : le dessin de l'ancienne tuile 🧊 Glace, supprimée en 10.1.2. Il est
 // désormais l'asset du ❄️ Gel absolu, qui a repris ses effets — c'est le seul indice à
 // l'écran que la dalle fait glisser, l'émoji seul ne parlant que du gel.
@@ -5446,17 +5561,6 @@ function doodleBiomeTile(ctx, p, t) {
   // 🏜️ Le sable mouvant s'assombrit après le 1er passage. ⚠ Depuis 10.1.1 il ne s'effondre
   // plus : la teinte ne dit donc plus qu'un danger, seulement qu'on est déjà passé par là.
   if (p.type === 'sand' && p.sink > 0) { ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(p.x, p.y, p.w, p.h); }
-  // 💫 Attraction : trois anneaux qui se RESSERRENT vers le centre — le mouvement va vers la
-  // dalle, comme la force. Des anneaux qui s'ouvriraient auraient dit exactement l'inverse.
-  if (p.type === 'pull') {
-    ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.2;
-    for (let i = 0; i < 3; i++) {
-      const k = 1 - (((t * 0.02 + i / 3) % 1));
-      ctx.globalAlpha = 0.15 + k * 0.5;
-      ctx.beginPath(); ctx.ellipse(p.x + p.w / 2, p.y + p.h / 2, 4 + k * 24, 2.5 + k * 9, 0, 0, Math.PI * 2); ctx.stroke();
-    }
-    ctx.restore();
-  }
   ctx.save(); ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.globalAlpha = 0.9 + Math.sin(t * 0.1) * 0.1;
   ctx.fillText(tile ? tile.icon : '?', p.x + p.w / 2, p.y + p.h / 2);
@@ -7004,6 +7108,15 @@ function doodleDraw(ctx, s, W, H) {
   // ⚠ 9.1.3 — L'invulnérabilité se VOIT (halo doré + clignotement) : sans signal à l'écran,
   // 2 s d'immunité seraient indiscernables d'un coup de chance, et on ne saurait pas quand
   // elles s'arrêtent. Le halo est dessiné SOUS le doodler pour ne pas le masquer.
+  // 🟦 La cabine du TARDIS. ⚠ Peinte HORS des `ctx.save()` du halo d'invulnérabilité et de la
+  // teinte portée : à l'intérieur, un 🟧 Colosse ou une 🔷 Miniature aurait mis la cabine à
+  // l'échelle du doodler, et le clignotement de l'invulnérabilité l'aurait fait clignoter avec lui.
+  // ⚠ L'ORDRE dépend de la phase : à l'embarquement la cabine passe DEVANT (le doodler s'y
+  // engouffre et disparaît derrière les portes), au dépôt elle passe DERRIÈRE (il sort de
+  // l'encadrement, et l'intérieur noir l'aurait mangé).
+  const tbox = s.tardis ? doodleTardisPos(s) : null;
+  const tdraw = () => doodleTardisBox(ctx, tbox.x, tbox.y, 1, doodleTardisOpen(s), s.t, s.tardis.fade == null ? 1 : s.tardis.fade);
+  if (tbox && s.tardis.ph === 'drop') tdraw();
   const inv = s.inv > 0;
   if (inv) {
     ctx.save();
@@ -7043,8 +7156,14 @@ function doodleDraw(ctx, s, W, H) {
     if (pgho) ctx.globalAlpha *= 0.34;
     if (pscl !== 1) { ctx.translate(s.px, s.py); ctx.scale(pscl, pscl); ctx.translate(-s.px, -s.py); }
   }
-  doodleDoodler(ctx, s.px, s.py, s.faceTimer > 0 ? 0 : s.face, s.fly > 0 ? s.flyType : null, s.t, ppal);
+  // 🟦 Pendant le voyage le doodler est DANS la cabine : on ne le dessine plus (`td.hid`).
+  // ⚠ L'ORDRE change selon la phase, et ce n'est pas cosmétique : à l'embarquement la cabine
+  // passe DEVANT (le doodler s'y engouffre et disparaît derrière les portes), au dépôt elle
+  // passe DERRIÈRE (il sort de l'encadrement, et l'intérieur noir l'aurait mangé).
+  if (!(s.tardis && s.tardis.hid)) doodleDoodler(ctx, s.px, s.py, s.faceTimer > 0 ? 0 : s.face, s.fly > 0 ? s.flyType : null, s.t, ppal);
   if (pwrap) ctx.restore();
+  if (tbox && s.tardis.ph !== 'drop') tdraw();
+  // (la cabine du dépôt a déjà été peinte plus haut, avant le halo d'invulnérabilité)
   if (inv) ctx.restore();
   // ✴️ Shurikens : dessinés APRÈS le doodler (elles tournent DEVANT lui la moitié du temps)
   // et avant les boucliers, dont le halo doit rester au premier plan.
