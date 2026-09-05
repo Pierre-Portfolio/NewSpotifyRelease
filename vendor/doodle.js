@@ -1893,6 +1893,31 @@ function doodleMakeRbMob(x, y) {
   return { x, y, w: D_RBMOB_W, h: D_RBMOB_H, type: 1, alive: true, kind: 'rbmob', icon: '🌈',
            rare: true, hp: D_RBMOB_HP, homing: D_RBMOB_V, wt: Math.random() * 6.28 };
 }
+// ⏲️ 12.5.2 — LE BALANCIER (demande utilisateur) : un pendule pendu SOUS la dalle, qui
+// bascule de gauche à droite sans fin et tue au contact — les créatures comme le doodler.
+// ⚠ C'est le seul danger du jeu qui soit à la fois PERMANENT (il ne s'arme pas, ne se
+// déclenche pas, ne s'épuise pas) et ENTIÈREMENT LISIBLE : sa course est un sinus, donc on
+// la lit d'un coup d'œil et on sait où la masse sera au moment où l'on passera. C'est ce qui
+// autorise un danger qu'on ne peut ni désamorcer ni esquiver par le haut.
+// ⚠ La masse pend SOUS la dalle : se poser dessus ne risque donc jamais rien, et c'est
+// volontaire — une dalle qui tue celui qui s'y pose aurait fait doublon avec la 🌵 Pique.
+// ⚠ La phase est TIRÉE À LA NAISSANCE (`p.pph`) : sans elle, tous les balanciers de l'écran
+// battraient à l'unisson et il n'y aurait qu'un seul instant sûr pour toute la colonne.
+// ⚠ L'angle se déduit de `s.tw` (le temps de jeu RALENTI par ⏱️), jamais de `s.t` : le
+// ralentisseur doit ralentir le balancier comme il ralentit tout le reste.
+const D_PEND_LEN = 46;        // longueur de la tige, du pivot au centre de la masse
+const D_PEND_R = 9;           // rayon de la masse
+const D_PEND_ANG = 1.15;      // amplitude, en radians (~66° de part et d'autre de la verticale)
+const D_PEND_SPD = 0.028;     // vitesse angulaire : ~3,7 s l'aller-retour complet
+const D_PEND_HIT = 12;        // marge de contact ajoutée au rayon, côté doodler
+function doodlePendAng(p, t) { return Math.sin(t * D_PEND_SPD + (p.pph || 0)) * D_PEND_ANG; }
+// Centre de la masse, en coordonnées d'écran. ⚠ Le pivot est le MILIEU DU DESSOUS de la dalle
+// et se relit à chaque frame : la dalle peut dériver (🌬️ vent, 🐛 Buguée, 🛋️ Ascenseur) et le
+// balancier doit la suivre au lieu de rester pendu dans le vide.
+function doodlePendPos(p, t) {
+  const a = doodlePendAng(p, t);
+  return { x: p.x + p.w / 2 + Math.sin(a) * D_PEND_LEN, y: p.y + p.h + Math.cos(a) * D_PEND_LEN, a };
+}
 const D_TILES = [
   { k: 'warp',  icon: '🌀', name: 'Téléporteur', txt: 'te renvoie sur une dalle tirée au hasard, n\'importe où à l\'écran' },
   { k: 'bomb',  icon: '🧨', name: 'Bombe',       txt: 'explose et nettoie les monstres' },
@@ -1967,6 +1992,7 @@ const D_TILES = [
   { k: 'zoom',     icon:'🔍', name: 'Zoom',           txt: 'à pile ou face, elle rapproche ou éloigne la vue de ' + Math.round((D_ZOOM_STEP - 1) * 100) + ' % — pour le reste de la partie, et ça se cumule. C\'est l\'ÉCHELLE DU DESSIN qui bouge, jamais les distances de saut. Une seule fois par dalle' },
   { k: 'bamboo',   icon:'🎋', name: 'Bambou',         txt: 'les ' + D_BAMB_N + ' prochaines dalles sur lesquelles tu te poses deviennent du bambou : leur effet, quel qu\'il soit, est annulé pour de bon — et ce sont désormais de simples plateformes' },
   { k: 'yinyang',  icon:'☯️', name: 'Yin et Yang',     txt: 'un pacte : +' + D_YY_PERKS + ' bonus permanents, et ' + Math.round((D_YY_MOB - 1) * 100) + ' % de créatures en plus pour le reste de la partie. Le taux se COMPOSE d\'une dalle à l\'autre (×' + D_YY_MOB.toFixed(2) + ', ×' + (D_YY_MOB * D_YY_MOB).toFixed(2) + ', ×' + (D_YY_MOB * D_YY_MOB * D_YY_MOB).toFixed(2) + '…) et ne redescend jamais. Une seule fois par dalle' },
+  { k: 'pendul',   icon:'⏲️', name: 'Balancier',      txt: 'un pendule pend sous la dalle et balaie sans fin de gauche à droite : tout ce que la masse touche meurt — les créatures comme toi. Se poser sur la dalle ne risque rien, le danger est EN DESSOUS' },
   // 🌈 11.2.6 — un arc tendu entre la dalle mère et un SECOND PIED qui est une vraie tuile de
   // la partie. Coffre garanti d'un côté, monstre garanti de l'autre.
   { k: 'rbow',     icon:'🌈', name: 'Arc-en-ciel',    txt: 'elle naît avec un SECOND PIED sur la même rangée et un arc-en-ciel se tend de l\'une à l\'autre — décor pur, il ne porte pas. Ce second pied est une vraie tuile de ta partie (débloquée, de biome, ou une plateforme ordinaire), effet compris. La dalle mère porte TOUJOURS un coffre de butin ; le second pied lâche TOUJOURS un monstre arc-en-ciel, qui encaisse ' + D_RBMOB_HP + ' tirs et fonce droit sur toi' },
@@ -4697,6 +4723,42 @@ function doodleTileDraw(ctx, p, t) {
     ctx.beginPath(); ctx.arc(x + w - 12, y + 5, 3.4, -0.4, Math.PI * 1.3); ctx.stroke();
     return;
   }
+  // ⏲️ Balancier : caisse d'horloge en bois sombre, pivot de laiton, tige et masse pendues
+  // SOUS la dalle. ⚠ La masse est dessinée dans la même passe que la dalle : elle sort de la
+  // boîte de la plateforme, exactement comme le mât du 🚩 Drapeau ou les piques de la 🧊
+  // Stalactite, et c'est ce qui la rend visible bien avant qu'on arrive à sa hauteur.
+  // ⚠ Le sillage (trois fantômes en arrière de la course) n'est pas décoratif : c'est lui qui
+  // dit DANS QUEL SENS la masse va, l'information dont on a besoin pour choisir son saut.
+  if (p.type === 'pendul') {
+    doodleRR(ctx, x, y, w, h, 6, '#4a3526');
+    ctx.fillStyle = '#2b1d14'; ctx.fillRect(x, y + h - 4, w, 4);
+    const cx = x + w / 2, cy = y + h;
+    const a0 = doodlePendAng(p, t);
+    // sens de la course, pour orienter le sillage derrière la masse
+    const dir = Math.cos(t * D_PEND_SPD + (p.pph || 0)) >= 0 ? 1 : -1;
+    for (let i = 3; i >= 1; i--) {
+      const a = a0 - dir * i * 0.16 * D_PEND_ANG;
+      const gx = cx + Math.sin(a) * D_PEND_LEN, gy = cy + Math.cos(a) * D_PEND_LEN;
+      ctx.globalAlpha = 0.10 * (4 - i);
+      ctx.fillStyle = '#c9ced6';
+      ctx.beginPath(); ctx.arc(gx, gy, D_PEND_R * 0.86, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    const bx = cx + Math.sin(a0) * D_PEND_LEN, by = cy + Math.cos(a0) * D_PEND_LEN;
+    ctx.strokeStyle = '#8f7a5a'; ctx.lineWidth = 2.4;                     // la tige de laiton
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.fillStyle = '#d8b45a';                                           // le pivot
+    ctx.beginPath(); ctx.arc(cx, cy, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#8f97a4'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(bx, by, D_PEND_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#e8ecf2';                                           // le reflet, qui donne le volume
+    ctx.beginPath(); ctx.arc(bx - D_PEND_R * 0.34, by - D_PEND_R * 0.34, D_PEND_R * 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#d8b45a';                                           // le cadran gravé sur la caisse
+    ctx.beginPath(); ctx.arc(cx, y + h / 2, 3.6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#4a3526'; ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.moveTo(cx, y + h / 2); ctx.lineTo(cx, y + h / 2 - 2.4); ctx.stroke();
+    return;
+  }
   // 🚦 Feu tricolore : boîtier noir à trois lampes, une seule allumée. ⚠ Les deux éteintes
   // restent visibles en sombre : c'est ce qui dit qu'il en existe trois et que ça va tourner.
   if (p.type === 'light') {
@@ -7198,6 +7260,8 @@ function doodleTileBirth(s, p, diff) {
   // (voir la boucle du vent). Sans lui, une girouette tirée comme « vestige » du biome quitté
   // aurait continué de souffler indéfiniment dans le suivant.
   if (type2 === 'gale') { p.g4 = Math.floor(Math.random() * D_GALE_DIRS.length); p.galeTier = doodleTier(s.score); }
+  // ⏲️ Balancier : sa phase est tirée à la naissance, sinon tous ceux de l'écran battraient ensemble.
+  if (type2 === 'pendul') p.pph = Math.random() * Math.PI * 2;
   // ⛈️ Phase TIRÉE AU HASARD par dalle, comme les tuiles à cycle : sans elle, tous les orages de
   // l'écran frapperaient à l'unisson et il n'y aurait plus qu'un seul instant à craindre.
   if (type2 === 'storm') p.stormT = Math.random() * D_STORM_EVERY;
