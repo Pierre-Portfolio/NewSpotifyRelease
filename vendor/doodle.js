@@ -2518,7 +2518,7 @@ const D_BIOMES = [
   { k:'volcan',  name:'Volcan',   icon:'🌋', paper:'#f6e2dc', rule:'#e5b7ab', marge:'#d4674a',
     tiles:[
       { k:'geyser',   icon:'🌋', name:'Geyser',  own:true, txt:'un jet de vapeur qui te projette très haut, sans contrôle' },
-      { k:'magma',    icon:'🔥', name:'Magma',   own:true, w:D_BIOME_TILE_RARE, txt:'une coulée en fusion : tant qu\'elle est à l\'écran, elle crache des gouttes de lave mortelles' },
+      { k:'magma',    icon:'🔥', name:'Magma',   own:true, w:D_BIOME_TILE_RARE, txt:'une coulée en fusion : tant qu\'elle est à l\'écran, elle crache des gouttes de lave qui tuent CE QUI EST SOUS ELLE — se tenir sur la dalle ne risque rien, une goutte ne brûle qu\'une fois retombée sous sa coulée' },
       { k:'meteor',   icon:'☄️', name:'Roche volcanique', own:true, txt:'chaque rebond fait tomber du ciel une roche en fusion, à une abscisse tirée au hasard. Elle explose sur la première dalle rencontrée et tue les monstres pris dans le souffle — mais LA PRENDRE EN PLEINE COURSE te tue aussi (un bouclier la pare)' },
     ],
     mobs:[{ k:'bat', icon:'🦇', w:36, h:28, vx:2.1, wave:3, drawn:true },
@@ -2957,8 +2957,24 @@ const D_STEAM_LIFE = 46;
 // (96 → 120 frames, soit 2 s à 60 fps), une fréquence ne se règle pas autrement. Ni la
 // gravité ni la vitesse terminale ne bougent : la goutte tombe pareil, elles sont juste
 // moins nombreuses.
+// ⚠ 12.5.0 — ON NE MEURT PLUS EN MARCHANT SUR LA DALLE (correctif). La goutte naissait à
+// `q.y - 10`, c'est-à-dire À 5 PX DU CORPS de qui se tenait dessus (`s.py = q.y - D_FEET`),
+// et la boîte de contact fait D_LAVA_HIT_Y de demi-hauteur : le simple fait de se poser sur la
+// dalle au mauvais moment tuait, sans le moindre geste possible — la goutte n'était pas encore
+// tombée qu'elle brûlait déjà.
+// ⚠ La règle est désormais : UNE GOUTTE NE BRÛLE QUE CE QUI EST SOUS ELLE. Elle reste inerte
+// tant qu'elle n'est pas descendue de D_LAVA_ARM sous le sommet de la dalle qui l'a crachée
+// (`dr.y0`) — c'est-à-dire pendant tout son jet vers le haut et sa redescente à travers la
+// dalle. Passé ce seuil, elle tombe pour de bon et tue comme avant.
+// ⚠ D_LAVA_ARM est DÉRIVÉ de l'épaisseur de la dalle et non écrit en dur : il doit rester
+// supérieur à D_LAVA_HIT_Y − D_FEET (5 px) pour que la boîte de contact ne rattrape jamais un
+// doodler posé sur la dalle. À 26, la marge est de 41 px contre 20 — on ne la franchit pas par
+// accident, et le seuil se lit comme ce qu'il est : « la goutte a quitté sa dalle ».
+// ⚠ `dr.y0` est un point DU MONDE : il suit le défilement de la caméra avec `dr.y`, comme
+// l'origine de l'éclair de l'⛈️ Orage. Figé, le seuil aurait dérivé d'un écran à l'autre.
 const D_LAVA_EVERY = 120, D_LAVA_G = 0.1, D_LAVA_VMAX = 2.7, D_LAVA_R = 8;
 const D_LAVA_HIT_X = D_LAVA_R + 7, D_LAVA_HIT_Y = D_LAVA_R + 12;
+const D_LAVA_ARM = D_PLAT_H + 12;
 // 🎊 10.1.3 — CONFETTIS (demande utilisateur, en remplacement de la 🌠 Étoile filante) : le
 // rebond arme la dalle pour D_CONF_LIFE frames (5 s à 60 fps) pendant lesquelles elle CRACHE des
 // confettis, qui retombent ensuite d'elles-mêmes. ⚠ C'est un ÉMETTEUR posé sur la dalle
