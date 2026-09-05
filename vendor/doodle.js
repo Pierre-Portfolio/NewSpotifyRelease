@@ -1146,19 +1146,28 @@ const D_STICKY_HOLD = 180;
 // ±15 % directement à la vitesse aurait fait ±32 % de hauteur, ce qui n'est plus « un petit peu ».
 // ⚠ Elle ne meurt pas en éclatant : c'est une dalle à hasard, pas une dalle à usage unique.
 const D_POP_LO = 0.85, D_POP_HI = 1.15, D_POP_LIFE = 26;
-// 🍿 12.4.9 — LA BARQUETTE PROJETTE DES GRAINS (demande utilisateur) : D_POP_THROW grains
-// partent en gerbe au premier rebond, vers le HAUT ou vers le BAS de la dalle, à pile ou face.
-// ⚠ UNE SEULE FOIS PAR DALLE (`p.thrown`) : une gerbe à chaque passage aurait noyé l'écran, et
-// c'est la première bouchée qui saute — les suivantes, la barquette les a déjà lâchées.
-// ⚠ Purement DÉCORATIFS, comme les 👥 clones : ils ne portent pas, ne blessent pas et ne se
-// ramassent pas. Des grains qui feraient quelque chose auraient changé une tuile de hasard en
-// tuile à effet, ce qui n'est pas ce qui est demandé.
-// ⚠ Ils vivent dans `s.parts`, le tableau des particules : il porte déjà la gravité (d'où l'arc
-// des grains lancés vers le haut), le défilement de la caméra et le nettoyage en fin de vie. Un
-// tableau à eux, c'était les trois à réécrire. Le drapeau `pop` les fait seulement dessiner en
-// FLOCON à trois bosses au lieu du carré ordinaire — un carré de 3 px ne dit pas « pop-corn ».
+// 🍿 12.5.1 — LA BARQUETTE TIRE (demande utilisateur) : D_POP_THROW grains partent en gerbe au
+// premier rebond, vers le HAUT ou vers le BAS de la dalle à pile ou face, et ce sont de VRAIS
+// PROJECTILES — ils tuent les créatures qu'ils touchent.
+// ⚠ Ils TRAVERSENT ce qu'ils tuent : aucun `break` après la mise à mort, un même grain peut
+// donc faucher toute une colonne dans la même frame. C'est ce qui les distingue d'une balle,
+// dont le perforant se compte et s'épuise.
+// ⚠ Ils ne s'éteignent PAS au bout d'un temps : ils volent jusqu'à SORTIR DE L'ÉCRAN, d'où une
+// gravité bien plus douce que celle des particules (D_POP_SHOT_G contre 0,25) — le grain monte,
+// s'incurve et s'en va, au lieu de retomber au pied de la dalle.
+// ⚠ UNE SEULE GERBE PAR DALLE (`p.thrown`) : une volée à chaque passage aurait rempli l'écran
+// de tirs gratuits, et c'est la première bouchée qui saute — les suivantes, la barquette les a
+// déjà lâchées.
+// ⚠ Tableau À EUX (`s.pops`) et non `s.bullets` : la chaîne des balles CONSOMME le projectile
+// à trois endroits (le 🥚 tamagotchi l'avale, la 🧊 stalactite le brise, le boss l'encaisse), ce
+// qui aurait contredit « il traverse » ; et un grain de maïs n'a ni perforant, ni explosives, ni
+// gros calibre à hériter. Les deux gardes qui comptent, elles, sont REPRISES telles quelles :
+// le pavois du 🛡️ Réflecteur (`doodleShieldBounce`) et l'encaissement du 🐉 dragonneau / 🏗️
+// bâtisseur (`doodleStrike`) — les recopier autrement, c'était créer un second jeu de règles.
+// ⚠ La mise à mort passe par `doodleKillMonster`, le point de passage unique : le coffre tombe,
+// les quêtes de chasse comptent, exactement comme pour une balle.
 // ⚠ L'animation d'éclatement de la barquette (`p.pop`) est CONSERVÉE : la gerbe s'y ajoute.
-const D_POP_THROW = 4, D_POP_THROW_V = 3.2, D_POP_THROW_LIFE = 58;
+const D_POP_THROW = 4, D_POP_THROW_V = 3.6, D_POP_SHOT_R = 5.4, D_POP_SHOT_G = 0.055;
 // 🧱 10.2.5 — PÂTE À MODELER (demande utilisateur) : elle S'ENFONCE un peu à chaque rebond.
 // ⚠ Le pas est petit devant l'écart entre deux rangées (D_GAP_SAFE = 92) : la dalle se dérobe
 // sous les pieds sans jamais ouvrir d'un coup un trou infranchissable. ⚠ Aucun plafond : elle
@@ -1949,7 +1958,7 @@ const D_TILES = [
   { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'son canon te suit et elle tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — pendant les ' + (D_TLASER_TEL / 60).toFixed(1).replace('.', ',') + ' s qui précèdent le coup, un rayon de visée en pointillés s\'allonge devant elle et deux anneaux se referment sur son œil : c\'est le moment de bouger. Se prendre le tir fait mal' },
   { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
-  { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire. Au premier rebond, elle projette en plus ' + D_POP_THROW + ' grains en gerbe, vers le haut ou vers le bas à pile ou face — de la pure décoration' },
+  { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire. Au premier rebond, elle TIRE en plus ' + D_POP_THROW + ' grains en gerbe, vers le haut ou vers le bas à pile ou face : ils tuent les créatures qu\'ils touchent, les TRAVERSENT pour faucher les suivantes, et ne s\'arrêtent qu\'en sortant de l\'écran' },
   { k: 'sticky',   icon:'🍯', name: 'Collante',       txt: 'tu restes collé dessus ' + Math.round(D_STICKY_HOLD / 60) + ' secondes, puis tu repars d\'un saut ordinaire' },
   { k: 'origami',  icon:'🪷', name: 'Origami',        txt: 'elle se plie et se déplie sans fin en trois formes : dalle ordinaire, super saut, puis dalle qu\'on traverse — la forme se voit avant d\'atterrir' },
   { k: 'soap',     icon:'🧼', name: 'Savon',          txt: 'tu glisses pendant ' + Math.round(D_SOAP_LIFE / 60) + ' secondes dans la direction inverse de celle d\'où tu arrivais' },
@@ -2614,6 +2623,51 @@ function doodleBuildPlat(s, W) {
 // ⚠ Il repart MOINS VITE que la balle (D_SHLD_BACK) : à pleine vitesse, un tir renvoyé
 // arrivait avant qu'on ait fini le geste qui l'a envoyé.
 const D_SHLD_BACK = 0.62, D_SHLD_FLASH = 16, D_SHLD_SPREAD = 0.5;
+// 🍿 Un grain de pop-corn en vol. Cinq bosses irrégulières autour d'un cœur doré, une ombre
+// chaude décalée qui donne le volume, un halo de beurre et un sillage de trois fantômes.
+// ⚠ La silhouette est tirée de `g.seed`, une graine PORTÉE PAR LE GRAIN, et jamais du temps :
+// recalculée à chaque frame elle aurait grésillé au lieu de tourner, et les quatre grains d'une
+// même gerbe se seraient déformés à l'unisson.
+// ⚠ L'ombre est une COPIE des bosses décalée, pas un contour : un trait ferait apparaître les
+// coutures entre les bosses, qui ne sont qu'un empilement de disques.
+// ⚠ Le sillage est tracé HORS de la rotation : entraîné par elle, il aurait tourné autour du
+// grain au lieu de rester derrière lui.
+function doodlePopDraw(ctx, g) {
+  const r = D_POP_SHOT_R, sd = g.seed || 0.5;
+  const sp = Math.hypot(g.vx, g.vy) || 1, ux = g.vx / sp, uy = g.vy / sp;
+  for (let i = 3; i >= 1; i--) {                                    // le sillage, du plus pâle au plus dense
+    ctx.globalAlpha = 0.10 * (4 - i);
+    ctx.fillStyle = i > 1 ? '#ffd98a' : '#fff1c9';
+    ctx.beginPath(); ctx.arc(g.x - ux * i * 5, g.y - uy * i * 5, r * (0.78 - i * 0.14), 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.save(); ctx.translate(g.x, g.y);
+  const hg = ctx.createRadialGradient(0, 0, r * 0.55, 0, 0, r * 2.6);   // le halo de beurre chaud
+  hg.addColorStop(0, 'rgba(255,214,120,0.36)'); hg.addColorStop(0.55, 'rgba(255,190,80,0.14)'); hg.addColorStop(1, 'rgba(255,190,80,0)');
+  ctx.fillStyle = hg; ctx.beginPath(); ctx.arc(0, 0, r * 2.6, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(g.spin || 0);
+  const lob = [];
+  for (let i = 0; i < 5; i++) {
+    const a = i / 5 * Math.PI * 2 + ((sd * (i + 3) * 7.3) % 1) * 0.55;
+    const d = r * (0.46 + ((sd * (i + 7) * 5.1) % 1) * 0.30);
+    lob.push([Math.cos(a) * d, Math.sin(a) * d, r * (0.54 + ((sd * (i + 11) * 3.7) % 1) * 0.26)]);
+  }
+  const bosses = (dx, dy, fill) => { ctx.fillStyle = fill; lob.forEach(([lx, ly, lr]) => { ctx.beginPath(); ctx.arc(lx + dx, ly + dy, lr, 0, Math.PI * 2); ctx.fill(); }); };
+  bosses(1.1, 1.5, '#c8913f');        // l'ombre grillée, décalée en bas à droite
+  bosses(0, 0, '#fff6dc');            // la chair soufflée
+  bosses(-0.9, -1.1, '#fffdf4');      // et le jour qui frappe en haut à gauche
+  // Le reste de la coque, caramélisé. ⚠ DÉCENTRÉ et petit : un gros disque doré pile au milieu
+  // se lisait comme un jaune d'œuf, pas comme un grain éclaté.
+  ctx.fillStyle = '#d99a2e';
+  ctx.beginPath(); ctx.arc(r * 0.14, r * 0.2, r * 0.25, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(200,145,63,0.75)';   // deux éclats de coque, pour la texture
+  ctx.beginPath(); ctx.arc(-r * 0.5, r * 0.34, r * 0.11, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(r * 0.46, -r * 0.18, r * 0.09, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.beginPath(); ctx.arc(-r * 0.42, -r * 0.5, r * 0.19, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(r * 0.3, -r * 0.62, r * 0.11, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
 function doodleShieldBounce(s, m, b) {
   m.sh = D_SHLD_FLASH;
   const v = Math.hypot(b.vx, b.vy) * D_SHLD_BACK || 1;
@@ -2727,7 +2781,7 @@ function doodleBossStart(s, W, H) {
   // hors champ lâchait son coffre. Les momies en chute sont vidées AUSSI : en se posant elles
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
-  s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = [];
+  s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
   s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.zip = null; s.grab = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
@@ -6820,17 +6874,9 @@ function doodleDraw(ctx, s, W, H) {
     ctx.restore();
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
   }
-  s.parts.forEach(pt => {
-    ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c;
-    // 🍿 Les grains projetés par la barquette : trois bosses qui tournent, le même flocon que
-    // celui dessiné dans la tuile. Un carré de 3 px se lit comme une étincelle, pas un grain.
-    if (pt.pop) {
-      ctx.save(); ctx.translate(pt.x, pt.y); ctx.rotate(pt.spin || 0);
-      [[-2.3, 0], [2.3, 0], [0, -2.3]].forEach(([ox, oy]) => { ctx.beginPath(); ctx.arc(ox, oy, pt.sz, 0, Math.PI * 2); ctx.fill(); });
-      ctx.restore(); return;
-    }
-    ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz);
-  });
+  s.parts.forEach(pt => { ctx.globalAlpha = Math.max(0, pt.life / pt.max); ctx.fillStyle = pt.c; ctx.fillRect(pt.x, pt.y, pt.sz, pt.sz); });
+  ctx.globalAlpha = 1;
+  if (s.pops) s.pops.forEach(g => doodlePopDraw(ctx, g));
   ctx.globalAlpha = 1;
   ctx.fillStyle = '#3a7d1e';
   // 🔆 Le laser se dessine en trait allongé dans son axe de tir, halo compris : une bille
