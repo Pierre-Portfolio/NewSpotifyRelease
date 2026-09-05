@@ -1936,7 +1936,7 @@ const D_TILES = [
   { k: 'lift',    icon:'🛗', name: 'Ascenseur',     txt: 'monte et descend sans arrêt le long de sa ligne' },
   { k: 'rebound', icon:'🦘', name: 'Rebond',        txt: 'les 3 prochains sauts montent deux fois plus haut' },
   { k: 'invert',  icon:'🔃', name: 'Inversion',     txt: 'inverse la gauche et la droite pendant ' + Math.round(D_INVERT_LIFE / 60) + ' secondes' },
-  { k: 'slot',    icon:'🎰', name: 'Machine à sous', txt: 'met le jeu en pause et tire 3 tuiles, aussitôt ajoutées à la partie' },
+  { k: 'slot',    icon:'🎰', name: 'Machine à sous', txt: 'met le jeu en pause et tire 3 tuiles, aussitôt ajoutées à la partie — trois tuiles DIFFÉRENTES, et jamais une que tu possèdes déjà' },
   { k: 'freeze',  icon:'⏸️', name: 'Pause',          txt: 'fige tous les monstres pour le reste de la partie… ou double leur vitesse. Une chance sur deux, et chaque nouvelle dalle annule la précédente' },
   { k: 'balloon', icon:'🎈', name: 'Ballon',         txt: 'un ballon gonfle sous toi, t\'emporte en l\'air, puis éclate' },
   { k: 'target',  icon:'🎯', name: 'Cible',          txt: 'atterris pile au centre et tu gagnes un butin de coffre ; sinon elle se détruit' },
@@ -3000,6 +3000,28 @@ function doodleBiomeTileDef(k) { return D_BIOME_TILE_LIST.find(t => t.k === k) |
 // `doodleTileDraw` et non par la plaque de biome générique. Sans ce tri, une tuile déplacée
 // d'une liste à l'autre perdrait son image du jour au lendemain.
 const D_BIOME_OWNDRAW = new Set(D_BIOME_TILE_LIST.filter(t => t.own).map(t => t.k));
+// La définition d'une tuile, qu'elle vienne du catalogue débloquable ou d'un biome. ⚠ TOUT ce
+// qui affiche une tuile par sa clé (rouleaux de la 🎰, écran de bannissement, bulle du 🃏 Casino)
+// passe par ici : `s.tiles` peut porter une tuile de BIOME (le 🃏 Casino y pioche déjà), et un
+// `D_TILES.find` nu rendait alors `undefined` — donc une case vide ou un plantage.
+function doodleTileAny(k) { return D_TILES.find(t => t.k === k) || doodleBiomeTileDef(k); }
+// ⚠ 12.5.3 — LA 🎰 MACHINE À SOUS NE COPIE PLUS CE QU'ON A DÉJÀ (demande utilisateur). Ses
+// trois rouleaux promettent trois tuiles « aussitôt ajoutées à la partie » ; ils pouvaient
+// tomber sur une tuile déjà débloquée — voire trois fois sur la même — et c'était un rouleau
+// pour rien. Le vivier exclut donc les tuiles présentes et les tuiles bannies, et le tirage se
+// fait SANS REMISE : les trois sont distincts.
+// ⚠ Le vivier peut se vider (fin de partie très avancée) : on rend alors moins de `n` tuiles, et
+// l'affichage s'y règle — compléter avec des doublons aurait re-promis ce qu'on possède déjà.
+function doodleCopyRoll(s, n) {
+  const pool = D_TILES.map(t => t.k)
+    .filter(k => k !== 'slot' && s.tiles.indexOf(k) < 0 && (s.banned || []).indexOf(k) < 0);
+  const out = [];
+  for (let i = 0; i < n && pool.length; i++) {
+    const j = Math.floor(Math.random() * pool.length);
+    out.push(pool[j]); pool.splice(j, 1);
+  }
+  return out;
+}
 // ⚠ Il n'y a qu'UNE dalle mortelle dans tout le jeu, la 🌵 Pique — passée du catalogue des
 // tuiles débloquables au biome Désert en 10.8.1. L'ensemble est CONSERVÉ malgré son unique
 // membre : tout le code de la pique (armement, mise à mort, plateforme de secours, dessin)

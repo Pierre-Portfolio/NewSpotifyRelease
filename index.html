@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.5.2';
+const APP_VERSION = '12.5.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6473,16 +6473,18 @@ function DoodleSlot({ roll, onDone }) {
   const [tick, setTick] = React.useState(0);
   React.useEffect(() => {
     const iv = setInterval(() => setTick(x => x + 1), 70);
-    const ts = D_SLOT_STOPS.map((ms, i) => setTimeout(() => setStopped(i + 1), ms));
+    const ts = D_SLOT_STOPS.slice(0, roll.length).map((ms, i) => setTimeout(() => setStopped(i + 1), ms));
     return () => { clearInterval(iv); ts.forEach(clearTimeout); };
   }, []);
-  const done = stopped >= 3;
-  const cell = i => stopped > i ? D_TILES.find(t => t.k === roll[i]) : D_TILES[(tick * 3 + i * 5) % D_TILES.length];
+  const done = stopped >= roll.length;
+  // ⚠ `doodleTileAny` et non `D_TILES.find` : un rouleau peut s'arrêter sur une tuile de BIOME,
+  // absente du catalogue débloquable — la case serait restée vide.
+  const cell = i => stopped > i ? doodleTileAny(roll[i]) : D_TILES[(tick * 3 + i * 5) % D_TILES.length];
   return (
     <div style={{ position:'absolute', inset:0, borderRadius:12, background:'linear-gradient(160deg, rgba(24,26,32,0.96), rgba(64,26,26,0.96))', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, padding:'0 14px', textAlign:'center', userSelect:'none', zIndex:4 }}>
       <div style={{ fontSize:11, fontWeight:800, letterSpacing:1.6, color:'#ffd54a', textTransform:'uppercase' }}>🎰 Machine à sous</div>
       <div style={{ display:'flex', gap:8 }}>
-        {[0, 1, 2].map(i => {
+        {roll.map((_, i) => {
           const c = cell(i);
           return (
             <div key={i} style={{ width:72, minHeight:82, borderRadius:10, background:'#f5e6c8', border:`2px solid ${stopped > i ? '#ffd54a' : '#8a7050'}`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:3, padding:'6px 3px' }}>
@@ -6493,7 +6495,7 @@ function DoodleSlot({ roll, onDone }) {
         })}
       </div>
       <div style={{ fontSize:11, color:'#d9dde6', maxWidth:260, lineHeight:1.45 }}>
-        {done ? 'Ces trois tuiles rejoignent la partie en cours.' : 'Les rouleaux tournent…'}
+        {done ? (roll.length > 1 ? `Ces ${roll.length} tuiles rejoignent la partie en cours.` : 'Cette tuile rejoint la partie en cours.') : 'Les rouleaux tournent…'}
       </div>
       {done && (
         <button onPointerDown={e => { e.stopPropagation(); onDone(); }}
@@ -6506,7 +6508,8 @@ function DoodleSlot({ roll, onDone }) {
 // (`overflowY`) : passé une dizaine de tuiles, la grille dépassait du plateau et les dernières
 // devenaient inatteignables — c'est-à-dire une partie bloquée en pause.
 function DoodleBan({ tiles, onPick }) {
-  const list = tiles.map(k => D_TILES.find(t => t.k === k)).filter(Boolean);
+  // ⚠ `doodleTileAny` : une tuile de biome copiée par la 🎰 est bannissable comme les autres.
+  const list = tiles.map(k => doodleTileAny(k)).filter(Boolean);
   return (
     <div style={{ position:'absolute', inset:0, borderRadius:12, background:'linear-gradient(160deg, rgba(24,26,32,0.97), rgba(26,48,44,0.97))', display:'flex', flexDirection:'column', zIndex:4, userSelect:'none' }}>
       <div style={{ padding:'10px 12px 6px', textAlign:'center', flexShrink:0 }}>
@@ -7398,7 +7401,8 @@ function GameDoodleInner() {
             let et = doodleEffType(p);
             if (p.type === 'casino' && !p.shown) {
               p.shown = true;
-              const rt = D_TILES.find(t2 => t2.k === p.roll);
+              const rt = doodleTileAny(p.roll);   // ⚠ le casino peut avoir tiré une tuile de BIOME copiée par la 🎰
+
               if (rt) s.toast = { txt: `🃏 Casino → ${rt.icon} ${rt.name}`, life: D_TOAST_LIFE };
               for (let k = 0; k < 12; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: p.x + p.w / 2, y: p.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 24, max: 24, sz: 3, c: k % 2 ? '#ffd54a' : '#2f2a4a' }); }
             }
@@ -7679,10 +7683,15 @@ function GameDoodleInner() {
               s.mobTime = p.froze;
               s.toast = { txt: p.froze === D_FREEZE_SLOW ? '⏸️ Monstres figés' : '⏸️ Monstres déchaînés ×2', life: D_TOAST_LIFE };
             }
+            // 🎰 Les trois rouleaux : voir `doodleCopyRoll` — jamais une tuile déjà dans la
+            // partie, jamais deux fois la même, et les tuiles de biome copiables mais pondérées.
+            // ⚠ Le tirage peut rendre MOINS de trois clés quand il ne reste plus rien à copier :
+            // l'overlay se règle sur la longueur, il ne suppose pas trois cases.
             if (et === 'slot' && !p.used) {
               p.used = true;
-              const pool = D_TILES.map(t2 => t2.k).filter(k => k !== 'slot');
-              s.slotRoll = [0, 1, 2].map(() => pool[Math.floor(Math.random() * pool.length)]);
+              const roll = doodleCopyRoll(s, 3);
+              if (roll.length) s.slotRoll = roll;
+              else s.toast = { txt: '🎰 Plus rien à copier — tu as déjà tout', life: D_TOAST_LIFE };
             }
             if (et === 'invert') { s.mrev = Math.max(s.mrev, D_INVERT_LIFE); s.toast = { txt: `🔃 Commandes inversées — ${Math.round(D_INVERT_LIFE / 60)} s`, life: D_TOAST_LIFE }; }
             if (et === 'rebound') { s.rebLeft = D_REBOUND_N; s.toast = { txt: `🦘 ${D_REBOUND_N} sauts deux fois plus hauts`, life: D_TOAST_LIFE }; }
