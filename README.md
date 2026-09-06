@@ -9,7 +9,7 @@
 
 ## Aperçu
 
-Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrappé depuis sa propre date de dernier scan — sauf la toute première fois, où sa discographie complète est récupérée. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
+Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrapé depuis sa propre date de dernier scan — sauf la toute première fois, où sa discographie complète est récupérée. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
 Au-delà de la musique, c'est un **hub perso** regroupant des modules activables/désactivables.
 
@@ -26,11 +26,11 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 - Connexion **OAuth 2.0 PKCE** 100 % client, aucun secret dans le code
 - Scan des artistes suivis, délai configurable (10/20/30 s)
 - Chaque artiste part de **sa propre date de dernier scan**, avancée seulement si le scan réussit
-- **Un artiste jamais scrappé rapporte TOUTE sa discographie** — les scans suivants redeviennent incrémentaux
+- **Un artiste jamais scrapé rapporte TOUTE sa discographie** — les scans suivants redeviennent incrémentaux
 - **Pause / reprise**, reprise après fermeture (bouton « ↩ Reprendre »)
 - **Protection rate-limit** : dès le 1er 429 tout s'arrête 15 min minimum (persiste au rechargement)
 - **Quota de 100 artistes / 24 h glissantes** avec compte à rebours, réinitialisable dans À propos
-- **🤖 Scrapping automatique** : au lancement, s'il reste du quota le scan part tout seul et continue même si tu navigues ailleurs. Une passe par jour, reprise là où il s'était arrêté. Interrupteur dans **À propos → 🤖 Lancement automatique**
+- **🤖 Scraping automatique** : au lancement, s'il reste du quota le scan part tout seul et continue même si tu navigues ailleurs. Une passe par jour, reprise là où il s'était arrêté. Interrupteur dans **À propos → 🤖 Lancement automatique**
 - **🎵 Masquer le bandeau de lecture** (**À propos → ⚙️ Paramétrage**) : seuls les boutons du bas disparaissent, la lecture et le marquage continuent
 - **👻 Artistes inconnus** : dans 🎤 Artistes suivis, « Identifier » demande à Spotify qui sont les lignes sans nom ; celles dont la page n'existe plus se suppriment de la liste **et de tes abonnements Spotify** (nouvelle permission : reconnecte-toi une fois)
 - Notification navigateur en fin de session
@@ -43,9 +43,9 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 - Si un titre ne se lance pas, le Hub choisit un appareil Spotify disponible et, à défaut, affiche le message exact de Spotify
 
 **Découvertes de la semaine**
-Rien n'est importé automatiquement. Deux moyens : le **bouton violet** dans ⚙ Scrapping (qui teste l'accès et importe ce qui est lisible), et surtout la **capture par la lecture** — lance la playlist une fois par semaine et le Hub range les titres dans « En attente » tout seul. Spotify ne laissant plus toujours lire le contenu des playlists éditoriales, la capture par la lecture reste le moyen fiable.
+Rien n'est importé automatiquement. Deux moyens : le **bouton violet** dans ⚙ Scraping (qui teste l'accès et importe ce qui est lisible), et surtout la **capture par la lecture** — lance la playlist une fois par semaine et le Hub range les titres dans « En attente » tout seul. Spotify ne laissant plus toujours lire le contenu des playlists éditoriales, la capture par la lecture reste le moyen fiable.
 
-L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scrapping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta Playlist (l'écart entre tes likes et le contenu de tes playlists, et en dernier les artistes suivis dont aucun titre n'est rangé en playlist).
+L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scraping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta Playlist (l'écart entre tes likes et le contenu de tes playlists, et en dernier les artistes suivis dont aucun titre n'est rangé en playlist).
 
 ---
 
