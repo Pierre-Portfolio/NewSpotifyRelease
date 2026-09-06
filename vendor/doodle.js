@@ -1722,7 +1722,7 @@ function doodleMakeHall(s, W, H) {
 // et saut ordinaire. ⚠ Un seul endroit pour les deux sorties, sinon l'une des deux aurait fini
 // par oublier le saut promis et laisser le doodler tomber comme une pierre.
 function doodleBubblePop(s) {
-  s.fly = 0; s.flyType = null; s.vy = D_JUMP; s.inv = Math.max(s.inv, D_INV);
+  s.fly = 0; s.flyType = null; s.flyVy = null; s.vy = D_JUMP; s.inv = Math.max(s.inv, D_INV);
   s.lastPlat = null; s.bounceStreak = 0;
   for (let k = 0; k < 18; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, max: 22, sz: 2.5, c: k % 3 ? '#bfeaf8' : '#ffffff' }); }
   s.toast = { txt: '🫧 La bulle éclate !', life: D_TOAST_LIFE };
@@ -1743,6 +1743,13 @@ function doodleOrigamiForm(p, t) { return Math.floor((t + (p.ph || 0)) / D_ORIGA
 // loterie sur l'effet, et rien à l'écran n'annonçait laquelle. Un temps unique, c'est un pari
 // qui ne porte plus que sur ce que la teinte FAIT.
 const D_PAINT_LIFE = 1800;
+// 🟠 12.8.1 — LA COMBUSTION EST L'EXCEPTION À LA RÈGLE CI-DESSUS (demande utilisateur : « réduit
+// la vitesse par 2 » et 20 s). C'est la seule teinte qui ne pose pas un effet mais un DÉPLACEMENT
+// automatique : à 8,8 px/frame pendant 30 s elle avalait le plateau sans qu'on ait rien à jouer.
+// ⚠ Sa durée est portée par son entrée de D_PAINTS (`life`), pas par un compteur à part : c'est
+// `life` que lisent la pastille du bandeau, la peau ET le vol (`s.fly = d.life`).
+const D_EMBER_LIFE = 1200;           // 20 s de vol, contre 30 s pour les autres teintes minutées
+const D_EMBER_VY = -4.4;             // … et deux fois moins vite que le 🚀 Jetpack (−8,8)
 const D_PAINT_MARBLE_JUMP = 0.6, D_PAINT_MARBLE_G = 2;    // ⚪ Statue : lourde à monter, prompte à retomber
 const D_PAINT_MINI_JUMP = 0.82, D_PAINT_MINI_SZ = 0.5;    // 🔷 Miniature : petites jambes, petite cible
 const D_PAINT_GIANT_SZ = 1.8;                             // 🟧 Colosse : il écrase, mais il se prend tout
@@ -1764,7 +1771,7 @@ const D_PAINTS = [
   { k:'shadow',   icon:'⚫', name:'Ombre',          body:'#4a4550', dark:'#221f28', eye:'#0d0b10', life: D_PAINT_LIFE, txt:'tu traverses créatures et trous noirs sans dégât — mais tu ne peux plus tirer' },
   { k:'marble',   icon:'⚪', name:'Statue',         body:'#eef2f5', dark:'#9aa6b0', eye:'#4a545c', life: D_PAINT_LIFE, txt:'rien ne peut te blesser, mais tu sautes bas et tu retombes comme une pierre' },
   { k:'toxic',    icon:'🟢', name:'Toxique',        body:'#8fe000', dark:'#4a7a00', eye:'#1e3300', life: D_PAINT_LIFE, txt:'tu laisses derrière toi une traînée corrosive, mortelle pour les créatures' },
-  { k:'ember',    icon:'🟠', name:'Combustion',     body:'#ff8c3a', dark:'#a8481a', eye:'#3f1a08', life: D_PAINT_LIFE, txt:'tu t\'envoles en crachant des flammes, comme sous un jetpack' },
+  { k:'ember',    icon:'🟠', name:'Combustion',     body:'#ff8c3a', dark:'#a8481a', eye:'#3f1a08', life: D_EMBER_LIFE, txt:'tu t\'envoles en crachant des flammes, comme sous un jetpack — moitié moins vite que le \ud83d\ude80 Jetpack, et 20 s au lieu de 30' },
   { k:'siphon',   icon:'🟣', name:'Siphon',         body:'#a05ab0', dark:'#5a2b66', eye:'#22102a', life: D_PAINT_LIFE, txt:'tous les coffres et bonus de l\'écran filent vers toi, sans limite de portée' },
   { k:'gum',      icon:'🩷', name:'Élastique',      body:'#ff8fc8', dark:'#c0417f', eye:'#4d1030', life: D_PAINT_LIFE, txt:'les bords de l\'écran cessent d\'être traversants : tu rebondis dessus et ça relance un saut' },
   { k:'bark',     icon:'🟤', name:'Écorce',         body:'#a9743a', dark:'#5f3d16', eye:'#2a1a08', life:0,   txt:'elle encaisse UN coup à ta place, puis s\'en va' },
@@ -1818,7 +1825,10 @@ function doodlePaintStart(s, k) {
   const d = doodlePaintDef(k); if (!d) return null;
   if (s.skin) doodlePaintEnd(s);
   s.skin = { k, left: d.life, max: d.life, tick: 0 };
-  if (k === 'ember') { s.fly = d.life; s.flyType = 'jet'; s.vy = -6.4; s.lastPlat = null; s.bounceStreak = 0; }
+  // ⚠ `flyVy` : la combustion emprunte le vol 'jet' du 🚀 Jetpack mais monte deux fois moins
+  // vite. Poser la vitesse SUR L'ÉTAT plutôt que de tester la teinte dans la boucle garde le
+  // Jetpack intact — un joueur teinté 🟠 qui ramasse un jetpack vole bien à la vitesse du jetpack.
+  if (k === 'ember') { s.fly = d.life; s.flyType = 'jet'; s.flyVy = D_EMBER_VY; s.vy = -6.4; s.lastPlat = null; s.bounceStreak = 0; }
   if (k === 'chaos') s.slip = 0;
   s.toast = { txt: `${d.icon} ${d.name} · ${d.txt}`, life: D_TOAST_LIFE * 1.4 };
   for (let j = 0; j < 20; j++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 26, max: 26, sz: 3, c: j % 2 ? d.body : d.dark }); }
@@ -3095,7 +3105,7 @@ function doodleBossStart(s, W, H) {
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
   s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
-  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.barb = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
+  s.fly = 0; s.flyType = null; s.flyVy = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.barb = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
   s.banner = { txt: `💀 ${kind.name}`, sub: `plus de saut — déplace-toi et tire · ${hp} points de vie · 🛡️ ${D_BOSS_SH} balles après chaque sort`, life: D_BANNER_LIFE * 1.6 };
