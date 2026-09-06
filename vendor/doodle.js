@@ -2555,6 +2555,42 @@ const D_MUM_LOOT = 1;
 const D_STAL_N = 3, D_STAL_G = 0.34, D_STAL_VMAX = 9.5, D_STAL_W = 9, D_STAL_H = 17;
 const D_STAL_SHOTS = 3;
 const D_PLAT_FALL_G = 0.42, D_PLAT_FALL_VMAX = 11;
+// 🟫 12.9.6 — LA CASSANTE SE CASSE EN DEUX (demande utilisateur) : elle ne s'évapore plus en six
+// éclats, elle se FEND au milieu et ses deux moitiés basculent vers l'extérieur puis tombent
+// dans le vide. C'est la seule dalle qu'on perd en s'en servant : elle méritait de se voir.
+// ⚠ Les morceaux vivent dans `s.wrecks` et JAMAIS dans `s.platforms` : une dalle en chute y
+// reste SOLIDE (voir `fvy`), et on aurait rebondi sur les débris de celle qui vient de céder.
+// ⚠ Ils appartiennent au MONDE : ils défilent avec la caméra, comme les grains de 🍿 et la lave.
+// ⚠ Vitesse initiale VERS LE HAUT (D_WRECK_VY) : une chute qui démarre à zéro ressemble à une
+// dalle qui glisse, pas à une rupture — le petit sursaut est ce qui donne le choc.
+const D_WRECK_G = 0.36, D_WRECK_VY = -1.6, D_WRECK_VX = 1.5, D_WRECK_SPIN = 0.055;
+function doodleBreakTile(s, p) {
+  p.dead = true;
+  s.wrecks = s.wrecks || [];
+  for (const sg of [-1, 1]) {
+    s.wrecks.push({ x: p.x + (sg < 0 ? 0 : p.w / 2), y: p.y, w: p.w / 2, h: p.h, sg,
+      vx: sg * D_WRECK_VX * (0.7 + Math.random() * 0.6), vy: D_WRECK_VY * (0.6 + Math.random() * 0.8),
+      rot: 0, rv: sg * D_WRECK_SPIN * (0.6 + Math.random() * 0.8) });
+  }
+  // La poussière de la rupture part de la FENTE, pas de toute la dalle : c'est là que ça casse.
+  for (let k = 0; k < 8; k++) s.parts.push({ x: p.x + p.w / 2 + (Math.random() - 0.5) * 8, y: p.y + Math.random() * p.h, vx: (Math.random() - 0.5) * 3, vy: -0.5 - Math.random() * 1.5, life: 24, max: 24, sz: 3, c: k % 2 ? '#c68a4e' : '#8a5a2c' });
+}
+// Une moitié de cassante en chute : le bois de la dalle, plus l'arête de rupture en dents de
+// scie du côté de la fente — c'est elle qui dit de quelle moitié il s'agit.
+function doodleWreck(ctx, wk) {
+  ctx.save();
+  ctx.translate(wk.x + wk.w / 2, wk.y + wk.h / 2); ctx.rotate(wk.rot);
+  const x = -wk.w / 2, y = -wk.h / 2;
+  doodleRR(ctx, x, y, wk.w, wk.h, 3, '#c68a4e');
+  ctx.fillStyle = '#8a5a2c'; ctx.fillRect(x + 1, y + wk.h - 4, wk.w - 2, 3);
+  ctx.strokeStyle = '#5a3a18'; ctx.lineWidth = 1.4;
+  const ex = wk.sg < 0 ? x + wk.w - 1 : x + 1;
+  ctx.beginPath();
+  ctx.moveTo(ex, y); ctx.lineTo(ex + wk.sg * 2.5, y + wk.h * 0.35);
+  ctx.lineTo(ex, y + wk.h * 0.62); ctx.lineTo(ex + wk.sg * 2, y + wk.h);
+  ctx.stroke();
+  ctx.restore();
+}
 // Décroche `n` piques de la dalle (au plus ce qu'il en reste), chacune autorisée à emporter
 // `take` dalles. Renvoie le nombre réellement parti.
 // ⚠ Les piques partent DE GAUCHE À DROITE, dans l'ordre où le dessin les montre : tirer au
@@ -3190,7 +3226,7 @@ function doodleBossStart(s, W, H) {
   // hors champ lâchait son coffre. Les momies en chute sont vidées AUSSI : en se posant elles
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
-  s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
+  s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = []; s.wrecks = [];
   s.fly = 0; s.flyType = null; s.flyVy = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.barb = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
@@ -7565,6 +7601,9 @@ function doodleDraw(ctx, s, W, H) {
     // 🌁 Brouillard : les DALLES seules disparaissent — tout le reste (créatures, trous, coffres,
     // bonus) continue de se voir, sans quoi ce serait une mort à l'aveugle et non une épreuve.
     if (!s.blind) s.platforms.forEach(p => doodlePlatform(ctx, p, s.tw));   // ⚠ horloge du MONDE : le dessin d'une tuile à cycle doit coïncider à la frame près avec sa fenêtre mortelle
+    // 🟫 Les deux moitiés de la cassante, sur la même couche que les dalles. ⚠ Le 🌁 Brouillard
+    // ne les efface PAS : il masque ce sur quoi on peut se poser, et un débris n'en est plus.
+    if (s.wrecks) for (const wk of s.wrecks) doodleWreck(ctx, wk);
     // 🪝 Grappins en vol : chaîne depuis la dalle jusqu'à la tête, et corde tendue vers le
     // doodler tant qu'il est ramené — sans elle, on serait tiré par du vide.
     ctx.save(); ctx.lineCap = 'round';
