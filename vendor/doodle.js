@@ -2557,9 +2557,18 @@ function doodleMumSettle(s, mu, pl) {
 // ⚠ Ce qui est PORTÉ par une dalle suit la poussée — l'axe de course de l'🛗 Ascenseur et de la
 // 🐛 Buguée (`y0`), l'ancre de la 👀 Vivante (`ax`/`ay`) et les 📦 coffres posés dessus. Sans
 // ça, le premier sortait de sa ligne et les seconds restaient suspendus dans le vide.
-// ⚠ Les sens des girouettes visibles s'ADDITIONNENT avant d'être réduits à un signe : deux
-// girouettes opposées à l'écran s'annulent, ce qui est exactement ce qu'on attend d'elles.
-const D_GALE_EVERY = 120, D_GALE_PUSH = 2;
+// ⚠ 12.5.9 — LE VENT NE SE LÈVE PLUS TOUT SEUL (demande utilisateur) : la girouette ne souffle
+// plus « tant qu'elle est à l'écran », elle souffle D_GALE_LIFE frames À PARTIR DU MOMENT OÙ
+// L'ON MARCHE DESSUS, et pas une de plus.
+// ⚠ Le vent vit désormais sur la PARTIE (`s.galeWind`) et non sur la dalle : une bourrasque
+// portée par la dalle se serait arrêtée net à l'instant où celle-ci sort par le bas de l'écran
+// et quitte `s.platforms` — or les dix secondes sont promises au joueur, pas à la plateforme.
+// ⚠ Une seule bourrasque à la fois : marcher sur une deuxième girouette REMPLACE la première
+// (nouveau sens, décompte remis à neuf). Les additionner aurait rendu le sens illisible, et
+// c'est précisément ce que l'ancien cumul « toutes les girouettes visibles » faisait de pire.
+// ⚠ Elle tombe toujours au CHANGEMENT DE BIOME : le palier est mémorisé au départ.
+const D_GALE_LIFE = 600;                        // 10 s de bourrasque
+const D_GALE_EVERY = 60, D_GALE_PUSH = 3;       // … et 3 px de poussée par seconde
 const D_GALE_DRIFT = 0.22;     // dérive latérale imprimée au doodler, px/frame
 const D_GALE_JUMP = 0.09;      // ± de HAUTEUR de saut, selon que le vent monte ou descend
 const D_GALE_DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];   // ↑ → ↓ ← , dans l'ordre des quarts de tour
@@ -2820,7 +2829,7 @@ const D_BIOMES = [
   { k:'nuages',  name:'Nuages',   icon:'☁️', paper:'#eef6fd', rule:'#cfe4f5', marge:'#7fb8e8',
     tiles:[
       { k:'ghost',  icon:'👻', name:'Fantôme', own:true, txt:'s\'efface deux secondes après qu\'on a marché dessus' },
-      { k:'gale',   icon:'🌬️', name:'Direction du vent', own:true, txt:'une girouette tournée vers l\'un des quatre points cardinaux, qui souffle tant qu\'elle est à l\'écran : toutes les ' + Math.round(D_GALE_EVERY / 60) + ' s elle pousse TOUTES les plateformes de ' + D_GALE_PUSH + ' px dans son sens, et le vent te fait dériver en continu — tes sauts montent ' + Math.round(D_GALE_JUMP * 100) + ' % plus haut quand il monte, autant de moins quand il descend. Des filets d\'air balaient l\'écran tant qu\'il souffle, et tout retombe au changement de biome' },
+      { k:'gale',   icon:'🌬️', name:'Direction du vent', own:true, txt:'une girouette tournée vers l\'un des quatre points cardinaux. Elle ne souffle QUE si tu marches dessus, et alors pendant ' + Math.round(D_GALE_LIFE / 60) + ' s : toutes les ' + Math.round(D_GALE_EVERY / 60) + ' s elle pousse TOUTES les plateformes de ' + D_GALE_PUSH + ' px dans son sens — elles restent où le vent les a menées — et il te fait dériver en continu, tes sauts montant ' + Math.round(D_GALE_JUMP * 100) + ' % plus haut quand il monte, autant de moins quand il descend. Des filets d\'air balaient l\'écran tant qu\'il souffle, une seule bourrasque à la fois, et tout retombe au changement de biome' },
       { k:'storm',  icon:'⛈️', name:'Orage',   own:true, w:D_BIOME_TILE_RARE, txt:'toutes les ' + Math.round(D_STORM_EVERY / 60) + ' s, la foudre frappe ce qu\'il y a de plus proche PLUS BAS qu\'elle : une dalle, qui décroche et tombe dans le vide, ou toi. L\'immunité électrique t\'en protège' },
     ],
     mobs:[{ k:'cherub', icon:'👼', w:38, h:34, vx:1.15, wave:2.2, drawn:true },
@@ -3522,6 +3531,26 @@ function doodleCloudBody(ctx, x, y, w, h, fill, edge) {
   [[0.2, 7.5], [0.47, 10], [0.76, 8]].forEach(([f, r]) => { ctx.beginPath(); ctx.arc(x + w * f, y + h * 0.44, r, 0, Math.PI * 2); ctx.fill(); });
   ctx.fillRect(x + 5, y + 2, w - 10, h - 3);
   if (edge) { ctx.fillStyle = edge; ctx.fillRect(x + 5, y + h - 3.5, w - 10, 3.5); }   // la sous-face, qui dit où l'on pose le pied
+}
+// 🌬️ 12.5.9 — LE CORPS DE LA GIROUETTE S'ARRONDIT SUR LES CÔTÉS (demande utilisateur). Elle
+// partageait le nuage de l'⛈️ Orage ; elle a désormais son propre corps en GÉLULE — demi-cercles
+// complets à gauche et à droite — surmonté des deux bosses qui gardent la silhouette de nuage.
+// ⚠ Les bosses sont conservées, et c'est ce qui fait la « légère » modification demandée : sans
+// elles, la dalle serait devenue une pastille bleue qu'on ne relie plus au biome des Nuages.
+// ⚠ La sous-face reste plate : c'est elle qui dit où l'on pose le pied, l'arrondir aurait rendu
+// le bord d'appui illisible.
+function doodleGaleBody(ctx, x, y, w, h, fill, edge) {
+  const r = h / 2;
+  ctx.fillStyle = fill;
+  [[0.30, 6.5], [0.66, 7.5]].forEach(([f, rr]) => { ctx.beginPath(); ctx.arc(x + w * f, y + h * 0.30, rr, 0, Math.PI * 2); ctx.fill(); });
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(x + r, y + h);
+  ctx.arc(x + r, y + r, r, Math.PI / 2, -Math.PI / 2);
+  ctx.closePath(); ctx.fill();
+  if (edge) { ctx.fillStyle = edge; ctx.fillRect(x + r, y + h - 3.5, w - h, 3.5); }
 }
 // 🟦 La cabine du TARDIS, en style Doodle : aplats vifs, gros contour sombre. Origine =
 // MILIEU DU BAS (elle se pose sur le sommet d'une dalle). ⚠ Une seule primitive pour les quatre
@@ -4809,7 +4838,7 @@ function doodleTileDraw(ctx, p, t) {
   if (p.type === 'gale') {
     const d = D_GALE_DIRS[(p.g4 || 0) % D_GALE_DIRS.length], cx = x + w / 2, cy = y + h * 0.44;
     const qx = -d[1], qy = d[0];                                       // la perpendiculaire : l'écartement des filets
-    doodleCloudBody(ctx, x, y, w, h, '#5bb0ea', '#2f7fbf');
+    doodleGaleBody(ctx, x, y, w, h, '#5bb0ea', '#2f7fbf');
     ctx.save();
     ctx.globalAlpha = 0.75; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.4; ctx.lineCap = 'round';
     const span = d[0] ? w : h;
@@ -7901,10 +7930,10 @@ function doodleTileBirth(s, p, diff) {
   if (D_SPIKY.has(type2)) p.armed = false;
   if (type2 === 'ghost') p.fade = 0;
   // 🌬️ Le point cardinal de la girouette, tiré une fois pour toutes et affiché dès sa naissance.
-  // ⚠ `galeTier` = le palier de biome où elle est née : son vent s'ARRÊTE au changement de biome
-  // (voir la boucle du vent). Sans lui, une girouette tirée comme « vestige » du biome quitté
-  // aurait continué de souffler indéfiniment dans le suivant.
-  if (type2 === 'gale') { p.g4 = Math.floor(Math.random() * D_GALE_DIRS.length); p.galeTier = doodleTier(s.score); }
+  // ⚠ Depuis 12.5.9 le palier de biome n'est plus mémorisé ICI mais sur la bourrasque
+  // (`s.galeWind.tier`) : c'est elle qui doit tomber au changement de biome, et elle survit
+  // désormais à la dalle qui l'a levée.
+  if (type2 === 'gale') p.g4 = Math.floor(Math.random() * D_GALE_DIRS.length);
   // ⏲️ Balancier : sa phase est tirée à la naissance, sinon tous ceux de l'écran battraient ensemble.
   if (type2 === 'pendul') p.pph = Math.random() * Math.PI * 2;
   // 🔦 Projecteur : sa phase est tirée à la naissance, sinon tous ceux de l'écran balaieraient ensemble.
