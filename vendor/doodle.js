@@ -2017,7 +2017,7 @@ const D_TILES = [
   // commune : une de plus débloquée par palier de D_TILE_STEP points, tirée au sort parmi les restantes.
   { k: 'spawner', icon:'👹', name: 'Générateur',    txt: 'fait surgir un monstre au-dessus de toi — une seule fois, puis elle s\'éteint' },
   { k: 'accord',  icon:'🪗', name: 'Accordéon',     txt: 'se comprime sous le poids, puis se détend d\'un coup et te propulse très haut' },
-  { k: 'casino',  icon:'🃏', name: 'Casino',        txt: 'imite au hasard une autre tuile débloquée — chaque dalle a le sien, tiré à sa naissance' },
+  { k: 'casino',  icon:'🃏', name: 'Casino',        txt: 'imite au hasard une autre tuile débloquée du catalogue, jamais une tuile de biome — chaque dalle a le sien, tiré à sa naissance' },
   { k: 'boomer',  icon:'🪃', name: 'Boomerang',     txt: 'se détache au rebond, décrit un arc, puis revient exactement à sa place' },
   { k: 'lift',    icon:'🛗', name: 'Ascenseur',     txt: 'monte et descend sans arrêt le long de sa ligne' },
   { k: 'rebound', icon:'🦘', name: 'Rebond',        txt: 'les 3 prochains sauts montent deux fois plus haut' },
@@ -8076,8 +8076,12 @@ function doodleTileBirth(s, p, diff) {
   // 🃏 Casino : CHAQUE dalle tire son effet à la naissance, parmi les tuiles déjà débloquées —
   // deux casinos d'une même partie n'ont donc pas le même. ⚠ Repli sur la table complète si le
   // casino est la seule tuile débloquée : sans lui, la toute première serait une dalle morte.
+  // ⚠ 12.7.6 — JAMAIS une tuile de BIOME (demande utilisateur) : depuis que la 🎰 Machine à sous
+  // sait en ajouter à `s.tiles`, le casino pouvait ressortir une 🌵 Pique ou une 🫧 Bulle hors
+  // de son biome. Le filtre est ici, sur le vivier — pas au dessin, qui doit rester le miroir
+  // de ce que la dalle FAIT.
   if (type === 'casino') {
-    const pool = s.tiles.filter(k => k !== 'casino');
+    const pool = s.tiles.filter(k => k !== 'casino' && !D_BIOME_TILES.has(k));
     const all = D_TILES.map(t2 => t2.k).filter(k => k !== 'casino');
     const src = pool.length ? pool : all;
     p.roll = src[Math.floor(Math.random() * src.length)];
