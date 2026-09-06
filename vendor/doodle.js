@@ -136,7 +136,11 @@ const D_LOOT = [
   // l'ACCOMPAGNE — un missile part avec la balle et va chercher le monstre le plus proche.
   // ⚠ Il a sa propre cadence (D_MISSILE_GAP), sinon une cadence améliorée en aurait rempli
   // l'écran et l'arme aurait tout balayé sans qu'on vise plus rien.
-  { k:'missile', icon:'🚀', label:'Missile',   txt:'un missile téléguidé part avec tes tirs et explose sur sa cible — au 2e exemplaire, il part aussi TOUT SEUL tant qu\'une créature est à l\'écran', max: 2, w: 1.2 },
+  // ⚠ 12.8.9 — UN PALIER INTERMÉDIAIRE (demande utilisateur) : le départ automatique était le
+  // 2e exemplaire, il passe au 3e ; le 2e se contente de DOUBLER la fusée d'accompagnement.
+  // Le saut « un missile » → « tourelle » se payait d'un seul cran et rendait le 1er palier
+  // sans intérêt dès qu'un second coffre tombait.
+  { k:'missile', icon:'🚀', label:'Missile',   txt:'un missile téléguidé part avec tes tirs et explose sur sa cible — au 2e exemplaire ils partent par DEUX, au 3e un missile part aussi TOUT SEUL tant qu\'une créature est à l\'écran', max: 3, w: 1.2 },
   // ⚠ 9.3.4 — TROIS BOUCLIERS (demande utilisateur), CUMULABLES : on peut porter les trois à la
   // fois et ils se relaient dans cet ordre — le temporel absorbe sans se consommer, puis le
   // bouclier à charges, puis la carapace des paliers. Le parachute ne sert QUE sur une chute.
@@ -225,16 +229,20 @@ function doodleBullet(s, x, y, vx, vy) {
 // une trajectoire. Et il a une durée de vie : privé de cible, il file droit et sort de l'écran ;
 // face à une cible qu'il n'arrive pas à recouper, il tournerait sinon indéfiniment.
 const D_MISSILE_V = 4.6, D_MISSILE_TURN = 0.12, D_MISSILE_GAP = 45, D_MISSILE_BOOM = 52, D_MISSILE_LIFE = 300;
-// 🚀 10.5.4 — 2e PALIER DU MISSILE (demande utilisateur) : « si on le cumule avec le même
+// 🚀 10.5.4 — PALIERS DU MISSILE (demande utilisateur) : « si on le cumule avec le même
 // bonus, le missile tire tout seul dès qu'un ennemi est visible ». Le 1er palier ne change
-// pas — le missile accompagne toujours les tirs — le 2e AJOUTE un départ automatique.
+// pas — le missile accompagne toujours les tirs — et le départ automatique s'AJOUTE au dernier.
+// ⚠ 12.8.9 — LE PALIER INTERMÉDIAIRE (demande utilisateur) : le 2e double la fusée
+// d'accompagnement (D_MISSILE_PAIR px de part et d'autre, la poursuite les recolle aussitôt),
+// le 3e ouvre la tourelle. Le nombre de fusées d'accompagnement reste PLAFONNÉ à deux : au 3e
+// palier on gagne la tourelle, pas une troisième fusée par tir.
 // ⚠ Cadence PROPRE et bien plus lente que celle du missile d'accompagnement : à
 // D_MISSILE_GAP, la tourelle aurait rempli l'écran de fusées et supprimé le tir.
 // ⚠ Il ne coûte AUCUNE munition et ne passe pas par `shoot` : c'est une tourelle, pas un
 // tir — à sec de munitions elle continue, et c'est exactement ce que le palier promet.
 // ⚠ « Visible sur la carte » = À L'ÉCRAN : viser un monstre hors champ aurait fait partir
 // des missiles vers le vide sans que rien ne l'explique.
-const D_MISSILE_AUTO_GAP = 110;
+const D_MISSILE_AUTO_GAP = 110, D_MISSILE_PAIR = 7, D_MISSILE_AUTO_LVL = 3;
 function doodleMobOnScreen(s, H) { return s.monsters.some(m => m.alive && m.y > -20 && m.y < H + 20); }
 // Cible = le monstre VIVANT le plus proche, réévalué à chaque frame : celui qu'on visait peut
 // mourir d'une balle partie après le missile, qui doit alors se reporter sur un autre.
@@ -262,7 +270,7 @@ function doodleMissileSteer(s, b, sf) {
   const a = Math.atan2(b.vy, b.vx) + Math.max(-D_MISSILE_TURN * sf, Math.min(D_MISSILE_TURN * sf, d));
   b.vx = Math.cos(a) * D_MISSILE_V; b.vy = Math.sin(a) * D_MISSILE_V;     // ⚠ vitesse RÉIMPOSÉE : elle ne doit dépendre que du cap, jamais s'éroder au fil des virages
 }
-function doodleMissile(s) { return { x: s.px, y: s.py - 18, vx: 0, vy: -D_MISSILE_V, pierce: 0, boom: true, boomR: D_MISSILE_BOOM, laser: false, missile: true, life: D_MISSILE_LIFE, sz: doodleBigMul(s) }; }
+function doodleMissile(s, dx) { return { x: s.px + (dx || 0), y: s.py - 18, vx: 0, vy: -D_MISSILE_V, pierce: 0, boom: true, boomR: D_MISSILE_BOOM, laser: false, missile: true, life: D_MISSILE_LIFE, sz: doodleBigMul(s) }; }
 function doodleLootLvl(s, k) { return D_LOOT_INST.has(k) ? 0 : (s.wpn[k] || 0); }
 // ⚠ Encaissement CENTRALISÉ : trois endroits infligent des dégâts (pique armée, monstre, trou
 // noir) et dupliquaient chacun leur cascade de protections — c'était la garantie qu'un
