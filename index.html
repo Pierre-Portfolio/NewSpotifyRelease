@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.8.5';
+const APP_VERSION = '12.8.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4753,6 +4753,7 @@ const GAMES = [
   { id:'findcolor',  label:'Find Color',      min:2, max:8 },
   { id:'findflag',   label:'Find the Flag',   min:1, max:1 },
   { id:'flappy',     label:'Flappy Bird',     min:1, max:1 },
+  { id:'flip7',      label:'Flip 7',          min:3, max:9 },
   { id:'go',         label:'Go',              min:2, max:2 },
   { id:'guitar',     label:'Guitar Hero',     min:1, max:1 },
   { id:'imposteur',  label:'Imposteur',       min:3, max:8 },
@@ -4863,6 +4864,7 @@ function GameHost({ game, label }) {
     case 'findcolor':  return <GameFindColor />;
     case 'findflag':   return <GameFindFlag />;
     case 'flappy':     return <GameFlappy />;
+    case 'flip7':      return <GameFlip7 />;
     case 'go':         return <GameGo />;
     case 'guitar':     return <GameGuitarHero />;
     case 'imposteur':  return <GameImposteur />;
@@ -4930,6 +4932,8 @@ const D_HI_RESET_LS = 'spotifyplus_doodle_hi_reset';
 // chemin d'entrée dans l'application, sans dépendre de l'ouverture de l'onglet Jeux.
 // ⚠ Le drapeau n'est PAS dans la sauvegarde : restaurer un backup antérieur ramènera les anciens
 // records, et c'est le comportement attendu d'une restauration — elle ramène l'état d'avant.
+// ⚠ `flip7` y RESTE alors que Flip 7 est revenu (12.9.0) : la liste est cumulative, et le
+// nouveau tableau des scores vit dans `spotifyplus_flip7`, jamais sous `spotifyplus_game_hi_`.
 const REMOVED_GAMES = ['flipper', 'snake', 'bounce', 'sudoku', 'flip7', 'solitaire', 'blackjack', 'poker', 'plox', 'bataille'];   // jeux retirés du Hub
 // Réglages laissés par un jeu retiré, hors préfixe `spotifyplus_game_hi_` (niveau choisi…).
 const REMOVED_GAME_KEYS = ['spotifyplus_game_sudoku_level', 'spotifyplus_game_sol_draw'];
@@ -11164,6 +11168,424 @@ function GameChrono() {
       </div>
     </GameWrap>
   );
+}
+
+// ════════ Flip 7 — tableau des scores (3 à 9 joueurs) ════════
+// ⚠ Flip 7 se joue avec de VRAIES cartes : l'app ne simule rien, elle tient le TABLEAU DES
+// SCORES de la partie (une ligne par manche, une colonne par joueur) et déclare la victoire
+// au premier qui atteint FLIP7_GOAL. Adapté de la page autonome « Tableau des scores ».
+// ⚠ Contrairement aux autres jeux, ce n'est pas un record (`gameHi`) mais une DONNÉE que
+// l'utilisateur perdrait mal : la clé `spotifyplus_flip7` voyage dans la sauvegarde (`flip7`),
+// et un export CSV permet en plus de partager / reprendre le tournoi sur un autre appareil.
+const FLIP7_LS = 'spotifyplus_flip7';
+const FLIP7_GOAL = 200;   // règle officielle : la partie s'arrête au premier à 200 points
+const FLIP7_MIN = 3, FLIP7_MAX = 9;
+const FLIP7_GOLD = '#f5b81f';
+// Couleur de barre par joueur, attribuée à l'ajout et MÉMORISÉE (elle suit le renommage) :
+// recalculer la couleur depuis l'index la ferait sauter d'un joueur à l'autre au moindre retrait.
+const FLIP7_PALETTE = ['#e0563f', '#39b2d1', '#6fd345', '#f5b81f', '#b06cf5', '#35c5a8', '#f59a2e', '#5f8def', '#e6d53f'];
+
+// Forme stockée : { joueurs:[nom], couleurs:{nom:hex}, manches:[{ ts:ISO, scores:{nom:int} }] }
+function flip7Load() {
+  let d = null;
+  try { d = JSON.parse(lsGet(FLIP7_LS) || 'null'); } catch {}
+  return flip7Norm(d);
+}
+// ⚠ Entonnoir de TOUTE donnée venue du disque (localStorage, sauvegarde, CSV) : noms filtrés
+// par `safeKey` (`__proto__` remplacerait le prototype au lieu de créer une entrée), doublons
+// écartés, scores forcés en entiers — sans quoi une valeur douteuse casserait tous les totaux.
+function flip7Norm(d) {
+  const joueurs = [];
+  for (const n of (d && Array.isArray(d.joueurs) ? d.joueurs : [])) {
+    const nom = String(n || '').trim().slice(0, 20);
+    if (nom && safeKey(nom) && !joueurs.includes(nom) && joueurs.length < FLIP7_MAX) joueurs.push(nom);
+  }
+  const couleurs = {};
+  joueurs.forEach((n, i) => {
+    const c = d && d.couleurs && typeof d.couleurs[n] === 'string' ? d.couleurs[n] : '';
+    couleurs[n] = /^#[0-9a-f]{6}$/i.test(c) ? c : FLIP7_PALETTE[i % FLIP7_PALETTE.length];
+  });
+  const manches = [];
+  for (const m of (d && Array.isArray(d.manches) ? d.manches : [])) {
+    const scores = {};
+    for (const n of joueurs) { const v = parseInt(m && m.scores ? m.scores[n] : 0, 10); scores[n] = Number.isFinite(v) ? v : 0; }
+    manches.push({ ts: typeof (m && m.ts) === 'string' ? m.ts : new Date().toISOString(), scores });
+  }
+  return { joueurs, couleurs, manches };
+}
+// Couleur libre pour un nouveau joueur (pas encore prise), sinon la suivante de la palette.
+function flip7NextColor(couleurs, i) {
+  const prises = Object.values(couleurs);
+  return FLIP7_PALETTE.find(c => !prises.includes(c)) || FLIP7_PALETTE[i % FLIP7_PALETTE.length];
+}
+// Classement : total décroissant, alphabétique à égalité (un tri instable ferait sauter les
+// cartes d'un rendu à l'autre entre deux joueurs à égalité).
+function flip7Rank(st) {
+  return st.joueurs.map(n => ({
+    n,
+    total: st.manches.reduce((s, m) => s + (m.scores[n] || 0), 0),
+    derniere: st.manches.length ? (st.manches[st.manches.length - 1].scores[n] || 0) : null,
+  })).sort((a, b) => (b.total - a.total) || a.n.localeCompare(b.n, 'fr', { sensitivity:'base' }));
+}
+function flip7Date(iso) {
+  try { return new Date(iso).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' }); }
+  catch { return '—'; }
+}
+// ── CSV (séparateur « ; » + BOM : Excel/Numbers l'ouvrent directement, accents conservés) ──
+function flip7Csv(st) {
+  const cls = flip7Rank(st);
+  const echap = v => { const s = String(v); return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lignes = [['Manche', 'Date'].concat(st.joueurs).map(echap).join(';')];
+  st.manches.forEach((m, i) => lignes.push([i + 1, flip7Date(m.ts)].concat(st.joueurs.map(n => m.scores[n] ?? 0)).map(echap).join(';')));
+  lignes.push(['Total', ''].concat(st.joueurs.map(n => (cls.find(c => c.n === n) || {}).total || 0)).map(echap).join(';'));
+  return '\uFEFF' + lignes.join('\r\n');
+}
+function flip7ParseCsv(texte) {
+  if (texte.charCodeAt(0) === 0xFEFF) texte = texte.slice(1);
+  const lignes = [];
+  let champ = '', ligne = [], quote = false;
+  for (let i = 0; i < texte.length; i++) {
+    const c = texte[i];
+    if (quote) {
+      if (c === '"') { if (texte[i + 1] === '"') { champ += '"'; i++; } else quote = false; }
+      else champ += c;
+    } else if (c === '"') quote = true;
+    else if (c === ';') { ligne.push(champ); champ = ''; }
+    else if (c === '\n') { ligne.push(champ); lignes.push(ligne); ligne = []; champ = ''; }
+    else if (c !== '\r') champ += c;
+  }
+  if (champ !== '' || ligne.length) { ligne.push(champ); lignes.push(ligne); }
+  return lignes;
+}
+// Reconstruit une date depuis l'affichage « JJ/MM HH:MM » (le CSV n'emporte pas l'année).
+function flip7IsoFrom(s) {
+  const m = /(\d{1,2})\/(\d{1,2})\D+(\d{1,2}):(\d{2})/.exec((s || '').trim());
+  if (!m) return null;
+  const now = new Date();
+  const d = new Date(now.getFullYear(), +m[2] - 1, +m[1], +m[3], +m[4]);
+  if (d.getTime() - now.getTime() > 864e5) d.setFullYear(now.getFullYear() - 1);   // en fait l'an dernier
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+function flip7FromCsv(texte) {
+  const grille = flip7ParseCsv(texte).filter(r => r.length);
+  const iEnt = grille.findIndex(r => (r[0] || '').trim().toLowerCase() === 'manche' && (r[1] || '').trim().toLowerCase() === 'date');
+  if (iEnt === -1) throw new Error('en-tête « Manche ; Date ; … » introuvable');
+  const joueurs = [];
+  grille[iEnt].slice(2).forEach(s => {
+    const n = (s || '').trim().slice(0, 20);
+    if (n && safeKey(n) && !joueurs.includes(n) && joueurs.length < FLIP7_MAX) joueurs.push(n);
+  });
+  if (!joueurs.length) throw new Error('aucun joueur dans l\'en-tête');
+  const manches = [];
+  for (let i = iEnt + 1; i < grille.length; i++) {
+    const r = grille[i];
+    if ((r[0] || '').trim().toLowerCase() === 'total') continue;      // ligne des totaux : recalculée
+    if (r.every(c => (c || '').trim() === '')) continue;
+    const scores = {};
+    joueurs.forEach((n, k) => { const v = parseInt((r[k + 2] ?? '').toString().trim(), 10); scores[n] = Number.isFinite(v) ? v : 0; });
+    manches.push({ ts: flip7IsoFrom(r[1]) || new Date(Date.now() + i).toISOString(), scores });
+  }
+  if (!manches.length) throw new Error('aucune manche à importer');
+  return flip7Norm({ joueurs, manches });
+}
+
+function GameFlip7() {
+  const [st, setSt] = React.useState(flip7Load);
+  const [saisie, setSaisie] = React.useState({});          // { nom: texte du champ }
+  const [gest, setGest] = React.useState(false);
+  const [histo, setHisto] = React.useState(false);
+  const [nouveau, setNouveau] = React.useState('');
+  const [msg, setMsg] = React.useState(null);              // { k:'ok'|'err', t }
+  // Un SEUL verrou de confirmation pour tous les boutons destructeurs ('reset' | 'undo' |
+  // 'import' | 'del:<nom>') : armer l'un désarme l'autre, et tout retombe après 3 s.
+  const [conf, setConf] = React.useState(null);
+  const confT = React.useRef(null);
+  const fileRef = React.useRef(null);
+  React.useEffect(() => () => clearTimeout(confT.current), []);
+  const arm = k => { clearTimeout(confT.current); setConf(k); confT.current = setTimeout(() => setConf(null), 3000); };
+  const disarm = () => { clearTimeout(confT.current); setConf(null); };
+
+  // Sans aucun joueur, le mode gestion est FORCÉ : sinon le champ « nouveau joueur » serait
+  // inatteignable et l'écran resterait désespérément vide.
+  const enGest = gest || !st.joueurs.length;
+  // ⚠ On lit le retour de `lsSet` : quota plein = rien n'a été écrit, l'afficher en vert
+  // ferait croire à une partie sauvegardée qui disparaîtra au prochain chargement.
+  const commit = (next, ok) => {
+    setSt(next);
+    setMsg(lsSet(FLIP7_LS, JSON.stringify(next))
+      ? (ok ? { k:'ok', t:ok } : null)
+      : { k:'err', t:'Stockage local saturé — la partie n\'a PAS été enregistrée.' });
+  };
+
+  const cls = flip7Rank(st);
+  const champion = cls.length && cls[0].total >= FLIP7_GOAL ? cls[0] : null;
+  const remplie = st.joueurs.some(n => (saisie[n] ?? '') !== '');
+
+  const valider = () => {
+    const invalides = [], scores = {};
+    let un = false;
+    for (const n of st.joueurs) {
+      const brut = String(saisie[n] ?? '').trim();
+      if (brut === '') { scores[n] = 0; continue; }
+      if (!/^-?\d+$/.test(brut)) { invalides.push(n); continue; }   // « 12,5 », « 1e3 »… refusés
+      scores[n] = parseInt(brut, 10);
+      un = true;
+    }
+    if (invalides.length) { setMsg({ k:'err', t:'Nombre entier attendu pour : ' + invalides.join(', ') }); return; }
+    if (!un) { setMsg({ k:'err', t:'Saisis au moins un score avant de valider.' }); return; }
+    disarm();
+    setSaisie({});
+    commit({ ...st, manches: st.manches.concat({ ts:new Date().toISOString(), scores }) }, '✓ Manche enregistrée');
+  };
+
+  const ajouter = () => {
+    const nom = nouveau.trim().slice(0, 20);
+    if (!nom || !safeKey(nom) || st.joueurs.includes(nom) || st.joueurs.length >= FLIP7_MAX) return;
+    const joueurs = st.joueurs.concat(nom);
+    setNouveau('');
+    // ⚠ Le mode gestion n'est FORCÉ que tant que la liste est vide : sans ce `setGest(true)`,
+    // ajouter le premier joueur en ferait sortir, et il faudrait rouvrir « Gérer les joueurs »
+    // avant chacun des suivants.
+    setGest(true);
+    commit({ joueurs, couleurs:{ ...st.couleurs, [nom]: flip7NextColor(st.couleurs, joueurs.length - 1) },
+      manches: st.manches.map(m => ({ ...m, scores:{ ...m.scores, [nom]:0 } })) });
+  };
+
+  // ⚠ Champ NON contrôlé (renommer à chaque frappe changerait la clé de l'objet `scores` à
+  // chaque lettre) : la validation a lieu au blur / à Entrée, et un refus remet l'ancien nom
+  // dans le champ à la main — React ne le ferait pas, la valeur n'étant pas dans le state.
+  const renommer = (ancien, input) => {
+    const nom = (input.value || '').trim().slice(0, 20);
+    if (nom === ancien) return;
+    if (!nom) { input.value = ancien; return; }
+    if (!safeKey(nom) || st.joueurs.includes(nom)) {
+      setMsg({ k:'err', t:`Le nom « ${nom} » est déjà pris.` });
+      input.value = ancien;
+      return;
+    }
+    const couleurs = {}; Object.keys(st.couleurs).forEach(k => { couleurs[k === ancien ? nom : k] = st.couleurs[k]; });
+    const manches = st.manches.map(m => {
+      const scores = {}; Object.keys(m.scores).forEach(k => { scores[k === ancien ? nom : k] = m.scores[k]; });
+      return { ...m, scores };
+    });
+    setSaisie(s => { const c = { ...s }; if (c[ancien] !== undefined) { c[nom] = c[ancien]; delete c[ancien]; } return c; });
+    commit({ joueurs: st.joueurs.map(n => n === ancien ? nom : n), couleurs, manches });
+  };
+
+  const retirer = nom => {
+    if (conf !== 'del:' + nom) { arm('del:' + nom); return; }
+    disarm();
+    const couleurs = { ...st.couleurs }; delete couleurs[nom];
+    // Ses points quittent AUSSI les manches passées : sinon recréer un joueur du même nom
+    // ferait ressusciter ses anciens scores.
+    const manches = st.manches.map(m => { const scores = { ...m.scores }; delete scores[nom]; return { ...m, scores }; });
+    setSaisie(s => { const c = { ...s }; delete c[nom]; return c; });
+    commit({ joueurs: st.joueurs.filter(n => n !== nom), couleurs, manches });
+  };
+
+  const partager = () => {
+    if (!st.manches.length) return;
+    const nomFichier = 'flip7-scores-' + localDayStr() + '.csv';
+    const blob = new Blob([flip7Csv(st)], { type:'text/csv;charset=utf-8' });
+    try {
+      const f = new File([blob], nomFichier, { type:'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files:[f] })) {
+        navigator.share({ files:[f], title:'Flip 7 — tableau des scores' })
+          .catch(e => { if (e && e.name !== 'AbortError') flip7Download(blob, nomFichier); });
+        return;
+      }
+    } catch {}   // File non supporté (vieux navigateurs) → téléchargement
+    flip7Download(blob, nomFichier);
+  };
+
+  const importer = f => {
+    const r = new FileReader();
+    r.onload = () => {
+      let data;
+      try { data = flip7FromCsv(String(r.result)); }
+      catch (e) { setMsg({ k:'err', t:'Import impossible : ' + ((e && e.message) || 'format non reconnu') + '.' }); return; }
+      // Les couleurs déjà connues suivent les joueurs qui reviennent.
+      data.joueurs.forEach(n => { data.couleurs[n] = st.couleurs[n] || data.couleurs[n]; });
+      setSaisie({});
+      disarm();
+      commit(data, `✓ ${data.manches.length} manche(s) importée(s) pour ${data.joueurs.length} joueur(s)`);
+    };
+    r.onerror = () => setMsg({ k:'err', t:'Lecture du fichier impossible.' });
+    r.readAsText(f);
+  };
+
+  const btn = (extra) => gameBtn({ fontSize:11.5, padding:'8px 12px', ...(extra || {}) });
+  const btnPlat = (on, off) => btn({ ...(on ? { background:'#e05050', border:'1px solid #e05050', color:'#fff' }
+                                          : { background:'none', border:`1px solid ${C.border}`, color:C.muted }),
+                                    opacity: off ? 0.4 : 1 });
+  const bar = (
+    <>
+      <span style={{ fontSize:11.5, color:C.muted }}>
+        {st.joueurs.length ? <>{st.joueurs.length} joueur{st.joueurs.length > 1 ? 's' : ''} · {st.manches.length} manche{st.manches.length > 1 ? 's' : ''}</> : 'Aucun joueur'}
+        <span style={{ color:FLIP7_GOLD, fontWeight:800 }}> · objectif {FLIP7_GOAL} pts</span>
+      </span>
+      <button onClick={() => { setGest(g => !g); disarm(); }} disabled={!st.joueurs.length}
+        style={btn({ opacity: st.joueurs.length ? 1 : 0.45, ...(enGest ? { background:`${GAMES_COLOR}30` } : {}) })}>
+        {enGest ? '✓ Fin de gestion' : '👥 Gérer les joueurs'}
+      </button>
+    </>
+  );
+
+  return (
+    <GameWrap hint="Flip 7 se joue avec de vraies cartes : cette page tient le tableau des scores. À la fin de chaque manche, saisis les points de chacun (0 s'il a sauté) puis valide — le premier à 200 points remporte la partie." bar={bar}>
+      <div style={{ width:'100%', maxWidth:420, display:'flex', flexDirection:'column', gap:10 }}>
+        {msg && (
+          <div style={{ fontSize:11.5, fontWeight:600, lineHeight:1.5, color: msg.k === 'ok' ? C.accent : '#e05050' }}>{msg.t}</div>
+        )}
+        {champion && (
+          <div style={{ display:'flex', alignItems:'center', gap:10, padding:'12px 14px', borderRadius:12, background:`${FLIP7_GOLD}18`, border:`1px solid ${FLIP7_GOLD}66` }}>
+            <div style={{ fontSize:26 }}>🏆</div>
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:14, fontWeight:900, color:FLIP7_GOLD, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{champion.n} remporte la partie !</div>
+              <div style={{ fontSize:11, color:C.muted }}>{champion.total} points — les {FLIP7_GOAL} sont atteints.</div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Classement ── */}
+        {cls.map((j, i) => {
+          const tete = cls[0].total > 0 && j.total === cls[0].total;
+          const col = st.couleurs[j.n] || FLIP7_PALETTE[i % FLIP7_PALETTE.length];
+          const pct = Math.max(0, Math.min(100, (j.total / FLIP7_GOAL) * 100));
+          return (
+            <div key={j.n} style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderRadius:12,
+              background: tete ? `${FLIP7_GOLD}12` : C.surface, border:`1px solid ${tete ? FLIP7_GOLD + '55' : C.border}` }}>
+              <div style={{ width:24, textAlign:'center', fontSize:15, fontWeight:900, color: tete ? FLIP7_GOLD : C.dim, flexShrink:0 }}>{tete ? '👑' : i + 1}</div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:8 }}>
+                  {enGest
+                    ? <input defaultValue={j.n} maxLength={20} aria-label={'Renommer ' + j.n}
+                        onBlur={e => renommer(j.n, e.target)}
+                        onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                        style={{ flex:1, minWidth:0, background:C.surfaceHigh, border:`1px dashed ${GAMES_COLOR}88`, borderRadius:7, color:C.text, padding:'4px 8px', fontSize:13, fontWeight:700, outline:'none' }} />
+                    : <span style={{ fontSize:13.5, fontWeight:800, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{j.n}</span>}
+                  <span style={{ fontSize:17, fontWeight:900, color: tete ? FLIP7_GOLD : C.text, flexShrink:0 }}>{j.total}</span>
+                </div>
+                <div style={{ marginTop:6, height:6, borderRadius:99, overflow:'hidden', background:C.surfaceHigh }}>
+                  <div style={{ width:pct + '%', height:'100%', borderRadius:99, background:col, transition:'width 500ms ease' }} />
+                </div>
+                {j.derniere !== null && <div style={{ fontSize:10, color:C.muted, marginTop:3 }}>Dernière manche : {j.derniere >= 0 ? '+' : ''}{j.derniere} pt{Math.abs(j.derniere) > 1 ? 's' : ''}</div>}
+              </div>
+              {enGest
+                ? <button onClick={() => retirer(j.n)} aria-label={'Retirer ' + j.n}
+                    style={btn({ flexShrink:0, padding:'6px 9px', ...(conf === 'del:' + j.n ? { background:'#e05050', border:'1px solid #e05050', color:'#fff' } : { background:'none', border:'1px solid #e0505066', color:'#e05050' }) })}>
+                    {conf === 'del:' + j.n ? 'OK ?' : '✕'}
+                  </button>
+                : <input type="number" inputMode="numeric" placeholder="pts" aria-label={'Points de ' + j.n}
+                    value={saisie[j.n] ?? ''}
+                    onChange={e => setSaisie(s => ({ ...s, [j.n]: e.target.value }))}
+                    onKeyDown={e => { if (e.key === 'Enter') valider(); }}
+                    style={{ width:62, flexShrink:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:'8px 4px', fontSize:14, fontWeight:700, textAlign:'center', outline:'none' }} />}
+            </div>
+          );
+        })}
+
+        {!st.joueurs.length && (
+          <div style={{ fontSize:11.5, color:C.muted, lineHeight:1.6, textAlign:'center', padding:'14px 8px' }}>
+            Aucun joueur pour l'instant. Ajoute-les un par un ci-dessous ({FLIP7_MIN} à {FLIP7_MAX}),
+            ou importe un tableau déjà exporté.
+          </div>
+        )}
+
+        {/* ── Ajout d'un joueur (mode gestion) ── */}
+        {enGest && (
+          <div style={{ display:'flex', gap:8 }}>
+            <input value={nouveau} maxLength={20} placeholder={st.joueurs.length >= FLIP7_MAX ? `Maximum ${FLIP7_MAX} joueurs` : 'Nom du nouveau joueur'}
+              aria-label="Nom du nouveau joueur" disabled={st.joueurs.length >= FLIP7_MAX}
+              onChange={e => setNouveau(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') ajouter(); }}
+              style={{ flex:1, minWidth:0, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:'9px 11px', fontSize:12.5, outline:'none' }} />
+            <button onClick={ajouter} disabled={!nouveau.trim() || st.joueurs.includes(nouveau.trim()) || st.joueurs.length >= FLIP7_MAX}
+              style={btn({ opacity: (!nouveau.trim() || st.joueurs.includes(nouveau.trim()) || st.joueurs.length >= FLIP7_MAX) ? 0.45 : 1 })}>+ Ajouter</button>
+          </div>
+        )}
+        {enGest && <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>
+          {st.joueurs.length ? 'Touche un nom pour le corriger. ✕ retire un joueur (deuxième appui pour confirmer) et efface ses points.' : 'Saisis un prénom puis « + Ajouter ». Recommence pour chaque joueur.'}
+        </div>}
+
+        {/* ── Actions ── */}
+        {!!st.joueurs.length && !enGest && (
+          <button onClick={valider} disabled={!remplie}
+            style={gameBtn({ padding:'12px', fontSize:13.5, opacity: remplie ? 1 : 0.45 })}>✅ Ajouter la manche</button>
+        )}
+        <div style={{ display:'flex', flexWrap:'wrap', gap:8 }}>
+          <button onClick={() => {
+              if (!st.manches.length) return;
+              if (conf !== 'undo') { arm('undo'); return; }
+              disarm();
+              commit({ ...st, manches: st.manches.slice(0, -1) }, '↩ Dernière manche annulée');
+            }} disabled={!st.manches.length}
+            style={btnPlat(conf === 'undo', !st.manches.length)}>{conf === 'undo' ? 'Confirmer ?' : '↩ Annuler la dernière'}</button>
+          <button onClick={partager} disabled={!st.manches.length} style={btnPlat(false, !st.manches.length)}>📤 Partager</button>
+          <button onClick={() => {
+              // L'import REMPLACE tout : confirmation demandée dès qu'il y a des manches.
+              if (st.manches.length && conf !== 'import') { arm('import'); return; }
+              disarm();
+              if (fileRef.current) fileRef.current.click();
+            }} style={btnPlat(conf === 'import')}>{conf === 'import' ? 'Remplacer ?' : '📥 Importer'}</button>
+          <button onClick={() => {
+              if (!st.manches.length) return;
+              if (conf !== 'reset') { arm('reset'); return; }
+              disarm();
+              setSaisie({});
+              commit({ ...st, manches: [] }, '♻️ Nouvelle partie — les joueurs sont conservés');
+            }} disabled={!st.manches.length}
+            style={btnPlat(conf === 'reset', !st.manches.length)}>{conf === 'reset' ? 'Confirmer ?' : '♻️ Remettre à zéro'}</button>
+        </div>
+        <input ref={fileRef} type="file" accept=".csv,text/csv,text/plain" hidden aria-hidden="true"
+          onChange={e => { const f = e.target.files && e.target.files[0]; if (f) importer(f); e.target.value = ''; }} />
+
+        {/* ── Historique ── */}
+        {!!st.manches.length && (
+          <>
+            <button onClick={() => setHisto(h => !h)}
+              style={btn({ background:'none', border:`1px solid ${C.border}`, color:C.muted, alignSelf:'flex-start' })}>
+              {histo ? '▾' : '▸'} Historique des manches
+            </button>
+            {histo && (
+              <div style={{ overflowX:'auto', borderRadius:10, border:`1px solid ${C.border}` }}>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11.5, color:C.text }}>
+                  <thead>
+                    <tr style={{ background:C.surfaceHigh }}>
+                      <th style={{ padding:'7px 9px', textAlign:'left', color:C.muted, fontWeight:700 }}>#</th>
+                      <th style={{ padding:'7px 9px', textAlign:'left', color:C.muted, fontWeight:700, whiteSpace:'nowrap' }}>Date</th>
+                      {st.joueurs.map(n => <th key={n} style={{ padding:'7px 9px', textAlign:'right', fontWeight:700, whiteSpace:'nowrap' }}>{n}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {st.manches.map((m, i) => (
+                      <tr key={m.ts + '|' + i} style={{ background: i % 2 ? C.surface : 'transparent' }}>
+                        <td style={{ padding:'6px 9px', color:C.muted }}>{i + 1}</td>
+                        <td style={{ padding:'6px 9px', color:C.muted, whiteSpace:'nowrap' }}>{flip7Date(m.ts)}</td>
+                        {st.joueurs.map(n => <td key={n} style={{ padding:'6px 9px', textAlign:'right' }}>{m.scores[n] ?? 0}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </GameWrap>
+  );
+}
+// Téléchargement d'un blob (repli quand le partage natif n'existe pas ou échoue).
+function flip7Download(blob, nom) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = nom;
+  // ⚠ Ancre ATTACHÉE au document : un `click()` sur une ancre détachée ne déclenche le
+  // téléchargement que sur certains navigateurs.
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
 // ════════ Morpion (2 joueurs) ════════
@@ -19952,6 +20374,9 @@ function buildBackup() {
       try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.indexOf('spotifyplus_game_hi_') === 0) hi[k.slice('spotifyplus_game_hi_'.length)] = +localStorage.getItem(k) || 0; } } catch {}
       return { hi, last: lsRaw('spotifyplus_games_last'), gh_level: lsRaw('spotifyplus_game_gh_level'), osu_level: lsRaw('spotifyplus_game_osu_level'), simon_level: lsRaw(SIMON_LEVEL_LS) };
     })(),
+    // ⚠ Flip 7 n'a pas de record mais un TABLEAU DES SCORES : c'est la partie en cours des
+    // joueurs, la seule donnée de la ludothèque qu'une perte ferait vraiment regretter.
+    flip7: lsJson(FLIP7_LS),
     // Préférences d'affichage diverses
     prefs: { tvtime_filter: lsRaw('spotifyplus_tvtime_filter'), tvtime_sort: lsRaw('spotifyplus_tvtime_sort'), loop: lsRaw('spotifyplus_loop'),
              vet_prix: lsRaw(VET_PRIX_LS),
@@ -20506,6 +20931,13 @@ function applyBackup(data) {
     putRaw('spotifyplus_game_gh_level', data.games.gh_level);
     putRaw('spotifyplus_game_osu_level', data.games.osu_level);
     putRaw(SIMON_LEVEL_LS, data.games.simon_level);
+  }
+  // Flip 7 — le tableau des scores du fichier REMPLACE celui de l'appareil : additionner ou
+  // unir deux listes de manches inventerait des manches qui n'ont jamais été jouées.
+  // ⚠ `flip7Norm` filtre les noms venus du fichier (safeKey) et force les scores en entiers.
+  if (data.flip7 && Array.isArray(data.flip7.joueurs)) {
+    const f = flip7Norm(data.flip7);
+    if (f.joueurs.length) put(FLIP7_LS, f);
   }
   // API — compteurs d'appels FUSIONNÉS au MAX par API (cf. apiCallsImport : additionner
   // doublerait l'historique déjà présent dans la sauvegarde à chaque ré-import)
