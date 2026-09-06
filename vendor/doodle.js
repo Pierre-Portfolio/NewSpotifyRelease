@@ -2727,6 +2727,24 @@ function doodleMakeSkel(x, y) {
 //   ⚠ Un délai de recharge (D_PROJ_COOL) par dalle : sans lui, rester deux secondes dans la
 //   lumière appelait une armée.
 const D_LADDER_DY = [76, 118];       // écart vertical entre les deux dalles d'une échelle
+// 🪜 12.7.4 — L'ÉCHELLE PREND SES AISES (demande utilisateur) : ses deux dalles sont 20 % plus
+// longues que les autres, ses montants 20 % plus larges, et surtout AUCUNE dalle n'a le droit
+// de les toucher. ⚠ Quand le dégagement n'est pas libre, la paire est ABANDONNÉE en bloc (la
+// dalle retombe en verte ordinaire) et non déplacée : la déplacer, c'était rejouer le tirage
+// d'abscisse jusqu'à trouver une place, donc parfois jamais — et une rangée sans dalle.
+const D_LADDER_W = Math.round(D_PLAT_W * 1.2);   // 74 px : la dalle d'échelle, 20 % plus longue
+const D_LADDER_HALF = 7.2;                       // demi-écart des montants (6 px + 20 %)
+const D_LADDER_CLEAR = 5;                        // marge de dégagement autour des deux dalles
+// Le rectangle `r` est-il libre de toute dalle, marge comprise ? ⚠ Les dalles MORTES ne comptent
+// pas : elles ne sont plus dans le monde, seulement en train de s'effacer.
+function doodleRectFree(s, r, mrg) {
+  const m = mrg == null ? D_LADDER_CLEAR : mrg;
+  for (const q of s.platforms) {
+    if (q.dead) continue;
+    if (r.x - m < q.x + q.w && q.x < r.x + r.w + m && r.y - m < q.y + q.h && q.y < r.y + r.h + m) return false;
+  }
+  return true;
+}
 const D_BARB_R = 40;                 // rayon de l'anneau de fil autour du doodler
 const D_BARB_LIFE = 300;             // 5 s de garde, puis l'explosion
 const D_BARB_SPD = 0.16;             // vitesse angulaire, rad/frame (~2,5 tours en 5 s)
@@ -5318,8 +5336,8 @@ function doodleTileDraw(ctx, p, t) {
     ctx.fillStyle = '#4c525d'; ctx.fillRect(x, y + h - 4, w, 4);
     ctx.strokeStyle = '#5c6470'; ctx.lineWidth = 1.2;                 // le platelage strié
     for (let i = 1; i < 6; i++) { ctx.beginPath(); ctx.moveTo(x + i * w / 6, y + 2); ctx.lineTo(x + i * w / 6, y + h - 4); ctx.stroke(); }
-    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6;                 // les deux pattes
-    [-6, 6].forEach(dx => { ctx.beginPath(); ctx.moveTo(x + w / 2 + dx, y + h - 2); ctx.lineTo(x + w / 2 + dx, y + h + 5); ctx.stroke(); });
+    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6;                 // les deux pattes, à l'écartement des montants
+    [-D_LADDER_HALF, D_LADDER_HALF].forEach(dx => { ctx.beginPath(); ctx.moveTo(x + w / 2 + dx, y + h - 2); ctx.lineTo(x + w / 2 + dx, y + h + 5); ctx.stroke(); });
     return;
   }
   // 🌪️ Tornade de barbelés : DEUX fils tendus d'un bord à l'autre de la dalle — le fil fait
@@ -7419,7 +7437,7 @@ function doodleDraw(ctx, s, W, H) {
       ctx.save();
       const N = 16;
       if (c.k === 'ladder') {
-        for (const off of [-6, 6]) {                                   // les deux montants
+        for (const off of [-D_LADDER_HALF, D_LADDER_HALF]) {           // les deux montants
           ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6; ctx.beginPath();
           for (let i = 0; i <= N; i++) { const pt = doodleClimbAt(c, i / N); i ? ctx.lineTo(pt.x + off, pt.y) : ctx.moveTo(pt.x + off, pt.y); }
           ctx.stroke();
@@ -7427,7 +7445,7 @@ function doodleDraw(ctx, s, W, H) {
         ctx.strokeStyle = '#c3c8d0'; ctx.lineWidth = 2.2;               // les barreaux
         for (let i = 1; i < N; i++) {
           const pt = doodleClimbAt(c, i / N);
-          ctx.beginPath(); ctx.moveTo(pt.x - 6, pt.y); ctx.lineTo(pt.x + 6, pt.y); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(pt.x - D_LADDER_HALF, pt.y); ctx.lineTo(pt.x + D_LADDER_HALF, pt.y); ctx.stroke();
         }
       } else for (let i = 0; i <= N; i++) {
         const pt = doodleClimbAt(c, i / N), nx = doodleClimbAt(c, Math.min(1, (i + 0.5) / N));
@@ -8136,10 +8154,19 @@ function doodleTileBirth(s, p, diff) {
   // 🪜 Échelle de prison : même mécanique que la ⛓️ Chaîne, mais VERTICALE — la jumelle naît
   // juste en dessous, à la MÊME abscisse. C'est ce qui en fait une échelle et non une corde.
   if (type === 'ladder') {
-    const id = (s.ladderSeq = (s.ladderSeq || 0) + 1);
-    p.ladder = id;
-    s.platforms.push({ x, y: ny + D_LADDER_DY[0] + Math.random() * (D_LADDER_DY[1] - D_LADDER_DY[0]),
-                       w, h: D_PLAT_H, type: 'ladder', ladder: id, dead: false });
+    // 20 % plus longue, et recalée dans l'écran : élargie vers la droite, elle en serait sortie.
+    const lw = D_LADDER_W, lx = Math.max(6, Math.min(x, DOODLE_W - 6 - lw));
+    const by = ny + D_LADDER_DY[0] + Math.random() * (D_LADDER_DY[1] - D_LADDER_DY[0]);
+    // ⚠ Le dégagement des DEUX dalles est exigé avant d'en poser une seule : la basse naît au
+    // milieu de rangées déjà générées, c'est elle qui trouve le plus souvent une voisine.
+    if (!doodleRectFree(s, { x: lx, y: ny, w: lw, h: D_PLAT_H }) ||
+        !doodleRectFree(s, { x: lx, y: by, w: lw, h: D_PLAT_H })) {
+      p.type = 'green';   // pas de place : ni échelle ni jumelle, une plateforme ordinaire
+    } else {
+      const id = (s.ladderSeq = (s.ladderSeq || 0) + 1);
+      p.ladder = id; p.w = lw; p.x = lx;
+      s.platforms.push({ x: lx, y: by, w: lw, h: D_PLAT_H, type: 'ladder', ladder: id, dead: false });
+    }
   }
   // 🚇 Tuyaux : la dalle tirée devient une bouche, et sa JUMELLE naît aussitôt une à deux
   // rangées plus bas, sur une abscisse franchement écartée — deux bouches côte à côte se
