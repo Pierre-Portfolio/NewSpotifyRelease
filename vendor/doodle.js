@@ -2375,24 +2375,33 @@ function doodleSegDist(px, py, x1, y1, x2, y2) {
 // ⚠ La MONTÉE passe par `s.vy` et non par `s.py` : seule une vitesse négative fait défiler la
 // caméra (voir la boucle « caméra »), et poser la position aurait sorti le doodler du cadre
 // sans que le monde bouge — c'est exactement le piège déjà documenté sur le 🌳 Arbre géant.
-// ⚠ Le voyage est PLAFONNÉ (D_TARDIS_MAX) : sans borne, un joueur qui ne recroise jamais de
-// tuile TARDIS avant le palier suivant serait monté indéfiniment. Au plafond, la cabine se pose
-// sur la dalle suivante comme si l'on avait changé de biome.
+// ⚠ 12.8.2 — LA CABINE NE RENONCE PLUS (demande utilisateur : « elle doit te déposer sur la
+// PROCHAINE case TARDIS »). Le plafond valait 5 s : la tuile TARDIS étant rare, la cabine
+// abandonnait presque toujours avant d'en croiser une et reposait le doodler sur la première
+// dalle venue — le voyage n'allait jamais nulle part. Tant qu'on est dans le biome, elle monte
+// AUSSI LONGTEMPS QU'IL LE FAUT ; c'est le changement de BIOME qui borne le voyage, et lui seul.
+// ⚠ D_TARDIS_MAX subsiste en pur garde-fou anti-blocage (60 s), pour la partie où le palier ne
+// changerait jamais. Il déclenche exactement la même sortie qu'un changement de biome.
+// ⚠ Sorti du biome, la destination n'est PAS « la première dalle venue » mais la première
+// VERTE OU BLEUE au-dessus : on sort d'un sauvetage, on ne doit pas être reposé dans un piège.
 // ⚠ La destination est la dalle la plus BASSE parmi celles qui sont AU-DESSUS des pieds : c'est
 // « la prochaine », et la cabine n'a donc jamais à redescendre pour déposer.
 const D_TARDIS_W = 30, D_TARDIS_H = 48;   // la cabine, un peu plus haute que large
 const D_TARDIS_IN = 5.2;                  // vitesse d'arrivée latérale, px/frame
 const D_TARDIS_V = 3.0;                   // vitesse de montée, px/frame (~180 px/s)
 const D_TARDIS_LOAD = 34, D_TARDIS_DROP = 42;   // frames d'ouverture des portes, à l'aller et au retour
-const D_TARDIS_MAX = 300;                 // garde-fou : 5 s de montée au plus, soit ~900 px
+const D_TARDIS_MAX = 3600;                // garde-fou anti-blocage : 60 s de montée au plus
 // La dalle d'arrivée : la plus BASSE de celles qui sont au-dessus des pieds du doodler.
 // ⚠ `onlyTardis` restreint aux tuiles TARDIS (hors celle de départ) tant qu'on est dans le
-// biome ; une fois sorti — ou au plafond — n'importe quelle dalle solide fait l'affaire.
+// biome. Une fois sorti — ou au garde-fou — seules les dalles VERTES ou BLEUES sont acceptées :
+// une dalle « quelconque » pouvait être une pique ou une cassante, et le sauvetage se terminait
+// alors par une mort. ⚠ Type EFFECTIF : un 🃏 Casino déguisé en verte n'en est pas une.
 function doodleTardisTarget(s, onlyTardis, from) {
   let best = null;
   for (const q of s.platforms) {
     if (q === from || q.dead || !doodleSolid(q) || q.y >= s.py + D_FEET - 6) continue;
-    if (onlyTardis && doodleEffType(q) !== 'tardis') continue;
+    const et = doodleEffType(q);
+    if (onlyTardis ? et !== 'tardis' : (q.type !== et || (et !== 'green' && et !== 'blue'))) continue;
     if (!best || q.y > best.y) best = q;
   }
   return best;
@@ -2839,7 +2848,7 @@ const D_BIOMES = [
   // 🪐 Gravité.
   { k:'cosmos',  name:'Cosmos',   icon:'🌌', paper:'#e6e4f6', rule:'#c9c4ea', marge:'#8f7fd8',
     tiles:[
-      { k:'tardis',   icon:'🟦', name:'Sauvé par le TARDIS', own:true, w:D_BIOME_TILE_RARE, txt:'une cabine bleue arrive par un côté, s\'ouvre, te récupère à l\'intérieur et t\'emmène droit vers le haut — puis te dépose sur la PROCHAINE tuile TARDIS. Si tu as quitté le biome avant d\'en croiser une, elle te pose sur la première dalle venue. Rien ne peut te toucher pendant le voyage, et une cabine ne vient qu\'une fois par dalle' },
+      { k:'tardis',   icon:'🟦', name:'Sauvé par le TARDIS', own:true, w:D_BIOME_TILE_RARE, txt:'une cabine bleue arrive par un côté, s\'ouvre, te récupère à l\'intérieur et t\'emmène droit vers le haut — puis te dépose sur la PROCHAINE tuile TARDIS, aussi loin soit-elle. Si tu as quitté le biome avant d\'en croiser une, elle te pose sur la première dalle verte ou bleue venue. Rien ne peut te toucher pendant le voyage, et une cabine ne vient qu\'une fois par dalle' },
       { k:'bhole',    icon:'🕳️', name:'Trou noir', own:true, txt:'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
       { k:'gravity',  icon:'🪐', name:'Gravité',   own:true, txt:'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
     ],
