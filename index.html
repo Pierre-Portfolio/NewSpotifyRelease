@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.5.9';
+const APP_VERSION = '12.6.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17024,6 +17024,7 @@ const EMPLOI_DEFAULTS = {
   contrats: [],         // multi — clés d'EMPLOI_CONTRATS
   taille: 'any',        // clé d'EMPLOI_TAILLES
   secteurs: [],         // multi — libres (suggestions EMPLOI_SECTEURS)
+  technos: [],          // multi — libres (suggestions EMPLOI_TECHNOS) : les technos préférées en informatique
   langues: [],          // multi
   exclude: [],          // multi — mots-clés éliminatoires (titre / entreprise / résumé)
   linkedin: '',         // URL du profil (ouverte telle quelle, jamais envoyée nulle part)
@@ -17045,6 +17046,18 @@ const EMPLOI_TAILLES = [
 const EMPLOI_SECTEURS = ['Informatique / Tech', 'Ingénierie', 'Finance / Banque', 'Santé',
   'Marketing / Communication', 'Industrie', 'BTP', 'Commerce', 'Enseignement', 'Logistique',
   'Juridique', 'Ressources humaines', 'Fonction publique', 'Environnement'];
+// 💻 12.6.0 — TECHNOLOGIES DE PRÉFÉRENCE (demande utilisateur). Critère SOUPLE, comme les
+// secteurs : une offre qui n'en cite aucune n'est jamais rejetée, elle marque simplement moins
+// de points. Le module ne rejette QUE sur les critères durs (fraîcheur, exclusions, salaire,
+// contrat, télétravail) — une techno absente d'un résumé de trois lignes ne dit rien de l'offre.
+// ⚠ Elles ne s'ajoutent PAS aux requêtes envoyées aux sources : chaque métier × lieu est déjà
+// une requête, y multiplier les technos aurait fait exploser le nombre d'appels pour un gain
+// que le classement obtient sans réseau.
+const EMPLOI_TECHNOS = ['JavaScript', 'TypeScript', 'React', 'Vue', 'Angular', 'Node.js',
+  'Python', 'Django', 'Java', 'Spring', 'Kotlin', 'Swift', 'C#', '.NET', 'C++', 'Go', 'Rust',
+  'PHP', 'Symfony', 'Laravel', 'Ruby', 'SQL', 'PostgreSQL', 'MongoDB', 'Docker', 'Kubernetes',
+  'AWS', 'Azure', 'GCP', 'Terraform', 'Linux', 'Git', 'CI/CD', 'GraphQL', 'Flutter', 'React Native'];
+const EMPLOI_TECH_PT = 7, EMPLOI_TECH_MAX = 21;   // 7 points par techno citée, 3 au plus
 const EMPLOI_LANGUES = ['Français', 'Anglais', 'Espagnol', 'Allemand', 'Italien'];
 const EMPLOI_EXCLUDE = ['stage', 'alternance', 'commercial', 'nuit', 'astreinte'];
 
@@ -17237,6 +17250,10 @@ function EmploiCriteresSection({ crit, setCrit }) {
 
       <EmploiField label="🏭 SECTEURS">
         <EmploiChips values={crit.secteurs} onChange={v => set('secteurs', v)} placeholder="Secteur d'activité…" suggestions={EMPLOI_SECTEURS} />
+      </EmploiField>
+
+      <EmploiField label="💻 TECHNOLOGIES PRÉFÉRÉES" hint="Ta pile idéale. Une offre qui n'en cite aucune n'est jamais écartée — elle marque simplement moins de points.">
+        <EmploiChips values={crit.technos} onChange={v => set('technos', v)} placeholder="Techno, langage, framework…" suggestions={EMPLOI_TECHNOS} />
       </EmploiField>
 
       <EmploiField label="🗣 LANGUES">
@@ -17481,6 +17498,18 @@ async function emploiFetchAdzuna(query, location, crit) {
 // plupart des offres — filtrer dessus viderait la liste).
 const _emLower = s => String(s || '').toLowerCase();
 function emploiHay(j) { return _emLower([j.title, j.company, j.location, j.excerpt, j.tags.join(' ')].join(' ')); }
+// Une techno est-elle CITÉE dans l'offre ? ⚠ Bornes de mot obligatoires, et non un `includes`
+// nu : « Go » se serait trouvé dans « gouvernance », « R » dans n'importe quoi, et le classement
+// aurait récompensé des offres qui ne parlent pas du tout de la techno. Les caractères que
+// portent les noms de technos (`+`, `#`, `.`) sont exclus des bornes, sinon « C » matcherait
+// « C++ » et « .NET » ne matcherait jamais.
+function emploiTechHit(hay, tech) {
+  const t = _emLower(tech).trim();
+  if (!t) return false;
+  const esc = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  try { return new RegExp('(^|[^a-z0-9+#.])' + esc + '([^a-z0-9+#.]|$)').test(hay); }
+  catch { return hay.includes(t); }
+}
 function emploiReject(j, crit, now) {
   const hay = emploiHay(j);
   const days = +crit.maxDays;
@@ -17507,6 +17536,15 @@ function emploiScore(j, crit, now) {
     else s -= 12;
   }
   for (const sec of crit.secteurs) { const t = _emLower(sec).split(/[\s/]+/)[0]; if (t && t.length > 3 && hay.includes(t)) s += 5; }
+  // 💻 Technos : le signal le plus fort après le métier lui-même quand on cherche en
+  // informatique — une offre qui cite la pile qu'on veut est presque toujours la bonne.
+  // ⚠ Le bonus est PLAFONNÉ : une annonce qui liste vingt technos ne doit pas rafler la
+  // première place au seul motif qu'elle est bavarde.
+  if (crit.technos.length) {
+    let nt = 0;
+    for (const tech of crit.technos) if (emploiTechHit(hay, tech)) nt++;
+    s += Math.min(EMPLOI_TECH_MAX, nt * EMPLOI_TECH_PT);
+  }
   for (const l of crit.langues) { const t = _emLower(l).trim(); if (t && hay.includes(t)) s += 3; }
   if (crit.remote === 'remote' && j.remote) s += 8;
   if (crit.contrats.length && j.contract && crit.contrats.indexOf(j.contract) >= 0) s += 8;
@@ -17574,6 +17612,7 @@ function emploiAiPrompt(crit, jobs) {
   if (crit.contrats.length) L.push('Contrats acceptés : ' + crit.contrats.map(k => (EMPLOI_CONTRATS.find(c => c[0] === k) || [, k])[1]).join(', '));
   if (crit.taille !== 'any') L.push("Taille d'entreprise : " + (EMPLOI_TAILLES.find(t => t[0] === crit.taille) || [, ''])[1]);
   if (crit.secteurs.length) L.push('Secteurs : ' + crit.secteurs.join(', '));
+  if (crit.technos.length) L.push('Technologies préférées : ' + crit.technos.join(', '));
   if (crit.langues.length) L.push('Langues : ' + crit.langues.join(', '));
   if (crit.exclude.length) L.push('À fuir : ' + crit.exclude.join(', '));
   if (crit.profil.trim()) L.push('Profil du candidat : ' + crit.profil.trim().slice(0, 700));
