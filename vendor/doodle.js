@@ -1144,9 +1144,13 @@ const D_PERK_STEP = 1000;
 // des tuiles est donc DÉCOUPLÉE de celle des bonus permanents, restée à 1000 : les deux
 // partageaient jusqu'ici le même compteur, si bien qu'accélérer l'une doublait l'autre.
 const D_TILE_STEP = 500;
+// 🧲 12.9.1 — L'AIMANT EST TEMPORAIRE (demande utilisateur) : 20 secondes à partir de la prise,
+// et non plus jusqu'à la fin de la partie. ⚠ Déclarée AVANT D_PERKS, dont le libellé lit la
+// durée : une const module-level lue plus haut serait une TDZ, c'est-à-dire un écran noir.
+const D_PERK_MAGNET_LIFE = 1200;
 const D_PERKS = [
   { k: 'jump',    icon: '🦵', label: 'Ressort',  txt: 'saut plus haut' },
-  { k: 'magnet',  icon: '🧲', label: 'Aimant',   txt: 'attire les bonus ET les coffres' },
+  { k: 'magnet',  icon: '🧲', label: 'Aimant',   txt: 'attire les bonus ET les coffres pendant ' + Math.round(D_PERK_MAGNET_LIFE / 60) + ' s, puis il s\'épuise — le reprendre relance le compte à rebours' },
   { k: 'armor',   icon: '🛡️', label: 'Carapace', txt: 'encaisse un coup' },
   { k: 'gun',     icon: '🔫', label: 'Canon',    txt: 'tir triple' },
   { k: 'feather', icon: '🪶', label: 'Plume',    txt: 'chute plus douce' },
@@ -6064,7 +6068,9 @@ function doodlePerkHud(ctx, s, W) {
   const froz = doodleFrozen(s);
   const bg0 = froz ? 'rgba(160,205,230,0.75)' : 'rgba(255,255,255,0.82)', fg0 = froz ? '#2a5570' : '#3a2a10';
   if (froz) chips.push({ t: `❄️${Math.ceil(s.frost / 60)}s`, bg:'rgba(63,111,216,0.92)', fg:'#fff' });
-  for (const p of D_PERKS) if (s.perks[p.k] > 0) chips.push({ t: `${p.icon}${s.perks[p.k] > 1 ? '×' + s.perks[p.k] : ''}`, bg:bg0, fg:fg0 });
+  // 🧲 L'aimant est le seul bonus « permanent » à durée : sa pastille porte donc son décompte,
+  // comme les malus — sans lui, rien ne dirait quand il va lâcher.
+  for (const p of D_PERKS) if (s.perks[p.k] > 0) chips.push({ t: `${p.icon}${s.perks[p.k] > 1 ? '×' + s.perks[p.k] : ''}${p.k === 'magnet' ? ' ' + Math.ceil((s.magLeft || 0) / 60) + 's' : ''}`, bg:bg0, fg:fg0 });
   for (const l of D_LOOT) {
     if (l.k === 'ammo' || !s.wpn || !s.wpn[l.k]) continue;
     // ⏳ Le bouclier temporel n'affiche pas ses charges mais ses POINTS restants : c'est en
