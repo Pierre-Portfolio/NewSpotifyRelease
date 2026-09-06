@@ -5448,16 +5448,20 @@ function doodleTileDraw(ctx, p, t) {
     ctx.beginPath(); ctx.arc(x + w / 2, y + h + 2, 4, -0.5, Math.PI + 0.5); ctx.stroke();
     return;
   }
-  // 🦴 Ossuaire : un TAS DE CRÂNES empilés les uns sur les autres, et leurs orbites ROUGEOIENT
-  // toutes ensemble à l'approche de la prochaine sortie — c'est le compte à rebours, visible.
+  // 🦴 Ossuaire : la dalle EST un mur de crânes, et leurs orbites ROUGEOIENT toutes ensemble à
+  // l'approche de la prochaine sortie — c'est le compte à rebours, visible.
   // ⚠ 12.7.7 — Deux fémurs croisés et un crâne unique (l'ancien dessin) faisaient un blason, pas
-  // un ossuaire. Trois assises décalées d'un demi-crâne, dessinées du fond vers l'avant : c'est
-  // le DÉCALAGE et le recouvrement qui font lire « empilé » plutôt qu'« aligné ».
+  // un ossuaire. C'est le DÉCALAGE et le recouvrement qui font lire « empilé » plutôt qu'« aligné ».
+  // ⚠ 12.9.7 — QUE DES CRÂNES, RIEN D'AUTRE (demande utilisateur) : le socle d'ardoise et la
+  // troisième assise disparaissent. Restent DEUX assises décalées d'un demi-crâne — celle du
+  // fond, plus petite, dépasse ENTRE les crânes du devant, plus gros et posés sur le bas de la
+  // dalle. La silhouette des crânes fait donc à elle seule la plateforme : plus rien ne les porte.
+  // ⚠ Le fond est dessiné EN PREMIER et se fait recouvrir : c'est ce recouvrement, et non une
+  // teinte plus sombre, qui donne la profondeur — un aplat grisé aurait juré avec les aplats vifs
+  // et les gros contours du jeu.
   // ⚠ Inclinaisons et tailles tirées de l'ABSCISSE de la dalle, jamais au sort : deux ossuaires
-  // n'ont pas la même pile, mais une même dalle garde la sienne d'une frame à l'autre.
+  // n'ont pas le même mur, mais une même dalle garde le sien d'une frame à l'autre.
   if (p.type === 'ossuary') {
-    doodleRR(ctx, x, y, w, h, 5, '#6b6252');
-    ctx.fillStyle = '#443f34'; ctx.fillRect(x, y + h - 4, w, 4);
     const pret = p.skelT == null ? 1 : Math.max(0, Math.min(1, 1 - p.skelT / D_SKEL_EVERY));
     const eye = 'rgb(' + Math.round(30 + pret * 225) + ',' + Math.round(24 + pret * 40) + ',30)';
     const skull = (cx, cy, r, tilt) => {
@@ -5474,13 +5478,15 @@ function doodleTileDraw(ctx, p, t) {
       ctx.restore();
     };
     const seed = Math.abs(Math.round(p.x));
-    const rows = [{ n: 6, r: 4.7, cy: y + h - 5 }, { n: 5, r: 4.4, cy: y + 4.5 }, { n: 3, r: 4, cy: y - 1 }];
-    for (let ri = 0; ri < rows.length; ri++) {
-      const R = rows[ri], step = (w - 8) / R.n;
-      for (let i = 0; i < R.n; i++) {
-        const g = (seed + ri * 31 + i * 17) % 13;
-        skull(x + 4 + step * (i + 0.5), R.cy + (g % 3) * 0.5, R.r * (0.88 + (g % 5) * 0.06), (g - 6) * 0.05);
-      }
+    const nb = 6, sb = w / nb;                       // l'assise du fond, qui dépasse par-dessus
+    for (let i = 0; i < nb; i++) {
+      const g = (seed + i * 23) % 11;
+      skull(x + sb * (i + 0.5), y + 4.3 + (g % 3) * 0.4, 4.5 * (0.92 + (g % 4) * 0.05), (g - 5) * 0.07);
+    }
+    const nf = 5, sf = w / nf;                       // l'assise du devant, plus grosse, décalée
+    for (let i = 0; i < nf; i++) {
+      const g = (seed + i * 17 + 7) % 13;
+      skull(x + sf * (i + 0.5), y + h - 2.6 + (g % 3) * 0.4, 5.5 * (0.93 + (g % 4) * 0.05), (g - 6) * 0.05);
     }
     return;
   }
