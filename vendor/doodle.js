@@ -521,6 +521,9 @@ const D_SCENE = {
   // ce sont les FISSURES incandescentes qui doivent éclairer, jamais les parois — sinon le décor
   // avale les dalles, exactement comme les façades de Night City.
   enfer:   { sky:['#0a0407', '#5a0d0a'], far:'#1c070b', near:'#0b0305', ink:'#ff5a2a' },
+  // 🔒 Prison : nuit froide au-dessus de la cour. `far`/`near` sont les DEUX enceintes de béton,
+  // et `ink` la lumière jaune des miradors — la seule chose colorée du biome.
+  prison:  { sky:['#0f1622', '#2f3a4a'], far:'#39404e', near:'#232935', ink:'#ffe08a' },
 };
 // ⚠ Positions DÉTERMINISTES : un Math.random() par frame ferait grésiller tout le décor.
 // Hachage classique sinus × grand nombre — reproductible, sans état à porter.
@@ -674,6 +677,38 @@ function doodleScene(ctx, W, H, climb, k, a) {
       ctx.fillStyle = i % 3 ? '#ff7a2a' : '#ffd24a';
       ctx.globalAlpha = Math.min(1, a) * (0.30 + doodleRnd(i + 9) * 0.55);
       ctx.beginPath(); ctx.arc(px, py, 1.2 + doodleRnd(i + 14) * 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = Math.min(1, a);
+  } else if (k === 'prison') {
+    // La COUR vue d'en bas : deux enceintes de béton à crête PLATE (un mur, pas une colline),
+    // couronnées de rouleaux de barbelés, avec un mirador une bande sur deux et son faisceau.
+    // ⚠ Crête plate et non ondulée : `doodleRidge` sert ici à empiler des MURS — une ondulation
+    // en aurait refait des collines, et toute la lecture du biome serait tombée.
+    const offFar = doodleParallax(climb, 0.06, 250);
+    doodleRidge(ctx, W, H, offFar, 250, sc.far, () => 30, 46);
+    const off = doodleParallax(climb, 0.13, 190);
+    doodleRidge(ctx, W, H, off, 190, sc.near, () => 22, 34);
+    for (let base = off - 190; base < H + 190; base += 190) {
+      const crete = base - 22;
+      // les rouleaux de barbelés sur la crête
+      ctx.strokeStyle = '#7d8492'; ctx.lineWidth = 1.4;
+      for (let bx = 6; bx < W; bx += 26) { ctx.beginPath(); ctx.arc(bx, crete - 5, 5.5, 0, Math.PI * 2); ctx.stroke(); }
+      // le mirador, une bande sur deux, avec sa cabine éclairée
+      const cote = ((base / 190) | 0) % 2 ? 0.18 : 0.78, mx = cote * W;
+      ctx.fillStyle = sc.near;
+      ctx.fillRect(mx - 4, crete - 54, 8, 54);                        // le fût
+      ctx.fillRect(mx - 15, crete - 72, 30, 20);                      // la cabine
+      ctx.fillStyle = '#141821';
+      ctx.beginPath(); ctx.moveTo(mx - 19, crete - 72); ctx.lineTo(mx + 19, crete - 72); ctx.lineTo(mx, crete - 84); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = sc.ink; ctx.fillRect(mx - 10, crete - 68, 20, 10);   // la vitre allumée
+      // le faisceau, qui balaie lentement — c'est lui qui fait la prison, pas le mur
+      const bal = Math.sin(climb * 0.011 + base * 0.03) * 0.55;
+      ctx.save(); ctx.translate(mx, crete - 63); ctx.rotate(bal);
+      const gb = ctx.createLinearGradient(0, 0, 0, 120);
+      gb.addColorStop(0, 'rgba(255,224,138,0.30)'); gb.addColorStop(1, 'rgba(255,224,138,0)');
+      ctx.fillStyle = gb;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-34, 120); ctx.lineTo(34, 120); ctx.closePath(); ctx.fill();
+      ctx.restore();
     }
     ctx.globalAlpha = Math.min(1, a);
   } else if (k === 'cosmos') {
@@ -2607,34 +2642,88 @@ const D_SKEL_DOWN = 120, D_SKEL_REBUILD = 120;   // 2 s en tas d'os, puis 2 s à
 const D_SKEL_MAX = 8;                // plafond global : aucun squelette ne meurt vraiment, il en faut un
 const D_FLAME_SHOTS = 3;
 const D_BURN_LIFE = 300, D_BURN_H = 12;          // 5 s d'embrasement, sur D_BURN_H px au-dessus de la dalle
-// Les chaînes tendues à l'écran : une entrée par PAIRE, de la dalle HAUTE vers la BASSE.
+// Les liaisons tendues à l'écran : une entrée par PAIRE, de la dalle HAUTE vers la BASSE.
+// ⚠ GÉNÉRIQUE, indexée par le champ qui porte l'identifiant de paire (`chain` pour la ⛓️ Chaîne
+// de l'Enfer, `ladder` pour la 🪜 Échelle de la Prison) : les deux tuiles sont le même mécanisme
+// à la flèche près, et les écrire deux fois, c'était garantir qu'elles finissent par diverger.
 // ⚠ Source UNIQUE pour le dessin et pour la montée : deux parcours séparés, et l'on finirait
-// par grimper une chaîne qui n'est pas celle qu'on voit.
-function doodleChainPairs(s) {
+// par grimper une liaison qui n'est pas celle qu'on voit.
+function doodleClimbPairs(s, champ) {
   const by = new Map();
   for (const q of s.platforms) {
-    if (!q.chain || q.dead) continue;
-    const l = by.get(q.chain) || []; l.push(q); by.set(q.chain, l);
+    if (!q[champ] || q.dead) continue;
+    const l = by.get(q[champ]) || []; l.push(q); by.set(q[champ], l);
   }
   const out = [];
   for (const l of by.values()) {
     if (l.length < 2) continue;
     const [a, b] = l[0].y <= l[1].y ? [l[0], l[1]] : [l[1], l[0]];   // a = haute, b = basse
-    out.push({ a, b, x1: a.x + a.w / 2, y1: a.y + a.h, x2: b.x + b.w / 2, y2: b.y });
+    out.push({ a, b, k: champ, x1: a.x + a.w / 2, y1: a.y + a.h, x2: b.x + b.w / 2, y2: b.y });
   }
   return out;
 }
-// Point de la chaîne à l'avancement `u` (0 = sous la dalle haute, 1 = sur la dalle basse).
-// La chaîne PEND : sans la flèche, deux dalles reliées par un trait droit n'auraient rien d'une
-// chaîne lâche, et « soumise à la gravité » n'aurait pas été tenu.
-function doodleChainAt(c, u) {
-  return { x: c.x1 + (c.x2 - c.x1) * u, y: c.y1 + (c.y2 - c.y1) * u + Math.sin(u * Math.PI) * D_CHAIN_SAG };
+// Toutes les liaisons, les deux sortes confondues — ce que le dessin et la recherche de paire
+// veulent presque toujours.
+function doodleClimbAll(s) { return doodleClimbPairs(s, 'chain').concat(doodleClimbPairs(s, 'ladder')); }
+// Point de la liaison à l'avancement `u` (0 = sous la dalle haute, 1 = sur la dalle basse).
+// ⚠ La CHAÎNE pend (D_CHAIN_SAG) : sans la flèche, deux dalles reliées par un trait droit
+// n'auraient rien d'une chaîne lâche, et « soumise à la gravité » n'aurait pas été tenu.
+// L'ÉCHELLE, elle, est rigide : flèche nulle, sinon ce serait une corde.
+function doodleClimbAt(c, u) {
+  const sag = c.k === 'chain' ? D_CHAIN_SAG : 0;
+  return { x: c.x1 + (c.x2 - c.x1) * u, y: c.y1 + (c.y2 - c.y1) * u + Math.sin(u * Math.PI) * sag };
 }
 // Un squelette d'ossuaire. ⚠ `grav` — le seul monstre du jeu qui tombe — et `revive`, qui le
 // fait passer par la branche « tas d'os » de `doodleKillMonster` au lieu de mourir.
 function doodleMakeSkel(x, y) {
   return { x, y, w: D_SKEL_W, h: D_SKEL_H, type: 1, alive: true, kind: 'skel', icon: '💀',
            vx: 0, vy: 0, grav: true, revive: true, wt: Math.random() * 6.28 };
+}
+// 🔒 12.5.8 — BIOME PRISON (demande utilisateur). Trois tuiles, dont deux reprennent des
+// mécaniques déjà éprouvées ailleurs — et c'est voulu : un biome n'a pas à tout réinventer, il
+// doit avoir sa COULEUR.
+// 🪜 L'ÉCHELLE DE PRISON est la ⛓️ Chaîne de l'Enfer, rigide et VERTICALE : les deux dalles
+//   naissent l'une au-dessus de l'autre, à la même abscisse, et l'on monte tout droit. Elles
+//   partagent `doodleClimbPairs` / `doodleClimbAt` — seule la flèche change (nulle ici).
+//   ⚠ La jumelle naît EN DESSOUS, comme partout : posée plus haut elle abaisserait `topY` et la
+//   génération croirait la rangée suivante déjà faite, ouvrant un trou infranchissable.
+// 🌪️ LA TORNADE DE BARBELÉS : le rouleau se DÉTACHE de sa dalle, tourne autour du doodler
+//   pendant D_BARB_LIFE frames et revient se poser à sa place. Tant qu'il tourne, il déchire
+//   toute créature qu'il croise. ⚠ Il ne blesse JAMAIS le doodler : il tourne autour de LUI,
+//   c'est une garde, pas un piège — et une garde qui mord son porteur n'aurait aucun sens.
+//   ⚠ Un seul rouleau à la fois (`s.barb`) : deux dalles enchaînées auraient superposé deux
+//   orbites illisibles, et la dalle d'origine du second n'aurait plus rien récupéré.
+//   ⚠ Le retour est une VRAIE trajectoire (phase 'back') et non une disparition : on doit voir
+//   le rouleau regagner sa dalle, sinon on croit l'avoir perdu.
+// 🔦 LE PROJECTEUR (tuile rare) : une tourelle au centre de la dalle et deux caméras de part et
+//   d'autre. Le faisceau tourne DANS LE SENS DES AIGUILLES D'UNE MONTRE, sans fin.
+//   ⚠ La demande s'arrête au milieu de la phrase (« si on fini dans la lumière du projecteur…
+//   alors => »). Choix retenu, et il est cohérent avec la fiction du biome : être pris dans le
+//   faisceau DÉCLENCHE L'ALARME et fait rappliquer un 👮 gardien, qui fonce droit sur le
+//   doodler. Ce n'est pas une mort sèche — c'est une poursuite, donc quelque chose qu'on peut
+//   encore jouer. Un dégât immédiat aurait fait de la tuile un piège qu'on subit.
+//   ⚠ Un délai de recharge (D_PROJ_COOL) par dalle : sans lui, rester deux secondes dans la
+//   lumière appelait une armée.
+const D_LADDER_DY = [76, 118];       // écart vertical entre les deux dalles d'une échelle
+const D_BARB_R = 40;                 // rayon de l'orbite du rouleau autour du doodler
+const D_BARB_LIFE = 300, D_BARB_BACK = 40;   // 5 s de tornade, puis 0,66 s de retour
+const D_BARB_SPD = 0.16;             // vitesse angulaire, rad/frame (~2,5 tours en 5 s)
+const D_BARB_HIT = 15;               // rayon de morsure du rouleau
+const D_PROJ_R = 165;                // portée du faisceau
+const D_PROJ_HALF = 0.24;            // demi-ouverture du cône, en radians (~28° de large)
+const D_PROJ_SPD = 0.013;            // vitesse de rotation, rad/frame (~8 s le tour complet)
+const D_PROJ_COOL = 260;             // recharge de l'alarme, par dalle
+const D_WARDEN_V = 1.35;             // le gardien appelé fonce droit sur le doodler
+// L'angle du faisceau à cet instant. ⚠ SENS HORAIRE : en repère écran (y vers le bas), l'angle
+// qui CROÎT tourne déjà dans le sens des aiguilles d'une montre — il n'y a donc pas de signe à
+// inverser, et c'est exactement le contre-sens qu'on aurait écrit sans y penser.
+function doodleProjAng(p, t) { return t * D_PROJ_SPD + (p.ph || 0); }
+// Le gardien appelé par l'alarme : il ne patrouille pas, il POURSUIT (`homing`, comme le monstre
+// arc-en-ciel). ⚠ Il n'est PAS marqué `rare` : il n'a rien à voir avec le tirage du biome, et
+// l'auréole rouge des très rares aurait laissé croire à un butin double.
+function doodleMakeWarden(x, y) {
+  return { x, y, w: 52, h: 46, type: 1, alive: true, kind: 'warden', icon: '👮',
+           homing: D_WARDEN_V, wt: Math.random() * 6.28 };
 }
 const D_BIOMES = [
   { k:'normal',  name:'Départ',   icon:'📄', paper:'#f4efdd', rule:'#cfe0ef', marge:'#f2c0c0', tiles:[], mobs:[] },
@@ -2746,6 +2835,17 @@ const D_BIOMES = [
     ],
     mobs:[{ k:'skel',  icon:'💀', w:36, h:40, vx:1.15, drawn:true },
           { k:'demon', icon:'👹', w:54, h:46, vx:1.05, rare:true, drawn:true }] },
+  // 🔒 12.5.8 — BIOME PRISON (demande utilisateur) : la cour, ses murs, ses miradors et ses
+  // projecteurs. Deux de ses trois tuiles reprennent une mécanique éprouvée ailleurs, et c'est
+  // voulu — un biome n'a pas à tout réinventer, il doit avoir sa couleur.
+  { k:'prison',  name:'Prison',   icon:'🔒', paper:'#e4e6e9', rule:'#bfc4cc', marge:'#5c6470',
+    tiles:[
+      { k:'ladder',  icon:'🪜', name:'Échelle de prison', own:true, txt:'elles naissent PAR DEUX, l\'une au-dessus de l\'autre et à la même abscisse, avec une échelle entre les deux. Te poser sur celle du BAS, c\'est en monter les barreaux jusqu\'à celle du haut, où tu repars d\'un saut' },
+      { k:'barbed',  icon:'🌪️', name:'Tornade de barbelés', own:true, txt:'le rouleau se DÉTACHE de la dalle et tourne autour de toi pendant ' + Math.round(D_BARB_LIFE / 60) + ' s en déchirant toute créature qu\'il croise, puis il regagne sa place. Il ne te blesse jamais — il tourne autour de toi, c\'est une garde. Un seul rouleau en l\'air à la fois' },
+      { k:'searchlight', icon:'🔦', name:'Projecteur', own:true, w:D_BIOME_TILE_RARE, txt:'une tourelle au centre de la dalle et deux caméras de surveillance. Le faisceau tourne dans le sens des aiguilles d\'une montre, sans fin : t\'y faire prendre DÉCLENCHE L\'ALARME et fait rappliquer un 👮 gardien, qui fonce droit sur toi. Une alarme toutes les ' + Math.round(D_PROJ_COOL / 60) + ' s par dalle' },
+    ],
+    mobs:[{ k:'inmate', icon:'🧍', w:36, h:42, vx:1.3, drawn:true },
+          { k:'warden', icon:'👮', w:52, h:46, vx:1.0, rare:true, drawn:true }] },
 ];
 // 🏗️ 9.8.3 — LE BÂTISSEUR (demande utilisateur) : TRÈS TRÈS TRÈS rare, et c'est le seul
 // monstre qu'on ne tue pas. Une balle ne l'abat pas — elle le décide à POSER une plateforme
@@ -2944,7 +3044,7 @@ function doodleBossStart(s, W, H) {
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
   s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
-  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
+  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.barb = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
   s.banner = { txt: `💀 ${kind.name}`, sub: `plus de saut — déplace-toi et tire · ${hp} points de vie · 🛡️ ${D_BOSS_SH} balles après chaque sort`, life: D_BANNER_LIFE * 1.6 };
@@ -3501,6 +3601,26 @@ function doodleTardisOpen(s) {
   if (td.ph === 'load') { const u = td.t / D_TARDIS_LOAD; return u < 0.35 ? u / 0.35 : u > 0.70 ? Math.max(0, 1 - (u - 0.70) / 0.30) : 1; }
   if (td.ph === 'drop') { const u = td.t / D_TARDIS_DROP; return u < 0.30 ? u / 0.30 : u > 0.75 ? Math.max(0, 1 - (u - 0.75) / 0.25) : 1; }
   return 0;
+}
+// 🌪️ Le rouleau de barbelés : un anneau et ses pointes, qui TOURNE. ⚠ Primitive partagée par
+// la dalle au repos et par la tornade en vol : deux dessins séparés et l'on n'aurait pas
+// reconnu, dans ce qui tourne autour de soi, ce qui vient de se détacher de la dalle.
+function doodleBarbRoll(ctx, cx, cy, r, t) {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.07);
+  ctx.strokeStyle = '#c3c8d0'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.6, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = 1.6;
+  for (let i = 0; i < 8; i++) {
+    const a = i / 8 * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * (r - 3), Math.sin(a) * (r - 3));
+    ctx.lineTo(Math.cos(a) * (r + 4), Math.sin(a) * (r + 4));
+    ctx.moveTo(Math.cos(a + 0.25) * r, Math.sin(a + 0.25) * r);
+    ctx.lineTo(Math.cos(a - 0.25) * r, Math.sin(a - 0.25) * r);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
@@ -5065,6 +5185,63 @@ function doodleTileDraw(ctx, p, t) {
     }
     return;
   }
+  // 🪜 Échelle de prison : platelage d'acier, avec les deux pattes d'où part l'échelle. ⚠ Les
+  // barreaux sont dessinés dans `doodleDraw`, à partir de la PAIRE — comme la ⛓️ Chaîne.
+  if (p.type === 'ladder') {
+    doodleRR(ctx, x, y, w, h, 3, '#7d8492');
+    ctx.fillStyle = '#4c525d'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#5c6470'; ctx.lineWidth = 1.2;                 // le platelage strié
+    for (let i = 1; i < 6; i++) { ctx.beginPath(); ctx.moveTo(x + i * w / 6, y + 2); ctx.lineTo(x + i * w / 6, y + h - 4); ctx.stroke(); }
+    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6;                 // les deux pattes
+    [-6, 6].forEach(dx => { ctx.beginPath(); ctx.moveTo(x + w / 2 + dx, y + h - 2); ctx.lineTo(x + w / 2 + dx, y + h + 5); ctx.stroke(); });
+    return;
+  }
+  // 🌪️ Tornade de barbelés : le rouleau posé en travers de la dalle. ⚠ Quand il est PARTI
+  // (`p.barbOut`), la dalle le montre : deux supports vides. Sans ça on ne saurait pas d'où
+  // vient le rouleau qui tourne autour de soi, ni où il va revenir.
+  if (p.type === 'barbed') {
+    doodleRR(ctx, x, y, w, h, 4, '#5f6672');
+    ctx.fillStyle = '#3b414b'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2;                   // les deux supports
+    [x + 8, x + w - 8].forEach(sx => { ctx.beginPath(); ctx.moveTo(sx, y + 2); ctx.lineTo(sx, y - 5); ctx.stroke(); });
+    if (!p.barbOut) doodleBarbRoll(ctx, x + w / 2, y - 5, 11, t);
+    return;
+  }
+  // 🔦 Projecteur : la tourelle au centre, deux caméras de part et d'autre, et le cône de
+  // lumière qui tourne. ⚠ Le cône est dessiné ICI et non dans `doodleDraw` : il appartient à la
+  // dalle, il doit défiler avec elle sans qu'on ait à le réinscrire dans le monde.
+  if (p.type === 'searchlight') {
+    doodleRR(ctx, x, y, w, h, 4, '#4a515c');
+    ctx.fillStyle = '#2c313a'; ctx.fillRect(x, y + h - 4, w, 4);
+    const cx = x + w / 2, cy = y - 2, ang = doodleProjAng(p, t);
+    // le cône : dégradé qui s'éteint avec la distance, comme les faisceaux des miradors du décor
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    const g = ctx.createLinearGradient(0, 0, D_PROJ_R, 0);
+    const chaud = p.alarm > 0;                                        // alarme en cours : le faisceau vire au rouge
+    g.addColorStop(0, chaud ? 'rgba(255,90,74,0.42)' : 'rgba(255,224,138,0.34)');
+    g.addColorStop(1, chaud ? 'rgba(255,90,74,0)' : 'rgba(255,224,138,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.moveTo(0, 0);
+    ctx.arc(0, 0, D_PROJ_R, -D_PROJ_HALF, D_PROJ_HALF); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // les deux caméras, qui clignotent en rouge quand l'alarme est chaude
+    [-1, 1].forEach(sx => {
+      const mx = cx + sx * (w / 2 - 7);
+      ctx.fillStyle = '#2c313a'; ctx.strokeStyle = '#1a1e25'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.rect(mx - 5, y - 6, 10, 6); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx + sx * 5, y - 5); ctx.lineTo(mx + sx * 9, y - 3); ctx.lineTo(mx + sx * 5, y - 1); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = (p.alarm > 0 && Math.floor(t / 8) % 2) ? '#ff4a3a' : '#7a2018';
+      ctx.beginPath(); ctx.arc(mx, y - 8, 1.8, 0, Math.PI * 2); ctx.fill();
+    });
+    // la tourelle
+    ctx.fillStyle = '#9aa0aa'; ctx.strokeStyle = '#1a1e25'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(cx, cy, 5.4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
+    ctx.fillStyle = p.alarm > 0 ? '#ff8a7a' : '#fff2c8';
+    ctx.beginPath(); ctx.ellipse(5.5, 0, 3.4, 4.4, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    return;
+  }
   // 🚦 Feu tricolore : boîtier noir à trois lampes, une seule allumée. ⚠ Les deux éteintes
   // restent visibles en sombre : c'est ce qui dit qu'il en existe trois et que ça va tourner.
   if (p.type === 'light') {
@@ -5889,6 +6066,55 @@ function doodleMummyFall(ctx, mu, t) {
   ctx.restore();
 }
 const D_MOB_DRAW = {
+  // 🧍 Prisonnier — combinaison à rayures, crâne rasé, boulet au pied. Il patrouille comme les
+  // autres créatures ordinaires : c'est sa SILHOUETTE qui doit dire « prison », pas son
+  // comportement — un biome se reconnaît d'abord à ce qu'on y voit.
+  inmate(ctx, m, cx, cy, t) {
+    const bob = Math.sin(t * 0.12 + m.x) * 1.4, look = m.vx > 0 ? 1 : -1;
+    ctx.strokeStyle = '#3a3f4a'; ctx.lineWidth = 1.6;                  // la chaîne du boulet
+    ctx.beginPath(); ctx.moveTo(cx + 4, cy + 14 + bob); ctx.lineTo(cx + 14, cy + 18 + bob); ctx.stroke();
+    ctx.fillStyle = '#2c313a';
+    ctx.beginPath(); ctx.arc(cx + 18, cy + 19 + bob, 5.4, 0, Math.PI * 2); ctx.fill();
+    doodleBlob(ctx, cx, cy + 2 + bob, 14, 15, '#eceff3');              // le corps
+    ctx.save();                                                        // les rayures, coupées à la forme du corps
+    ctx.beginPath(); ctx.ellipse(cx, cy + 2 + bob, 14, 15, 0, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = '#39404e';
+    for (let i = -3; i <= 3; i++) ctx.fillRect(cx - 15, cy + 2 + bob + i * 7 - 1.8, 30, 3.6);
+    ctx.restore();
+    ctx.fillStyle = '#e8c9a8'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2;   // le crâne rasé
+    ctx.beginPath(); ctx.arc(cx, cy - 13 + bob, 9, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    doodleEye(ctx, cx - 3.4, cy - 14 + bob, 3.4, look);
+    doodleEye(ctx, cx + 3.4, cy - 14 + bob, 3.4, look);
+    ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.6; ctx.lineCap = 'round';     // la bouche renfrognée
+    ctx.beginPath(); ctx.arc(cx, cy - 5 + bob, 3.4, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+  },
+  // 👮 Gardien — la créature TRÈS rare de la Prison, et celle que l'alarme du 🔦 Projecteur
+  // fait rappliquer. Casquette, lunettes noires, matraque : massif et frontal.
+  warden(ctx, m, cx, cy, t) {
+    const bob = Math.sin(t * 0.09 + m.x) * 1.7, look = m.homing ? 0 : m.vx > 0 ? 1 : -1;
+    ctx.strokeStyle = '#3a3f4a'; ctx.lineWidth = 4; ctx.lineCap = 'round';       // le bras et la matraque
+    ctx.beginPath(); ctx.moveTo(cx + 13, cy + bob); ctx.lineTo(cx + 22, cy + 8 + bob); ctx.stroke();
+    ctx.strokeStyle = '#22262e'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(cx + 22, cy + 8 + bob); ctx.lineTo(cx + 30, cy - 4 + bob); ctx.stroke();
+    doodleBlob(ctx, cx, cy + 3 + bob, 18, 16, '#2f5aa8');                        // l'uniforme
+    ctx.fillStyle = '#1d3a6e'; ctx.fillRect(cx - 18, cy + 8 + bob, 36, 5);       // le ceinturon
+    ctx.fillStyle = '#e8c45a';
+    ctx.beginPath(); ctx.arc(cx, cy + 10.5 + bob, 2.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8c9a8'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2.2; // la tête
+    ctx.beginPath(); ctx.arc(cx, cy - 13 + bob, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#22262e';                                                    // les lunettes noires
+    ctx.fillRect(cx - 9, cy - 16 + bob, 18, 5.4);
+    ctx.fillStyle = '#8fb4e8';
+    ctx.fillRect(cx - 8, cy - 15.4 + bob + look * 0, 6.4, 4.2);
+    ctx.fillRect(cx + 1.6, cy - 15.4 + bob, 6.4, 4.2);
+    ctx.fillStyle = '#1d3a6e'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.8; // la casquette
+    ctx.beginPath(); ctx.arc(cx, cy - 20 + bob, 11, Math.PI, 0); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(cx, cy - 20 + bob, 15, 3.4, 0, Math.PI, 0); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#e8c45a';
+    ctx.beginPath(); ctx.arc(cx, cy - 25 + bob, 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.8; ctx.lineCap = 'round';     // la bouche sévère
+    ctx.beginPath(); ctx.moveTo(cx - 4, cy - 6 + bob); ctx.lineTo(cx + 4, cy - 6 + bob); ctx.stroke();
+  },
   // 💀 Squelette — crâne, cage thoracique, bras ballants. ⚠ Il a DEUX vies visuelles : debout,
   // et en tas d'os (`m.bones`), où il se recompose sous les yeux du joueur. Le second état est
   // dessiné ici et nulle part ailleurs : c'est le même monstre, pas un décor de plus.
@@ -7045,25 +7271,46 @@ function doodleDraw(ctx, s, W, H) {
       ctx.beginPath(); ctx.moveTo(q.x + q.w / 2, q.y + q.h / 2); ctx.lineTo(s.px, s.py); ctx.stroke();
     }
     ctx.restore();
-    // ⛓️ Chaînes : AVANT les filets d'eau, elles passent derrière. Maillons dessinés un à un le
-    // long de la courbe — un simple trait n'aurait rien eu d'une chaîne.
-    for (const c of doodleChainPairs(s)) {
+    // ⛓️🪜 Liaisons grimpables : AVANT les filets d'eau, elles passent derrière. La CHAÎNE est
+    // une suite de maillons le long de la courbe (un simple trait n'aurait rien eu d'une
+    // chaîne) ; l'ÉCHELLE est deux montants et ses barreaux. Même parcours, deux traits.
+    for (const c of doodleClimbAll(s)) {
       ctx.save();
       const N = 16;
-      for (let i = 0; i <= N; i++) {
-        const pt = doodleChainAt(c, i / N), nx = doodleChainAt(c, Math.min(1, (i + 0.5) / N));
+      if (c.k === 'ladder') {
+        for (const off of [-6, 6]) {                                   // les deux montants
+          ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6; ctx.beginPath();
+          for (let i = 0; i <= N; i++) { const pt = doodleClimbAt(c, i / N); i ? ctx.lineTo(pt.x + off, pt.y) : ctx.moveTo(pt.x + off, pt.y); }
+          ctx.stroke();
+        }
+        ctx.strokeStyle = '#c3c8d0'; ctx.lineWidth = 2.2;               // les barreaux
+        for (let i = 1; i < N; i++) {
+          const pt = doodleClimbAt(c, i / N);
+          ctx.beginPath(); ctx.moveTo(pt.x - 6, pt.y); ctx.lineTo(pt.x + 6, pt.y); ctx.stroke();
+        }
+      } else for (let i = 0; i <= N; i++) {
+        const pt = doodleClimbAt(c, i / N), nx = doodleClimbAt(c, Math.min(1, (i + 0.5) / N));
         const ang = Math.atan2(nx.y - pt.y, nx.x - pt.x);
         ctx.save(); ctx.translate(pt.x, pt.y); ctx.rotate(ang);
         ctx.strokeStyle = i % 2 ? '#8f929c' : '#5c5f68'; ctx.lineWidth = 1.8;
         ctx.beginPath(); ctx.ellipse(0, 0, 4.6, 2.8, 0, 0, Math.PI * 2); ctx.stroke();
         ctx.restore();
       }
-      // le grimpeur : un maillon doré à l'endroit exact où l'on se hisse
+      // le grimpeur : un repère doré à l'endroit exact où l'on se hisse
       if (s.chainUp && s.chainUp.a === c.a && s.chainUp.b === c.b) {
-        const pt = doodleChainAt(c, s.chainUp.u);
+        const pt = doodleClimbAt(c, s.chainUp.u);
         ctx.fillStyle = '#ffd54a'; ctx.strokeStyle = '#8a5a2c'; ctx.lineWidth = 1.4;
         ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       }
+      ctx.restore();
+    }
+    // 🌪️ Tornade de barbelés : le rouleau détaché, en orbite autour du doodler ou en train de
+    // regagner sa dalle. ⚠ Dessiné DANS le monde et non collé au doodler : pendant le retour il
+    // n'est plus attaché à lui, et la trajectoire doit se voir.
+    if (s.barb) {
+      const bp = s.barb.px, by2 = s.barb.py;
+      ctx.save(); ctx.globalAlpha = s.barb.ph === 'back' ? 0.85 : 1;
+      doodleBarbRoll(ctx, bp, by2, 12, s.t * 2);
       ctx.restore();
     }
     // 🔥 Sommets embrasés par le lance-flammes : dessinés APRÈS les dalles, ils lèchent leur
@@ -7660,6 +7907,8 @@ function doodleTileBirth(s, p, diff) {
   if (type2 === 'gale') { p.g4 = Math.floor(Math.random() * D_GALE_DIRS.length); p.galeTier = doodleTier(s.score); }
   // ⏲️ Balancier : sa phase est tirée à la naissance, sinon tous ceux de l'écran battraient ensemble.
   if (type2 === 'pendul') p.pph = Math.random() * Math.PI * 2;
+  // 🔦 Projecteur : sa phase est tirée à la naissance, sinon tous ceux de l'écran balaieraient ensemble.
+  if (type2 === 'searchlight') p.ph = Math.random() * Math.PI * 2;
   // ⛈️ Phase TIRÉE AU HASARD par dalle, comme les tuiles à cycle : sans elle, tous les orages de
   // l'écran frapperaient à l'unisson et il n'y aurait plus qu'un seul instant à craindre.
   if (type2 === 'storm') p.stormT = Math.random() * D_STORM_EVERY;
@@ -7737,6 +7986,14 @@ function doodleTileBirth(s, p, diff) {
     for (let k = 0; k < 12 && Math.abs(x2 - x) > D_CHAIN_MAXX; k++) x2 = 6 + Math.random() * (DOODLE_W - w - 12);
     s.platforms.push({ x: x2, y: ny + D_CHAIN_DY[0] + Math.random() * (D_CHAIN_DY[1] - D_CHAIN_DY[0]),
                        w, h: D_PLAT_H, type: 'chain', chain: id, dead: false });
+  }
+  // 🪜 Échelle de prison : même mécanique que la ⛓️ Chaîne, mais VERTICALE — la jumelle naît
+  // juste en dessous, à la MÊME abscisse. C'est ce qui en fait une échelle et non une corde.
+  if (type === 'ladder') {
+    const id = (s.ladderSeq = (s.ladderSeq || 0) + 1);
+    p.ladder = id;
+    s.platforms.push({ x, y: ny + D_LADDER_DY[0] + Math.random() * (D_LADDER_DY[1] - D_LADDER_DY[0]),
+                       w, h: D_PLAT_H, type: 'ladder', ladder: id, dead: false });
   }
   // 🚇 Tuyaux : la dalle tirée devient une bouche, et sa JUMELLE naît aussitôt une à deux
   // rangées plus bas, sur une abscisse franchement écartée — deux bouches côte à côte se
