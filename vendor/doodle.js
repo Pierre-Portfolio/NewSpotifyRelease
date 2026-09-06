@@ -2700,13 +2700,43 @@ function doodleClimbPairs(s, champ) {
   for (const l of by.values()) {
     if (l.length < 2) continue;
     const [a, b] = l[0].y <= l[1].y ? [l[0], l[1]] : [l[1], l[0]];   // a = haute, b = basse
-    out.push({ a, b, k: champ, x1: a.x + a.w / 2, y1: a.y + a.h, x2: b.x + b.w / 2, y2: b.y });
+    out.push(doodleClimbLink(a, b, champ));
+  }
+  return out;
+}
+// La géométrie d'une liaison, de la dalle HAUTE `a` vers la BASSE `b`. ⚠ Recalculée à chaque
+// lecture et jamais mémorisée : les dalles bougent (🛗 ascenseur, 🔵 bleue), un tracé figé aurait
+// décroché du décor au bout de deux secondes.
+function doodleClimbLink(a, b, k) { return { a, b, k, x1: a.x + a.w / 2, y1: a.y + a.h, x2: b.x + b.w / 2, y2: b.y }; }
+// 🪜 12.8.3 — L'ÉCHELLE N'EST PLUS UNE PAIRE (demande utilisateur) : UNE seule dalle la porte, et
+// l'échelle rejoint la PROCHAINE dalle disponible au-dessus — la plus basse de celles qui la
+// dominent, quelle que soit son abscisse. L'échelle peut donc être en DIAGONALE.
+// ⚠ Les 🟫 cassantes sont exclues : une échelle qui mène à une dalle qui se dérobe à l'arrivée
+// n'est pas une échelle, c'est un piège. Type EFFECTIF, pour qu'un 🃏 Casino déguisé en cassante
+// soit exclu lui aussi.
+// ⚠ Le haut est résolu à CHAQUE lecture, jamais posé à la naissance : les dalles meurent,
+// naissent et défilent — un haut fixé une fois pour toutes aurait fini par pointer sur rien.
+function doodleLadderTop(s, p) {
+  let best = null;
+  for (const q of s.platforms) {
+    if (q === p || q.dead || !doodleSolid(q) || q.y >= p.y - 8) continue;
+    if (q.type === 'break' || doodleEffType(q) === 'break') continue;
+    if (!best || q.y > best.y) best = q;
+  }
+  return best;
+}
+function doodleLadderLinks(s) {
+  const out = [];
+  for (const p of s.platforms) {
+    if (p.dead || doodleEffType(p) !== 'ladder') continue;
+    const top = doodleLadderTop(s, p);
+    if (top) out.push(doodleClimbLink(top, p, 'ladder'));
   }
   return out;
 }
 // Toutes les liaisons, les deux sortes confondues — ce que le dessin et la recherche de paire
 // veulent presque toujours.
-function doodleClimbAll(s) { return doodleClimbPairs(s, 'chain').concat(doodleClimbPairs(s, 'ladder')); }
+function doodleClimbAll(s) { return doodleClimbPairs(s, 'chain').concat(doodleLadderLinks(s)); }
 // Point de la liaison à l'avancement `u` (0 = sous la dalle haute, 1 = sur la dalle basse).
 // ⚠ La CHAÎNE pend (D_CHAIN_SAG) : sans la flèche, deux dalles reliées par un trait droit
 // n'auraient rien d'une chaîne lâche, et « soumise à la gravité » n'aurait pas été tenu.
@@ -2724,11 +2754,11 @@ function doodleMakeSkel(x, y) {
 // 🔒 12.5.8 — BIOME PRISON (demande utilisateur). Trois tuiles, dont deux reprennent des
 // mécaniques déjà éprouvées ailleurs — et c'est voulu : un biome n'a pas à tout réinventer, il
 // doit avoir sa COULEUR.
-// 🪜 L'ÉCHELLE DE PRISON est la ⛓️ Chaîne de l'Enfer, rigide et VERTICALE : les deux dalles
-//   naissent l'une au-dessus de l'autre, à la même abscisse, et l'on monte tout droit. Elles
-//   partagent `doodleClimbPairs` / `doodleClimbAt` — seule la flèche change (nulle ici).
-//   ⚠ La jumelle naît EN DESSOUS, comme partout : posée plus haut elle abaisserait `topY` et la
-//   génération croirait la rangée suivante déjà faite, ouvrant un trou infranchissable.
+// 🪜 L'ÉCHELLE DE PRISON est la ⛓️ Chaîne de l'Enfer en RIGIDE : même montée, mais sans flèche.
+//   ⚠ Elle n'a PLUS de jumelle : une seule dalle la porte, et `doodleLadderTop` lui trouve à
+//   chaque frame la prochaine dalle disponible au-dessus (les 🟫 cassantes exclues). L'échelle
+//   peut donc partir EN DIAGONALE — c'est la différence avec la paire d'avant, qui imposait la
+//   même abscisse. Elles partagent `doodleClimbLink` / `doodleClimbAt` avec la chaîne.
 // 🌪️ LA TORNADE DE BARBELÉS : la dalle porte deux FILS barbelés tendus d'un bord à l'autre —
 //   le fil, c'est 100 % de la tuile. S'y poser le décolle, et il joue quatre phases enchaînées,
 //   toujours le même fil (`doodleBarbWire` dessine les quatre) : 'peel' il s'arrache en 1 s EN
@@ -2751,15 +2781,14 @@ function doodleMakeSkel(x, y) {
 //   encore jouer. Un dégât immédiat aurait fait de la tuile un piège qu'on subit.
 //   ⚠ Un délai de recharge (D_PROJ_COOL) par dalle : sans lui, rester deux secondes dans la
 //   lumière appelait une armée.
-const D_LADDER_DY = [76, 118];       // écart vertical entre les deux dalles d'une échelle
-// 🪜 12.7.4 — L'ÉCHELLE PREND SES AISES (demande utilisateur) : ses deux dalles sont 20 % plus
-// longues que les autres, ses montants 20 % plus larges, et surtout AUCUNE dalle n'a le droit
-// de les toucher. ⚠ Quand le dégagement n'est pas libre, la paire est ABANDONNÉE en bloc (la
-// dalle retombe en verte ordinaire) et non déplacée : la déplacer, c'était rejouer le tirage
-// d'abscisse jusqu'à trouver une place, donc parfois jamais — et une rangée sans dalle.
+// 🪜 12.7.4 — L'ÉCHELLE PREND SES AISES (demande utilisateur) : sa dalle est 20 % plus longue
+// que les autres, ses montants 20 % plus larges, et surtout AUCUNE dalle n'a le droit de la
+// toucher. ⚠ Quand le dégagement n'est pas libre, l'échelle est ABANDONNÉE (la dalle retombe en
+// verte ordinaire) et non déplacée : la déplacer, c'était rejouer le tirage d'abscisse jusqu'à
+// trouver une place, donc parfois jamais — et une rangée sans dalle.
 const D_LADDER_W = Math.round(D_PLAT_W * 1.2);   // 74 px : la dalle d'échelle, 20 % plus longue
 const D_LADDER_HALF = 7.2;                       // demi-écart des montants (6 px + 20 %)
-const D_LADDER_CLEAR = 5;                        // marge de dégagement autour des deux dalles
+const D_LADDER_CLEAR = 5;                        // marge de dégagement autour de la dalle
 // Le rectangle `r` est-il libre de toute dalle, marge comprise ? ⚠ Les dalles MORTES ne comptent
 // pas : elles ne sont plus dans le monde, seulement en train de s'effacer.
 function doodleRectFree(s, r, mrg) {
@@ -2910,7 +2939,7 @@ const D_BIOMES = [
   // voulu — un biome n'a pas à tout réinventer, il doit avoir sa couleur.
   { k:'prison',  name:'Prison',   icon:'🔒', paper:'#e4e6e9', rule:'#bfc4cc', marge:'#5c6470',
     tiles:[
-      { k:'ladder',  icon:'🪜', name:'Échelle de prison', own:true, txt:'elles naissent PAR DEUX, l\'une au-dessus de l\'autre et à la même abscisse, avec une échelle entre les deux. Te poser sur celle du BAS, c\'est en monter les barreaux jusqu\'à celle du haut, où tu repars d\'un saut' },
+      { k:'ladder',  icon:'🪜', name:'Échelle de prison', own:true, txt:'une échelle en part vers la PROCHAINE dalle disponible au-dessus, quelle que soit son abscisse — elle est donc souvent en diagonale, et ne mène jamais à une 🟫 cassante. T\'y poser, c\'est en monter les barreaux jusqu\'en haut, où tu repars d\'un saut' },
       { k:'barbed',  icon:'🌪️', name:'Tornade de barbelés', own:true, txt:'le fil s\'ARRACHE de la dalle par la droite, fonce sur toi comme aimanté et se referme en anneau tournant pendant ' + Math.round(D_BARB_LIFE / 60) + ' s, déchirant toute créature qu\'il croise — puis il explose en ' + D_BARB_NEEDLES + ' aiguilles. Il ne te blesse jamais : c\'est une garde. Un seul fil en l\'air à la fois' },
       { k:'searchlight', icon:'🔦', name:'Projecteur', own:true, w:D_BIOME_TILE_RARE, txt:'une tourelle au centre de la dalle et deux caméras de surveillance. Le faisceau tourne dans le sens des aiguilles d\'une montre, sans fin : t\'y faire prendre DÉCLENCHE L\'ALARME et fait rappliquer un 👮 gardien, qui fonce droit sur toi. Une alarme toutes les ' + Math.round(D_PROJ_COOL / 60) + ' s par dalle' },
     ],
@@ -5413,15 +5442,17 @@ function doodleTileDraw(ctx, p, t) {
     ctx.globalAlpha = 1;
     return;
   }
-  // 🪜 Échelle de prison : platelage d'acier, avec les deux pattes d'où part l'échelle. ⚠ Les
-  // barreaux sont dessinés dans `doodleDraw`, à partir de la PAIRE — comme la ⛓️ Chaîne.
+  // 🪜 Échelle de prison : platelage d'acier, avec les deux pieds d'où PART l'échelle. ⚠ Ils
+  // montent (`y - 5`) et non plus vers le bas : depuis 12.8.3 la dalle est le BAS de l'échelle,
+  // qui s'élève vers la prochaine dalle disponible. ⚠ Les barreaux, eux, sont dessinés dans
+  // `doodleDraw` à partir de la liaison — comme la ⛓️ Chaîne.
   if (p.type === 'ladder') {
     doodleRR(ctx, x, y, w, h, 3, '#7d8492');
     ctx.fillStyle = '#4c525d'; ctx.fillRect(x, y + h - 4, w, 4);
     ctx.strokeStyle = '#5c6470'; ctx.lineWidth = 1.2;                 // le platelage strié
     for (let i = 1; i < 6; i++) { ctx.beginPath(); ctx.moveTo(x + i * w / 6, y + 2); ctx.lineTo(x + i * w / 6, y + h - 4); ctx.stroke(); }
-    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6;                 // les deux pattes, à l'écartement des montants
-    [-D_LADDER_HALF, D_LADDER_HALF].forEach(dx => { ctx.beginPath(); ctx.moveTo(x + w / 2 + dx, y + h - 2); ctx.lineTo(x + w / 2 + dx, y + h + 5); ctx.stroke(); });
+    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.6;                 // les deux pieds, à l'écartement des montants
+    [-D_LADDER_HALF, D_LADDER_HALF].forEach(dx => { ctx.beginPath(); ctx.moveTo(x + w / 2 + dx, y + 3); ctx.lineTo(x + w / 2 + dx, y - 5); ctx.stroke(); });
     return;
   }
   // 🌪️ Tornade de barbelés : DEUX fils tendus d'un bord à l'autre de la dalle — le fil fait
@@ -8239,22 +8270,13 @@ function doodleTileBirth(s, p, diff) {
     s.platforms.push({ x: x2, y: ny + D_CHAIN_DY[0] + Math.random() * (D_CHAIN_DY[1] - D_CHAIN_DY[0]),
                        w, h: D_PLAT_H, type: 'chain', chain: id, dead: false });
   }
-  // 🪜 Échelle de prison : même mécanique que la ⛓️ Chaîne, mais VERTICALE — la jumelle naît
-  // juste en dessous, à la MÊME abscisse. C'est ce qui en fait une échelle et non une corde.
+  // 🪜 Échelle de prison : UNE seule dalle, sans jumelle — son haut est la prochaine dalle
+  // disponible au-dessus, retrouvée à chaque frame par `doodleLadderTop`.
   if (type === 'ladder') {
     // 20 % plus longue, et recalée dans l'écran : élargie vers la droite, elle en serait sortie.
     const lw = D_LADDER_W, lx = Math.max(6, Math.min(x, DOODLE_W - 6 - lw));
-    const by = ny + D_LADDER_DY[0] + Math.random() * (D_LADDER_DY[1] - D_LADDER_DY[0]);
-    // ⚠ Le dégagement des DEUX dalles est exigé avant d'en poser une seule : la basse naît au
-    // milieu de rangées déjà générées, c'est elle qui trouve le plus souvent une voisine.
-    if (!doodleRectFree(s, { x: lx, y: ny, w: lw, h: D_PLAT_H }) ||
-        !doodleRectFree(s, { x: lx, y: by, w: lw, h: D_PLAT_H })) {
-      p.type = 'green';   // pas de place : ni échelle ni jumelle, une plateforme ordinaire
-    } else {
-      const id = (s.ladderSeq = (s.ladderSeq || 0) + 1);
-      p.ladder = id; p.w = lw; p.x = lx;
-      s.platforms.push({ x: lx, y: by, w: lw, h: D_PLAT_H, type: 'ladder', ladder: id, dead: false });
-    }
+    if (!doodleRectFree(s, { x: lx, y: ny, w: lw, h: D_PLAT_H })) p.type = 'green';   // pas de place
+    else { p.w = lw; p.x = lx; }
   }
   // 🚇 Tuyaux : la dalle tirée devient une bouche, et sa JUMELLE naît aussitôt une à deux
   // rangées plus bas, sur une abscisse franchement écartée — deux bouches côte à côte se
