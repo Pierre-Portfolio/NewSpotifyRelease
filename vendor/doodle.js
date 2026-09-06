@@ -2824,12 +2824,17 @@ function doodleMakeSkel(x, y) {
 //   encore jouer. Un dégât immédiat aurait fait de la tuile un piège qu'on subit.
 //   ⚠ Un délai de recharge (D_PROJ_COOL) par dalle : sans lui, rester deux secondes dans la
 //   lumière appelait une armée.
-// 🪜 12.7.4 — L'ÉCHELLE PREND SES AISES (demande utilisateur) : sa dalle est 20 % plus longue
-// que les autres, ses montants 20 % plus larges, et surtout AUCUNE dalle n'a le droit de la
-// toucher. ⚠ Quand le dégagement n'est pas libre, l'échelle est ABANDONNÉE (la dalle retombe en
-// verte ordinaire) et non déplacée : la déplacer, c'était rejouer le tirage d'abscisse jusqu'à
-// trouver une place, donc parfois jamais — et une rangée sans dalle.
-const D_LADDER_W = Math.round(D_PLAT_W * 1.2);   // 74 px : la dalle d'échelle, 20 % plus longue
+// 🪜 12.7.4 — L'ÉCHELLE PREND SES AISES (demande utilisateur) : ses montants sont 20 % plus
+// larges et surtout AUCUNE dalle n'a le droit de la toucher. ⚠ Quand le dégagement n'est pas
+// libre, l'échelle est ABANDONNÉE (la dalle retombe en verte ordinaire) et non déplacée : la
+// déplacer, c'était rejouer le tirage d'abscisse jusqu'à trouver une place, donc parfois
+// jamais — et une rangée sans dalle.
+// ⚠ 12.9.4 — SA DALLE EST 20 % MOINS LARGE (demande utilisateur) : 74 → 60 px, d'où le `× 0.8`
+// qui suit le 1,2 de 12.7.4 plutôt qu'un facteur recalculé — la formule dit ce qui a été repris.
+// Les MONTANTS gardent leur largeur : c'est le platelage qui rétrécit, pas l'échelle elle-même.
+// ⚠ Effet de bord assumé : une dalle plus étroite trouve plus souvent son dégagement, donc
+// l'échelle est abandonnée moins souvent.
+const D_LADDER_W = Math.round(D_PLAT_W * 1.2 * 0.8);   // 60 px : la dalle d'échelle
 const D_LADDER_HALF = 7.2;                       // demi-écart des montants (6 px + 20 %)
 const D_LADDER_CLEAR = 5;                        // marge de dégagement autour de la dalle
 // Le rectangle `r` est-il libre de toute dalle, marge comprise ? ⚠ Les dalles MORTES ne comptent
