@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.6.2';
+const APP_VERSION = '12.6.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -36631,6 +36631,57 @@ function TodoPanel() {
   // Cécile : les activités faites descendent en bas de liste (ordre de saisie préservé sinon)
   if (isCecile) items = [...items.filter(t => !t.done), ...items.filter(t => t.done)];
   const doneCount = isCecile ? items.filter(t => t.done).length : 0;
+
+  // ── ⠿ 12.6.3 · GLISSER-DÉPOSER POUR RÉORDONNER (demande utilisateur) ───────────────
+  // Chaque rubrique se réordonne à la poignée. ⚠ Une POIGNÉE dédiée et non la ligne entière :
+  // la ligne porte déjà l'étoile, l'appui long « supprimer la récurrence » du Quotidien et
+  // trois boutons — la rendre draggable aurait mangé tous ces gestes.
+  // ⚠ Pointer events et non l'API HTML5 `draggable` : celle-ci ne fonctionne pas au doigt sur
+  // mobile, où se passe l'essentiel de l'usage du Hub.
+  // ⚠ `touchAction:'none'` sur la poignée, sinon le navigateur fait défiler la page au lieu
+  // d'envoyer les `pointermove`.
+  // ⚠ L'ordre affiché est réécrit DANS `todos` : le tableau complet est conservé, seules les
+  // positions occupées par les tâches de la rubrique courante sont permutées entre elles. Les
+  // autres rubriques ne bougent pas d'un cran, et l'ordre survit au rechargement comme au backup.
+  // ⚠ La permutation se fait au franchissement du MILIEU du voisin, un cran à la fois : viser
+  // une position absolue aurait fait sauter la ligne dès le premier pixel de mouvement.
+  // ⚠ Dans « Activité avec Cécile » l'affichage range les activités faites en bas ; on ne
+  // réordonne donc qu'à l'intérieur de chaque groupe, et une ligne lâchée de l'autre côté de la
+  // frontière revient à sa place — c'est la règle de la rubrique qui prime.
+  const dragRef = React.useRef(null);
+  const rowRefs = React.useRef({});
+  const [dragId, setDragId] = React.useState(null);
+  const applyOrder = ids => {
+    const byId = new Map(todos.map(t => [t.id, t]));
+    const inBucket = new Set(ids);
+    let k = 0;
+    update(todos.map(t => (inBucket.has(t.id) ? byId.get(ids[k++]) : t)));
+  };
+  const dragStart = (e, id) => {
+    if (e.button != null && e.button !== 0) return;
+    e.preventDefault();
+    if (e.currentTarget.setPointerCapture) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} }
+    dragRef.current = { id };
+    setDragId(id);
+  };
+  const dragMove = e => {
+    const d = dragRef.current; if (!d) return;
+    const order = items.map(t => t.id), i = order.indexOf(d.id);
+    if (i < 0) return;
+    for (const j of [i - 1, i + 1]) {
+      if (j < 0 || j >= order.length) continue;
+      const el = rowRefs.current[order[j]];
+      if (!el) continue;
+      const r = el.getBoundingClientRect(), mid = r.top + r.height / 2;
+      if ((j < i && e.clientY < mid) || (j > i && e.clientY > mid)) {
+        const next = order.slice();
+        next.splice(i, 1); next.splice(j, 0, d.id);
+        applyOrder(next);
+        break;
+      }
+    }
+  };
+  const dragEnd = () => { dragRef.current = null; setDragId(null); };
   const arrowBtn = { background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:TODO_GREEN, fontSize:16, lineHeight:1, padding:'4px 10px', cursor:'pointer', flexShrink:0 };
 
   return (
@@ -36711,8 +36762,17 @@ function TodoPanel() {
             const doneToday = isDaily && t.doneDate === today;
             const doneCecile = isCecile && !!t.done;
             const faded = doneToday || doneCecile;   // grisée + barrée (validée du jour / activité faite)
+            const dragging = dragId === t.id;
             return (
-              <div key={t.id} style={{ display:'flex', alignItems:'center', gap:10, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px', opacity: faded ? 0.5 : 1 }}>
+              <div key={t.id} ref={el => { if (el) rowRefs.current[t.id] = el; else delete rowRefs.current[t.id]; }}
+                style={{ display:'flex', alignItems:'center', gap:8, background: dragging ? `${TODO_GREEN}1e` : C.surfaceHigh, borderRadius:8, padding:'6px 8px',
+                         opacity: dragging ? 0.9 : (faded ? 0.5 : 1),
+                         boxShadow: dragging ? `0 0 0 1px ${TODO_GREEN}77` : 'none' }}>
+                <span onPointerDown={e => dragStart(e, t.id)} onPointerMove={dragMove}
+                  onPointerUp={dragEnd} onPointerCancel={dragEnd}
+                  title="Glisser pour changer l'ordre" aria-label="Réordonner cette tâche"
+                  style={{ color: dragging ? TODO_GREEN : C.dim, fontSize:14, lineHeight:1, padding:'2px 3px', cursor:'grab',
+                           flexShrink:0, touchAction:'none', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }}>⠿</span>
                 <button onClick={() => toggleFav(t.id)} title={t.fav ? 'Retirer des favorites' : 'Marquer comme favorite'}
                   style={{ background:'none', border:'none', color: t.fav ? '#f5c518' : C.dim, fontSize:15, lineHeight:1, padding:'2px 4px', cursor:'pointer', flexShrink:0 }}>{t.fav ? '★' : '☆'}</button>
                 <div
@@ -36736,6 +36796,11 @@ function TodoPanel() {
               </div>
             );
           })}
+        </div>
+      )}
+      {items.length > 1 && (
+        <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+          ⠿ glisse une tâche pour changer son ordre dans la rubrique
         </div>
       )}
       {isDaily && (
