@@ -300,7 +300,15 @@ function doodleLootGrant(s) {
   // une information, pas un butin raté. D'où le toast à elle et le retour anticipé.
   else if (l.k === 'cure') {
     const got = doodleCure(s);
-    s.toast = { txt: got.length ? `🧴 Panacée — ${got.join(' ')} balayé${got.length > 1 ? 's' : ''}` : '🧴 Panacée — rien à soigner, tu es net', life: D_TOAST_LIFE * 1.4 };
+    // 🧴 12.7.2 — RIEN À SOIGNER ⇒ ELLE ATTEND (demande utilisateur) : bue sur un joueur net,
+    // la panacée était un butin perdu. Elle part en RÉSERVE (`s.cureHold`) et se boit toute seule
+    // à la première chose à soigner — voir `doodleCureHold`.
+    if (!got.length) {
+      s.cureHold = (s.cureHold || 0) + 1;
+      s.toast = { txt: `🧴 Panacée — rien à soigner, elle attend en réserve${s.cureHold > 1 ? ' ×' + s.cureHold : ''}`, life: D_TOAST_LIFE * 1.4 };
+      return l;
+    }
+    s.toast = { txt: `🧴 Panacée — ${got.join(' ')} balayé${got.length > 1 ? 's' : ''}`, life: D_TOAST_LIFE * 1.4 };
     return l;
   }
   else {
@@ -5769,6 +5777,18 @@ function doodleCure(s) {
   if (n) got.push('⚡');
   return got;
 }
+// 🧴 La RÉSERVE de panacées : celles bues alors qu'il n'y avait rien à soigner attendent ici.
+// Dès que `doodleCure` trouve enfin quelque chose, UNE SEULE se boit — les autres continuent
+// d'attendre. ⚠ Appelée une frame sur `D_CURE_HOLD_EVERY` et non à chaque frame : elle balaie
+// toutes les plateformes, et un sixième de seconde de retard ne se voit pas.
+const D_CURE_HOLD_EVERY = 10;
+function doodleCureHold(s) {
+  if (!(s.cureHold > 0)) return;
+  const got = doodleCure(s);
+  if (!got.length) return;
+  s.cureHold--;
+  s.toast = { txt: `🧴 Panacée en réserve — ${got.join(' ')} balayé${got.length > 1 ? 's' : ''}`, life: D_TOAST_LIFE * 1.4 };
+}
 // Bandeau des bonus acquis, en haut à gauche : sans lui, des bonus « permanents » seraient
 // invisibles et on ne saurait jamais lesquels on a.
 // ⚠ 9.4.0 — TOUS les effets actifs, en HAUT À DROITE (demande utilisateur) : bonus permanents,
@@ -5805,6 +5825,9 @@ function doodlePerkHud(ctx, s, W) {
   if (s.shroom > 0) chips.push({ t: `🍄${Math.ceil(s.shroom / 60)}s`, bg:'rgba(226,86,74,0.92)', fg:'#fff' });
   if (s.neg > 0) chips.push({ t: `🎨${Math.ceil(s.neg / 60)}s`, bg:'rgba(60,60,70,0.92)', fg:'#fff' });
   if (s.blind) chips.push({ t: '🌁', bg:'rgba(150,160,172,0.92)', fg:'#1c2028' });
+  // 🧴 Panacées en attente : sans pastille, une réserve qui se boit toute seule plus tard
+  // passerait pour un butin volé.
+  if (s.cureHold > 0) chips.push({ t: `🧴×${s.cureHold}`, bg:'rgba(255,255,255,0.82)', fg:'#3a2a10' });
   // 🖌️ Teinte portée : la peau la dit déjà, mais elle ne dit NI son nom NI ce qu'il en reste.
   // ⚠ Une teinte consommable (`life: 0`) affiche son icône seule : elle n'a pas de compte à rebours.
   if (s.skin) {
