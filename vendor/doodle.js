@@ -5322,22 +5322,40 @@ function doodleTileDraw(ctx, p, t) {
     ctx.beginPath(); ctx.arc(x + w / 2, y + h + 2, 4, -0.5, Math.PI + 0.5); ctx.stroke();
     return;
   }
-  // 🦴 Ossuaire : dalle d'ossements empilés, avec un crâne au centre dont les orbites
-  // ROUGEOIENT à l'approche de la prochaine sortie — c'est le compte à rebours, visible.
+  // 🦴 Ossuaire : un TAS DE CRÂNES empilés les uns sur les autres, et leurs orbites ROUGEOIENT
+  // toutes ensemble à l'approche de la prochaine sortie — c'est le compte à rebours, visible.
+  // ⚠ 12.7.7 — Deux fémurs croisés et un crâne unique (l'ancien dessin) faisaient un blason, pas
+  // un ossuaire. Trois assises décalées d'un demi-crâne, dessinées du fond vers l'avant : c'est
+  // le DÉCALAGE et le recouvrement qui font lire « empilé » plutôt qu'« aligné ».
+  // ⚠ Inclinaisons et tailles tirées de l'ABSCISSE de la dalle, jamais au sort : deux ossuaires
+  // n'ont pas la même pile, mais une même dalle garde la sienne d'une frame à l'autre.
   if (p.type === 'ossuary') {
     doodleRR(ctx, x, y, w, h, 5, '#6b6252');
     ctx.fillStyle = '#443f34'; ctx.fillRect(x, y + h - 4, w, 4);
-    ctx.strokeStyle = '#d8d2bd'; ctx.lineWidth = 3; ctx.lineCap = 'round';   // deux fémurs croisés
-    ctx.beginPath(); ctx.moveTo(x + 7, y + 4); ctx.lineTo(x + w - 7, y + h - 5);
-    ctx.moveTo(x + w - 7, y + 4); ctx.lineTo(x + 7, y + h - 5); ctx.stroke();
-    const cx = x + w / 2, cy = y + h / 2;
-    ctx.fillStyle = '#efeadb'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.ellipse(cx, cy - 1, 7.5, 6.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillRect(cx - 4, cy + 4, 8, 3.4);                             // la mâchoire
-    // orbites : d'autant plus rouges que la prochaine sortie approche
     const pret = p.skelT == null ? 1 : Math.max(0, Math.min(1, 1 - p.skelT / D_SKEL_EVERY));
-    ctx.fillStyle = 'rgb(' + Math.round(30 + pret * 225) + ',' + Math.round(24 + pret * 40) + ',30)';
-    [-3, 3].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx, cy - 1.5, 2.2, 0, Math.PI * 2); ctx.fill(); });
+    const eye = 'rgb(' + Math.round(30 + pret * 225) + ',' + Math.round(24 + pret * 40) + ',30)';
+    const skull = (cx, cy, r, tilt) => {
+      ctx.save(); ctx.translate(cx, cy); ctx.rotate(tilt);
+      ctx.fillStyle = '#efeadb'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = Math.max(0.7, r * 0.17);
+      ctx.beginPath();                                                  // la mâchoire, sous la boîte
+      ctx.moveTo(-r * 0.5, r * 0.5); ctx.lineTo(-r * 0.4, r * 1.15); ctx.lineTo(r * 0.4, r * 1.15); ctx.lineTo(r * 0.5, r * 0.5);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.9, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();   // la boîte crânienne
+      ctx.fillStyle = eye;                                              // les orbites, qui rougeoient
+      [-1, 1].forEach(sg => { ctx.beginPath(); ctx.ellipse(sg * r * 0.42, -r * 0.08, r * 0.29, r * 0.33, 0, 0, Math.PI * 2); ctx.fill(); });
+      ctx.fillStyle = '#2b2b33';                                        // l'os nasal
+      ctx.beginPath(); ctx.moveTo(0, r * 0.14); ctx.lineTo(-r * 0.17, r * 0.5); ctx.lineTo(r * 0.17, r * 0.5); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    };
+    const seed = Math.abs(Math.round(p.x));
+    const rows = [{ n: 6, r: 4.7, cy: y + h - 5 }, { n: 5, r: 4.4, cy: y + 4.5 }, { n: 3, r: 4, cy: y - 1 }];
+    for (let ri = 0; ri < rows.length; ri++) {
+      const R = rows[ri], step = (w - 8) / R.n;
+      for (let i = 0; i < R.n; i++) {
+        const g = (seed + ri * 31 + i * 17) % 13;
+        skull(x + 4 + step * (i + 0.5), R.cy + (g % 3) * 0.5, R.r * (0.88 + (g % 5) * 0.06), (g - 6) * 0.05);
+      }
+    }
     return;
   }
   // 🔥 Flamme éternelle : coulée de magma à ciel ouvert, avec ses flammes au-dessus. ⚠ Les
