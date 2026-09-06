@@ -1371,7 +1371,8 @@ const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5, 
 // ⚠ 12.4.2 — LA POURSUITE S'ARRÊTE AU PREMIER REBOND (`p.glued`, demande utilisateur) : elle
 // suivait sans relâche, se retrouvait donc toujours sous les pieds au retour, et on rebondissait
 // dessus indéfiniment sans jamais quitter sa hauteur. Figée après le premier passage, elle rend
-// un second rebond de dalle ordinaire — celui qu'on rate si on ne s'est pas déplacé.
+// un second rebond ORDINAIRE MAIS PLUS HAUT (voir `p.hops` au calcul du rebond) : le seul moyen
+// d'en repartir vers le haut est justement d'y retomber — celui qu'on rate si on s'est déplacé.
 const D_GLUE_V = 1.6;
 // 🪞 10.3.7 — MIMÉTIQUE (demande utilisateur) : elle prend l'APPARENCE ET L'EFFET de la dernière
 // dalle sur laquelle le joueur a rebondi.
@@ -1921,7 +1922,7 @@ function doodlePerkRaise(s, cible) {
 const D_BAMB_N = 3;
 const D_BAMB_CLEAR = ['roll', 'mim', 'gvx', 'vy2', 'y0', 'span2', 'ax', 'ay', 'boo', 'conf',
   'fade', 'fuse', 'tent', 'pcool', 'steam', 'lava', 'laz', 'grap', 'grapCool', 'egg', 'ori',
-  'lit', 'tama', 'meals', 'tlaz', 'lazFire', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'pool', 'pop', 'eat'];
+  'lit', 'tama', 'meals', 'tlaz', 'lazFire', 'armed', 'sink', 'stal', 'stalLeft', 'stalHits', 'mum', 'dir', 'uses', 'pipe', 'pool', 'pop', 'eat', 'hops'];
 function doodleBambooify(s, p) {
   s.bambLeft--;
   p.type = 'bambooed';
@@ -2050,8 +2051,9 @@ const D_TILES = [
   // ⚠ 12.4.2 — UNE SEULE TRAVERSÉE POUR LA PAIRE (demande utilisateur) : les deux bouches se
   // bouchent ensemble à la sortie. Sans ça, on retombait sur celle d'arrivée, qui renvoyait vers
   // celle de départ, qui renvoyait… — un aller-retour sans fin, à la même hauteur, dont rien ne
-  // faisait sortir. Bouchées, ce sont deux dalles ordinaires, et le second rebond est classique.
-  { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre — une seule fois, puis les deux bouches se bouchent et ne sont plus que des dalles ordinaires' },
+  // faisait sortir. Bouchées, ce sont deux dalles ordinaires — mais y retomber une SECONDE fois
+// renvoie plus haut (voir `p.hops` au calcul du rebond), ce qui rend la bouche d'arrivée utile.
+  { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre — une seule fois, puis les deux bouches se bouchent ; y retomber une seconde fois te renvoie plus haut' },
   // 🪙 9.9.1 — QUITTE OU DOUBLE (demande utilisateur) : une seule fois par dalle, pile ou face.
   { k: 'gamble',  icon:'🪙', name: 'Quitte ou double', txt: 'une chance sur deux de DOUBLER le NOMBRE de tes effets (autant de neufs que tu en as, au moins ' + D_GAMBLE_MIN + ') et de tes tuiles… une chance sur deux d\'en perdre la MOITIÉ, tirée au hasard — jamais tout' },
   // 🕯️ 9.9.6 — ESPRITS (demande utilisateur) : trois apparitions qui fondent sur toi chacune
@@ -2069,7 +2071,7 @@ const D_TILES = [
   { k: 'quest',    icon:'🎯', name: 'Quête',          txt: 'elle te confie un défi tiré au sort parmi ceux qui ne tournent pas déjà ; le réussir fait tomber du ciel une PLUIE DE COFFRES — un par tranche de ' + D_QUEST_RAIN_PER + ' points d\'altitude, un au minimum. Ils se posent où ils tombent : à toi d\'aller les chercher. Les ' + D_QUESTS.length + ' défis peuvent courir de front, et les avoir tous les ' + D_QUESTS.length + ' en même temps rapporte ' + D_QUEST_TRIO + ' butins de plus, tout de suite. 🏅 Une fois les ' + D_QUESTS.length + ' RÉUSSIS, la QUÊTE ULTIME s\'ouvre d\'elle-même — abats ' + D_ULT_KILLS + ' créatures, rebondis sur ' + D_ULT_KINDS + ' sortes de tuiles et terrasse ' + D_ULT_BOSS + ' boss : elle débloque 100 % des tuiles d\'un coup et pousse toutes les améliorations et tous les bonus permanents à leur maximum' },
   { k: 'alive',    icon:'👀', name: 'Vivante',        txt: 'elle a des yeux, elle te regarde et elle se traîne vers toi — sans jamais s\'éloigner beaucoup de l\'endroit où elle est née' },
   { k: 'mimic',    icon:'🪞', name: 'Mimétique',      txt: 'elle prend l\'apparence ET l\'effet de la dernière dalle sur laquelle tu as rebondi — elle change donc au fil de la partie' },
-  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur et se déplace pour rester juste sous toi — jusqu\'à ton premier rebond dessus : le pot est vidé, elle se fige et n\'est plus qu\'une dalle ordinaire' },
+  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur et se déplace pour rester juste sous toi — jusqu\'à ton premier rebond dessus : le pot est vidé et elle se fige ; y retomber une seconde fois te renvoie plus haut' },
   { k: 'chameleon', icon:'🦎', name: 'Caméléon',      txt: 'elle prend l\'apparence d\'une tuile DÉJÀ PRÉSENTE dans la partie — débloquée ou venue d\'un biome traversé — et n\'en a aucun des effets : c\'est une plateforme ordinaire. Sans rien à imiter, elle reste une dalle verte' },
   { k: 'grapple',  icon:'🪝', name: 'Grappin',        txt: 'elle lance un grappin sur toi de temps en temps : s\'il t\'accroche, il te ramène sur la dalle, où tu repars d\'un saut' },
   { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : VERTE elle t\'offre 1 bonus (une seule fois par dalle), JAUNE on glisse, ROUGE elle te prend ' + D_LIGHT_TAKE + ' niveaux de bonus et ' + D_LIGHT_AMMO + ' balles' },
