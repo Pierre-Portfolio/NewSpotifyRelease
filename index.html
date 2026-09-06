@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.6.1';
+const APP_VERSION = '12.6.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4764,10 +4764,10 @@ const GAMES = [
   { id:'ordre',      label:'Ordre croissant', min:2, max:8 },
   { id:'osu',        label:'Osu',             min:1, max:1 },
   { id:'piano',      label:'Piano Tiles',     min:1, max:1 },
-  { id:'plox',       label:'Plox',            min:1, max:1 },
   { id:'puissance4', label:'Puissance 4',     min:2, max:2 },
   { id:'simon',      label:'Simon',           min:1, max:1 },
   { id:'chrono',     label:'Stop Chrono',     min:2, max:8 },
+  { id:'tetris',     label:'Tetris',          min:1, max:1 },
   { id:'tierlist',   label:'TierList',        min:1, max:1 },
   { id:'undercover', label:'UnderCoverDraw',  min:3, max:8 },
 ];
@@ -4875,7 +4875,7 @@ function GameHost({ game, label }) {
     case 'ordre':      return <GameOrdre />;
     case 'osu':        return <GameOsu />;
     case 'piano':      return <GamePiano />;
-    case 'plox':       return <GamePlox />;
+    case 'tetris':     return <GameTetris />;
     case 'puissance4': return <GamePuissance4 />;
     case 'simon':      return <GameSimon />;
     case 'chrono':     return <GameChrono />;
@@ -4932,17 +4932,18 @@ const D_HI_RESET_LS = 'spotifyplus_doodle_hi_reset';
 // chemin d'entrée dans l'application, sans dépendre de l'ouverture de l'onglet Jeux.
 // ⚠ Le drapeau n'est PAS dans la sauvegarde : restaurer un backup antérieur ramènera les anciens
 // records, et c'est le comportement attendu d'une restauration — elle ramène l'état d'avant.
-const REMOVED_GAMES = ['flipper', 'snake', 'bounce', 'sudoku', 'flip7', 'solitaire', 'blackjack', 'poker'];   // jeux retirés du Hub
+const REMOVED_GAMES = ['flipper', 'snake', 'bounce', 'sudoku', 'flip7', 'solitaire', 'blackjack', 'poker', 'plox'];   // jeux retirés du Hub
 // Réglages laissés par un jeu retiré, hors préfixe `spotifyplus_game_hi_` (niveau choisi…).
 const REMOVED_GAME_KEYS = ['spotifyplus_game_sudoku_level', 'spotifyplus_game_sol_draw'];
-const HI_PURGE_LS = 'spotifyplus_hi_purged_v5';
+const HI_PURGE_LS = 'spotifyplus_hi_purged_v6';
 (function purgeRemovedGameHiOnce() {
   try {
     if (localStorage.getItem(HI_PURGE_LS)) return;
     for (const id of REMOVED_GAMES) localStorage.removeItem('spotifyplus_game_hi_' + id);
     for (const k of REMOVED_GAME_KEYS) localStorage.removeItem(k);
     localStorage.removeItem('spotifyplus_flipper_hi_purged');   // drapeau de la purge 11.8.2, devenu inutile
-    localStorage.removeItem('spotifyplus_hi_purged_v4');        // drapeau de la vague précédente
+    localStorage.removeItem('spotifyplus_hi_purged_v4');        // drapeaux des vagues précédentes
+    localStorage.removeItem('spotifyplus_hi_purged_v5');
     // ⚠ La liste est CUMULATIVE : un appareil qui n'a jamais vu une vague précédente doit
     // encore nettoyer ses clés, un seul drapeau suffit donc — mais il faut un NOUVEAU nom
     // à chaque vague, sinon la nouvelle purge ne partirait pas là où l'ancienne a tourné.
@@ -5373,221 +5374,267 @@ function GameSimon() {
   );
 }
 
-// ════════ Plox (d'après le jeu de l'appli Plato — ici en SOLO) ════════
-// Une pièce de 3 blocs colorés tombe ; on la déplace, on la TOURNE, on la lâche. Aligner 3 blocs
-// de la même couleur ou plus — à l'horizontale, à la verticale OU EN DIAGONALE (les deux
-// diagonales) — les fait disparaître, et ce qui est au-dessus retombe : d'où les enchaînements,
-// qui multiplient les points de chaque passe. La partie s'arrête quand la pile DÉPASSE LA HAUTEUR.
-// ⚠ Les 4 directions se testent en ne comptant une suite QU'À SON DÉBUT (la case précédente doit
-// être d'une autre couleur), sinon une suite de 4 serait comptée quatre fois.
-// ⚠ TOURNER ≠ permuter les couleurs : la pièce a QUATRE états, parcourus dans cet ordre à chaque
-// appui — verticale → horizontale → verticale RETOURNÉE → horizontale RETOURNÉE (donc au 3e clic
-// on est sur l'horizontale retournée), puis retour à la verticale. « Retournée » inverse l'ordre
-// des trois couleurs ; c'est la même pièce lue à l'envers.
-const PLOX_HI = 'plox';
-const PLOX_COLS = ['#e0443c', '#3b82f6', '#2fbf5e', '#e0b02a', '#8b5cf0'];
-// ⚠ Cases VOLONTAIREMENT grandes (48 px contre 30 avant) : à 7 colonnes le plateau occupe alors
-// toute la largeur d'un téléphone au lieu d'un timbre-poste au milieu de l'écran.
-const PX_COLS = 7, PX_ROWS = 13, PX_CELL = 48;
-const PX_W = PX_COLS * PX_CELL, PX_H = PX_ROWS * PX_CELL;
-const PX_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
-const ploxDrop = sc => Math.max(150, 620 - ((sc / 400) | 0) * 45);   // la pièce tombe plus vite
-// Les 3 cases occupées par la pièce, avec leur couleur. `o` : 0 verticale · 1 horizontale ·
-// 2 verticale retournée · 3 horizontale retournée.
-function ploxCells(p) {
-  const rev = p.o >= 2, hor = p.o % 2 === 1;
+// ════════ Tetris ════════
+// 12.6.2 — Le 🟪 Plox est remplacé par un vrai Tetris (demande utilisateur) : tout son code
+// part, l'entrée du catalogue est renommée, et son record est purgé comme celui de n'importe
+// quel jeu retiré (voir REMOVED_GAMES / HI_PURGE_LS).
+// Plateau 10 × 20, sept tétriminos, sac de 7, fantôme, aperçu de la pièce suivante, niveaux.
+// ⚠ Les rotations sont CALCULÉES et non tabulées : chaque pièce est décrite UNE fois dans sa
+// boîte carrée, et `tetCells` applique le quart de tour (x, y) → (n−1−y, x). Quatre tables
+// recopiées à la main, c'était quatre occasions de se tromper d'un pixel, et rien pour le voir.
+// ⚠ Le sac de 7 (`tetBag`) et non un tirage uniforme : c'est la règle du vrai Tetris, et c'est
+// elle qui garantit qu'on ne peut jamais attendre une barre pendant vingt pièces.
+// ⚠ La pièce naît AU-DESSUS du plateau (`r` négatif possible) : `tetFits` ne teste donc les
+// collisions que pour les lignes ≥ 0. Sans ça, une pièce haute serait refusée à sa naissance et
+// la partie se serait terminée d'entrée.
+// ⚠ Les rattrapages de rotation (wall kicks) sont indispensables contre les bords et dans les
+// puits : sans eux, tourner est simplement REFUSÉ là où on en a le plus besoin.
+// ⚠ L'effacement des lignes passe par un état d'ANIMATION (`s.clear`) qui suspend la chute :
+// supprimer les lignes dans la même frame, c'était ne jamais voir ce que l'on vient de réussir.
+const TET_HI = 'tetris';
+const TET_COLS = 10, TET_ROWS = 20, TET_CELL = 26;
+const TET_PANEL = 76;                                    // colonne de droite : suivant, niveau, lignes
+const TET_W = TET_COLS * TET_CELL + TET_PANEL, TET_H = TET_ROWS * TET_CELL;
+const TET_CLEAR_T = 16;                                  // frames de l'éclair sur les lignes pleines
+const TET_FONT = 'system-ui, sans-serif';   // même pile que les autres jeux à canvas
+// Les sept tétriminos, dans leur boîte carrée. `n` = côté de la boîte, `c` = couleur officielle.
+const TET_SHAPES = {
+  I: { n: 4, c: '#37cfe0', cells: [[0, 1], [1, 1], [2, 1], [3, 1]] },
+  O: { n: 2, c: '#f2cf3f', cells: [[0, 0], [1, 0], [0, 1], [1, 1]] },
+  T: { n: 3, c: '#b25ce0', cells: [[1, 0], [0, 1], [1, 1], [2, 1]] },
+  S: { n: 3, c: '#4fd066', cells: [[1, 0], [2, 0], [0, 1], [1, 1]] },
+  Z: { n: 3, c: '#e2564a', cells: [[0, 0], [1, 0], [1, 1], [2, 1]] },
+  J: { n: 3, c: '#3f76e0', cells: [[0, 0], [0, 1], [1, 1], [2, 1]] },
+  L: { n: 3, c: '#f0913c', cells: [[2, 0], [0, 1], [1, 1], [2, 1]] },
+};
+const TET_KEYS = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
+// Points d'un effacement, par NOMBRE de lignes, multipliés par (niveau + 1) — barème classique :
+// un Tetris (4 lignes) vaut huit fois une ligne seule, c'est ce qui pousse à empiler.
+const TET_LINE_PTS = [0, 100, 300, 500, 800];
+const TET_KICKS = [[0, 0], [-1, 0], [1, 0], [-2, 0], [2, 0], [0, -1], [-1, -1], [1, -1]];
+// Les 4 cases d'une pièce, dans sa boîte, pour l'orientation `o` (quarts de tour horaires).
+function tetCells(k, o) {
+  const sh = TET_SHAPES[k], n = sh.n, q = ((o % 4) + 4) % 4;
+  return sh.cells.map(([x, y]) => {
+    let a = x, b = y;
+    for (let i = 0; i < q; i++) { const t = a; a = n - 1 - b; b = t; }
+    return [a, b];
+  });
+}
+// ⚠ Les lignes NÉGATIVES sont libres par construction : c'est au-dessus du plateau, là où la
+// pièce naît. Seuls les bords latéraux et le fond sont des murs.
+function tetFits(g, k, o, c, r) {
+  for (const [x, y] of tetCells(k, o)) {
+    const cc = c + x, rr = r + y;
+    if (cc < 0 || cc >= TET_COLS || rr >= TET_ROWS) return false;
+    if (rr >= 0 && g[rr * TET_COLS + cc]) return false;
+  }
+  return true;
+}
+// Sac de 7 : les sept pièces sortent dans un ordre aléatoire, puis le sac se remplit à nouveau.
+function tetBag(s) {
+  if (!s.bag.length) {
+    s.bag = TET_KEYS.slice();
+    for (let i = s.bag.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = s.bag[i]; s.bag[i] = s.bag[j]; s.bag[j] = t; }
+  }
+  return s.bag.pop();
+}
+function tetSpawn(k) { return { k, o: 0, c: Math.floor((TET_COLS - TET_SHAPES[k].n) / 2), r: -1 }; }
+// Hauteur de chute libre depuis la position courante : sert au fantôme ET au lâcher.
+function tetDropTo(g, p) { let r = p.r; while (tetFits(g, p.k, p.o, p.c, r + 1)) r++; return r; }
+function tetFullRows(g) {
   const out = [];
-  for (let i = 0; i < 3; i++) {
-    const v = p.k[rev ? 2 - i : i];
-    out.push(hor ? { c: p.c + i, r: p.r, v } : { c: p.c, r: p.r + i, v });
+  for (let r = 0; r < TET_ROWS; r++) {
+    let plein = true;
+    for (let c = 0; c < TET_COLS; c++) if (!g[r * TET_COLS + c]) { plein = false; break; }
+    if (plein) out.push(r);
   }
   return out;
 }
-const ploxFree = (g, c, r) => c >= 0 && c < PX_COLS && r >= 0 && r < PX_ROWS && !g[r * PX_COLS + c];
-// La pièce tient-elle à (c, r) dans l'orientation `o` ?
-const ploxFits = (g, c, r, o) => ploxCells({ c, r, o, k:[1, 1, 1] }).every(x => ploxFree(g, x.c, x.r));
-// Toutes les cases membres d'une suite de 3+ de la même couleur (les 4 directions).
-function ploxMatches(g) {
-  const hit = new Set();
-  for (let r = 0; r < PX_ROWS; r++) for (let c = 0; c < PX_COLS; c++) {
-    const v = g[r * PX_COLS + c];
-    if (!v) continue;
-    for (const [dc, dr] of PX_DIRS) {
-      const pc = c - dc, pr = r - dr;
-      if (pc >= 0 && pc < PX_COLS && pr >= 0 && pr < PX_ROWS && g[pr * PX_COLS + pc] === v) continue;
-      let n = 0, cc = c, rr = r;
-      while (cc >= 0 && cc < PX_COLS && rr >= 0 && rr < PX_ROWS && g[rr * PX_COLS + cc] === v) { n++; cc += dc; rr += dr; }
-      if (n >= 3) { cc = c; rr = r; for (let k = 0; k < n; k++) { hit.add(rr * PX_COLS + cc); cc += dc; rr += dr; } }
-    }
+// Retire les lignes pleines et fait descendre tout ce qui était au-dessus.
+// ⚠ Recopie de BAS EN HAUT dans le même tableau : une boucle descendante aurait écrasé les
+// lignes qu'elle n'avait pas encore lues.
+function tetCollapse(g, rows) {
+  const del = new Set(rows);
+  let w = TET_ROWS - 1;
+  for (let r = TET_ROWS - 1; r >= 0; r--) {
+    if (del.has(r)) continue;
+    if (w !== r) for (let c = 0; c < TET_COLS; c++) g[w * TET_COLS + c] = g[r * TET_COLS + c];
+    w--;
   }
-  return hit;
+  for (; w >= 0; w--) for (let c = 0; c < TET_COLS; c++) g[w * TET_COLS + c] = 0;
 }
-// Tassement colonne par colonne (ce qui flotte après un effacement retombe).
-function ploxGravity(g) {
-  for (let c = 0; c < PX_COLS; c++) {
-    let w = PX_ROWS - 1;
-    for (let r = PX_ROWS - 1; r >= 0; r--) {
-      const v = g[r * PX_COLS + c];
-      if (v) { g[r * PX_COLS + c] = 0; g[w * PX_COLS + c] = v; w--; }
-    }
-    for (let r = w; r >= 0; r--) g[r * PX_COLS + c] = 0;
-  }
-}
-// Efface, tasse, recommence. `boom` reçoit une bulle par case détruite : la grille, elle, est
-// nettoyée TOUT DE SUITE — l'animation ne fait que survivre à la case qu'elle représente, donc
-// elle ne peut jamais bloquer ni retarder le jeu.
-function ploxResolve(g, boom) {
-  let pts = 0, chain = 0;
-  for (;;) {
-    const hit = ploxMatches(g);
-    if (!hit.size) break;
-    chain++;
-    hit.forEach(i => {
-      if (boom) boom.push({ c: i % PX_COLS, r: (i / PX_COLS) | 0, v: g[i], t: 0, delay: (chain - 1) * 6 });
-      g[i] = 0;
-    });
-    pts += hit.size * 10 * chain;
-    ploxGravity(g);
-  }
-  return { pts, chain };
-}
-function ploxNewPiece() {
-  const rnd = () => 1 + ((Math.random() * PLOX_COLS.length) | 0);
-  return { c: 2, r: 0, o: 0, k: [rnd(), rnd(), rnd()] };
-}
-// ── Dessin ──
-function ploxRound(ctx, x, y, w, h, r) {
+// Niveau et cadence. ⚠ La cadence a un PLANCHER : sans lui, un très bon joueur atteindrait une
+// vitesse où la pièce se pose avant d'avoir pu être déplacée, ce qui n'est plus une difficulté.
+const tetLevel = lines => Math.floor(lines / 10);
+const tetDrop = lines => Math.max(90, 800 - tetLevel(lines) * 68);
+function tetRound(ctx, x, y, w, h, r) {
   ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+  ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y); ctx.closePath();
 }
-// Un bloc ARRONDI, avec un reflet en haut et un liseré sombre : `s` met à l'échelle (l'animation
-// de destruction s'en sert pour faire enfler la case avant qu'elle ne s'efface).
-function ploxBlock(ctx, c, r, v, alpha, scale) {
-  if (r < 0) return;
-  const m = 3, sc = scale === undefined ? 1 : scale;
-  const w = (PX_CELL - m * 2) * sc, rad = Math.max(6, w * 0.3);
-  const x = c * PX_CELL + PX_CELL / 2 - w / 2, y = r * PX_CELL + PX_CELL / 2 - w / 2;
-  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
-  ploxRound(ctx, x, y, w, w, rad);
-  ctx.fillStyle = PLOX_COLS[v - 1]; ctx.fill();
-  ctx.lineWidth = 2; ctx.strokeStyle = '#00000055'; ctx.stroke();
-  ploxRound(ctx, x + w * 0.16, y + w * 0.12, w * 0.68, w * 0.26, rad * 0.5);
-  ctx.fillStyle = '#ffffff44'; ctx.fill();
-  ctx.globalAlpha = 1;
-}
-function ploxDraw(ctx, s) {
+// Un bloc plein : aplat, facette claire en haut, ombre en bas — c'est ce relief qui distingue
+// une pile de cubes d'un aplat de couleur.
+function tetBlock(ctx, px, py, sz, col, alpha) {
+  const m = Math.max(1, sz * 0.07);
   ctx.save();
-  // Secousse : elle ne dure que quelques images après un lâcher, pour donner du poids au geste.
-  if (s.shake > 0) ctx.translate((Math.random() - 0.5) * s.shake, (Math.random() - 0.5) * s.shake);
-  ctx.fillStyle = '#0b0e14'; ctx.fillRect(-12, -12, PX_W + 24, PX_H + 24);
-  ctx.strokeStyle = '#1b2130'; ctx.lineWidth = 1;
-  for (let c = 1; c < PX_COLS; c++) { ctx.beginPath(); ctx.moveTo(c * PX_CELL, 0); ctx.lineTo(c * PX_CELL, PX_H); ctx.stroke(); }
-  for (let r = 1; r < PX_ROWS; r++) { ctx.beginPath(); ctx.moveTo(0, r * PX_CELL); ctx.lineTo(PX_W, r * PX_CELL); ctx.stroke(); }
-  // Ligne de débordement : la 1re rangée est celle qui met fin à la partie.
-  ctx.strokeStyle = '#e0443c55';
-  ctx.beginPath(); ctx.moveTo(0, PX_CELL); ctx.lineTo(PX_W, PX_CELL); ctx.stroke();
-  // Traînée du lâcher : une comète derrière chaque bloc, de son point de départ jusqu'à l'arrivée.
-  if (s.slam) {
-    const a = Math.max(0, 1 - s.slam.t / 14);
-    for (const x of s.slam.cells) {
-      const g = ctx.createLinearGradient(0, s.slam.from * PX_CELL, 0, (x.r + 1) * PX_CELL);
-      g.addColorStop(0, PLOX_COLS[x.v - 1] + '00'); g.addColorStop(1, PLOX_COLS[x.v - 1] + 'cc');
-      ctx.globalAlpha = a * 0.75; ctx.fillStyle = g;
-      ploxRound(ctx, x.c * PX_CELL + 10, s.slam.from * PX_CELL, PX_CELL - 20, Math.max(0, (x.r - s.slam.from + 1) * PX_CELL), 8);
-      ctx.fill();
-    }
-    // Éclair d'impact sous la pièce
-    ctx.globalAlpha = a;
-    ctx.fillStyle = '#ffffff';
-    for (const x of s.slam.cells) ctx.fillRect(x.c * PX_CELL + 4, (x.r + 1) * PX_CELL - 3, PX_CELL - 8, 3);
-    ctx.globalAlpha = 1;
-  }
-  for (let r = 0; r < PX_ROWS; r++) for (let c = 0; c < PX_COLS; c++) {
-    const v = s.g[r * PX_COLS + c]; if (v) ploxBlock(ctx, c, r, v);
-  }
-  if (s.p) for (const x of ploxCells(s.p)) ploxBlock(ctx, x.c, x.r, x.v);
-  // Destruction : la case enfle, blanchit et se disloque en éclats.
-  for (const b of s.boom) {
-    if (b.t < b.delay) continue;
-    const k = (b.t - b.delay) / 18;
-    if (k > 1) continue;
-    ploxBlock(ctx, b.c, b.r, b.v, 1 - k, 1 + k * 0.7);
-    ctx.globalAlpha = Math.max(0, 1 - k) * 0.9;
-    ctx.fillStyle = '#ffffff';
-    const cx = (b.c + 0.5) * PX_CELL, cy = (b.r + 0.5) * PX_CELL, d = k * PX_CELL * 1.1;
-    for (let i = 0; i < 6; i++) {
-      const a = i * 1.047 + b.c;
-      ctx.fillRect(cx + Math.cos(a) * d - 2.5, cy + Math.sin(a) * d - 2.5, 5, 5);
-    }
-    ctx.globalAlpha = 1;
-  }
+  if (alpha != null) ctx.globalAlpha = alpha;
+  tetRound(ctx, px + m, py + m, sz - m * 2, sz - m * 2, sz * 0.16);
+  ctx.fillStyle = col; ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.30)';
+  ctx.fillRect(px + m * 2, py + m * 2, sz - m * 4, (sz - m * 4) * 0.24);
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.fillRect(px + m * 2, py + sz - m * 2 - (sz - m * 4) * 0.18, sz - m * 4, (sz - m * 4) * 0.18);
   ctx.restore();
 }
-function GamePlox() {
+function tetDraw(ctx, s) {
+  const BW = TET_COLS * TET_CELL;
+  ctx.clearRect(0, 0, TET_W, TET_H);
+  ctx.fillStyle = '#0e1015'; ctx.fillRect(0, 0, TET_W, TET_H);
+  ctx.fillStyle = '#151922'; ctx.fillRect(0, 0, BW, TET_H);
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1;   // la grille, discrète
+  ctx.beginPath();
+  for (let c = 1; c < TET_COLS; c++) { ctx.moveTo(c * TET_CELL, 0); ctx.lineTo(c * TET_CELL, TET_H); }
+  for (let r = 1; r < TET_ROWS; r++) { ctx.moveTo(0, r * TET_CELL); ctx.lineTo(BW, r * TET_CELL); }
+  ctx.stroke();
+  // le fantôme : là où la pièce se posera si on la lâche maintenant
+  if (s.p && !s.clear) {
+    const gr = tetDropTo(s.g, s.p);
+    if (gr !== s.p.r) {
+      ctx.save(); ctx.globalAlpha = 0.28;
+      for (const [x, y] of tetCells(s.p.k, s.p.o)) {
+        const rr = gr + y; if (rr < 0) continue;
+        tetBlock(ctx, (s.p.c + x) * TET_CELL, rr * TET_CELL, TET_CELL, TET_SHAPES[s.p.k].c);
+      }
+      ctx.restore();
+    }
+  }
+  // la pile
+  for (let r = 0; r < TET_ROWS; r++) for (let c = 0; c < TET_COLS; c++) {
+    const v = s.g[r * TET_COLS + c]; if (!v) continue;
+    tetBlock(ctx, c * TET_CELL, r * TET_CELL, TET_CELL, TET_SHAPES[TET_KEYS[v - 1]].c);
+  }
+  // les lignes en train de sauter : elles blanchissent puis se rétractent
+  if (s.clear) {
+    const k = 1 - s.clear.t / TET_CLEAR_T;
+    ctx.save(); ctx.globalAlpha = 0.35 + k * 0.65;
+    ctx.fillStyle = '#ffffff';
+    for (const r of s.clear.rows) ctx.fillRect(0, r * TET_CELL + TET_CELL * (1 - k) / 2, BW, TET_CELL * k);
+    ctx.restore();
+  }
+  // la pièce en cours
+  if (s.p && !s.clear) for (const [x, y] of tetCells(s.p.k, s.p.o)) {
+    const rr = s.p.r + y; if (rr < 0) continue;
+    tetBlock(ctx, (s.p.c + x) * TET_CELL, rr * TET_CELL, TET_CELL, TET_SHAPES[s.p.k].c);
+  }
+  // le panneau de droite : pièce suivante, niveau, lignes
+  const px = BW + 10;
+  ctx.fillStyle = '#8b93a3'; ctx.font = '700 10px ' + TET_FONT; ctx.textAlign = 'left';
+  ctx.fillText('SUIVANT', px, 20);
+  if (s.next) {
+    const sh = TET_SHAPES[s.next], cs = 14;
+    let minx = 9, maxx = -9, miny = 9, maxy = -9;
+    for (const [x, y] of sh.cells) { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
+    const ox = px + (TET_PANEL - 20 - (maxx - minx + 1) * cs) / 2, oy = 30;
+    for (const [x, y] of sh.cells) tetBlock(ctx, ox + (x - minx) * cs, oy + (y - miny) * cs, cs, sh.c);
+  }
+  ctx.fillStyle = '#8b93a3'; ctx.font = '700 10px ' + TET_FONT;
+  ctx.fillText('NIVEAU', px, 110);
+  ctx.fillStyle = '#e8ecf2'; ctx.font = '800 20px ' + TET_FONT;
+  ctx.fillText(String(tetLevel(s.lines)), px, 132);
+  ctx.fillStyle = '#8b93a3'; ctx.font = '700 10px ' + TET_FONT;
+  ctx.fillText('LIGNES', px, 162);
+  ctx.fillStyle = '#e8ecf2'; ctx.font = '800 20px ' + TET_FONT;
+  ctx.fillText(String(s.lines), px, 184);
+  // le dernier effacement, annoncé le temps qu'on le lise
+  if (s.flash > 0 && s.flashTxt) {
+    ctx.save(); ctx.globalAlpha = Math.min(1, s.flash / 30);
+    ctx.fillStyle = '#f2cf3f'; ctx.font = '800 12px ' + TET_FONT;
+    ctx.fillText(s.flashTxt, px, 220);
+    ctx.restore();
+  }
+  ctx.textAlign = 'left';
+}
+function GameTetris() {
   const canvasRef = React.useRef(null);
   const g = React.useRef(null);
   const [score, setScore] = React.useState(0);
-  const [best, setBest] = React.useState(() => gameHi(PLOX_HI));
+  const [best, setBest] = React.useState(() => gameHi(TET_HI));
   const [phase, setPhase] = React.useState('ready');   // ready | playing | dead
-  const blank = () => ({ g: new Int8Array(PX_COLS * PX_ROWS), p: null, score: 0, last: 0, boom: [], slam: null, shake: 0 });
+  const blank = () => ({ g: new Int8Array(TET_COLS * TET_ROWS), p: null, next: null, bag: [],
+                         score: 0, lines: 0, last: 0, clear: null, flash: 0, flashTxt: '' });
   const start = () => {
-    const s = blank(); s.p = ploxNewPiece();
+    const s = blank();
+    s.p = tetSpawn(tetBag(s));
+    s.next = tetBag(s);
     g.current = s; setScore(0); setPhase('playing');
   };
-  const paint = () => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && g.current) ploxDraw(ctx, g.current); };
+  const paint = () => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && g.current) tetDraw(ctx, g.current); };
   React.useEffect(() => { if (!g.current) g.current = blank(); paint(); }, [phase]);
-  // ⚠ Refs anti-closure : `step`/`act` sont appelées depuis la boucle rAF et depuis des
-  // écouteurs posés une fois — elles lisent TOUT dans `g.current`, jamais dans un state.
   const overRef = React.useRef(null);
-  // Pose la pièce, résout les alignements, fait naître la suivante. `from` = rangée de départ du
-  // lâcher (pour la traînée) ou null quand la pièce s'est simplement posée toute seule.
-  const lock = React.useCallback((s, from) => {
-    const cells = ploxCells(s.p);
-    for (const x of cells) s.g[x.r * PX_COLS + x.c] = x.v;
-    if (from !== null && from !== undefined && from < s.p.r) { s.slam = { cells, from, t: 0 }; s.shake = 9; }
-    // ⚠ Tassement DÈS LA POSE, avant même de chercher les alignements : une pièce HORIZONTALE
-    // posée à cheval sur deux colonnes de hauteurs différentes laisserait sinon des blocs en
-    // suspension au-dessus du vide — impossible avec l'ancienne pièce verticale, et contraire à
-    // la règle « ce qui est au-dessus retombe ».
-    ploxGravity(s.g);
-    const r = ploxResolve(s.g, s.boom);
-    if (r.pts) { s.score += r.pts; setScore(s.score); if (r.chain > 1) s.shake = Math.max(s.shake, 5 + r.chain * 2); }
-    // Fin de partie : un bloc reste sur la 1re rangée, ou la pièce suivante n'a plus la place
-    // de naître — dans les deux cas la pile a dépassé la hauteur du plateau.
-    let over = false;
-    for (let c = 0; c < PX_COLS; c++) if (s.g[c]) over = true;
-    const np = ploxNewPiece();
-    if (!ploxFits(s.g, np.c, np.r, np.o)) over = true;
-    if (over) { s.p = null; overRef.current && overRef.current(); return; }
-    s.p = np;
+  // Sort la pièce suivante du sac. ⚠ Elle peut ne pas tenir : c'est l'autre fin de partie, celle
+  // où la pile touche le plafond sans qu'aucune pièce n'ait débordé en se posant.
+  // ⚠ Déclarée AVANT `lock`, qui l'appelle (piège n°2 : Babel ne remonte pas les `const`).
+  const nextPiece = s => {
+    const p = tetSpawn(s.next);
+    s.next = tetBag(s);
+    if (!tetFits(s.g, p.k, p.o, p.c, p.r)) { overRef.current && overRef.current(); return; }
+    s.p = p;
+  };
+  // Pose la pièce, compte les lignes, fait naître la suivante. ⚠ L'effacement n'est pas appliqué
+  // ici : il est ARMÉ (`s.clear`) et la boucle le consomme après l'animation, sinon on ne verrait
+  // jamais les lignes qu'on vient de faire.
+  const lock = React.useCallback(s => {
+    const v = TET_KEYS.indexOf(s.p.k) + 1;
+    for (const [x, y] of tetCells(s.p.k, s.p.o)) {
+      const rr = s.p.r + y; if (rr < 0) continue;
+      s.g[rr * TET_COLS + s.p.c + x] = v;
+    }
+    // ⚠ Fin de partie AVANT tout le reste : une pièce posée alors qu'une de ses cases est
+    // au-dessus du plateau, c'est que la pile a débordé.
+    const deborde = tetCells(s.p.k, s.p.o).some(([, y]) => s.p.r + y < 0);
+    const rows = tetFullRows(s.g);
+    s.p = null;
+    if (rows.length) {
+      s.clear = { rows, t: 0 };
+      s.lines += rows.length;
+      s.score += TET_LINE_PTS[rows.length] * (tetLevel(s.lines) + 1);
+      setScore(s.score);
+      s.flash = 60;
+      s.flashTxt = rows.length === 4 ? 'TETRIS !' : rows.length + (rows.length > 1 ? ' LIGNES' : ' LIGNE');
+    }
+    if (deborde) { overRef.current && overRef.current(); return; }
+    if (!rows.length) nextPiece(s);
   }, []);
   const step = React.useCallback(() => {
-    const s = g.current; if (!s || !s.p) return;
-    if (ploxFits(s.g, s.p.c, s.p.r + 1, s.p.o)) { s.p.r++; return; }
-    lock(s, null);
+    const s = g.current; if (!s || !s.p || s.clear) return;
+    if (tetFits(s.g, s.p.k, s.p.o, s.p.c, s.p.r + 1)) { s.p.r++; return; }
+    lock(s);
   }, [lock]);
   const act = React.useCallback(kind => {
-    const s = g.current; if (!s || !s.p) return;
+    const s = g.current; if (!s || !s.p || s.clear) return;
     const p = s.p;
-    if (kind === 'left'  && ploxFits(s.g, p.c - 1, p.r, p.o)) p.c--;
-    if (kind === 'right' && ploxFits(s.g, p.c + 1, p.r, p.o)) p.c++;
+    if (kind === 'left'  && tetFits(s.g, p.k, p.o, p.c - 1, p.r)) p.c--;
+    if (kind === 'right' && tetFits(s.g, p.k, p.o, p.c + 1, p.r)) p.c++;
     if (kind === 'rot') {
-      // ⚠ Décalages de rattrapage : passer de la verticale à l'horizontale demande 2 colonnes de
-      // plus. Sans eux, tourner serait REFUSÉ contre le bord droit et le cycle des 4 états
-      // (« au 3e clic, l'horizontale retournée ») ne serait plus tenu là où on en a le plus besoin.
       const o = (p.o + 1) % 4;
-      for (const [dc, dr] of [[0, 0], [-1, 0], [-2, 0], [1, 0], [0, -1], [-1, -1]]) {
-        if (ploxFits(s.g, p.c + dc, p.r + dr, o)) { p.c += dc; p.r += dr; p.o = o; break; }
+      for (const [dc, dr] of TET_KICKS) {
+        if (tetFits(s.g, p.k, o, p.c + dc, p.r + dr)) { p.c += dc; p.r += dr; p.o = o; break; }
       }
     }
-    if (kind === 'down')  step();
-    if (kind === 'drop')  {
-      const from = p.r;
-      while (ploxFits(s.g, p.c, p.r + 1, p.o)) p.r++;
-      lock(s, from);
+    // ⚠ La descente rapide RAPPORTE (1 point par case) et le lâcher DEUX fois plus : c'est le
+    // barème classique, et c'est lui qui rend le jeu nerveux plutôt qu'attentiste.
+    if (kind === 'down' && tetFits(s.g, p.k, p.o, p.c, p.r + 1)) { p.r++; s.score++; setScore(s.score); }
+    else if (kind === 'down') { lock(s); }
+    if (kind === 'drop') {
+      const to = tetDropTo(s.g, p);
+      s.score += Math.max(0, to - p.r) * 2; setScore(s.score);
+      p.r = to; s.last = 0; lock(s);
     }
     paint();
-  }, [step, lock]);
+  }, [lock]);
   React.useEffect(() => {
     if (phase !== 'playing') return;
     let raf, alive = true;
@@ -5595,21 +5642,21 @@ function GamePlox() {
       if (!alive) return;
       alive = false; cancelAnimationFrame(raf);
       const sc = g.current.score;
-      setBest(b => { const nb = Math.max(b, sc); setGameHi(PLOX_HI, nb); return nb; });
+      setBest(b => { const nb = Math.max(b, sc); setGameHi(TET_HI, nb); return nb; });
       setPhase('dead');
     };
     const loop = t => {
       if (!alive) return;
       const s = g.current;
       if (!s.last) s.last = t;
-      if (t - s.last >= ploxDrop(s.score)) { s.last = t; step(); }
-      if (!alive) return;                      // `step` a pu terminer la partie
-      // Minuteries des animations (elles vivent leur vie, la grille est déjà à jour)
-      for (const b of s.boom) b.t++;
-      s.boom = s.boom.filter(b => b.t < b.delay + 19);
-      if (s.slam && ++s.slam.t > 14) s.slam = null;
-      if (s.shake > 0) s.shake = Math.max(0, s.shake - 0.7);
-      ploxDraw(canvasRef.current.getContext('2d'), s);
+      if (s.clear) {
+        // l'animation d'effacement suspend la chute — puis les lignes tombent et la pièce
+        // suivante entre en jeu.
+        if (++s.clear.t >= TET_CLEAR_T) { tetCollapse(s.g, s.clear.rows); s.clear = null; s.last = t; nextPiece(s); }
+      } else if (t - s.last >= tetDrop(s.lines)) { s.last = t; step(); }
+      if (!alive) return;                      // `step` ou `nextPiece` a pu terminer la partie
+      if (s.flash > 0) s.flash--;
+      tetDraw(canvasRef.current.getContext('2d'), s);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -5625,10 +5672,11 @@ function GamePlox() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [phase, act]);
-  // Gestes façon Plato : taper = tourner la pièce, glisser latéralement = déplacer (case par
-  // case, l'origine se recale à chaque pas), glisser vers le bas = lâcher.
-  // ⚠ Garde `moved` : un glissement se termine TOUJOURS par un click synthétique, qui ferait
-  // tourner la pièce en plus de l'avoir déplacée (piège n°12).
+  // Gestes : taper = tourner, glisser latéralement = déplacer case par case, glisser vers le bas
+  // = lâcher. ⚠ Garde `moved` : un glissement se termine TOUJOURS par un click synthétique, qui
+  // ferait tourner la pièce en plus de l'avoir déplacée (piège n°12).
+  // ⚠ Le geste se TERMINE au lâcher (`drag.current = null`) : sans ça, un doigt qui continue de
+  // descendre lâcherait aussi la pièce suivante, et celle d'après.
   const drag = React.useRef(null);
   const onDown = e => {
     if (phase !== 'playing') { start(); return; }
@@ -5638,23 +5686,22 @@ function GamePlox() {
   const onMove = e => {
     const d = drag.current; if (!d) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
-    // ⚠ Le geste se TERMINE au lâcher (`drag.current = null`) : sans ça, un doigt qui
-    // continuait de descendre relâchait aussi la pièce suivante, et celle d'après — un seul
-    // glissé faisait tomber plusieurs pièces d'affilée, et la partie devenait injouable.
-    if (dy > 34 && Math.abs(dy) > Math.abs(dx)) { d.moved = true; drag.current = null; act('drop'); return; }
-    if (Math.abs(dx) >= 22) { d.moved = true; act(dx > 0 ? 'right' : 'left'); d.x = e.clientX; d.y = e.clientY; }
+    if (dy > 40 && Math.abs(dy) > Math.abs(dx)) { d.moved = true; drag.current = null; act('drop'); return; }
+    if (Math.abs(dx) >= 20) { d.moved = true; act(dx > 0 ? 'right' : 'left'); d.x = e.clientX; d.y = e.clientY; }
   };
   const onUp = () => { const d = drag.current; drag.current = null; if (d && !d.moved) act('rot'); };
   return (
-    <GameWrap bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
-      <div style={{ position:'relative', width:'100%', maxWidth:PX_W }}>
-        <canvas ref={canvasRef} width={PX_W} height={PX_H}
+    <GameWrap
+      hint="Glisse pour déplacer, touche pour tourner, glisse vers le bas pour lâcher. Au clavier : ← → pour déplacer, ↑ pour tourner, ↓ pour accélérer, espace pour lâcher."
+      bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b></span>}>
+      <div style={{ position:'relative', width:'100%', maxWidth:TET_W }}>
+        <canvas ref={canvasRef} width={TET_W} height={TET_H}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
           onContextMenu={e => e.preventDefault()}
           style={{ width:'100%', height:'auto', borderRadius:12, border:`1px solid ${C.border}`, touchAction:'none', cursor:'pointer', display:'block', WebkitTapHighlightColor:'transparent', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }} />
         {phase !== 'playing' && (
           <div onPointerDown={start} style={{ position:'absolute', inset:0, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:8, color:'#fff', cursor:'pointer', WebkitTapHighlightColor:'transparent', userSelect:'none' }}>
-            <div style={{ fontSize:16, fontWeight:800, textShadow:'0 2px 8px #000' }}>{phase === 'dead' ? '💥 Ça dépasse !' : '🟪 Plox'}</div>
+            <div style={{ fontSize:16, fontWeight:800, textShadow:'0 2px 8px #000' }}>{phase === 'dead' ? '💥 La pile déborde !' : '🧱 Tetris'}</div>
             <div style={{ fontSize:12, background:'#00000099', padding:'6px 12px', borderRadius:8 }}>Touche pour {phase === 'dead' ? 'recommencer' : 'jouer'}</div>
           </div>
         )}
@@ -5664,6 +5711,7 @@ function GamePlox() {
           <button onClick={() => act('left')}  style={gameBtn({ fontSize:15, padding:'7px 15px' })}>←</button>
           <button onClick={() => act('rot')}   style={gameBtn({ fontSize:13, padding:'7px 15px' })}>↻</button>
           <button onClick={() => act('right')} style={gameBtn({ fontSize:15, padding:'7px 15px' })}>→</button>
+          <button onClick={() => act('down')}  style={gameBtn({ fontSize:15, padding:'7px 15px' })}>↓</button>
           <button onClick={() => act('drop')}  style={gameBtn({ fontSize:15, padding:'7px 15px' })}>⤓</button>
         </div>
       )}
