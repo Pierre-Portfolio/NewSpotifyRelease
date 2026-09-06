@@ -8301,7 +8301,10 @@ function doodleTileBirth(s, p, diff) {
   if (type === 'ladder') {
     // 20 % plus longue, et recalée dans l'écran : élargie vers la droite, elle en serait sortie.
     const lw = D_LADDER_W, lx = Math.max(6, Math.min(x, DOODLE_W - 6 - lw));
-    if (!doodleRectFree(s, { x: lx, y: ny, w: lw, h: D_PLAT_H })) p.type = 'green';   // pas de place
+    // ⚠ `type` AUSSI, et pas seulement `p.type` : la fin de la fonction réécrit `p.type = type`
+    // (voir la 🎲 Roulette russe, qui met déjà les deux à jour). Ne poser que `p.type` faisait
+    // silencieusement renaître l'échelle abandonnée, dégagement ou pas.
+    if (!doodleRectFree(s, { x: lx, y: ny, w: lw, h: D_PLAT_H })) { p.type = 'green'; type = 'green'; }   // pas de place
     else { p.w = lw; p.x = lx; }
   }
   // 🚇 Tuyaux : la dalle tirée devient une bouche, et sa JUMELLE naît aussitôt une à deux
