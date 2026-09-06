@@ -2704,14 +2704,19 @@ function doodleMakeSkel(x, y) {
 //   partagent `doodleClimbPairs` / `doodleClimbAt` — seule la flèche change (nulle ici).
 //   ⚠ La jumelle naît EN DESSOUS, comme partout : posée plus haut elle abaisserait `topY` et la
 //   génération croirait la rangée suivante déjà faite, ouvrant un trou infranchissable.
-// 🌪️ LA TORNADE DE BARBELÉS : le rouleau se DÉTACHE de sa dalle, tourne autour du doodler
-//   pendant D_BARB_LIFE frames et revient se poser à sa place. Tant qu'il tourne, il déchire
-//   toute créature qu'il croise. ⚠ Il ne blesse JAMAIS le doodler : il tourne autour de LUI,
-//   c'est une garde, pas un piège — et une garde qui mord son porteur n'aurait aucun sens.
-//   ⚠ Un seul rouleau à la fois (`s.barb`) : deux dalles enchaînées auraient superposé deux
-//   orbites illisibles, et la dalle d'origine du second n'aurait plus rien récupéré.
-//   ⚠ Le retour est une VRAIE trajectoire (phase 'back') et non une disparition : on doit voir
-//   le rouleau regagner sa dalle, sinon on croit l'avoir perdu.
+// 🌪️ LA TORNADE DE BARBELÉS : la dalle porte deux FILS barbelés tendus d'un bord à l'autre —
+//   le fil, c'est 100 % de la tuile. S'y poser le décolle, et il joue quatre phases enchaînées,
+//   toujours le même fil (`doodleBarbWire` dessine les quatre) : 'peel' il s'arrache en 1 s EN
+//   PARTANT DE LA DROITE, 'dash' il fonce sur le doodler comme attiré (course en k², pas un
+//   glissement), 'orbit' il se referme en ANNEAU qui tourne autour de l'avatar pendant
+//   D_BARB_LIFE frames, puis il EXPLOSE en D_BARB_NEEDLES aiguilles lancées en étoile.
+//   Tant qu'il tourne, l'anneau déchire toute créature qu'il croise — la morsure se juge sur
+//   l'ÉCART au rayon (une couronne), pas sur la distance au centre : le fil est le cercle.
+//   ⚠ Il ne blesse JAMAIS le doodler : il tourne autour de LUI, c'est une garde, pas un piège —
+//   et une garde qui mord son porteur n'aurait aucun sens.
+//   ⚠ Un seul fil à la fois (`s.barb`) : deux anneaux superposés seraient illisibles.
+//   ⚠ Il ne revient PLUS se poser : il se dépense. La dalle garde donc ses poteaux nus
+//   (`p.barbOut`) pour toujours — on doit voir d'où le fil est parti.
 // 🔦 LE PROJECTEUR (tuile rare) : une tourelle au centre de la dalle et deux caméras de part et
 //   d'autre. Le faisceau tourne DANS LE SENS DES AIGUILLES D'UNE MONTRE, sans fin.
 //   ⚠ La demande s'arrête au milieu de la phrase (« si on fini dans la lumière du projecteur…
@@ -2722,10 +2727,15 @@ function doodleMakeSkel(x, y) {
 //   ⚠ Un délai de recharge (D_PROJ_COOL) par dalle : sans lui, rester deux secondes dans la
 //   lumière appelait une armée.
 const D_LADDER_DY = [76, 118];       // écart vertical entre les deux dalles d'une échelle
-const D_BARB_R = 40;                 // rayon de l'orbite du rouleau autour du doodler
-const D_BARB_LIFE = 300, D_BARB_BACK = 40;   // 5 s de tornade, puis 0,66 s de retour
+const D_BARB_R = 40;                 // rayon de l'anneau de fil autour du doodler
+const D_BARB_LIFE = 300;             // 5 s de garde, puis l'explosion
 const D_BARB_SPD = 0.16;             // vitesse angulaire, rad/frame (~2,5 tours en 5 s)
-const D_BARB_HIT = 15;               // rayon de morsure du rouleau
+const D_BARB_HIT = 15;               // épaisseur de morsure DE PART ET D'AUTRE du fil
+const D_BARB_PEEL = 60;              // 1 s de décollement, en partant de la droite
+const D_BARB_DASH = 22;              // la ruée sur le doodler, une fois le fil arraché
+const D_BARB_SEG = 48;               // segments de la polyligne du fil (dalle comme anneau)
+const D_BARB_GAP = 13;               // écart entre deux barbillons, en px de LONGUEUR DE FIL
+const D_BARB_NEEDLES = 16, D_BARB_NEEDLE_V = 6.2;   // l'étoile d'aiguilles de l'explosion
 const D_PROJ_R = 165;                // portée du faisceau
 const D_PROJ_HALF = 0.24;            // demi-ouverture du cône, en radians (~28° de large)
 const D_PROJ_SPD = 0.013;            // vitesse de rotation, rad/frame (~8 s le tour complet)
@@ -2858,7 +2868,7 @@ const D_BIOMES = [
   { k:'prison',  name:'Prison',   icon:'🔒', paper:'#e4e6e9', rule:'#bfc4cc', marge:'#5c6470',
     tiles:[
       { k:'ladder',  icon:'🪜', name:'Échelle de prison', own:true, txt:'elles naissent PAR DEUX, l\'une au-dessus de l\'autre et à la même abscisse, avec une échelle entre les deux. Te poser sur celle du BAS, c\'est en monter les barreaux jusqu\'à celle du haut, où tu repars d\'un saut' },
-      { k:'barbed',  icon:'🌪️', name:'Tornade de barbelés', own:true, txt:'le rouleau se DÉTACHE de la dalle et tourne autour de toi pendant ' + Math.round(D_BARB_LIFE / 60) + ' s en déchirant toute créature qu\'il croise, puis il regagne sa place. Il ne te blesse jamais — il tourne autour de toi, c\'est une garde. Un seul rouleau en l\'air à la fois' },
+      { k:'barbed',  icon:'🌪️', name:'Tornade de barbelés', own:true, txt:'le fil s\'ARRACHE de la dalle par la droite, fonce sur toi comme aimanté et se referme en anneau tournant pendant ' + Math.round(D_BARB_LIFE / 60) + ' s, déchirant toute créature qu\'il croise — puis il explose en ' + D_BARB_NEEDLES + ' aiguilles. Il ne te blesse jamais : c\'est une garde. Un seul fil en l\'air à la fois' },
       { k:'searchlight', icon:'🔦', name:'Projecteur', own:true, w:D_BIOME_TILE_RARE, txt:'une tourelle au centre de la dalle et deux caméras de surveillance. Le faisceau tourne dans le sens des aiguilles d\'une montre, sans fin : t\'y faire prendre DÉCLENCHE L\'ALARME et fait rappliquer un 👮 gardien, qui fonce droit sur toi. Une alarme toutes les ' + Math.round(D_PROJ_COOL / 60) + ' s par dalle' },
     ],
     mobs:[{ k:'inmate', icon:'🧍', w:36, h:42, vx:1.3, drawn:true },
@@ -3639,25 +3649,104 @@ function doodleTardisOpen(s) {
   if (td.ph === 'drop') { const u = td.t / D_TARDIS_DROP; return u < 0.30 ? u / 0.30 : u > 0.75 ? Math.max(0, 1 - (u - 0.75) / 0.25) : 1; }
   return 0;
 }
-// 🌪️ Le rouleau de barbelés : un anneau et ses pointes, qui TOURNE. ⚠ Primitive partagée par
-// la dalle au repos et par la tornade en vol : deux dessins séparés et l'on n'aurait pas
-// reconnu, dans ce qui tourne autour de soi, ce qui vient de se détacher de la dalle.
-function doodleBarbRoll(ctx, cx, cy, r, t) {
-  ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.07);
-  ctx.strokeStyle = '#c3c8d0'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.arc(0, 0, r * 0.6, 0, Math.PI * 2); ctx.stroke();
-  ctx.lineWidth = 1.6;
-  for (let i = 0; i < 8; i++) {
-    const a = i / 8 * Math.PI * 2;
+// 🌪️ LE FIL barbelé : un toron d'acier le long d'une polyligne, et ses barbillons en croix
+// plantés à intervalle régulier. ⚠ Primitive PARTAGÉE par les quatre états du fil (tendu sur la
+// dalle, arraché, en ruée, refermé en anneau) : c'est le MÊME fil du début à la fin, et c'est
+// ce qui rend l'animation lisible. Deux dessins séparés et l'on n'aurait pas reconnu, dans ce
+// qui tourne autour de soi, ce qui vient de quitter la dalle.
+function doodleBarbWire(ctx, pts, closed) {
+  if (!pts || pts.length < 2) return;
+  ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const path = () => {
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    if (closed) ctx.closePath();
+  };
+  ctx.strokeStyle = '#6d737d'; ctx.lineWidth = 3;   path(); ctx.stroke();   // l'ombre du toron
+  ctx.strokeStyle = '#d5dae1'; ctx.lineWidth = 1.5; path(); ctx.stroke();   // l'acier éclairé
+  // Les barbillons : deux traits croisés, penchés dans l'axe du fil — c'est ce croisement, et
+  // pas une simple pointe, qui fait lire « barbelé » à cette taille. ⚠ Espacés en LONGUEUR
+  // D'ARC (D_BARB_GAP px) et non tous les n points : la même polyligne sert à un fil de 62 px
+  // et à un anneau de 250 px de tour, et un pas en indices aurait donné des barbillons collés
+  // sur l'un et clairsemés sur l'autre.
+  const barb = [];
+  let acc = D_BARB_GAP * 0.5;
+  for (let i = 1; i < pts.length; i++) {
+    acc += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    if (acc < D_BARB_GAP) continue;
+    acc = 0;
+    const a = pts[Math.min(pts.length - 1, i + 1)], b = pts[i - 1];
+    const dx = a.x - b.x, dy = a.y - b.y, n = Math.hypot(dx, dy) || 1;
+    barb.push({ p: pts[i], tx: dx / n, ty: dy / n });
+  }
+  // Deux passes, comme le toron : l'ombre porte la forme sur le fond crème, l'acier la rallume.
+  for (const [col, lw, L] of [['#5c626c', 2.6, 5.4], ['#e6eaf0', 1.1, 5]]) {
+    ctx.strokeStyle = col; ctx.lineWidth = lw;
     ctx.beginPath();
-    ctx.moveTo(Math.cos(a) * (r - 3), Math.sin(a) * (r - 3));
-    ctx.lineTo(Math.cos(a) * (r + 4), Math.sin(a) * (r + 4));
-    ctx.moveTo(Math.cos(a + 0.25) * r, Math.sin(a + 0.25) * r);
-    ctx.lineTo(Math.cos(a - 0.25) * r, Math.sin(a - 0.25) * r);
+    for (const b of barb) {
+      const nx = -b.ty, ny = b.tx;
+      for (const sg of [1, -1]) {
+        const ux = nx + b.tx * 0.5 * sg, uy = ny + b.ty * 0.5 * sg;
+        ctx.moveTo(b.p.x + ux * L, b.p.y + uy * L);
+        ctx.lineTo(b.p.x - ux * L, b.p.y - uy * L);
+      }
+    }
     ctx.stroke();
   }
   ctx.restore();
+}
+// Le fil TENDU sur la dalle : d'un bord à l'autre (100 % de la tuile), avec la flèche que prend
+// un fil tendu entre deux poteaux.
+function doodleBarbLinePts(x, y, w) {
+  const pts = [];
+  for (let i = 0; i <= D_BARB_SEG; i++) {
+    const u = i / D_BARB_SEG;
+    pts.push({ x: x + u * w, y: y - 4 + Math.sin(u * Math.PI) * 2 });
+  }
+  return pts;
+}
+// Le fil ENROULÉ en anneau. ⚠ Même paramétrage `u` que la ligne : c'est ce qui permet
+// d'interpoler point à point de l'un à l'autre pendant le décollement.
+function doodleBarbRingPts(cx, cy, r, rot) {
+  const pts = [];
+  for (let i = 0; i <= D_BARB_SEG; i++) {
+    const a = rot + i / D_BARB_SEG * Math.PI * 2;
+    pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
+  }
+  return pts;
+}
+// Les points du fil à cet instant. Pendant 'peel', mélange point à point entre la dalle et
+// l'anneau, LA DROITE D'ABORD (`u = 1` est le bord droit) : le décollement remonte vers la
+// gauche, et le fil n'est jamais coupé en deux morceaux.
+function doodleBarbPts(bb) {
+  const ring = doodleBarbRingPts(bb.cx, bb.cy, bb.r, bb.a);
+  const q = bb.p;
+  if (bb.ph !== 'peel' || !q) return ring;
+  const line = doodleBarbLinePts(q.x, q.y, q.w);
+  const out = [];
+  for (let i = 0; i <= D_BARB_SEG; i++) {
+    const u = i / D_BARB_SEG;
+    const m = Math.max(0, Math.min(1, (u - (1 - bb.k)) * 4 + bb.k * bb.k));
+    out.push({ x: line[i].x + (ring[i].x - line[i].x) * m, y: line[i].y + (ring[i].y - line[i].y) * m });
+  }
+  return out;
+}
+// 💥 L'EXPLOSION : le fil ne revient plus se poser, il se dépense en aiguilles lancées en
+// étoile depuis l'anneau. ⚠ Les aiguilles partent dans `s.bullets` — c'est déjà le tableau qui
+// défile avec le monde et qui sait mordre créatures et boss ; un tableau de plus aurait
+// dupliqué tout cela pour rien.
+function doodleBarbBurst(s, bb) {
+  for (let i = 0; i < D_BARB_NEEDLES; i++) {
+    const a = bb.a + i / D_BARB_NEEDLES * Math.PI * 2;
+    s.bullets.push({ x: bb.cx + Math.cos(a) * bb.r, y: bb.cy + Math.sin(a) * bb.r,
+                     vx: Math.cos(a) * D_BARB_NEEDLE_V, vy: Math.sin(a) * D_BARB_NEEDLE_V,
+                     pierce: 0, boom: false, laser: false, sz: doodleBigMul(s), needle: true });
+  }
+  for (let n = 0; n < 20; n++) {
+    const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5;
+    s.parts.push({ x: bb.cx + Math.cos(a) * bb.r, y: bb.cy + Math.sin(a) * bb.r, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, max: 22, sz: 2.5, c: n % 2 ? '#c3c8d0' : '#eef2f6' });
+  }
+  s.toast = { txt: `🌪️ Le fil explose — ${D_BARB_NEEDLES} aiguilles`, life: D_TOAST_LIFE };
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
@@ -5233,15 +5322,15 @@ function doodleTileDraw(ctx, p, t) {
     [-6, 6].forEach(dx => { ctx.beginPath(); ctx.moveTo(x + w / 2 + dx, y + h - 2); ctx.lineTo(x + w / 2 + dx, y + h + 5); ctx.stroke(); });
     return;
   }
-  // 🌪️ Tornade de barbelés : le rouleau posé en travers de la dalle. ⚠ Quand il est PARTI
-  // (`p.barbOut`), la dalle le montre : deux supports vides. Sans ça on ne saurait pas d'où
-  // vient le rouleau qui tourne autour de soi, ni où il va revenir.
+  // 🌪️ Tornade de barbelés : DEUX fils tendus d'un bord à l'autre de la dalle — le fil fait
+  // 100 % de la tuile, poteaux compris. ⚠ Quand il est PARTI (`p.barbOut`), la dalle le montre :
+  // deux poteaux nus. Sans ça on ne saurait pas d'où vient le fil qui tourne autour de soi.
   if (p.type === 'barbed') {
     doodleRR(ctx, x, y, w, h, 4, '#5f6672');
     ctx.fillStyle = '#3b414b'; ctx.fillRect(x, y + h - 4, w, 4);
-    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2;                   // les deux supports
-    [x + 8, x + w - 8].forEach(sx => { ctx.beginPath(); ctx.moveTo(sx, y + 2); ctx.lineTo(sx, y - 5); ctx.stroke(); });
-    if (!p.barbOut) doodleBarbRoll(ctx, x + w / 2, y - 5, 11, t);
+    ctx.strokeStyle = '#9aa0aa'; ctx.lineWidth = 2.4;                 // les deux poteaux, aux extrémités
+    [x + 2.5, x + w - 2.5].forEach(sx => { ctx.beginPath(); ctx.moveTo(sx, y + 3); ctx.lineTo(sx, y - 13); ctx.stroke(); });
+    if (!p.barbOut) { doodleBarbWire(ctx, doodleBarbLinePts(x, y, w), false); doodleBarbWire(ctx, doodleBarbLinePts(x, y - 7, w), false); }
     return;
   }
   // 🔦 Projecteur : la tourelle au centre, deux caméras de part et d'autre, et le cône de
@@ -7356,15 +7445,10 @@ function doodleDraw(ctx, s, W, H) {
       }
       ctx.restore();
     }
-    // 🌪️ Tornade de barbelés : le rouleau détaché, en orbite autour du doodler ou en train de
-    // regagner sa dalle. ⚠ Dessiné DANS le monde et non collé au doodler : pendant le retour il
-    // n'est plus attaché à lui, et la trajectoire doit se voir.
-    if (s.barb) {
-      const bp = s.barb.px, by2 = s.barb.py;
-      ctx.save(); ctx.globalAlpha = s.barb.ph === 'back' ? 0.85 : 1;
-      doodleBarbRoll(ctx, bp, by2, 12, s.t * 2);
-      ctx.restore();
-    }
+    // 🌪️ Tornade de barbelés : le fil en train de s'arracher, de foncer, ou refermé en anneau
+    // autour du doodler. ⚠ Dessiné DANS le monde et non collé au doodler : pendant l'arrachement
+    // et la ruée il n'est pas encore à lui, et la trajectoire doit se voir.
+    if (s.barb) doodleBarbWire(ctx, doodleBarbPts(s.barb), s.barb.ph !== 'peel');
     // 🔥 Sommets embrasés par le lance-flammes : dessinés APRÈS les dalles, ils lèchent leur
     // bord haut. ⚠ La hauteur des flammes DÉCROÎT avec le décompte : c'est le seul signal qui
     // dise que le brasier va s'éteindre, donc quand la dalle redeviendra praticable.
@@ -7647,6 +7731,16 @@ function doodleDraw(ctx, s, W, H) {
       return;
     }
     const bz = b.sz || 1;
+    // 🌪️ Aiguille du fil barbelé qui explose : un éclat d'acier effilé, dessiné DANS SON AXE.
+    // Une bille verte n'aurait rien dit de sa provenance ni de son sens de vol.
+    if (b.needle) {
+      ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(Math.atan2(b.vy, b.vx)); ctx.scale(bz, bz);
+      ctx.fillStyle = '#8a9099';
+      ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(-5, -2.1); ctx.lineTo(-5, 2.1); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#eef2f6';
+      ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(-4, -0.9); ctx.lineTo(-4, 0.9); ctx.closePath(); ctx.fill();
+      ctx.restore(); return;
+    }
     if (!b.laser) { ctx.fillStyle = '#3a7d1e'; ctx.beginPath(); ctx.arc(b.x, b.y, 4 * bz, 0, Math.PI * 2); ctx.fill(); return; }
     // ⚠ Le laser grossit en ÉPAISSEUR seulement : allonger aussi le trait aurait fait un
     // rayon de 156 px au 5e palier, plus long que la moitié du plateau.

@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.7.2';
+const APP_VERSION = '12.7.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7105,6 +7105,7 @@ function GameDoodleInner() {
         s.platforms.forEach(p => { p.y += d; if (p.y0 != null) p.y0 += d; if (p.ay != null) p.ay += d; });   // 👀 l'ancre de la vivante défile avec sa dalle
         s.monsters.forEach(m => { m.y += d; if (m.y0 != null) m.y0 += d; });
         s.bullets.forEach(b => b.y += d); s.holes.forEach(h => h.y += d); s.items.forEach(it => it.y += d); s.parts.forEach(pt => pt.y += d); s.booms.forEach(b => b.y += d); s.chests.forEach(c => c.y += d); s.meteors.forEach(mt => mt.y += d); if (s.mums) s.mums.forEach(mu => mu.y += d); if (s.stals) s.stals.forEach(st => st.y += d);
+        if (s.barb) { s.barb.cy += d; if (s.barb.y0 != null) s.barb.y0 += d; }   // 🌪️ le fil arraché appartient au monde, son point de départ aussi
         if (s.clones) s.clones.forEach(c => c.y += d);   // 👥 sinon ils resteraient collés au bas de l'écran et ne « monteraient » jamais
         if (s.confs) s.confs.forEach(cf => cf.y += d);   // 🎊 ils appartiennent au monde, pas à l'écran
         if (s.tshots) s.tshots.forEach(sh => sh.y += d);   // 🔴 idem pour les traits de laser
@@ -7458,6 +7459,9 @@ function GameDoodleInner() {
           return false;
         }
         if (b.missile) return b.life > 0 && b.y > -20 && b.y < H + 40 && b.x > -24 && b.x < W + 24;   // ⚠ le missile poursuit aussi vers le BAS : sans borne basse ni durée de vie, il vivrait hors de l'écran jusqu'à la fin de la partie
+        // ⚠ Les aiguilles partent en ÉTOILE, donc vers le BAS aussi : sans borne basse, celles-là
+        // vivraient hors de l'écran jusqu'à la fin de la partie, comme le missile.
+        if (b.needle) return b.y > -20 && b.y < H + 40 && b.x > -24 && b.x < W + 24;
         return b.y > -20 && b.x > -24 && b.x < W + 24;   // ⚠ les diagonales sortent aussi par les CÔTÉS (une balle droite, jamais)
       });
       // 🍿 — Tirs de pop-corn : voir D_POP_THROW. Ils volent jusqu'à sortir de l'écran et
@@ -7919,13 +7923,14 @@ function GameDoodleInner() {
               const noms = ['vers le haut', 'vers la droite', 'vers le bas', 'vers la gauche'];
               s.toast = { txt: `🌬️ Le vent se lève ${noms[p.g4 % 4]} — ${Math.round(D_GALE_LIFE / 60)} s`, life: D_TOAST_LIFE };
             }
-            // 🌪️ Tornade de barbelés : le rouleau se détache et vient tourner autour du doodler.
-            // ⚠ Un seul en l'air à la fois : deux orbites superposées seraient illisibles, et la
-            // dalle d'origine du second n'aurait plus rien récupéré.
+            // 🌪️ Tornade de barbelés : le fil s'arrache de la dalle, fonce sur le doodler et se
+            // referme en anneau autour de lui. ⚠ Un seul en l'air à la fois : deux anneaux
+            // superposés seraient illisibles.
             if (et === 'barbed' && !s.barb && !p.barbOut) {
               p.barbOut = true;
-              s.barb = { p, ph: 'orbit', t: 0, a: Math.random() * Math.PI * 2, px: p.x + p.w / 2, py: p.y - 5 };
-              s.toast = { txt: `🌪️ Tornade de barbelés — ${Math.round(D_BARB_LIFE / 60)} s de garde`, life: D_TOAST_LIFE };
+              s.barb = { p, ph: 'peel', t: 0, k: 0, a: Math.random() * Math.PI * 2,
+                         cx: p.x + p.w / 2, cy: p.y - 8, r: D_BARB_R * 0.42 };
+              s.toast = { txt: `🌪️ Le fil barbelé s'arrache — ${Math.round(D_BARB_LIFE / 60)} s de garde`, life: D_TOAST_LIFE };
             }
             // 🔥 Flamme éternelle : s'y poser ne brûle pas — ça ARME le lance-flammes.
             if (et === 'eflame') {
@@ -8692,34 +8697,38 @@ function GameDoodleInner() {
         if (doodleHurt(s)) { for (let k = 0; k < 10; k++) { const a2 = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 2.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a2) * v, vy: Math.sin(a2) * v, life: 18, max: 18, sz: 2.5, c: k % 2 ? '#ffd54a' : '#c9ced6' }); } break; }
         die(); return;
       }
-      // 🌪️ Tornade de barbelés : le rouleau tourne autour du doodler, déchire ce qu'il croise,
-      // puis regagne sa dalle. ⚠ Il ne blesse JAMAIS le doodler : il tourne autour de LUI, c'est
-      // une garde — une garde qui mord son porteur n'aurait aucun sens.
-      // ⚠ Portes de sortie pendant le retour (dalle morte, sortie de l'écran) : sans elles, le
-      // rouleau viserait pour toujours un objet que plus rien ne met à jour.
+      // 🌪️ Tornade de barbelés — quatre phases enchaînées, jamais une téléportation : le fil
+      // s'arrache de sa dalle EN PARTANT DE LA DROITE ('peel', 1 s), FONCE sur le doodler comme
+      // aimanté ('dash', course en k²), tourne en anneau autour de lui ('orbit') puis EXPLOSE en
+      // aiguilles. ⚠ Il ne blesse JAMAIS le doodler : il tourne autour de LUI, c'est une garde —
+      // une garde qui mord son porteur n'aurait aucun sens.
+      // ⚠ La dalle peut mourir pendant l'arrachement : on passe alors directement à la ruée
+      // depuis la position courante, sinon le fil viserait un objet que plus rien ne met à jour.
       if (s.barb) {
         const bb = s.barb;
         bb.t += sf;
-        if (bb.ph === 'orbit') {
-          bb.a += D_BARB_SPD * sf;
-          bb.px = s.px + Math.cos(bb.a) * D_BARB_R;
-          bb.py = s.py + Math.sin(bb.a) * D_BARB_R;
-          if (bb.t >= D_BARB_LIFE) { bb.ph = 'back'; bb.t = 0; bb.x0 = bb.px; bb.y0 = bb.py; }
+        bb.a += D_BARB_SPD * sf;                            // le fil tourne dans TOUTES les phases
+        if (bb.ph === 'peel') {
+          const q = bb.p, lost = q.dead || s.platforms.indexOf(q) < 0 || q.y > H + 60;
+          if (!lost) { bb.cx = q.x + q.w / 2; bb.cy = q.y - 8; }
+          bb.k = lost ? 1 : Math.min(1, bb.t / D_BARB_PEEL);
+          if (bb.k >= 1) { bb.ph = 'dash'; bb.t = 0; bb.x0 = bb.cx; bb.y0 = bb.cy; bb.r0 = bb.r; }
+        } else if (bb.ph === 'dash') {
+          const k = Math.min(1, bb.t / D_BARB_DASH), e = k * k;   // attiré : ça accélère, ça ne glisse pas
+          bb.cx = bb.x0 + (s.px - bb.x0) * e;
+          bb.cy = bb.y0 + (s.py - bb.y0) * e;
+          bb.r = bb.r0 + (D_BARB_R - bb.r0) * e;
+          if (k >= 1) { bb.ph = 'orbit'; bb.t = 0; }
         } else {
-          const q = bb.p;
-          if (q.dead || s.platforms.indexOf(q) < 0 || q.y > H + 60) { s.barb = null; }
-          else {
-            const k = Math.min(1, bb.t / D_BARB_BACK);
-            bb.px = bb.x0 + (q.x + q.w / 2 - bb.x0) * k;
-            bb.py = bb.y0 + (q.y - 5 - bb.y0) * k;
-            if (k >= 1) {
-              q.barbOut = false; s.barb = null;
-              for (let n = 0; n < 8; n++) s.parts.push({ x: q.x + q.w / 2, y: q.y - 5, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, life: 16, max: 16, sz: 2, c: '#c3c8d0' });
-            }
-          }
+          bb.cx = s.px; bb.cy = s.py; bb.r = D_BARB_R;
+          if (bb.t >= D_BARB_LIFE) { doodleBarbBurst(s, bb); s.barb = null; }
         }
+        // ⚠ La morsure se juge sur l'ÉCART AU RAYON et non sur la distance au centre : le fil
+        // EST le cercle — une créature au milieu de l'anneau n'est pas touchée par lui.
         if (s.barb) for (const m of s.monsters) {
-          if (!m.alive || Math.hypot(m.x + m.w / 2 - s.barb.px, m.y + m.h / 2 - s.barb.py) > D_BARB_HIT + Math.max(m.w, m.h) / 2) continue;
+          if (!m.alive) continue;
+          const d = Math.hypot(m.x + m.w / 2 - s.barb.cx, m.y + m.h / 2 - s.barb.cy);
+          if (Math.abs(d - s.barb.r) > D_BARB_HIT + Math.max(m.w, m.h) / 2) continue;
           doodleKillMonster(s, m, true);   // les barbelés DÉCHIRENT : contact physique, le pavois du 🛡️ Réflecteur n'y peut rien
           for (let n = 0; n < 10; n++) { const a2 = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3; s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: Math.cos(a2) * v, vy: Math.sin(a2) * v, life: 20, max: 20, sz: 2.5, c: n % 2 ? '#c3c8d0' : '#e2564a' }); }
         }
