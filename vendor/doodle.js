@@ -2630,12 +2630,17 @@ function doodleBiomeTileW(k) { const d = doodleBiomeTileDef(k); return (d && d.w
 //   ouvrant un trou infranchissable (même piège que les 🚇 Tuyaux).
 //   ⚠ L'écart horizontal est BORNÉ (D_CHAIN_MAXX) : deux pieds aux antipodes auraient donné une
 //   chaîne presque horizontale, qu'on ne lit plus comme quelque chose qui se grimpe.
-// 🦴 L'OSSUAIRE crache un squelette dès qu'elle entre à l'écran, puis un toutes les
-//   D_SKEL_EVERY frames. Le squelette est la SEULE créature du jeu soumise à la gravité : il
-//   tombe, se pose sur ce qu'il rencontre et marche vers le doodler. ⚠ Et il ne meurt pas
-//   vraiment — abattu, il s'effondre en tas d'os, attend D_SKEL_DOWN puis se reconstruit en
-//   D_SKEL_REBUILD. C'est pourquoi il ne lâche AUCUN coffre : sans cette règle, une dalle
-//   d'ossuaire aurait été une machine à butin qu'il suffisait d'arroser.
+// 🦴 L'OSSUAIRE crache un squelette D_SKEL_FIRST frames après son entrée à l'écran, puis un
+//   toutes les D_SKEL_EVERY frames. Le squelette est la SEULE créature du jeu soumise à la
+//   gravité : il tombe, se pose sur ce qu'il rencontre et marche vers le doodler. ⚠ Et il ne
+//   meurt pas vraiment — abattu, il s'effondre en tas d'os, attend D_SKEL_DOWN puis se
+//   reconstruit en D_SKEL_REBUILD. C'est pourquoi il ne lâche AUCUN coffre : sans cette règle,
+//   une dalle d'ossuaire aurait été une machine à butin qu'il suffisait d'arroser.
+//   ⚠ 12.8.0 — UNE SECONDE DE PLUS PARTOUT ET 20 % DE VITESSE EN MOINS (demande utilisateur) :
+//   la dalle crachait son premier squelette à l'instant même où on la découvrait, sans laisser
+//   le temps de la lire, et les suivants se relevaient trop vite pour qu'abattre serve à
+//   quelque chose. Le délai d'apparition, celui de reconstruction et l'allure de marche sont
+//   réglés par ces quatre constantes — rien n'est écrit en dur ailleurs.
 // 🔥 LA FLAMME ÉTERNELLE (tuile rare) est une coulée de magma à ciel ouvert :
 //   • une créature qui la touche brûle sur place ;
 //   • une balle tirée dedans est ABSORBÉE — on ne l'éteint pas ;
@@ -2651,11 +2656,12 @@ const D_CHAIN_DY = [72, 124];        // écart vertical entre les deux dalles d'
 const D_CHAIN_MAXX = 120;            // … et écart horizontal maximal
 const D_CHAIN_SAG = 24;              // flèche de la chaîne : ce qui la fait pendre
 const D_CHAIN_V = 0.0165;            // vitesse de montée, en fraction de chaîne par frame (~1 s)
-const D_SKEL_EVERY = 300;            // un squelette toutes les 5 s
+const D_SKEL_EVERY = 360;            // un squelette toutes les 6 s
+const D_SKEL_FIRST = 60;             // … et 1 s de répit avant le tout premier
 const D_SKEL_G = 0.34, D_SKEL_VMAX = 8.5;
-const D_SKEL_VX = 0.95;              // il marche vers le doodler, au sol seulement
+const D_SKEL_VX = 0.76;              // il marche vers le doodler, au sol seulement (0,95 − 20 %)
 const D_SKEL_W = 32, D_SKEL_H = 38;
-const D_SKEL_DOWN = 120, D_SKEL_REBUILD = 120;   // 2 s en tas d'os, puis 2 s à se reconstruire
+const D_SKEL_DOWN = 120, D_SKEL_REBUILD = 180;   // 2 s en tas d'os, puis 3 s à se reconstruire
 const D_SKEL_MAX = 8;                // plafond global : aucun squelette ne meurt vraiment, il en faut un
 const D_FLAME_SHOTS = 3;
 const D_BURN_LIFE = 300, D_BURN_H = 12;          // 5 s d'embrasement, sur D_BURN_H px au-dessus de la dalle
@@ -2875,7 +2881,7 @@ const D_BIOMES = [
   { k:'enfer',   name:'Enfer',    icon:'😈', paper:'#f0dad6', rule:'#d2a49c', marge:'#8f1d14',
     tiles:[
       { k:'chain',    icon:'⛓️', name:'Chaîne',   own:true, txt:'elles naissent PAR DEUX, à des hauteurs différentes, et une chaîne pend entre les deux. Te poser sur la dalle du BAS, c\'est la gravir jusqu\'à celle du haut, où tu repars d\'un saut' },
-      { k:'ossuary',  icon:'🦴', name:'Ossuaire', own:true, txt:'dès qu\'elle entre à l\'écran elle crache un squelette, puis un autre toutes les ' + Math.round(D_SKEL_EVERY / 60) + ' s. Le squelette TOMBE — c\'est la seule créature du jeu soumise à la gravité — se pose où il peut et marche vers toi. L\'abattre ne rapporte AUCUN coffre : il s\'effondre en tas d\'os, attend ' + Math.round(D_SKEL_DOWN / 60) + ' s et se reconstruit en ' + Math.round(D_SKEL_REBUILD / 60) + ' s' },
+      { k:'ossuary',  icon:'🦴', name:'Ossuaire', own:true, txt:'une seconde après son entrée à l\'écran elle crache un squelette, puis un autre toutes les ' + Math.round(D_SKEL_EVERY / 60) + ' s. Le squelette TOMBE — c\'est la seule créature du jeu soumise à la gravité — se pose où il peut et marche vers toi. L\'abattre ne rapporte AUCUN coffre : il s\'effondre en tas d\'os, attend ' + Math.round(D_SKEL_DOWN / 60) + ' s et se reconstruit en ' + Math.round(D_SKEL_REBUILD / 60) + ' s' },
       { k:'eflame',   icon:'🔥', name:'Flamme éternelle', own:true, w:D_BIOME_TILE_RARE, txt:'une coulée de magma à ciel ouvert : une créature qui la touche brûle, une balle tirée dedans est ABSORBÉE — et t\'y poser arme tes ' + D_FLAME_SHOTS + ' tirs suivants en LANCE-FLAMMES. Un jet qui rencontre une dalle en embrase le sommet pendant ' + Math.round(D_BURN_LIFE / 60) + ' s, et ce sommet détruit tout ce qu\'il touche — les créatures, et toi aussi. Te tenir sur la coulée, en revanche, ne risque rien' },
     ],
     mobs:[{ k:'skel',  icon:'💀', w:36, h:40, vx:1.15, drawn:true },
