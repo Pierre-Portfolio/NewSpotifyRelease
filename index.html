@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '12.6.0';
+const APP_VERSION = '12.6.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17497,6 +17497,16 @@ async function emploiFetchAdzuna(query, location, crit) {
 // ⚠ Une donnée MANQUANTE ne rejette JAMAIS (salaire, contrat et date sont absents de la
 // plupart des offres — filtrer dessus viderait la liste).
 const _emLower = s => String(s || '').toLowerCase();
+// Comparaison de LIEUX : minuscules SANS accents. « Île-de-France » saisi et « ile de france »
+// renvoyé par une API sont le même endroit, et un critère DUR ne peut pas se permettre de les
+// distinguer. ⚠ Les séparateurs (tirets, virgules, points) deviennent des espaces : les APIs
+// écrivent tantôt « Ile-de-France », tantôt « Ile de France ».
+const _emPlace = s => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .replace(/[-_,;/().]+/g, ' ').replace(/\s+/g, ' ').trim();
+// Mots qui désignent « n'importe où » plutôt qu'un lieu : ce que rendent les sources 100 %
+// distancielles. ⚠ Ils ne valent PAS un lieu : « anywhere » veut dire « un autre pays est
+// possible », exactement ce que le critère dur interdit.
+const EMPLOI_PARTOUT = ['remote', 'teletravail', 'telework', 'anywhere', 'worldwide', 'partout', 'monde', 'global'];
 function emploiHay(j) { return _emLower([j.title, j.company, j.location, j.excerpt, j.tags.join(' ')].join(' ')); }
 // Une techno est-elle CITÉE dans l'offre ? ⚠ Bornes de mot obligatoires, et non un `includes`
 // nu : « Go » se serait trouvé dans « gouvernance », « R » dans n'importe quoi, et le classement
@@ -17510,9 +17520,43 @@ function emploiTechHit(hay, tech) {
   try { return new RegExp('(^|[^a-z0-9+#.])' + esc + '([^a-z0-9+#.]|$)').test(hay); }
   catch { return hay.includes(t); }
 }
+// 📍 12.6.1 — LE LIEU DEVIENT UN CRITÈRE DUR (demande utilisateur : « c'est non négociable de
+// trouver dans la région minimum décrite en recherche, donc pas un autre pays »). Il ne coûtait
+// jusqu'ici que 12 points de classement : une offre à Berlin restait affichée, simplement plus
+// bas. Elle est désormais ÉCARTÉE.
+// ⚠ Le test porte sur le champ LIEU de l'offre, jamais sur tout son texte : une entreprise qui
+// s'appelle « Paris SAS » ou un résumé qui cite Paris en passant n'est pas une offre à Paris, et
+// un critère dur ne peut pas se tromper là-dessus (le classement, lui, pouvait).
+// ⚠ Correspondance dans LES DEUX SENS : « Paris » saisi accepte « Paris, France », et
+// « Île-de-France » saisi accepte « Ile de France » comme « Paris » n'y suffit pas — d'où aussi
+// la comparaison mot à mot, qui rattrape ville ⊂ région quand l'API donne les deux.
+// ⚠ Une offre SANS lieu, ou marquée « anywhere / worldwide », est écartée elle aussi : on ne
+// peut pas prouver qu'elle est dans la zone, et « pas un autre pays » ne se satisfait pas d'un
+// peut-être. L'EXCEPTION est explicite : saisir « Remote » (ou « Télétravail ») parmi les lieux
+// rouvre la porte à ces offres-là, puisque c'est alors le lieu demandé.
+// ⚠ Aucun effet si aucun lieu n'est saisi : le critère ne s'invente pas, il applique ce qui est
+// écrit dans le formulaire — la règle du module (« une donnée manquante ne rejette jamais »)
+// vaut pour la donnée de l'OFFRE, pas pour un critère que l'utilisateur a posé.
+function emploiLocOk(j, crit) {
+  const loc = _emPlace(j.location);
+  const mots = loc ? loc.split(' ') : [];
+  const vague = !loc || EMPLOI_PARTOUT.some(v => mots.includes(v));
+  for (const l of crit.lieux) {
+    const t = _emPlace(l);
+    if (!t) continue;
+    if (EMPLOI_PARTOUT.indexOf(t) >= 0) { if (j.remote || vague) return true; continue; }
+    if (vague) continue;
+    if (loc.includes(t) || t.includes(loc)) return true;
+    // mot à mot : « paris ile de france » saisi ↔ « paris » rendu par l'API, et réciproquement
+    const tm = t.split(' ');
+    if (tm.some(w => w.length > 2 && mots.indexOf(w) >= 0)) return true;
+  }
+  return false;
+}
 function emploiReject(j, crit, now) {
   const hay = emploiHay(j);
   const days = +crit.maxDays;
+  if (crit.lieux.length && !emploiLocOk(j, crit)) return 'hors de la zone';
   if (days > 0 && j.at && (now - j.at) > days * 86400000) return 'trop ancienne';
   for (const w of crit.exclude) { const t = _emLower(w).trim(); if (t && hay.includes(t)) return 'exclu : ' + w; }
   const sMin = emploiAnnual(crit.salMin, crit.salPeriod), sMax = emploiAnnual(crit.salMax, crit.salPeriod);
@@ -17529,12 +17573,10 @@ function emploiScore(j, crit, now) {
   let s = 40;
   const hay = emploiHay(j), title = _emLower(j.title);
   for (const m of crit.metiers) { const t = _emLower(m).trim(); if (!t) continue; if (title.includes(t)) s += 16; else if (hay.includes(t)) s += 7; }
-  if (crit.lieux.length) {
-    const loc = _emLower(j.location);
-    if (crit.lieux.some(l => { const t = _emLower(l).trim(); return t && (loc.includes(t) || hay.includes(t)); })) s += 12;
-    else if (j.remote) s += 4;
-    else s -= 12;
-  }
+  // 📍 Le lieu ne PÉNALISE plus : depuis 12.6.1 il écarte (voir `emploiReject`), et tout ce qui
+  // arrive ici est donc déjà dans la zone. Le bonus subsiste pour départager une correspondance
+  // exacte du champ lieu d'une correspondance seulement plausible.
+  if (crit.lieux.length && emploiLocOk(j, crit)) s += 12;
   for (const sec of crit.secteurs) { const t = _emLower(sec).split(/[\s/]+/)[0]; if (t && t.length > 3 && hay.includes(t)) s += 5; }
   // 💻 Technos : le signal le plus fort après le métier lui-même quand on cherche en
   // informatique — une offre qui cite la pile qu'on veut est presque toujours la bonne.
