@@ -2737,6 +2737,32 @@ function doodleLadderLinks(s) {
 // Toutes les liaisons, les deux sortes confondues — ce que le dessin et la recherche de paire
 // veulent presque toujours.
 function doodleClimbAll(s) { return doodleClimbPairs(s, 'chain').concat(doodleLadderLinks(s)); }
+// ⛓️🪜 12.8.4 — RIEN NE RESTE EN TRAVERS D'UNE LIAISON (demande utilisateur). Une dalle plantée
+// au milieu des barreaux ou des maillons se dessinait PAR-DESSUS le tracé et le doodler la
+// traversait pendant la montée : on ne comprenait plus ce qu'on grimpait. Les dalles qui coupent
+// le tracé sont donc effacées, avec les éclats qui le disent.
+// ⚠ Les deux EXTRÉMITÉS sont épargnées : ce sont le départ et l'arrivée.
+// ⚠ Le tracé est échantillonné par `doodleClimbAt`, la MÊME fonction que le dessin et que la
+// montée — un test géométrique à part aurait fini par effacer des dalles qui ne gênaient pas,
+// ou par en laisser une en travers de ce qu'on voit.
+// ⚠ Marquage `dead` et non retrait du tableau : c'est le nettoyage de fin de frame qui les
+// enlève, comme pour toute dalle qui meurt — retirer en pleine boucle décale les index.
+const D_CLIMB_CLEAR_N = 22;          // points d'échantillonnage du tracé
+function doodleClimbClear(s) {
+  for (const c of doodleClimbAll(s)) {
+    const half = (c.k === 'ladder' ? D_LADDER_HALF : 5) + 2;
+    for (const q of s.platforms) {
+      if (q === c.a || q === c.b || q.dead) continue;
+      for (let i = 1; i < D_CLIMB_CLEAR_N; i++) {
+        const pt = doodleClimbAt(c, i / D_CLIMB_CLEAR_N);
+        if (pt.x + half < q.x || pt.x - half > q.x + q.w || pt.y < q.y - 2 || pt.y > q.y + q.h + 2) continue;
+        q.dead = true;
+        for (let k = 0; k < 8; k++) s.parts.push({ x: q.x + q.w / 2, y: q.y + q.h / 2, vx: (Math.random() - 0.5) * 3.4, vy: 0.6 + Math.random() * 2, life: 24, max: 24, sz: 3, c: k % 2 ? '#c3c8d0' : '#8f929c' });
+        break;
+      }
+    }
+  }
+}
 // Point de la liaison à l'avancement `u` (0 = sous la dalle haute, 1 = sur la dalle basse).
 // ⚠ La CHAÎNE pend (D_CHAIN_SAG) : sans la flèche, deux dalles reliées par un trait droit
 // n'auraient rien d'une chaîne lâche, et « soumise à la gravité » n'aurait pas été tenu.
