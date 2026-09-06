@@ -151,7 +151,10 @@ const D_LOOT = [
   { k:'big',    icon:'🔎', label:'Gros calibre', txt:'tous tes projectiles doublent de taille',  max: D_BIG_MAX, w: 4 },
   { k:'shTime', icon:'⏳', label:'Bouclier temporel', txt:'invulnérable pendant ' + D_SHTIME + ' points', max: 3, w: 1.5 },
   { k:'shHit',  icon:'🛡️', label:'Bouclier',          txt:'encaisse un coup',                     max: 3, w: 2 },
-  { k:'shFall', icon:'🪂', label:'Parachute',         txt:'rattrape une chute dans le vide',      max: 2, w: 1.5 },
+  // ⚠ 12.8.8 — UN SEUL PARACHUTE À LA FOIS (demande utilisateur) : `max: 1`. Le plafond garde
+  // aussi le vivier des coffres (`doodleLootPool`) et le prêt du déblocage, qui s'y recalent
+  // tous les deux — il n'y a rien d'autre à borner. Consommé, il redevient tirable aussitôt.
+  { k:'shFall', icon:'🪂', label:'Parachute',         txt:'rattrape une chute dans le vide — un seul à la fois', max: 1, w: 1.5 },
   { k:'shVoid', icon:'🌌', label:'Survivant des trous noirs', txt:'tu survis au trou noir qui devait t\'avaler : il engloutit à ta place toutes les créatures visibles et t\'offre le butin de leurs coffres', max: D_VOID_MAX, w: 1.2 },
   // 🐏 10.6.6 — BÉLIER (demande utilisateur) : il ne garde QUE le dessus, et seulement pendant
   // la MONTÉE — saut, ressort, geyser, jetpack, peu importe ce qui soulève. Un léger bouclier
