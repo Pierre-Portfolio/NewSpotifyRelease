@@ -213,7 +213,8 @@ function doodleShotGap(s) { return Math.max(2, D_SHOT_GAP - Math.min(4, doodlePe
 function doodleBullet(s, x, y, vx, vy) {
   const laser = doodleWpnOf(s, 'laser') > 0;
   return { x, y, vx: laser ? vx * D_LASER_V : vx, vy: laser ? vy * D_LASER_V : vy,
-           pierce: laser ? D_LASER_PIERCE : doodleWpnOf(s, 'pierce'), boom: doodleWpnOf(s, 'boom') > 0, laser, sz: doodleBigMul(s) };
+           pierce: laser ? D_LASER_PIERCE : doodleWpnOf(s, 'pierce'), boom: doodleWpnOf(s, 'boom') > 0, laser, sz: doodleBigMul(s),
+           flame: (s.flame || 0) > 0 };   // 🔥 le jet de lance-flammes : voir la 🔥 Flamme éternelle
 }
 // 🚀 Missile téléguidé. ⚠ Il vole MOINS vite qu'une balle : c'est le prix de la poursuite,
 // sans quoi il rendrait le tir ordinaire inutile. Son virage est BORNÉ (D_MISSILE_TURN rad par
@@ -356,6 +357,12 @@ function doodleKillMonster(s, m, force) {
   for (let k = 0; k < (m.rare ? 16 : 9); k++) s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 0.5) * 6, life: 24, max: 24, sz: 4, c });
   // ⚠ La créature TRÈS rare du biome lâche DEUX coffres : c'est ce qui récompense de l'avoir
   // affrontée plutôt que contournée. Ils sont décalés pour ne pas tomber l'un dans l'autre.
+  // 🦴 Squelette d'ossuaire : il ne MEURT pas, il s'effondre en tas d'os et se reconstruit.
+  // ⚠ Et il ne lâche AUCUN coffre : c'est le prix de son immortalité — sans cette règle, une
+  // dalle d'ossuaire aurait été une machine à butin qu'il suffisait d'arroser.
+  // ⚠ `alive = false` le rend inoffensif et le sort du tir ; le filtre de fin de frame l'épargne
+  // tant que `bones > 0`, et c'est la boucle des monstres qui le relève.
+  if (m.revive) { m.bones = D_SKEL_DOWN + D_SKEL_REBUILD; m.vx = 0; m.vy = 0; return; }
   if (doodleClassic(s)) return;   // 🎮 Classique : pas de coffres, donc pas de butins
   // ⚠ L'étalement est DÉRIVÉ de `n` et centré, et non écrit en dur pour deux : c'est ce qui
   // le laisse juste si un jour une créature en lâche davantage.
@@ -508,6 +515,12 @@ const D_SCENE = {
   // ☁️ Plein ciel : azur franc en haut, lumière dorée en bas (on monte vers le soleil).
   // `far`/`near` sont ici les DEUX teintes de cumulus, pas des reliefs : le biome n'a pas de sol.
   nuages:  { sky:['#2f7fd8', '#dff0ff'], far:'#c3ddf3', near:'#ffffff', ink:'#5f93c8' },
+  // 🔥 Enfer : NOIR EN HAUT, ROUGE SANG EN BAS — on remonte d'un gouffre en feu vers la voûte
+  // obscure. ⚠ L'inverse (clair en haut) aurait dit qu'on s'échappe vers la lumière, alors que
+  // tout le biome raconte qu'on s'enfonce. `far`/`near` sont deux plans de roche presque noirs :
+  // ce sont les FISSURES incandescentes qui doivent éclairer, jamais les parois — sinon le décor
+  // avale les dalles, exactement comme les façades de Night City.
+  enfer:   { sky:['#0a0407', '#5a0d0a'], far:'#1c070b', near:'#0b0305', ink:'#ff5a2a' },
 };
 // ⚠ Positions DÉTERMINISTES : un Math.random() par frame ferait grésiller tout le décor.
 // Hachage classique sinus × grand nombre — reproductible, sans état à porter.
@@ -626,6 +639,41 @@ function doodleScene(ctx, W, H, climb, k, a) {
       const py = H - doodleParallax(climb, -0.7 - doodleRnd(i + 6) * 0.6, H + 40, doodleRnd(i + 4) * H);
       ctx.globalAlpha = Math.min(1, a) * (0.35 + doodleRnd(i + 8) * 0.5);
       ctx.beginPath(); ctx.arc(px, py, 1.3 + doodleRnd(i + 13) * 1.7, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = Math.min(1, a);
+  } else if (k === 'enfer') {
+    // Deux plans de roche dentelée, des fissures incandescentes qui les parcourent, et des
+    // braises qui MONTENT (parallaxe inversée, comme au Volcan). ⚠ Le halo du gouffre est peint
+    // AVANT les reliefs : posé après, il aurait blanchi la roche et tout le contraste serait parti.
+    const glow = ctx.createRadialGradient(W * 0.5, H * 1.02, 10, W * 0.5, H * 1.02, H * 0.85);
+    glow.addColorStop(0, 'rgba(255,90,42,0.55)'); glow.addColorStop(1, 'rgba(255,90,42,0)');
+    ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+    const offFar = doodleParallax(climb, 0.06, 260);
+    doodleRidge(ctx, W, H, offFar, 260, sc.far, fx => 18 + Math.abs(Math.sin(fx * 9.1)) * 46, 42);
+    const off = doodleParallax(climb, 0.13, 200);
+    doodleRidge(ctx, W, H, off, 200, sc.near, fx => 12 + Math.abs(Math.sin(fx * 13.7 + 1.2)) * 54, 32);
+    // Les fissures : de courts éclats coudés posés sur le plan proche, qui pulsent lentement.
+    ctx.lineCap = 'round';
+    for (let base = off - 200; base < H + 200; base += 200) {
+      for (let i = 0; i < 5; i++) {
+        const fx = doodleRnd(i + 31), px = fx * W, py = base + 6 + doodleRnd(i + 47) * 22;
+        ctx.strokeStyle = sc.ink;
+        ctx.globalAlpha = Math.min(1, a) * (0.30 + 0.35 * (0.5 + 0.5 * Math.sin(climb * 0.02 + i * 1.7)));
+        ctx.lineWidth = 1.4 + doodleRnd(i + 53) * 1.6;
+        ctx.beginPath();
+        ctx.moveTo(px - 14, py); ctx.lineTo(px - 3, py - 7); ctx.lineTo(px + 6, py + 2); ctx.lineTo(px + 17, py - 5);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = Math.min(1, a);
+    // Les braises. ⚠ Deux teintes en alternance : une seule et l'écran se lisait comme une pluie
+    // de points, pas comme un feu.
+    for (let i = 0; i < 22; i++) {
+      const px = (doodleRnd(i) * W + Math.sin(climb * 0.025 + i * 2.1) * 14 + W) % W;
+      const py = H - doodleParallax(climb, -0.75 - doodleRnd(i + 6) * 0.7, H + 40, doodleRnd(i + 4) * H);
+      ctx.fillStyle = i % 3 ? '#ff7a2a' : '#ffd24a';
+      ctx.globalAlpha = Math.min(1, a) * (0.30 + doodleRnd(i + 9) * 0.55);
+      ctx.beginPath(); ctx.arc(px, py, 1.2 + doodleRnd(i + 14) * 1.8, 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalAlpha = Math.min(1, a);
   } else if (k === 'cosmos') {
@@ -2520,6 +2568,74 @@ const D_STORM_DROPS = 12;      // gouttes dessinées sous la dalle (voir doodleT
 // Écrit `0.4 / 3` et non la décimale : la valeur d'origine et le facteur restent lisibles.
 const D_BIOME_TILE_RARE = 0.4 / 3;   // poids d'une tuile « rare » : ~87 % de moins qu'une tuile ordinaire
 function doodleBiomeTileW(k) { const d = doodleBiomeTileDef(k); return (d && d.w) || 1; }
+// 🔥 12.5.7 — BIOME ENFER (demande utilisateur). Trois tuiles, et chacune répond à une
+// question que les autres biomes ne posaient pas :
+// ⛓️ LA CHAÎNE naît TOUJOURS PAR DEUX, à des hauteurs différentes, et une chaîne PEND entre
+//   les deux (d'où la flèche : elle est soumise à la gravité, comme une vraie chaîne lâche).
+//   Se poser sur la dalle BASSE, c'est la gravir jusqu'à la HAUTE — un ascenseur qu'on grimpe,
+//   pas un tremplin. ⚠ La jumelle naît EN DESSOUS, jamais au-dessus : posée plus haut, elle
+//   abaisserait `topY` et la boucle de génération croirait la rangée suivante déjà faite,
+//   ouvrant un trou infranchissable (même piège que les 🚇 Tuyaux).
+//   ⚠ L'écart horizontal est BORNÉ (D_CHAIN_MAXX) : deux pieds aux antipodes auraient donné une
+//   chaîne presque horizontale, qu'on ne lit plus comme quelque chose qui se grimpe.
+// 🦴 L'OSSUAIRE crache un squelette dès qu'elle entre à l'écran, puis un toutes les
+//   D_SKEL_EVERY frames. Le squelette est la SEULE créature du jeu soumise à la gravité : il
+//   tombe, se pose sur ce qu'il rencontre et marche vers le doodler. ⚠ Et il ne meurt pas
+//   vraiment — abattu, il s'effondre en tas d'os, attend D_SKEL_DOWN puis se reconstruit en
+//   D_SKEL_REBUILD. C'est pourquoi il ne lâche AUCUN coffre : sans cette règle, une dalle
+//   d'ossuaire aurait été une machine à butin qu'il suffisait d'arroser.
+// 🔥 LA FLAMME ÉTERNELLE (tuile rare) est une coulée de magma à ciel ouvert :
+//   • une créature qui la touche brûle sur place ;
+//   • une balle tirée dedans est ABSORBÉE — on ne l'éteint pas ;
+//   • s'y poser arme les D_FLAME_SHOTS tirs suivants en LANCE-FLAMMES.
+//   Un tir de lance-flammes qui rencontre une dalle en EMBRASE LE SOMMET pour D_BURN_LIFE
+//   frames, et ce sommet détruit tout ce qu'il touche — les créatures, et toi aussi.
+//   ⚠ C'est volontaire : l'arme est puissante, elle doit se payer. Le brasier est parfaitement
+//   visible, donc évitable — c'est un risque qu'on prend, pas un piège qu'on subit. Le doodler
+//   passe par `doodleHurt` comme partout : boucliers et teintes gardent leur mot à dire.
+//   ⚠ Se tenir sur la coulée elle-même ne risque RIEN, comme sur la 🔥 Magma du Volcan : il
+//   faut bien pouvoir y prendre le lance-flammes.
+const D_CHAIN_DY = [72, 124];        // écart vertical entre les deux dalles d'une paire
+const D_CHAIN_MAXX = 120;            // … et écart horizontal maximal
+const D_CHAIN_SAG = 24;              // flèche de la chaîne : ce qui la fait pendre
+const D_CHAIN_V = 0.0165;            // vitesse de montée, en fraction de chaîne par frame (~1 s)
+const D_SKEL_EVERY = 300;            // un squelette toutes les 5 s
+const D_SKEL_G = 0.34, D_SKEL_VMAX = 8.5;
+const D_SKEL_VX = 0.95;              // il marche vers le doodler, au sol seulement
+const D_SKEL_W = 32, D_SKEL_H = 38;
+const D_SKEL_DOWN = 120, D_SKEL_REBUILD = 120;   // 2 s en tas d'os, puis 2 s à se reconstruire
+const D_SKEL_MAX = 8;                // plafond global : aucun squelette ne meurt vraiment, il en faut un
+const D_FLAME_SHOTS = 3;
+const D_BURN_LIFE = 300, D_BURN_H = 12;          // 5 s d'embrasement, sur D_BURN_H px au-dessus de la dalle
+// Les chaînes tendues à l'écran : une entrée par PAIRE, de la dalle HAUTE vers la BASSE.
+// ⚠ Source UNIQUE pour le dessin et pour la montée : deux parcours séparés, et l'on finirait
+// par grimper une chaîne qui n'est pas celle qu'on voit.
+function doodleChainPairs(s) {
+  const by = new Map();
+  for (const q of s.platforms) {
+    if (!q.chain || q.dead) continue;
+    const l = by.get(q.chain) || []; l.push(q); by.set(q.chain, l);
+  }
+  const out = [];
+  for (const l of by.values()) {
+    if (l.length < 2) continue;
+    const [a, b] = l[0].y <= l[1].y ? [l[0], l[1]] : [l[1], l[0]];   // a = haute, b = basse
+    out.push({ a, b, x1: a.x + a.w / 2, y1: a.y + a.h, x2: b.x + b.w / 2, y2: b.y });
+  }
+  return out;
+}
+// Point de la chaîne à l'avancement `u` (0 = sous la dalle haute, 1 = sur la dalle basse).
+// La chaîne PEND : sans la flèche, deux dalles reliées par un trait droit n'auraient rien d'une
+// chaîne lâche, et « soumise à la gravité » n'aurait pas été tenu.
+function doodleChainAt(c, u) {
+  return { x: c.x1 + (c.x2 - c.x1) * u, y: c.y1 + (c.y2 - c.y1) * u + Math.sin(u * Math.PI) * D_CHAIN_SAG };
+}
+// Un squelette d'ossuaire. ⚠ `grav` — le seul monstre du jeu qui tombe — et `revive`, qui le
+// fait passer par la branche « tas d'os » de `doodleKillMonster` au lieu de mourir.
+function doodleMakeSkel(x, y) {
+  return { x, y, w: D_SKEL_W, h: D_SKEL_H, type: 1, alive: true, kind: 'skel', icon: '💀',
+           vx: 0, vy: 0, grav: true, revive: true, wt: Math.random() * 6.28 };
+}
 const D_BIOMES = [
   { k:'normal',  name:'Départ',   icon:'📄', paper:'#f4efdd', rule:'#cfe0ef', marge:'#f2c0c0', tiles:[], mobs:[] },
   // 🌲 10.8.0 — LA PRAIRIE DEVIENT LA FORÊT (demande utilisateur) : elle garde sa 🌿 Liane et
@@ -2620,6 +2736,16 @@ const D_BIOMES = [
     ],
     mobs:[{ k:'cherub', icon:'👼', w:38, h:34, vx:1.15, wave:2.2, drawn:true },
           { k:'seraph', icon:'😇', w:56, h:46, vx:0.85, rare:true, drawn:true }] },
+  // 🔥 12.5.7 — BIOME ENFER (demande utilisateur) : le seul biome entièrement NOIR ET ROUGE,
+  // et le seul dont les trois tuiles sont neuves — rien n'y est repris du catalogue.
+  { k:'enfer',   name:'Enfer',    icon:'😈', paper:'#f0dad6', rule:'#d2a49c', marge:'#8f1d14',
+    tiles:[
+      { k:'chain',    icon:'⛓️', name:'Chaîne',   own:true, txt:'elles naissent PAR DEUX, à des hauteurs différentes, et une chaîne pend entre les deux. Te poser sur la dalle du BAS, c\'est la gravir jusqu\'à celle du haut, où tu repars d\'un saut' },
+      { k:'ossuary',  icon:'🦴', name:'Ossuaire', own:true, txt:'dès qu\'elle entre à l\'écran elle crache un squelette, puis un autre toutes les ' + Math.round(D_SKEL_EVERY / 60) + ' s. Le squelette TOMBE — c\'est la seule créature du jeu soumise à la gravité — se pose où il peut et marche vers toi. L\'abattre ne rapporte AUCUN coffre : il s\'effondre en tas d\'os, attend ' + Math.round(D_SKEL_DOWN / 60) + ' s et se reconstruit en ' + Math.round(D_SKEL_REBUILD / 60) + ' s' },
+      { k:'eflame',   icon:'🔥', name:'Flamme éternelle', own:true, w:D_BIOME_TILE_RARE, txt:'une coulée de magma à ciel ouvert : une créature qui la touche brûle, une balle tirée dedans est ABSORBÉE — et t\'y poser arme tes ' + D_FLAME_SHOTS + ' tirs suivants en LANCE-FLAMMES. Un jet qui rencontre une dalle en embrase le sommet pendant ' + Math.round(D_BURN_LIFE / 60) + ' s, et ce sommet détruit tout ce qu\'il touche — les créatures, et toi aussi. Te tenir sur la coulée, en revanche, ne risque rien' },
+    ],
+    mobs:[{ k:'skel',  icon:'💀', w:36, h:40, vx:1.15, drawn:true },
+          { k:'demon', icon:'👹', w:54, h:46, vx:1.05, rare:true, drawn:true }] },
 ];
 // 🏗️ 9.8.3 — LE BÂTISSEUR (demande utilisateur) : TRÈS TRÈS TRÈS rare, et c'est le seul
 // monstre qu'on ne tue pas. Une balle ne l'abat pas — elle le décide à POSER une plateforme
@@ -2818,7 +2944,7 @@ function doodleBossStart(s, W, H) {
   // repeupleraient `s.monsters`. ⚠ NE PAS toucher aux dalles, bonus, trous ni coffres : le
   // monde de plateforme reprend tel quel à la fin du combat (`bossHide` repasse à false).
   s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = [];
-  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
+  s.fly = 0; s.flyType = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
   s.lastPlat = null; s.bounceStreak = 0;
   s.banner = { txt: `💀 ${kind.name}`, sub: `plus de saut — déplace-toi et tire · ${hp} points de vie · 🛡️ ${D_BOSS_SH} balles après chaque sort`, life: D_BANNER_LIFE * 1.6 };
@@ -4882,6 +5008,63 @@ function doodleTileDraw(ctx, p, t) {
     if (p.tar) doodleTileSpent(ctx, p);                            // une cabine par dalle : on doit voir qu'elle est passée
     return;
   }
+  // ⛓️ Chaîne : dalle de fer noir, avec l'anneau d'ancrage d'où part la chaîne. ⚠ La chaîne
+  // elle-même est dessinée dans `doodleDraw`, à partir de la PAIRE : la tracer ici aurait obligé
+  // chaque dalle à retrouver sa jumelle, et deux moitiés de chaîne se seraient croisées.
+  if (p.type === 'chain') {
+    doodleRR(ctx, x, y, w, h, 4, '#3f4048');
+    ctx.fillStyle = '#1d1e24'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#22232a'; ctx.lineWidth = 1.2;
+    for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(x + i * w / 4, y + 2); ctx.lineTo(x + i * w / 4, y + h - 4); ctx.stroke(); }
+    ctx.fillStyle = '#6b6d78';                                        // les quatre rivets
+    for (const rx of [x + 5, x + w - 5]) for (const ry of [y + 4, y + h - 6]) { ctx.beginPath(); ctx.arc(rx, ry, 1.6, 0, Math.PI * 2); ctx.fill(); }
+    ctx.strokeStyle = '#8f929c'; ctx.lineWidth = 2.4;                 // l'anneau d'ancrage
+    ctx.beginPath(); ctx.arc(x + w / 2, y + h + 2, 4, -0.5, Math.PI + 0.5); ctx.stroke();
+    return;
+  }
+  // 🦴 Ossuaire : dalle d'ossements empilés, avec un crâne au centre dont les orbites
+  // ROUGEOIENT à l'approche de la prochaine sortie — c'est le compte à rebours, visible.
+  if (p.type === 'ossuary') {
+    doodleRR(ctx, x, y, w, h, 5, '#6b6252');
+    ctx.fillStyle = '#443f34'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.strokeStyle = '#d8d2bd'; ctx.lineWidth = 3; ctx.lineCap = 'round';   // deux fémurs croisés
+    ctx.beginPath(); ctx.moveTo(x + 7, y + 4); ctx.lineTo(x + w - 7, y + h - 5);
+    ctx.moveTo(x + w - 7, y + 4); ctx.lineTo(x + 7, y + h - 5); ctx.stroke();
+    const cx = x + w / 2, cy = y + h / 2;
+    ctx.fillStyle = '#efeadb'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.ellipse(cx, cy - 1, 7.5, 6.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillRect(cx - 4, cy + 4, 8, 3.4);                             // la mâchoire
+    // orbites : d'autant plus rouges que la prochaine sortie approche
+    const pret = p.skelT == null ? 1 : Math.max(0, Math.min(1, 1 - p.skelT / D_SKEL_EVERY));
+    ctx.fillStyle = 'rgb(' + Math.round(30 + pret * 225) + ',' + Math.round(24 + pret * 40) + ',30)';
+    [-3, 3].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx, cy - 1.5, 2.2, 0, Math.PI * 2); ctx.fill(); });
+    return;
+  }
+  // 🔥 Flamme éternelle : coulée de magma à ciel ouvert, avec ses flammes au-dessus. ⚠ Les
+  // flammes sont DÉTERMINISTES (t + abscisse) et non tirées au sort : une gerbe de particules
+  // aurait brûlé tout le budget de dessin pour une dalle qui reste des dizaines de secondes.
+  if (p.type === 'eflame') {
+    doodleRR(ctx, x, y, w, h, 5, '#5a1208');
+    ctx.fillStyle = '#2a0704'; ctx.fillRect(x, y + h - 4, w, 4);
+    // la coulée : trois bandes de magma de plus en plus claires vers le centre
+    ctx.fillStyle = '#c02b0c'; ctx.fillRect(x + 2, y + 2, w - 4, h - 7);
+    ctx.fillStyle = '#ff6a1c'; ctx.fillRect(x + 4, y + 4, w - 8, h - 11);
+    ctx.fillStyle = '#ffd24a';
+    for (let i = 0; i < 4; i++) {
+      const bx = x + 8 + i * (w - 16) / 3, bw = 3 + Math.sin(t * 0.09 + i * 1.7) * 1.6;
+      ctx.fillRect(bx - bw / 2, y + 5, bw, h - 13);
+    }
+    // les flammes, au-dessus de la dalle
+    for (let i = 0; i < 5; i++) {
+      const fx = x + 7 + i * (w - 14) / 4;
+      const fh = 10 + Math.abs(Math.sin(t * 0.11 + i * 1.3 + p.x * 0.05)) * 11;
+      ctx.fillStyle = 'rgba(255,106,28,0.9)';
+      ctx.beginPath(); ctx.moveTo(fx - 4.5, y + 2); ctx.quadraticCurveTo(fx - 2, y - fh * 0.55, fx, y - fh); ctx.quadraticCurveTo(fx + 2, y - fh * 0.55, fx + 4.5, y + 2); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,214,74,0.95)';
+      ctx.beginPath(); ctx.moveTo(fx - 2.2, y + 2); ctx.quadraticCurveTo(fx - 1, y - fh * 0.4, fx, y - fh * 0.62); ctx.quadraticCurveTo(fx + 1, y - fh * 0.4, fx + 2.2, y + 2); ctx.closePath(); ctx.fill();
+    }
+    return;
+  }
   // 🚦 Feu tricolore : boîtier noir à trois lampes, une seule allumée. ⚠ Les deux éteintes
   // restent visibles en sombre : c'est ce qui dit qu'il en existe trois et que ça va tourner.
   if (p.type === 'light') {
@@ -5706,6 +5889,83 @@ function doodleMummyFall(ctx, mu, t) {
   ctx.restore();
 }
 const D_MOB_DRAW = {
+  // 💀 Squelette — crâne, cage thoracique, bras ballants. ⚠ Il a DEUX vies visuelles : debout,
+  // et en tas d'os (`m.bones`), où il se recompose sous les yeux du joueur. Le second état est
+  // dessiné ici et nulle part ailleurs : c'est le même monstre, pas un décor de plus.
+  skel(ctx, m, cx, cy, t) {
+    // — tas d'os, puis reconstruction — `k` va de 0 (effondré) à 1 (debout)
+    if (m.bones > 0) {
+      const k = m.bones > D_SKEL_REBUILD ? 0 : 1 - m.bones / D_SKEL_REBUILD;
+      ctx.globalAlpha = 0.45 + k * 0.55;
+      ctx.strokeStyle = '#efeadb'; ctx.lineWidth = 3.4; ctx.lineCap = 'round';
+      for (let i = 0; i < 4; i++) {                                    // les os, qui se redressent
+        const a0 = 1.35 + i * 0.35, a1 = -1.35 + i * 0.28;
+        const ang = a0 + (a1 - a0) * k, ln = 8 + i * 1.6;
+        const bx = cx + (i - 1.5) * 6 * (1 - k * 0.55), by = cy + m.h * 0.34 - k * m.h * 0.42;
+        ctx.beginPath(); ctx.moveTo(bx - Math.cos(ang) * ln, by - Math.sin(ang) * ln); ctx.lineTo(bx + Math.cos(ang) * ln, by + Math.sin(ang) * ln); ctx.stroke();
+      }
+      ctx.fillStyle = '#efeadb'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.6;
+      const sy = cy + m.h * 0.3 - k * m.h * 0.52;
+      ctx.beginPath(); ctx.ellipse(cx, sy, 8.5, 7.5, (1 - k) * 0.8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.globalAlpha = 1;
+      return;
+    }
+    const bob = Math.sin(t * 0.13 + m.x) * 1.3, look = m.vx > 0 ? 1 : m.vx < 0 ? -1 : 0;
+    ctx.strokeStyle = '#efeadb'; ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+    [-1, 1].forEach(sx => {                                            // bras ballants
+      const sw = Math.sin(t * 0.13 + m.x + (sx > 0 ? 1.6 : 0)) * 0.4;
+      ctx.beginPath(); ctx.moveTo(cx + sx * 8, cy - 1 + bob);
+      ctx.lineTo(cx + sx * (13 + sw * 4), cy + 10 + bob); ctx.stroke();
+    });
+    ctx.lineWidth = 3.6;                                               // jambes
+    [-1, 1].forEach(sx => { ctx.beginPath(); ctx.moveTo(cx + sx * 3.5, cy + 8 + bob); ctx.lineTo(cx + sx * 5, cy + m.h * 0.45 + bob); ctx.stroke(); });
+    ctx.fillStyle = '#e6e0cf'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.rect(cx - 7, cy - 3 + bob, 14, 13); ctx.fill(); ctx.stroke();   // la cage
+    ctx.strokeStyle = '#a8a290'; ctx.lineWidth = 1.4;                  // les côtes
+    for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(cx - 6, cy + i * 4 + bob); ctx.lineTo(cx + 6, cy + i * 4 + bob); ctx.stroke(); }
+    ctx.fillStyle = '#efeadb'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(cx, cy - 12 + bob, 9.5, 8.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();   // le crâne
+    ctx.fillRect(cx - 4.5, cy - 5 + bob, 9, 3.4);                      // la mâchoire
+    ctx.fillStyle = '#c0270c';                                         // orbites incandescentes
+    [-4, 4].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx + look * 0.8, cy - 13 + bob, 2.6, 0, Math.PI * 2); ctx.fill(); });
+    ctx.fillStyle = '#ff7a2a';
+    [-4, 4].forEach(dx => { ctx.beginPath(); ctx.arc(cx + dx + look * 0.8, cy - 13 + bob, 1.3, 0, Math.PI * 2); ctx.fill(); });
+  },
+  // 👹 Démon — la créature TRÈS rare de l'Enfer : masse rouge, cornes, ailes de chauve-souris
+  // battantes et queue fourchue. Massif et lent, comme tous les « très rares » : c'est sa
+  // silhouette qui doit faire peur, pas sa vitesse.
+  demon(ctx, m, cx, cy, t) {
+    const bob = Math.sin(t * 0.08 + m.x) * 1.9, fl = Math.sin(t * 0.34) * 0.45 + 1, look = m.vx > 0 ? 1 : -1;
+    ctx.fillStyle = '#9c1c14'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2.2;   // les ailes, derrière — teinte RELEVÉE : l'auréole rouge des très rares noyait une membrane sombre
+    [-1, 1].forEach(sx => {
+      ctx.beginPath();
+      ctx.moveTo(cx + sx * 12, cy - 4 + bob);
+      ctx.quadraticCurveTo(cx + sx * 34, cy - 22 * fl + bob, cx + sx * 30, cy + 6 + bob);
+      ctx.quadraticCurveTo(cx + sx * 22, cy - 2 + bob, cx + sx * 12, cy + 8 + bob);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#e8b0a8'; ctx.lineWidth = 1.2;                            // deux nervures : sans elles l'aile n'est qu'une tache
+      [0.45, 0.75].forEach(u => { ctx.beginPath(); ctx.moveTo(cx + sx * 13, cy - 2 + bob); ctx.lineTo(cx + sx * (13 + 17 * u), cy - 12 * fl * (1 - u) + 8 * u + bob); ctx.stroke(); });
+      ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 2.2;
+    });
+    ctx.strokeStyle = '#7a1410'; ctx.lineWidth = 3; ctx.lineCap = 'round';         // la queue fourchue
+    ctx.beginPath();
+    ctx.moveTo(cx - look * 8, cy + 12 + bob);
+    ctx.quadraticCurveTo(cx - look * 26, cy + 16 + bob, cx - look * 24, cy + 2 + bob);
+    ctx.stroke();
+    doodleBlob(ctx, cx, cy + bob, 19, 17, '#d6291c');
+    ctx.fillStyle = '#a01a10'; ctx.beginPath(); ctx.ellipse(cx, cy + 7 + bob, 12, 8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8d2b0'; ctx.strokeStyle = '#2b2b33'; ctx.lineWidth = 1.8;   // les cornes
+    [-1, 1].forEach(sx => {
+      ctx.beginPath();
+      ctx.moveTo(cx + sx * 8, cy - 13 + bob); ctx.lineTo(cx + sx * 17, cy - 26 + bob); ctx.lineTo(cx + sx * 13, cy - 11 + bob);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    });
+    doodleEye(ctx, cx - 6.5, cy - 3 + bob, 5.6, look);
+    doodleEye(ctx, cx + 6.5, cy - 3 + bob, 5.6, look);
+    ctx.strokeStyle = '#4a0a06'; ctx.lineWidth = 2; ctx.lineCap = 'round';         // les sourcils, qui font le rictus
+    [-1, 1].forEach(sx => { ctx.beginPath(); ctx.moveTo(cx + sx * 2, cy - 9 + bob); ctx.lineTo(cx + sx * 12, cy - 5 + bob); ctx.stroke(); });
+    doodleFangs(ctx, cx, cy + 9 + bob, 17, 4);
+  },
   // 𓁿 Momie — tombée d'une stèle 𓂀 et posée sur sa dalle. Elle se dandine sur place : elle ne
   // se déplace pas (`perch`), c'est le balancement qui dit qu'elle est vivante.
   mummy(ctx, m, cx, cy, t) {
@@ -6785,6 +7045,44 @@ function doodleDraw(ctx, s, W, H) {
       ctx.beginPath(); ctx.moveTo(q.x + q.w / 2, q.y + q.h / 2); ctx.lineTo(s.px, s.py); ctx.stroke();
     }
     ctx.restore();
+    // ⛓️ Chaînes : AVANT les filets d'eau, elles passent derrière. Maillons dessinés un à un le
+    // long de la courbe — un simple trait n'aurait rien eu d'une chaîne.
+    for (const c of doodleChainPairs(s)) {
+      ctx.save();
+      const N = 16;
+      for (let i = 0; i <= N; i++) {
+        const pt = doodleChainAt(c, i / N), nx = doodleChainAt(c, Math.min(1, (i + 0.5) / N));
+        const ang = Math.atan2(nx.y - pt.y, nx.x - pt.x);
+        ctx.save(); ctx.translate(pt.x, pt.y); ctx.rotate(ang);
+        ctx.strokeStyle = i % 2 ? '#8f929c' : '#5c5f68'; ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.ellipse(0, 0, 4.6, 2.8, 0, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+      // le grimpeur : un maillon doré à l'endroit exact où l'on se hisse
+      if (s.chainUp && s.chainUp.a === c.a && s.chainUp.b === c.b) {
+        const pt = doodleChainAt(c, s.chainUp.u);
+        ctx.fillStyle = '#ffd54a'; ctx.strokeStyle = '#8a5a2c'; ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, 4.2, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // 🔥 Sommets embrasés par le lance-flammes : dessinés APRÈS les dalles, ils lèchent leur
+    // bord haut. ⚠ La hauteur des flammes DÉCROÎT avec le décompte : c'est le seul signal qui
+    // dise que le brasier va s'éteindre, donc quand la dalle redeviendra praticable.
+    for (const q of s.platforms) {
+      if (!(q.burn > 0) || q.dead || q.y < -30 || q.y > H + 30) continue;
+      const k = Math.min(1, q.burn / 60);
+      ctx.save();
+      for (let i = 0; i < 6; i++) {
+        const fx = q.x + 5 + i * (q.w - 10) / 5;
+        const fh = (7 + Math.abs(Math.sin(s.t * 0.15 + i * 1.1 + q.x * 0.05)) * D_BURN_H) * k;
+        ctx.fillStyle = 'rgba(255,90,26,0.88)';
+        ctx.beginPath(); ctx.moveTo(fx - 4, q.y + 3); ctx.quadraticCurveTo(fx - 2, q.y - fh * 0.5, fx, q.y - fh); ctx.quadraticCurveTo(fx + 2, q.y - fh * 0.5, fx + 4, q.y + 3); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = 'rgba(255,222,90,0.92)';
+        ctx.beginPath(); ctx.moveTo(fx - 1.9, q.y + 3); ctx.quadraticCurveTo(fx - 0.9, q.y - fh * 0.36, fx, q.y - fh * 0.6); ctx.quadraticCurveTo(fx + 0.9, q.y - fh * 0.36, fx + 1.9, q.y + 3); ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+    }
     // 💧 Filets d'eau : APRÈS les dalles (ils coulent devant) et depuis la MÊME liste que la
     // capture. ⚠ 10.5.1 — la cascade était un rectangle dégradé surmonté d'un fil qui serpente :
     // une barre de 7 px, pas de l'eau. Elle est refaite en QUATRE couches, du fond vers l'avant —
@@ -7426,6 +7724,19 @@ function doodleTileBirth(s, p, diff) {
       s.rrN = Math.min(D_RR_MAX, (s.rrN == null ? D_RR_START : s.rrN) + 1);
       s.rrP = (s.rrP == null ? 1 : s.rrP) * D_RR_DECAY;
     }
+  }
+  // ⛓️ Chaîne : la dalle tirée est le point HAUT, et sa jumelle naît plus BAS, à une abscisse
+  // proche — la chaîne pend entre les deux. ⚠ La jumelle va EN DESSOUS, jamais au-dessus : posée
+  // plus haut, elle abaisserait `topY` et la génération croirait la rangée suivante déjà faite.
+  // ⚠ L'écart horizontal est BORNÉ : deux pieds aux antipodes auraient donné une chaîne presque
+  // horizontale, qu'on ne lit plus comme quelque chose qui se grimpe.
+  if (type === 'chain') {
+    const id = (s.chainSeq = (s.chainSeq || 0) + 1);
+    p.chain = id;
+    let x2 = 6 + Math.random() * (DOODLE_W - w - 12);
+    for (let k = 0; k < 12 && Math.abs(x2 - x) > D_CHAIN_MAXX; k++) x2 = 6 + Math.random() * (DOODLE_W - w - 12);
+    s.platforms.push({ x: x2, y: ny + D_CHAIN_DY[0] + Math.random() * (D_CHAIN_DY[1] - D_CHAIN_DY[0]),
+                       w, h: D_PLAT_H, type: 'chain', chain: id, dead: false });
   }
   // 🚇 Tuyaux : la dalle tirée devient une bouche, et sa JUMELLE naît aussitôt une à deux
   // rangées plus bas, sur une abscisse franchement écartée — deux bouches côte à côte se
