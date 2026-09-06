@@ -3766,6 +3766,42 @@ function doodleBarbBurst(s, bb) {
   }
   s.toast = { txt: `🌪️ Le fil explose — ${D_BARB_NEEDLES} aiguilles`, life: D_TOAST_LIFE };
 }
+// 🔥 UNE LANGUE DE FEU, tracée point par point. ⚠ 12.7.5 — L'ancienne flamme était UNE goutte
+// symétrique dont la hauteur suivait UNE sinusoïde : à l'œil, ça bat en cadence, on lit un
+// clignotement et jamais du feu. Trois corrections, toutes visibles :
+//   · TROIS fréquences décalées (0,13 / 0,31 / 0,07) au lieu d'une — le battement ne se répète
+//     plus à vue d'œil, alors que le dessin reste DÉTERMINISTE (t + abscisse), sans particules
+//     à mémoriser sur une dalle qui vit des dizaines de secondes ;
+//   · la langue se PENCHE d'autant plus qu'elle monte (`u²`) et ondule sur sa hauteur : la
+//     turbulence emporte la pointe, elle ne monte pas droit ;
+//   · TROIS couches — halo rouge sombre, corps orange, cœur presque blanc plus court — au lieu
+//     de deux : c'est le dégradé du bas vers le haut qui donne la chaleur.
+function doodleFlameLick(ctx, fx, baseY, t, ph, sc) {
+  const k = sc == null ? 1 : sc;
+  const puls = 0.55 + 0.25 * Math.sin(t * 0.13 + ph) + 0.14 * Math.sin(t * 0.31 + ph * 2.3) + 0.09 * Math.sin(t * 0.07 + ph * 0.7);
+  const fh = (9 + puls * 17) * k;
+  const lean = Math.sin(t * 0.09 + ph * 1.3) * 3.4 + Math.sin(t * 0.23 + ph) * 1.6;
+  const N = 7;
+  const lick = (h0, wid, col) => {
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    for (let side = 0; side < 2; side++) {
+      for (let j = 0; j <= N; j++) {
+        const u = side ? 1 - j / N : j / N;
+        // axe de la langue : penché en u² (la pointe part la première) et ondulé sur la hauteur
+        const ax = fx + lean * u * u + Math.sin(t * 0.19 + ph + u * 3.4) * 1.6 * u;
+        // largeur : ventrue au tiers bas, effilée à la pointe — un cône droit fait une bougie
+        const wd = wid * (1 - u) * (0.45 + 0.75 * Math.sin(Math.min(1, (1 - u) * 1.6) * Math.PI * 0.5));
+        const px = ax + (side ? wd : -wd), py = baseY - h0 * u;
+        (side || j) ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      }
+    }
+    ctx.closePath(); ctx.fill();
+  };
+  lick(fh, 5 * k, 'rgba(198,48,8,0.5)');            // le halo qui rougeoie autour
+  lick(fh * 0.88, 3.6 * k, 'rgba(255,116,24,0.92)');  // le corps
+  lick(fh * 0.5, 2 * k, 'rgba(255,232,140,0.95)');    // le cœur, presque blanc
+}
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
   // 🔋 Recharge : pile posée sur la dalle, avec ses barres de charge qui se remplissent en
@@ -5318,15 +5354,20 @@ function doodleTileDraw(ctx, p, t) {
       const bx = x + 8 + i * (w - 16) / 3, bw = 3 + Math.sin(t * 0.09 + i * 1.7) * 1.6;
       ctx.fillRect(bx - bw / 2, y + 5, bw, h - 13);
     }
-    // les flammes, au-dessus de la dalle
+    // les flammes, au-dessus de la dalle : six langues et leurs escarbilles
+    const FN = 6;
+    for (let i = 0; i < FN; i++) doodleFlameLick(ctx, x + 6 + i * (w - 12) / (FN - 1), y + 2, t, i * 1.7 + p.x * 0.05);
+    // 🔥 Les escarbilles : elles montent, dérivent et s'éteignent — c'est ce détail-là qui fait
+    // passer du « dessin de flamme » au feu. ⚠ Déterministes elles aussi : leur vie est
+    // (t + décalage) modulo une durée, la dalle ne mémorise rien.
     for (let i = 0; i < 5; i++) {
-      const fx = x + 7 + i * (w - 14) / 4;
-      const fh = 10 + Math.abs(Math.sin(t * 0.11 + i * 1.3 + p.x * 0.05)) * 11;
-      ctx.fillStyle = 'rgba(255,106,28,0.9)';
-      ctx.beginPath(); ctx.moveTo(fx - 4.5, y + 2); ctx.quadraticCurveTo(fx - 2, y - fh * 0.55, fx, y - fh); ctx.quadraticCurveTo(fx + 2, y - fh * 0.55, fx + 4.5, y + 2); ctx.closePath(); ctx.fill();
-      ctx.fillStyle = 'rgba(255,214,74,0.95)';
-      ctx.beginPath(); ctx.moveTo(fx - 2.2, y + 2); ctx.quadraticCurveTo(fx - 1, y - fh * 0.4, fx, y - fh * 0.62); ctx.quadraticCurveTo(fx + 1, y - fh * 0.4, fx + 2.2, y + 2); ctx.closePath(); ctx.fill();
+      const ph = i * 2.6 + p.x * 0.07, u = (t * 0.014 + i * 0.21) % 1;
+      const ex = x + 8 + ((i * 41 + Math.round(p.x)) % Math.max(1, w - 16)) + Math.sin(t * 0.07 + ph) * 4 * u;
+      ctx.globalAlpha = (1 - u) * (1 - u) * 0.9;
+      ctx.fillStyle = u < 0.45 ? '#ffe08a' : '#ff7a1c';
+      ctx.fillRect(ex, y - 3 - u * 27, 1.8, 1.8);
     }
+    ctx.globalAlpha = 1;
     return;
   }
   // 🪜 Échelle de prison : platelage d'acier, avec les deux pattes d'où part l'échelle. ⚠ Les
