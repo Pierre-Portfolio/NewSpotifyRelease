@@ -2790,10 +2790,10 @@ function doodleBiomeTileW(k) { const d = doodleBiomeTileDef(k); return (d && d.w
 //   • une balle tirée dedans est ABSORBÉE — on ne l'éteint pas ;
 //   • s'y poser arme les D_FLAME_SHOTS tirs suivants en LANCE-FLAMMES.
 //   Un tir de lance-flammes qui rencontre une dalle en EMBRASE LE SOMMET pour D_BURN_LIFE
-//   frames, et ce sommet détruit tout ce qu'il touche — les créatures, et toi aussi.
-//   ⚠ C'est volontaire : l'arme est puissante, elle doit se payer. Le brasier est parfaitement
-//   visible, donc évitable — c'est un risque qu'on prend, pas un piège qu'on subit. Le doodler
-//   passe par `doodleHurt` comme partout : boucliers et teintes gardent leur mot à dire.
+//   frames, et ce sommet détruit toute CRÉATURE qui le touche.
+//   ⚠ 13.2.7 — IL NE PEUT PLUS TUER LE DOODLER (demande utilisateur) : le feu vient de sa
+//   propre arme, et se tuer avec le lance-flammes qu'on vient de ramasser n'amusait personne.
+//   Le test est RETIRÉ de la boucle, pas neutralisé par une invulnérabilité — rien à réarmer.
 //   ⚠ Se tenir sur la coulée elle-même ne risque RIEN, comme sur la 🔥 Magma du Volcan : il
 //   faut bien pouvoir y prendre le lance-flammes.
 const D_CHAIN_DY = [72, 124];        // écart vertical entre les deux dalles d'une paire
@@ -3096,7 +3096,7 @@ const D_BIOMES = [
     tiles:[
       { k:'chain',    icon:'⛓️', name:'Chaîne',   own:true, txt:'elles naissent PAR DEUX, à des hauteurs différentes, et une chaîne pend entre les deux. Te poser sur la dalle du BAS, c\'est la gravir jusqu\'à celle du haut, où tu repars d\'un saut' },
       { k:'ossuary',  icon:'🦴', name:'Ossuaire', own:true, txt:'une seconde après son entrée à l\'écran elle crache un squelette, puis un autre toutes les ' + Math.round(D_SKEL_EVERY / 60) + ' s. Le squelette TOMBE — c\'est la seule créature du jeu soumise à la gravité — se pose où il peut et marche vers toi. L\'abattre ne rapporte AUCUN coffre : il s\'effondre en tas d\'os, attend ' + Math.round(D_SKEL_DOWN / 60) + ' s et se reconstruit en ' + Math.round(D_SKEL_REBUILD / 60) + ' s. Deux effets seulement en viennent DÉFINITIVEMENT à bout — la ☠️ Destructrice et l\'onde de la ✨ Création — et même là, il ne lâche rien' },
-      { k:'eflame',   icon:'🔥', name:'Flamme éternelle', own:true, w:D_BIOME_TILE_RARE, txt:'une coulée de magma à ciel ouvert : une créature qui la touche brûle, une balle tirée dedans est ABSORBÉE — et t\'y poser arme tes ' + D_FLAME_SHOTS + ' tirs suivants en LANCE-FLAMMES. Un jet qui rencontre une dalle en embrase le sommet pendant ' + Math.round(D_BURN_LIFE / 60) + ' s, et ce sommet détruit tout ce qu\'il touche — les créatures, et toi aussi. Te tenir sur la coulée, en revanche, ne risque rien' },
+      { k:'eflame',   icon:'🔥', name:'Flamme éternelle', own:true, w:D_BIOME_TILE_RARE, txt:'une coulée de magma à ciel ouvert : une créature qui la touche brûle, une balle tirée dedans est ABSORBÉE — et t\'y poser arme tes ' + D_FLAME_SHOTS + ' tirs suivants en LANCE-FLAMMES. Un jet qui rencontre une dalle en embrase le sommet pendant ' + Math.round(D_BURN_LIFE / 60) + ' s, et ce sommet détruit toute CRÉATURE qui le touche — mais il ne peut pas te tuer, toi. Te tenir sur la coulée ne risque rien non plus' },
     ],
     mobs:[{ k:'skel',  icon:'💀', w:36, h:40, vx:1.15, drawn:true },
           { k:'demon', icon:'👹', w:54, h:46, vx:1.05, rare:true, drawn:true }] },
