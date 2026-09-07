@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.1.6';
+const APP_VERSION = '13.1.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -38383,6 +38383,22 @@ function MdpCopyBtn({ value, purge, what }) {
   );
 }
 
+// 📅 État d'une date d'expiration : jours restants, couleur et libellé.
+// ⚠ Comparaison en JOURS LOCAUX (`localDayStr`), jamais en millisecondes : une date saisie
+// « aujourd'hui » ne doit pas être annoncée expirée parce qu'il est 14 h (piège 16).
+// `null` = pas de date, donc rien à afficher.
+const MDP_EXP_SOON = 30;   // jours à partir desquels on prévient
+function mdpExpState(v) {
+  if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;
+  const today = localDayStr();
+  const d = new Date(v + 'T12:00:00'), n = new Date(today + 'T12:00:00');
+  const days = Math.round((d - n) / 86400000);
+  const label = d.toLocaleDateString('fr-FR');
+  if (v < today)  return { days, label, color:'#e05050', icon:'⚠', txt:`expiré depuis le ${label}` };
+  if (v === today) return { days, label, color:'#e05050', icon:'⚠', txt:`expire aujourd'hui (${label})` };
+  if (days <= MDP_EXP_SOON) return { days, label, color:MDP_AMBER, icon:'⏳', txt:`expire dans ${days} j (${label})` };
+  return { days, label, color:C.muted, icon:'📅', txt:`expire le ${label}` };
+}
 function GestionMdpPanel() {
   const [phase, setPhase] = React.useState(
     () => _mdpSession.unlocked ? 'unlocked' : (loadVaultBlob() ? 'locked' : 'setup'));
@@ -38392,7 +38408,7 @@ function GestionMdpPanel() {
   const [pw2, setPw2]         = React.useState('');     // confirmation (setup)
   const [err, setErr]         = React.useState('');
   const [busy, setBusy]       = React.useState(false);
-  const [form, setForm]       = React.useState({ titre:'', identifiant:'', mdp:'', url:'', comment:'', tags:[] });
+  const [form, setForm]       = React.useState({ titre:'', identifiant:'', mdp:'', url:'', expire:'', comment:'', tags:[] });
   const [shown, setShown]     = React.useState({});
   const [msg, setMsg]         = React.useState('');
   const [showAdd, setShowAdd] = React.useState(false);  // formulaire d'ajout repliable
@@ -38404,7 +38420,7 @@ function GestionMdpPanel() {
   const [editTagId, setEditTagId]     = React.useState(null); // tag en cours d'édition (double-clic / appui 3 s)
   const [tagEdit, setTagEdit] = React.useState({ name:'', order:'' });
   const [editId, setEditId]   = React.useState(null);    // id de l'entrée en cours d'édition
-  const [editForm, setEditForm] = React.useState({ titre:'', identifiant:'', mdp:'', url:'', comment:'', tags:[] });
+  const [editForm, setEditForm] = React.useState({ titre:'', identifiant:'', mdp:'', url:'', expire:'', comment:'', tags:[] });
   const [dragId, setDragId]   = React.useState(null);    // id de l'entrée glissée (réordonnancement)
   const holdRef   = React.useRef({ timer:null, fired:false });   // appui long sur un chip de tag
   const masterRef = React.useRef(_mdpSession.pw);       // mot de passe maître courant (mémoire only)
@@ -38490,10 +38506,10 @@ function GestionMdpPanel() {
   };
 
   const add = () => {
-    const f = { titre: form.titre.trim(), identifiant: form.identifiant.trim(), mdp: form.mdp, url: form.url.trim(), comment: form.comment.trim(), tags: form.tags || [] };
+    const f = { titre: form.titre.trim(), identifiant: form.identifiant.trim(), mdp: form.mdp, url: form.url.trim(), expire: form.expire || '', comment: form.comment.trim(), tags: form.tags || [] };
     if (!f.titre && !f.identifiant && !f.mdp && !f.url) return;
     persist([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), ...f }, ...entries]);
-    setForm({ titre:'', identifiant:'', mdp:'', url:'', comment:'', tags:[] });
+    setForm({ titre:'', identifiant:'', mdp:'', url:'', expire:'', comment:'', tags:[] });
   };
   // Suppression d'une entrée : CONFIRMATION obligatoire (un × mal cliqué faisait perdre
   // un identifiant sans aucun filet — le coffre n'a pas d'historique ni de corbeille).
@@ -38505,11 +38521,11 @@ function GestionMdpPanel() {
   };
 
   // ─ Édition d'une entrée ─
-  const startEdit = e => { setEditId(e.id); setEditForm({ titre:e.titre||'', identifiant:e.identifiant||'', mdp:e.mdp||'', url:e.url||'', comment:e.comment||'', tags:(e.tags||[]).slice() }); };
+  const startEdit = e => { setEditId(e.id); setEditForm({ titre:e.titre||'', identifiant:e.identifiant||'', mdp:e.mdp||'', url:e.url||'', expire:e.expire||'', comment:e.comment||'', tags:(e.tags||[]).slice() }); };
   const cancelEdit = () => setEditId(null);
   const saveEdit = () => {
     persist(entries.map(e => e.id === editId
-      ? { ...e, titre:editForm.titre.trim(), identifiant:editForm.identifiant.trim(), mdp:editForm.mdp, url:editForm.url.trim(), comment:editForm.comment.trim(), tags:editForm.tags }
+      ? { ...e, titre:editForm.titre.trim(), identifiant:editForm.identifiant.trim(), mdp:editForm.mdp, url:editForm.url.trim(), expire:editForm.expire || '', comment:editForm.comment.trim(), tags:editForm.tags }
       : e));
     setEditId(null);
   };
@@ -38669,6 +38685,21 @@ function GestionMdpPanel() {
       onKeyDown={e => { if (e.key === 'Enter') add(); }}
       style={{ ...inputBase, border:`1px solid ${form[k] ? MDP_AMBER : C.border}` }} />
   );
+  // 📅 Expiration (12.9.4, demande utilisateur) : une date, AU-DESSUS du commentaire. Facultative
+  // — un identifiant sans date de péremption reste la règle, pas l'exception.
+  // ⚠ `colorScheme:'dark'` : sans lui, l'icône du calendrier et le texte du sélecteur natif
+  // sortent en noir sur noir sur toute la famille Chrome.
+  const dateField = (val, setF) => (
+    <label style={{ display:'flex', alignItems:'center', gap:7, fontSize:11, color: val ? MDP_AMBER : C.dim }}>
+      <span style={{ flexShrink:0 }}>Expiration :</span>
+      <input type="date" value={val || ''} onChange={e => setF(f => ({ ...f, expire: e.target.value }))}
+        style={{ ...inputBase, flex:1, minWidth:0, colorScheme:'dark', border:`1px solid ${val ? MDP_AMBER : C.border}` }} />
+      {val && (
+        <button type="button" onClick={() => setF(f => ({ ...f, expire: '' }))} title="Retirer la date"
+          style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+      )}
+    </label>
+  );
   const editField = (k, ph) => (
     <input type="text" value={editForm[k]} placeholder={ph}
       onChange={e => setEditForm(f => ({ ...f, [k]: e.target.value }))}
@@ -38709,6 +38740,7 @@ function GestionMdpPanel() {
           {field('identifiant', 'Identifiant / login')}
           {field('mdp', 'Mot de passe')}
           {field('url', 'URL (https://…)')}
+          {dateField(form.expire, setForm)}
           {field('comment', 'Commentaire')}
           {tags.length > 0 && <div style={{ fontSize:9.5, color:C.dim }}>Tags :</div>}
           {tags.length > 0 && tagPicker(form.tags, setForm)}
@@ -38799,6 +38831,7 @@ function GestionMdpPanel() {
                   {editField('identifiant', 'Identifiant / login')}
                   {editField('mdp', 'Mot de passe')}
                   {editField('url', 'URL (https://…)')}
+                  {dateField(editForm.expire, setEditForm)}
                   {editField('comment', 'Commentaire')}
                   {tags.length > 0 && <div style={{ fontSize:9.5, color:C.dim }}>Tags :</div>}
                   {tags.length > 0 && tagPicker(editForm.tags, setEditForm)}
@@ -38838,6 +38871,12 @@ function GestionMdpPanel() {
                     proportion. ⚠ Monter la seule police aurait fait déborder les icônes du cadre :
                     l'agrandissement porte sur la fiche entière, pas sur son texte. */}
                 <div style={{ flex:1, minWidth:0, fontSize:14, fontWeight:700, color:C.text, wordBreak:'break-word' }}>{e.titre || e.identifiant || '—'}</div>
+                {/* ⚠ 12.9.4 — L'ALERTE d'expiration est la SEULE chose de la fiche qui s'affiche
+                    sans passer par le 👁 : une date qu'il faut déplier pour voir ne préviendrait
+                    de rien. Ce n'est pas un secret — ni le titre, ni l'identifiant, ni le mot de
+                    passe n'y apparaissent. La date exacte, elle, reste dans le détail. */}
+                {(() => { const x = mdpExpState(e.expire); return x && x.days <= MDP_EXP_SOON
+                  ? <span title={`Mot de passe à renouveler — ${x.txt}`} style={{ fontSize:13, color:x.color, flexShrink:0 }}>{x.icon}</span> : null; })()}
                 {/* ⚠ 8.8.1 — LES 4 ICÔNES SUR UNE SEULE LIGNE (demande utilisateur) : copier ·
                     voir · éditer · supprimer. Elles étaient réparties sur DEUX lignes (✏️ ×
                     sur celle du titre, 👁 📋 sur celle du mot de passe), ce qui les faisait
@@ -38882,6 +38921,8 @@ function GestionMdpPanel() {
               {shown[e.id] && e.url && (safeHref(e.url)
                 ? <a href={safeHref(e.url)} target="_blank" rel="noreferrer" style={{ fontSize:12, color:'#5aa9ff', wordBreak:'break-all', textDecoration:'none' }}>↗ {e.url}</a>
                 : <span title="Lien non affiché (schéma non autorisé)" style={{ fontSize:12, color:C.muted, wordBreak:'break-all' }}>↗ {e.url}</span>)}
+              {shown[e.id] && (() => { const x = mdpExpState(e.expire); return x
+                ? <div style={{ fontSize:12, color:x.color }}>{x.icon} Expiration : {x.label}<span style={{ color:C.dim }}> · {x.txt}</span></div> : null; })()}
               {shown[e.id] && e.comment && <div style={{ fontSize:12, color:C.muted, wordBreak:'break-word' }}>{e.comment}</div>}
               {shown[e.id] && eTags.length > 0 && <div style={{ display:'flex', flexWrap:'wrap', gap:3, marginTop:1 }}>{eTags.map(tagChip)}</div>}
             </div>
