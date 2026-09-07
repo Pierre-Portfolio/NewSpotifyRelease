@@ -69,7 +69,7 @@ tracks (id PK, spotify_uri UNIQUE, artist_name, title, release_title, release_ty
 
 artists_scraped (spotify_id PK, last_scraped_at, name, image_url, popularity, followers,
         genres /*JSON*/, spotify_url, last_release_count DEFAULT 0, total_tracks_added DEFAULT 0,
-        last_scan_status /*ok|partial|error|gone*/, scan_count DEFAULT 0)
+        last_scan_status /*ok|partial|error|gone*/, scan_count DEFAULT 0, following DEFAULT 1)
 
 stats (id=1 CHECK, total_listened, listened_this_month, listened_this_year,
         last_reset_month /*YYYY-MM*/, last_reset_year, total_listened_ms, total_liked)
@@ -94,6 +94,7 @@ Migrations idempotentes dans `initDB()` (ALTER TABLE en try/catch). Accès : `db
 - ⚠ `FULL_SCRAPE_FROM` est aussi la **sentinelle de reprise** (posée par l'écriture « légère ») : un premier scan coupé par un 429 se reprend en ENTIER — y poser une date récente ferait perdre la discographie à jamais.
 - `/artists/{id}/albums?include_groups=album,single&limit=10&market=FR` (piège 21) → filtre `releaseInRange` (piège 19) → `/albums/{id}/tracks?limit=50`. Dédoublonnage `seenUris` + `knownUrisRef` + `purged_uris` : album skippé seulement si `uris.every` connu.
 - **Artistes sans nom** (ligne d'avant la colonne `name`, ou restaurée d'une sauvegarde qui ne portait que `spotify_id`+`name`) : plus dans `/me/following` ⇒ aucun scan ne repasse les remplir. Bouton « 🔍 Identifier » du panneau Artistes → `GET /v1/artists?ids=` (50 max, `null` en place d'un id disparu) : trouvé ⇒ métadonnées écrites, sinon `last_scan_status='gone'` puis « 🗑 Supprimer » = `DELETE FROM artists_scraped` **+ `DELETE /me/following?type=artist&ids=`** (scope `user-follow-modify`, ajouté après coup ⇒ **403 sur un jeton ancien**, suppression locale faite quand même).
+- **Désabonnement = `following=0`, JAMAIS un DELETE** : la ligne garde sa date et ses compteurs, l'artiste n'est plus scanné (la boucle ne visite que `/me/following`, d'où le X/X déjà juste) et les deux UPSERT reposent `following=1` ⇒ un **réabonnement repart de la date d'origine, sans rien redemander**. Posé par le **balayage de fin de boucle**, ⚠ joué **uniquement** après un passage COMPLET parti de la 1re page : après une reprise ou un quota atteint, `followedIds` est partiel et archiverait des artistes bien suivis.
 - **Écriture « légère »** dès la liste d'albums lue (`last_scan_status='partial'`, date jamais avancée) → l'artiste apparaît même si un 429 coupe ; **UPSERT final** après artiste terminé (avance `last_scraped_at`, `status='ok'`, cumule les compteurs). Liste inaccessible → `status='error'`, date non avancée.
 - Progression dans `spotifyplus_sync_progress` après chaque artiste ; `resumeSync()` repart sur la bonne page.
 

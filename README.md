@@ -47,6 +47,8 @@ Rien n'est importé automatiquement. Deux moyens : le **bouton violet** dans ⚙
 
 L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scraping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta : un bouton **▶ Analyser** et deux résultats — **Delta Playlist** (l'écart entre tes likes et le contenu de tes playlists) et **Delta Artiste** (les artistes que tu suis dont aucun titre n'est rangé en playlist).
 
+Te désabonner d'un artiste dans l'app Spotify ne l'efface **jamais** : il reste dans 🎤 Artistes suivis, marqué **⊘ Désabonné**, avec sa date de dernier scrapping et ses compteurs. Il n'est simplement plus scanné et ne compte plus dans le X/X de la synchro. Si tu te réabonnes un jour, le prochain scan le réactive tout seul et **repart de sa dernière date** au lieu de tout reprendre depuis le début.
+
 ---
 
 ## Les autres modules

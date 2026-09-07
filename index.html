@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.4.6';
+const APP_VERSION = '13.4.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1920,6 +1920,7 @@ async function spotifyArtistsByIds(ids) {
 // SCOPES : un jeton plus ancien ne l'a pas (403) et seule une reconnexion l'accorde.
 const spotifyUnfollowArtists = ids =>
   apiDel(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
+
 // ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
 // puis 100 de plus à 00h30 (1h plus tard). Désormais, atteindre 100 démarre un
@@ -2095,7 +2096,9 @@ async function initDB() {
         last_release_count INTEGER DEFAULT 0, -- sorties trouvées au dernier scan
         total_tracks_added INTEGER DEFAULT 0, -- cumul des titres ajoutés pour cet artiste
         last_scan_status TEXT,                -- 'ok' | 'error' (albums inaccessibles)
-        scan_count INTEGER DEFAULT 0          -- nombre de scans réussis
+        scan_count INTEGER DEFAULT 0,         -- nombre de scans réussis
+        following INTEGER DEFAULT 1           -- 1 = suivi sur Spotify (donc scrapé) · 0 = désabonné :
+                                              -- ligne CONSERVÉE avec toutes ses données
       );
       CREATE TABLE IF NOT EXISTS stats (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -2124,6 +2127,10 @@ async function initDB() {
   try { _db.run("ALTER TABLE artists_scraped ADD COLUMN total_tracks_added INTEGER DEFAULT 0"); } catch {}
   try { _db.run("ALTER TABLE artists_scraped ADD COLUMN last_scan_status TEXT"); } catch {}
   try { _db.run("ALTER TABLE artists_scraped ADD COLUMN scan_count INTEGER DEFAULT 0"); } catch {}
+  // ⚠ DEFAULT 1 : toute ligne existante a forcément été créée depuis /me/following, donc
+  // suivie au moment du scan. Un `following` à 0 ne peut venir que d'un désabonnement
+  // constaté après coup (bouton ⊘, ou balayage de fin de scan complet).
+  try { _db.run("ALTER TABLE artists_scraped ADD COLUMN following INTEGER DEFAULT 1"); } catch {}
   // Mémoire des titres purgés : le DELETE de la purge fait sortir l'URI de `tracks`, et un
   // re-scan du même album (cutoff tronqué au jour, scan partiel non terminé…) réinsérait le
   // titre comme NON écouté. Table minuscule (une URI par ligne), alimentée par purgeListened
@@ -2354,6 +2361,9 @@ function loadArtistsFromDB() {
       totalTracksAdded: r.total_tracks_added || 0,
       lastScanStatus:   r.last_scan_status || null,
       scanCount:        r.scan_count || 0,
+      // ⚠ `!== 0` et non `=== 1` : une colonne absente (base d'avant la migration, ligne
+      // restaurée d'une vieille sauvegarde) vaut `undefined` → l'artiste est réputé SUIVI.
+      following:        r.following !== 0,
     };
   });
 }
@@ -3915,6 +3925,10 @@ function StoreProvider({ children }) {
         try { setArtists(loadArtistsFromDB()); } catch {}
       };
       let globalArtistIndex = 0;
+      // Tous les ids rendus par /me/following pendant CE passage : sert au balayage des
+      // désabonnements en fin de boucle (voir plus bas). Rempli page par page, y compris
+      // pour les artistes que le quota empêchera de scanner — être suivi suffit.
+      const followedIds = new Set();
       // Reprise par curseur : repartir directement sur la page sauvegardée au lieu de
       // re-paginer depuis le début (burst de fetchs sans délai = pire scénario post-429)
       let nextUrl   = resumeUrl || 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
@@ -3935,6 +3949,7 @@ function StoreProvider({ children }) {
         }
         nextUrl = pageData.artists.next || null;
         const artists = pageData.artists.items;
+        artists.forEach(a => { if (a?.id) followedIds.add(a.id); });
         // Reprise au milieu d'une page : ne sauter que les artistes déjà traités de CETTE page
         const startIdx = (firstPage && resumeUrl) ? Math.min(resumeOffset, artists.length) : 0;
         firstPage = false;
@@ -4032,7 +4047,7 @@ function StoreProvider({ children }) {
             try {
               dbRun(
                 `INSERT INTO artists_scraped
-                   (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_scan_status)
+                   (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_scan_status)  -- following prend son DEFAULT 1
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'partial')
                  ON CONFLICT(spotify_id) DO UPDATE SET
                    name        = excluded.name,
@@ -4040,7 +4055,8 @@ function StoreProvider({ children }) {
                    popularity  = excluded.popularity,
                    followers   = excluded.followers,
                    genres      = excluded.genres,
-                   spotify_url = excluded.spotify_url`,
+                   spotify_url = excluded.spotify_url,
+                   following   = 1`,
                 [
                   artist.id, cutoffISO, artist.name || null,
                   artist.images?.[1]?.url || artist.images?.[0]?.url || null, artist.popularity ?? null,
@@ -4151,7 +4167,8 @@ function StoreProvider({ children }) {
                  last_release_count = excluded.last_release_count,
                  total_tracks_added = total_tracks_added + excluded.total_tracks_added,
                  last_scan_status   = 'ok',
-                 scan_count         = scan_count + 1`,
+                 scan_count         = scan_count + 1,
+                 following          = 1`,
               [
                 artist.id,
                 artist.name || null,
@@ -4201,6 +4218,30 @@ function StoreProvider({ children }) {
             await sleep(delay);
           }
         }
+      }
+
+      // ── Balayage des désabonnements faits DANS SPOTIFY (13.4.7) ──────────────────
+      // /me/following est la seule source de vérité : un artiste retiré là-bas n'y revient
+      // plus jamais, donc n'est plus scanné. Restait à le DIRE — sinon sa ligne se faisait
+      // encore passer pour un abonnement dans le panneau Artistes.
+      // ⚠ Uniquement après un passage COMPLET parti de la 1re page (`!resumeUrl && !skipCount`)
+      // et arrivé jusqu'ici : une reprise, un quota atteint ou un 429 sortent AVANT par
+      // `return`/`throw`, avec un `followedIds` partiel qui archiverait des artistes bien suivis.
+      // ⚠ La ligne n'est jamais supprimée : ses données restent là pour un futur réabonnement.
+      if (!resumeUrl && skipCount === 0) {
+        try {
+          const known = dbAll("SELECT spotify_id FROM artists_scraped WHERE following IS NULL OR following <> 0");
+          let dropped = 0;
+          known.forEach(r => {
+            if (followedIds.has(r.spotify_id)) return;
+            dbRun("UPDATE artists_scraped SET following = 0 WHERE spotify_id = ?", [r.spotify_id]);
+            dropped++;
+          });
+          if (dropped) {
+            log(`⊘ ${dropped} artiste(s) ne sont plus dans tes abonnements — archivés (données conservées, plus scannés)`, 'info');
+            refreshArtists();
+          }
+        } catch {}
       }
 
       if (totalTracks === 0) {
@@ -21211,7 +21252,7 @@ function buildBackup() {
   try { stats = dbGet("SELECT * FROM stats WHERE id = 1"); } catch {}
   try {
     artists = dbAll(
-      "SELECT spotify_id, name, last_scraped_at, scan_count, total_tracks_added, last_release_count, last_scan_status FROM artists_scraped ORDER BY last_scraped_at DESC"
+      "SELECT spotify_id, name, last_scraped_at, scan_count, total_tracks_added, last_release_count, last_scan_status, following FROM artists_scraped ORDER BY last_scraped_at DESC"
     );
   } catch {}
   // Musique : TOUTES les pistes (feed en attente `listened=0` + historique `listened=1`),
@@ -21602,16 +21643,22 @@ function applyBackup(data) {
     if (!a?.spotify_id || !a?.last_scraped_at) continue;
     try {
       dbRun(
-        `INSERT INTO artists_scraped (spotify_id, last_scraped_at, name, last_release_count, total_tracks_added, last_scan_status, scan_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        // ⚠ `following` au MIN et non au MAX : un désabonnement est une DÉCISION, la perdre
+        // remettrait l'artiste dans la file de scrapping. Aucun risque de le geler pour
+        // autant — un scan complet qui le revoit dans /me/following repose 1. Une sauvegarde
+        // d'avant 13.4.7 n'a pas le champ ⇒ 1 ⇒ MIN() garde la valeur locale.
+        `INSERT INTO artists_scraped (spotify_id, last_scraped_at, name, last_release_count, total_tracks_added, last_scan_status, scan_count, following)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(spotify_id) DO UPDATE SET
            last_scraped_at    = MAX(last_scraped_at, excluded.last_scraped_at),
            name               = COALESCE(name, excluded.name),
            last_release_count = MAX(last_release_count, excluded.last_release_count),
            total_tracks_added = MAX(total_tracks_added, excluded.total_tracks_added),
-           scan_count         = MAX(scan_count, excluded.scan_count)`,
+           scan_count         = MAX(scan_count, excluded.scan_count),
+           following          = MIN(COALESCE(following, 1), excluded.following)`,
         [a.spotify_id, a.last_scraped_at, a.name || null, a.last_release_count || 0,
-         a.total_tracks_added || 0, a.last_scan_status || null, a.scan_count || 0]
+         a.total_tracks_added || 0, a.last_scan_status || null, a.scan_count || 0,
+         a.following === 0 ? 0 : 1]
       );
       artistsRestored++;
     } catch {}
@@ -42034,7 +42081,7 @@ function ArtistsPanel() {
   const { artists, reloadArtists } = useStore();
   const [search,   setSearch]   = React.useState('');
   const [sortBy,   setSortBy]   = React.useState('recent');
-  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'partial' | 'error' | 'gone'
+  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'partial' | 'error' | 'gone' | 'off'
   const [busy,     setBusy]     = React.useState('');    // '' | 'resolve' | 'purge'
   const [msg,      setMsg]      = React.useState('');    // compte-rendu de la dernière action
   const filtersOn = search.trim() || sortBy !== 'recent' || status !== 'all';
@@ -42044,6 +42091,9 @@ function ArtistsPanel() {
   // répondu qu'il ne connaît plus cet id → la page de l'artiste n'existe plus.
   const unknown = React.useMemo(() => (artists || []).filter(a => !a.name && a.lastScanStatus !== 'gone'), [artists]);
   const gone    = React.useMemo(() => (artists || []).filter(a => a.lastScanStatus === 'gone'), [artists]);
+  // ⊘ Désabonnés : plus dans /me/following, donc hors du X/X de la synchro — mais leur ligne
+  // (date du dernier scrap, compteurs) est gardée pour un éventuel réabonnement.
+  const unfollowed = React.useMemo(() => (artists || []).filter(a => a.following === false), [artists]);
 
   // Demande à Spotify qui sont les lignes sans nom : celles qu'il connaît encore sont
   // remplies (nom, photo, genres…), les autres passent en statut 'gone'.
@@ -42118,6 +42168,9 @@ function ArtistsPanel() {
       if (status === 'partial' && a.lastScanStatus !== 'partial') return false;
       if (status === 'error'   && a.lastScanStatus !== 'error') return false;
       if (status === 'gone'    && a.lastScanStatus !== 'gone') return false;
+      // ⊘ Désabonnés : ligne gardée pour ses données, jamais rescannée tant qu'on ne se
+      // réabonne pas sur Spotify. C'est le SEUL filtre qui ne regarde pas `last_scan_status`.
+      if (status === 'off'     && a.following !== false) return false;
       const q = search.trim().toLowerCase();
       if (q) return (a.name || '').toLowerCase().includes(q) || (a.id || '').toLowerCase().includes(q);
       return true;
@@ -42156,8 +42209,8 @@ function ArtistsPanel() {
         <div style={{ border:'1px solid #5a3a18', background:'#2a1c08', borderRadius:8, padding:'9px 10px', display:'flex', flexDirection:'column', gap:7 }}>
           <div style={{ fontSize:10.5, color:'#e0a050', lineHeight:1.55 }}>
             <b>{unknown.length} artiste(s) sans nom.</b> Ces lignes ont été créées avant que le
-            nom soit enregistré (ou restaurées d'une vieille sauvegarde) : elles ne font plus
-            partie de tes abonnements Spotify, donc aucun scan ne repasse jamais les remplir.
+            nom soit enregistré (ou restaurées d'une vieille sauvegarde) : tant qu'un scan
+            complet ne les a pas revues dans tes abonnements, aucun scan ne les remplit.
             <br/>« Identifier » demande à Spotify qui elles sont — celles dont la page n'existe
             plus sont marquées <b>Introuvable</b> et peuvent être supprimées.
           </div>
@@ -42188,7 +42241,7 @@ function ArtistsPanel() {
       )}
       {/* Toolbar : statut + tri + reset */}
       <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
-        {[['all','Tous'],['ok','✓ OK'],['partial','⏳ Partiel'],['error','⚠ Erreur'],['gone','👻 Introuvable']].map(([k,n]) => (
+        {[['all','Tous'],['ok','✓ OK'],['partial','⏳ Partiel'],['error','⚠ Erreur'],['gone','👻 Introuvable'],['off','⊘ Désabonnés']].map(([k,n]) => (
           <button key={k} onClick={() => setStatus(k)} style={btnFilter(status===k)}>{n}</button>
         ))}
         <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
@@ -42226,6 +42279,7 @@ function ArtistsPanel() {
 
       <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', padding:'0 2px' }}>
         {view.length} / {artists.length} artiste{artists.length > 1 ? 's' : ''}
+        {unfollowed.length > 0 && ` · dont ${unfollowed.length} désabonné(s), conservé(s) mais plus scanné(s)`}
       </div>
 
       {/* Liste */}
@@ -42243,6 +42297,11 @@ function ArtistRow({ a }) {
   const err     = a.lastScanStatus === 'error';
   const partial = a.lastScanStatus === 'partial';
   const gone    = a.lastScanStatus === 'gone';
+  // Désabonné : ligne CONSERVÉE mais plus jamais scannée (colonne `following`).
+  const unfollowed = a.following === false;
+  // Jamais scrapé : ligne créée par un désabonnement avant que la boucle n'ait eu le temps
+  // de visiter l'artiste (quota 100/jour) — sa date est la sentinelle, pas un vrai scan.
+  const never = !a.scanCount && (!a.lastScrapedAt || a.lastScrapedAt.slice(0, 10) <= FULL_SCRAPE_FROM);
   // Couleur + libellé du badge selon le statut (erreur rouge, partiel orange, ok vert,
   // introuvable gris : l'id a été refusé par /v1/artists, la page n'existe plus)
   const badge = gone
@@ -42251,8 +42310,10 @@ function ArtistRow({ a }) {
       ? { txt:'ERREUR',  fg:'#e05050', bg:'#2a0e0e', bd:'#5a2020' }
       : partial
         ? { txt:'PARTIEL', fg:'#e0a050', bg:'#2a1c08', bd:'#5a3a18' }
-        : { txt:'OK',      fg:C.accent, bg:`${C.accent}18`, bd:`${C.accent}40` };
-  const artColor = gone ? '#8a8a8a' : err ? '#e05050' : partial ? '#e0a050' : C.accent;
+        : never
+          ? { txt:'JAMAIS SCANNÉ', fg:'#8a8a8a', bg:'#161616', bd:'#2e2e2e' }
+          : { txt:'OK',      fg:C.accent, bg:`${C.accent}18`, bd:`${C.accent}40` };
+  const artColor = gone || unfollowed || never ? '#8a8a8a' : err ? '#e05050' : partial ? '#e0a050' : C.accent;
   return (
     <div style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'9px 10px', borderRadius:8, background:C.surfaceHigh, border:`1px solid ${C.border}` }}>
       <AlbumArt size={44} letter={(a.name || a.id || '?')[0].toUpperCase()} color={artColor} image={a.image} />
@@ -42271,6 +42332,13 @@ function ArtistRow({ a }) {
             background: badge.bg, color: badge.fg, border:`1px solid ${badge.bd}` }}>
             {badge.txt}
           </span>
+          {unfollowed && (
+            <span title="Tu ne suis plus cet artiste sur Spotify : il n'est plus scanné et ne compte plus dans le X/X de la synchro. Sa ligne et ses données restent ici — te réabonner sur Spotify suffit à le réactiver au prochain scan."
+              style={{ flexShrink:0, fontSize:8, fontWeight:700, letterSpacing:'0.04em', padding:'2px 6px', borderRadius:5,
+                background:'#1a1424', color:'#a78bda', border:'1px solid #3a2f52' }}>
+              ⊘ DÉSABONNÉ
+            </span>
+          )}
         </div>
 
         {/* id Spotify */}
@@ -42290,7 +42358,7 @@ function ArtistRow({ a }) {
 
         {/* métriques */}
         <div style={{ display:'flex', flexWrap:'wrap', gap:'4px 12px', marginTop:6, fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
-          <span title="Dernier scraping">📅 {formatListenedAt(a.lastScrapedAt) || '—'}</span>
+          <span title={never ? 'Jamais scrapé' : 'Dernier scraping'}>📅 {never ? '—' : (formatListenedAt(a.lastScrapedAt) || '—')}</span>
           {a.popularity != null && <span title="Popularité Spotify (0-100)">★ {a.popularity}</span>}
           {a.followers != null && <span title="Abonnés">👥 {fmtCompactNum(a.followers)}</span>}
           <span title="Nombre de scans réussis">🔁 {a.scanCount}×</span>
@@ -42736,7 +42804,7 @@ function DeltaTrackList({ tracks, empty }) {
   );
 }
 
-// Même liste paginée, pour des ARTISTES (collapse « aucun titre en playlist »).
+// Même liste paginée, pour des ARTISTES (collapse « Delta Artiste »).
 // Le ❤ signale un artiste absent des playlists mais présent dans les titres likés.
 function DeltaArtistList({ artists, empty }) {
   const [max, setMax] = React.useState(DELTA_PAGE);
@@ -42770,14 +42838,6 @@ function DeltaArtistList({ artists, empty }) {
   );
 }
 
-// ⚠ 13.4.6 — UN SEUL point d'entrée : le collapse « 🔀 DELTA » porte le bouton ▶ Analyser
-// (une analyse pour les DEUX questions, elles sortent du même scan) et deux sous-collapses
-// qui n'affichent QUE le résultat :
-//   🔀 Delta Playlist → les likés rangés nulle part + ce que chaque playlist contient de non-liké
-//   🎤 Delta Artiste  → les artistes suivis dont AUCUN titre n'est dans une playlist
-// ⚠ Rien ne doit relancer le scan depuis un sous-collapse : `StatsCollapse` DÉMONTE ses
-// enfants à la fermeture (piège 5) — un bouton logé là-dedans disparaîtrait avec son état.
-// C'est aussi pourquoi tout vit dans `_delta` (module-level) et non dans un `useState`.
 function DeltaPanel() {
   const { user, logout } = useStore();
   const [, force] = React.useReducer(x => x + 1, 0);
@@ -42942,6 +43002,9 @@ function MusiquePanel() {
   // différente) — MusiquePanel est rendu par WebApp ET par MobileApp.
   const isMobile = useIsMobile();
   const cnt = n => <span style={{ color:C.dim, fontWeight:400 }}>· {n}</span>;
+  // Les désabonnés restent dans la table (données conservées) mais ne sont plus scannés :
+  // les compter avec les abonnements ferait mentir le titre du collapse.
+  const artOff = (artists || []).filter(a => a.following === false).length;
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
       {/* ⚠ 7.7.6 — SCRAPPING et EN ATTENTE vivent DANS le module Musique (demande
@@ -42968,7 +43031,7 @@ function MusiquePanel() {
       <StatsCollapse defaultOpen={false} color={MUSIQUE_COLOR} title={<span>🕘 HISTORIQUE {cnt(history.length)}</span>}>
         <HistoryPanel />
       </StatsCollapse>
-      <StatsCollapse defaultOpen={false} color="#6f7bf5" title={<span>🎤 ARTISTES SUIVIS {cnt(artists.length)}</span>}>
+      <StatsCollapse defaultOpen={false} color="#6f7bf5" title={<span>🎤 ARTISTES SUIVIS {cnt(artOff ? `${artists.length - artOff} + ${artOff} désabonné(s)` : artists.length)}</span>}>
         <ArtistsPanel />
       </StatsCollapse>
       <StatsCollapse defaultOpen={false} color={DELTA_COLOR} title={<span>🔀 DELTA</span>}>
