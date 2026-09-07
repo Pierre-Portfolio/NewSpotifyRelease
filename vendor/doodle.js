@@ -2443,8 +2443,12 @@ function doodleTardisTarget(s, onlyTardis, from) {
   }
   return best;
 }
+// ⚠ 13.2.8 — L'ENTRAÎNEMENT PERD 20 % (demande utilisateur) : c'est la DÉRIVE qui maigrit
+// (3,3 → 2,64 px/frame), pas la durée ni l'adhérence — l'effet du tapis, c'est de pousser, et
+// c'est cette poussée qu'on a trouvée trop forte. Écrit `3.3 * 0.8` pour que le facteur
+// demandé reste lisible. Les chevrons de vitesse dérivent de `s.beltVx`, ils maigrissent seuls.
 const D_BELT_LIFE_S = 3;                       // ➡️ durée de l'entraînement, en SECONDES réelles
-const D_BELT_V = 3.3, D_BELT_LIFE = D_BELT_LIFE_S * 60, D_BELT_GRIP = 0.3;
+const D_BELT_V = 3.3 * 0.8, D_BELT_LIFE = D_BELT_LIFE_S * 60, D_BELT_GRIP = 0.3;
 const D_STEER_V = 7.2;                         // pas maximal du pilotage au doigt, en px/frame
 const D_TMAGNET_R = 150, D_TMAGNET_V = 3.2;    // 🧲 rayon d'attraction et vitesse
 const D_SLOW_LIFE = 600, D_SLOW = 0.55;        // ⏱️ 10 s à 60 fps, tout tourne à 55 % de vitesse
