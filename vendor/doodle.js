@@ -392,7 +392,9 @@ function doodleKillMonster(s, m, force) {
   // l'auréole ni au taux d'apparition d'une « très rare » — c'est le cas de la 𓁿 momie, qui
   // n'en vaut qu'un depuis 11.1.8 mais tombe désormais à cinq.
   const n = m.loot || (m.rare ? 2 : 1);
-  for (let i = 0; i < n; i++) s.chests.push({ x: m.x + m.w / 2 - D_CHEST_W / 2 + (n > 1 ? (i - (n - 1) / 2) * 15 : 0), y: m.y + m.h / 2, w: D_CHEST_W, h: D_CHEST_H, vy: 0, landed: false, taken: false, plat: null });
+  // ⚠ Le type est tiré COFFRE PAR COFFRE : une créature qui en lâche deux peut très bien
+  // rendre un ordinaire et un doré — un tirage commun aurait fait des doublons systématiques.
+  for (let i = 0; i < n; i++) s.chests.push({ x: m.x + m.w / 2 - D_CHEST_W / 2 + (n > 1 ? (i - (n - 1) / 2) * 15 : 0), y: m.y + m.h / 2, w: D_CHEST_W, h: D_CHEST_H, vy: 0, landed: false, taken: false, plat: null, kind: doodleChestKind() });
 }
 // ⚠ 9.1.5 — LE BOUCLIER EXPLOSE EN S'ÉTEIGNANT et tue les monstres proches (demande
 // utilisateur). C'est le pendant offensif du halo : au lieu de simplement redevenir
@@ -2495,6 +2497,19 @@ const D_GCHEST_P = 0.001;
 // ⚠ Un joueur qui n'a AUCUN bonus ne perd rien et le toast le dit : un coffre qui semblerait
 // n'avoir rien fait passerait pour un bug.
 const D_CCHEST_P = 0.001, D_CCHEST_TAKE = 2;
+// 12.9.3 (demande utilisateur) — LES CRÉATURES PEUVENT LÂCHER CES DEUX COFFRES-LÀ. Une dalle
+// dorée ou maudite est une rencontre d'une rangée sur mille ; un monstre tué, lui, est chose
+// courante, donc le taux est bien plus bas que ce que « 1/1000 » laisserait croire pour une
+// rangée : D_CHEST_SPECIAL_P de chaque côté, soit environ un coffre spécial tous les 25 tués.
+// ⚠ Le coffre lâché ne change RIEN d'autre que son contenu : il tombe, se pose et se ramasse
+// exactement comme un coffre ordinaire. Seule l'ouverture bifurque (`c.kind`).
+const D_CHEST_SPECIAL_P = 0.02;
+function doodleChestKind() {
+  const r = Math.random();
+  if (r < D_CHEST_SPECIAL_P) return 'gold';
+  if (r < D_CHEST_SPECIAL_P * 2) return 'cursed';
+  return null;
+}
 // Retire D_CCHEST_TAKE niveaux, un par un, TIRÉS AU SORT PARMI CEUX QU'ON POSSÈDE — et non
 // parmi les 5 bonus : tirer un bonus déjà à zéro aurait rendu le coffre inoffensif dès qu'il
 // manquait deux bonus sur cinq. Un bonus à 3 peut donc en perdre deux d'un coup.
@@ -7386,7 +7401,8 @@ function doodleChestBody(ctx, x, y, w, h, pal, t, kind) {
 }
 function doodleChest(ctx, c, t) {
   const bob = c.landed ? Math.sin(t * 0.13) * 1.4 : 0;
-  doodleChestBody(ctx, c.x, c.y + bob, c.w, c.h, D_CHEST_PAL.loot, t, 'loot');
+  const k = c.kind === 'gold' || c.kind === 'cursed' ? c.kind : 'loot';
+  doodleChestBody(ctx, c.x, c.y + bob, c.w, c.h, D_CHEST_PAL[k], t, k);
   if (!c.landed) { ctx.globalAlpha = 0.18; ctx.fillStyle = '#000'; ctx.beginPath(); ctx.ellipse(c.x + c.w / 2, c.y + bob + c.h + 7, c.w * 0.42, 3, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
 }
 function doodleItem(ctx, it, t) {
@@ -8924,6 +8940,7 @@ function doodleRules() {
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
       { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
+      { i:'🏆⚰️', n:'Coffre spécial lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés sont dorés et autant sont maudits — tirés coffre par coffre, contenu identique à la dalle du même nom.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
       { i:'🎩', n:'Chapeau, jetpack', d:`${doodlePct(0.03)} des plateformes vertes et bleues sans ressort. Ressort ${doodlePct(0.09)}, trampoline ${doodlePct(0.02)}.` },
     ] },
@@ -8948,6 +8965,8 @@ function doodleRules() {
     { t:'Malus de la case malchance', c:'#e2564a', rows: D_MALUS.map(m => ({ i:m.icon, n:m.label, d:m.txt + (['jam','ambush'].indexOf(m.k) < 0 ? ' — pendant environ 6 s.' : '.') })) },
     { t:'Coffres des monstres', c:'#c98b3a', rows:[
       { i:'📦', n:'Coffre',  d:'chaque monstre tué en lâche un ; il tombe et se pose sur la première plateforme. La créature très rare d\'un biome en lâche deux.' },
+      { i:'🏆', n:'Coffre doré lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés : au lieu d'un butin d'arme, il donne un bonus permanent — exactement la dalle 🏆 Coffre doré.` },
+      { i:'⚰️', n:'Coffre maudit lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés : il RETIRE ${D_CCHEST_TAKE} niveaux de bonus permanents — exactement la dalle ⚰️ Coffre maudit. On le reconnaît à sa couleur AVANT de le ramasser.` },
       ...odds.map(l => ({ i:l.icon, n:l.label, d:`${l.txt} — ${pOf(l.k)} du contenu d'un coffre, ` + (l.max === 1 ? 'une seule fois par partie.' : l.max > 1 && l.max < 99 ? `cumulable jusqu'à ${l.max}.` : 'répétable.') })),
     ] },
     { t:`Tuiles débloquées (une par palier de ${D_TILE_STEP} points)`, c:'#2f7fbf', rows: D_TILES.map(t => ({ i:t.icon, n:t.name, d:t.txt })) },
