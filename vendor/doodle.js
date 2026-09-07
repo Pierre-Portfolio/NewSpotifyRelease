@@ -3930,6 +3930,64 @@ function doodleFlameLick(ctx, fx, baseY, t, ph, sc) {
 }
 function doodleTileDraw(ctx, p, t) {
   const x = p.x, y = p.y, w = p.w, h = p.h;
+  // ✨ La Création : le Big Bang (ciel noir, étoiles, cœur incandescent, onde qui bat) avec les
+  // deux mains de la fresque posées dessus — l'étincelle entre les deux index EST le cœur.
+  // ⚠ Trois réglages tiennent la lisibilité à 62 × 14 px, ne pas les « corriger » : le POING
+  // dépasse en hauteur de l'avant-bras (sans cette bosse, les deux bras ne font qu'une barre
+  // beige), les deux index laissent un VRAI vide au centre (l'étincelle doit avoir sa place),
+  // et les bras sont coupés par le bord de la dalle — c'est ce qui les fait lire comme deux
+  // mains qui se tendent plutôt que comme deux objets posés là.
+  if (p.type === 'creation') {
+    const cx = x + w / 2, cy = y + h / 2, pulse = 1 + Math.sin(t * 0.09) * 0.12, lit = !!p.used;
+    const halo = (hx, hy, r, a, col) => {
+      if (r <= 0) return;
+      const g = ctx.createRadialGradient(hx, hy, 0, hx, hy, r);
+      g.addColorStop(0, col.replace('A', a)); g.addColorStop(1, col.replace('A', 0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(hx, hy, r, 0, Math.PI * 2); ctx.fill();
+    };
+    halo(cx, cy, (lit ? 30 : 17) * pulse, lit ? 0.75 : 0.45, 'rgba(255,214,120,A)');
+    doodleRR(ctx, x, y, w, h, 6, '#141024');
+    ctx.fillStyle = '#080615'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.save(); doodleRR(ctx, x, y, w, h, 6, '#141024'); ctx.clip();
+    ctx.fillStyle = '#fff';
+    [[0.10, 0.28], [0.20, 0.72], [0.80, 0.24], [0.90, 0.68], [0.68, 0.82], [0.32, 0.18]].forEach((f, i) => {
+      ctx.globalAlpha = 0.35 + Math.abs(Math.sin(t * 0.06 + i * 1.3)) * 0.6;
+      ctx.fillRect(x + w * f[0], y + h * f[1], 1.1, 1.1);
+    });
+    ctx.globalAlpha = 1;
+    halo(cx, cy - 1.2, 12 * pulse, 0.85, 'rgba(255,206,90,A)');
+    ctx.restore();
+    for (const sx of [-1, 1]) {
+      ctx.save(); ctx.translate(cx + sx * 6.4, cy + 2.6); ctx.scale(sx, 1); ctx.rotate(-0.1);
+      ctx.fillStyle = '#f7ddb8'; ctx.strokeStyle = '#241708'; ctx.lineWidth = 1; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-3.8, -0.7);                                   // la pointe de l'index
+      ctx.lineTo(2.4, -1.9);
+      ctx.quadraticCurveTo(5.0, -4.4, 9.0, -3.8);               // la bosse du poing
+      ctx.quadraticCurveTo(11.8, -3.4, 12.4, -2.2);             // le poignet
+      ctx.lineTo(17, -1.9); ctx.lineTo(17, 2.5); ctx.lineTo(12.2, 2.3);   // l'avant-bras, coupé par le bord
+      ctx.quadraticCurveTo(8.8, 3.5, 5.8, 2.3);                 // le dessous du poing
+      ctx.quadraticCurveTo(4.0, 1.5, 2.4, 0.45);                // les doigts repliés
+      ctx.lineTo(-3.8, 0.0);                                    // le dessous de l'index
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(36,23,8,0.42)'; ctx.lineWidth = 0.6;        // les phalanges
+      ctx.beginPath(); ctx.moveTo(4.9, 1.5); ctx.lineTo(5.4, -1.0); ctx.moveTo(7.6, 2.2); ctx.lineTo(8.0, -1.4); ctx.stroke();
+      ctx.restore();
+    }
+    halo(cx, cy - 1.6, lit ? 11 : 7.5, 1, 'rgba(255,255,255,A)');         // l'étincelle
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx, cy - 1.6, lit ? 2.6 : 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,240,200,' + (lit ? 0.95 : 0.7) + ')'; ctx.lineWidth = 0.9;
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3 + t * 0.016, r1 = lit ? 7.5 : 5.2;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * 2.6, cy - 1.6 + Math.sin(a) * 2.6);
+      ctx.lineTo(cx + Math.cos(a) * r1, cy - 1.6 + Math.sin(a) * r1);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(255,236,170,0.55)'; ctx.lineWidth = 1.3;      // l'onde amorcée
+    ctx.beginPath(); ctx.ellipse(cx, cy, w * 0.36 + Math.sin(t * 0.05) * 2, h * 0.75, 0, 0, Math.PI * 2); ctx.stroke();
+    return;
+  }
   // 🔋 Recharge : pile posée sur la dalle, avec ses barres de charge qui se remplissent en
   // boucle et son éclair — l'image dit à la fois « munitions » et « ça revient ».
   if (p.type === 'recharge') {
@@ -6285,7 +6343,7 @@ function doodlePlatform(ctx, p, t) {
   if (p.type === 'rainbow') return doodleRainbowPlat(ctx, p);
   if (p.type === 'perk' || p.type === 'lucky' || p.type === 'unlucky') return doodleCase(ctx, p, t || 0);
   if (D_BIOME_TILES.has(p.type) && !D_BIOME_OWNDRAW.has(p.type)) return doodleBiomeTile(ctx, p, t || 0);
-  if (p.type === 'chest' || p.type === 'rrfake' || p.type === 'nightmare' || p.type === 'bambooed' || D_BIOME_OWNDRAW.has(p.type) || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni les leurres 🎲, ni la 💀 cauchemardesque ne sont dans D_TILES
+  if (p.type === 'chest' || p.type === 'rrfake' || p.type === 'nightmare' || p.type === 'bambooed' || p.type === 'creation' || D_BIOME_OWNDRAW.has(p.type) || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni les leurres 🎲, ni la 💀 cauchemardesque, ni la ✨ Création ne sont dans D_TILES
   const c = cols[p.type] || cols.green;
   doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
   ctx.fillStyle = c[1]; ctx.fillRect(p.x + 3, p.y + p.h - 4, p.w - 6, 3);
@@ -7581,14 +7639,17 @@ function doodleDraw(ctx, s, W, H) {
   // save/restore imbriqués, et il aurait suffi d'un `return` au milieu du dessin pour laisser
   // la pile déséquilibrée et tout décaler à la frame suivante.
   const sw = doodleShroomWarp(s), zm = s.zoom || 1;
-  const warped = !!sw || Math.abs(zm - 1) > 0.0005;
+  // ✨ La secousse de la Création voyage dans LA MÊME transformation que l'ondulation du 🍄 et
+  // le 🔍 zoom : posée à part, elle aurait fait trembler le HUD avec le monde.
+  const shk = (s.crea && s.crea.shake > 0) ? (Math.random() - 0.5) * s.crea.shake : 0;
+  const warped = !!sw || Math.abs(zm - 1) > 0.0005 || shk !== 0;
   if (warped) {
     // ⚠ Dézoomé, le monde ne remplit plus le cadre : on peint d'abord toute la toile de la
     // couleur du papier, sinon la bordure garderait l'image de la frame précédente.
     if (zm < 1) { ctx.fillStyle = doodleBiomeCols(s, s.score).paper; ctx.fillRect(0, 0, W, H); }
     const sc = zm * (sw ? sw.sc : 1);
     ctx.save();
-    ctx.translate(W / 2 + (sw ? sw.dx : 0), H / 2 + (sw ? sw.dy : 0));
+    ctx.translate(W / 2 + (sw ? sw.dx : 0) + shk, H / 2 + (sw ? sw.dy : 0));
     if (sw) ctx.rotate(sw.rot);
     ctx.scale(sc, sc);
     ctx.translate(-W / 2, -H / 2);
@@ -8012,6 +8073,7 @@ function doodleDraw(ctx, s, W, H) {
   }
   ctx.fillStyle = '#3a7d1e';
   s.booms.forEach(b => doodleBoomDraw(ctx, b));
+  doodleCreaDraw(ctx, s, W, H);   // ✨ l'onde de la Création, ses traits de course et ses fantômes — SOUS le doodler
   // ⚠ 9.1.3 — L'invulnérabilité se VOIT (halo doré + clignotement) : sans signal à l'écran,
   // 2 s d'immunité seraient indiscernables d'un coup de chance, et on ne saurait pas quand
   // elles s'arrêtent. Le halo est dessiné SOUS le doodler pour ne pas le masquer.
@@ -8377,6 +8439,189 @@ function doodleTileBirth(s, p, diff) {
   p.type = type;
   return p;
 }
+// ── ✨ LA CRÉATION (demande utilisateur) ─────────────────────────────────────────
+// ⚠ CE N'EST PAS UNE TUILE BONUS : elle n'est ni dans `D_TILES` ni dans un biome, donc jamais
+// tirée au déblocage, jamais tirée au hasard par une rangée. Elle NAÎT DU TERRAIN — dès que
+// deux dalles se touchent, elles fusionnent en UNE Création de largeur ORDINAIRE (l'union des
+// deux aurait donné une plateforme deux fois plus large que tout le reste).
+// Ce qu'elle fait, au contact :
+//   1. une onde de lumière part de son centre et grandit jusqu'à sortir de la carte ; tout
+//      monstre que le front rattrape meurt et lâche son coffre (`doodleKillMonster(force)`) ;
+//   2. puis, pendant D_CREA_TP_LIFE, le doodler est téléporté DE DALLE EN DALLE, du plus BAS
+//      au plus HAUT, une dalle toutes les D_CREA_TP_STEP frames.
+// ⚠ AUCUN effet de tuile n'est réécrit ici : à chaque saut on REPOSE réellement le doodler sur
+// la dalle (position, `prevFeet`, `vy > 0`) et c'est le code d'atterrissage ordinaire qui joue,
+// la frame même. C'est ce qui garantit que « leurs effets s'appliquent » sans exception — un
+// dispatch parallèle aurait oublié la moitié des tuiles au premier ajout.
+// ⚠ INVULNÉRABLE pendant toute la séquence (`s.inv`, comme le voyage en TARDIS) : la première
+// ⚡ Électrifiée ou 🌵 Pique visitée tuerait en une frame, sans que le joueur puisse rien faire.
+// ⚠ La file est RECALCULÉE à chaque saut (la dalle non visitée la plus basse) et non figée au
+// départ : en montant, la caméra fait naître de nouvelles rangées, et « il n'en loupe aucune »
+// n'aurait plus été vrai avec une liste prise une fois pour toutes.
+const D_CREA_TOUCH    = 3;      // px de jeu tolérés entre deux dalles pour les dire « collées »
+const D_CREA_WAVE_V   = 9;      // vitesse du front de lumière, en px/frame
+const D_CREA_TP_LIFE  = 600;    // 10 s à 60 fps
+const D_CREA_TP_STEP  = 2;      // une dalle toutes les 2 frames (30/s) — vitesse demandée
+const D_CREA_GHOSTS   = 4;      // doodlers fantômes étirés laissés sur chaque trajet
+const D_CREA_SHAKE    = 3.2;    // secousse d'écran à chaque saut (sensation de vitesse)
+// Une dalle peut-elle fusionner ? ⚠ On écarte celles qui sont le PIED d'une structure : la 🌈
+// Arc-en-ciel et son second pied, les 🚇 Tuyaux, les ⛓️ Chaînes. Les faire disparaître laisserait
+// leur jumelle pointer un fantôme — et une paire est déjà, par construction, deux dalles liées.
+function doodleCreaCan(p) {
+  return p && !p.dead && p.fvy == null && doodleSolid(p) && p.type !== 'creation'
+    && p.pipe == null && p.chain == null && !p.arcTo && !p.rbPair;   // (les leurres 🎲 sont déjà écartés par doodleSolid)
+}
+// Deux dalles se touchent-elles ? Même rangée (à une hauteur de dalle près) et bords jointifs.
+function doodleCreaTouch(a, b) {
+  return Math.abs(a.y - b.y) <= D_PLAT_H
+      && a.x + a.w >= b.x - D_CREA_TOUCH && b.x + b.w >= a.x - D_CREA_TOUCH;
+}
+// Cherche un contact et fait naître la Création. ⚠ UNE SEULE à l'écran à la fois : deux
+// séquences qui se chevauchent se voleraient le doodler à chaque frame.
+function doodleCreaFuse(s) {
+  if (s.bossHide || s.crea) return;
+  const ps = s.platforms;
+  for (const q of ps) if (q.type === 'creation' && !q.dead) return;
+  for (let i = 0; i < ps.length; i++) {
+    const a = ps[i];
+    if (!doodleCreaCan(a) || a.y < -20 || a.y > DOODLE_H + 20) continue;
+    for (let j = i + 1; j < ps.length; j++) {
+      const b = ps[j];
+      if (!doodleCreaCan(b) || !doodleCreaTouch(a, b)) continue;
+      // La plus BASSE des deux devient la Création, recentrée sur le point de contact et
+      // ramenée à la largeur ordinaire ; l'autre est absorbée (`dead`, la voie que le jeu
+      // utilise déjà partout — rien ne pointe une dalle morte sans le tester).
+      const low = a.y >= b.y ? a : b, gone = low === a ? b : a;
+      const mid = (Math.max(a.x, b.x) + Math.min(a.x + a.w, b.x + b.w)) / 2;
+      for (const k of ['spring', 'trampoline', 'egg', 'roll', 'mim', 'hops', 'armed', 'used', 'shown', 'lit', 'ori', 'meals', 'glued']) delete low[k];
+      low.type = 'creation'; low.w = D_PLAT_W; low.used = false;
+      low.x = Math.max(2, Math.min(DOODLE_W - D_PLAT_W - 2, mid - D_PLAT_W / 2));
+      gone.dead = true;
+      for (let k = 0; k < 22; k++) {
+        const ang = Math.random() * Math.PI * 2, v = 1 + Math.random() * 3;
+        s.parts.push({ x: mid, y: low.y + D_PLAT_H / 2, vx: Math.cos(ang) * v, vy: Math.sin(ang) * v - 0.6,
+          life: 30, max: 30, sz: 3, c: k % 3 === 0 ? '#ffffff' : k % 3 === 1 ? '#ffd54a' : '#f7ddb8' });
+      }
+      s.toast = { txt: '✨ Deux dalles se sont touchées — La Création !', life: D_TOAST_LIFE };
+      return;
+    }
+  }
+}
+// Au contact : l'onde part, la séquence commence.
+function doodleCreaStart(s, p) {
+  s.crea = { x: p.x + p.w / 2, y: p.y + D_PLAT_H / 2, r: 0, ph: 'wave', tp: 0, hop: 0,
+             seen: new Set([p]), streaks: [], ghosts: [], shake: 0 };
+  s.inv = Math.max(s.inv || 0, D_CREA_TP_LIFE + 120);
+  s.toast = { txt: '✨ La Création — la lumière balaie tout', life: D_TOAST_LIFE };
+}
+// La dalle non visitée la plus BASSE encore à l'écran (la file, recalculée à chaque saut).
+function doodleCreaNext(s, H) {
+  let best = null;
+  for (const p of s.platforms) {
+    if (p.dead || !doodleSolid(p) || s.crea.seen.has(p)) continue;
+    if (p.y < -30 || p.y > H + 30) continue;
+    if (!best || p.y > best.y) best = p;
+  }
+  return best;
+}
+// ⚠ APPELÉE JUSTE AVANT le test d'atterrissage de la boucle de jeu : le doodler reposé ici est
+// ramassé par ce test LA FRAME MÊME, donc l'effet de la dalle part sans un tick de retard.
+function doodleCreaStep(s, W, H, sf) {
+  const cr = s.crea;
+  if (!cr) return;
+  cr.shake = Math.max(0, cr.shake - 0.55);
+  for (const k of cr.streaks) k.life--;
+  for (const g of cr.ghosts) g.life--;
+  cr.streaks = cr.streaks.filter(k => k.life > 0);
+  cr.ghosts  = cr.ghosts.filter(g => g.life > 0);
+  if (cr.ph === 'wave') {
+    cr.r += D_CREA_WAVE_V * sf;
+    for (const m of s.monsters) {
+      if (!m.alive || m.y < -30 || m.y > H + 30) continue;   // « tous les monstres VISIBLES »
+      if (Math.hypot(m.x + m.w / 2 - cr.x, m.y + m.h / 2 - cr.y) <= cr.r) doodleKillMonster(s, m, true);
+    }
+    // Sortie de carte : le front doit avoir dépassé le coin le plus éloigné.
+    const far = Math.max(Math.hypot(cr.x, cr.y), Math.hypot(W - cr.x, cr.y),
+                         Math.hypot(cr.x, H - cr.y), Math.hypot(W - cr.x, H - cr.y));
+    if (cr.r > far) { cr.ph = 'tp'; cr.r = 0; }
+    return;
+  }
+  cr.tp += sf;
+  if (cr.tp >= D_CREA_TP_LIFE) { s.crea = null; return; }
+  if (Math.floor(cr.tp) % D_CREA_TP_STEP !== 0 || cr.hop === Math.floor(cr.tp)) return;
+  cr.hop = Math.floor(cr.tp);
+  const p = doodleCreaNext(s, H);
+  if (!p) return;                                  // rien de neuf à visiter : on attend la rangée suivante
+  cr.seen.add(p);
+  const nx = p.x + p.w / 2, ny = p.y - D_FEET + 2;
+  cr.streaks.push({ x1: s.px, y1: s.py, x2: nx, y2: ny, life: D_CREA_TP_STEP * 5, max: D_CREA_TP_STEP * 5 });
+  for (let k = 1; k <= D_CREA_GHOSTS; k++) {
+    cr.ghosts.push({ x: s.px + (nx - s.px) * k / (D_CREA_GHOSTS + 1), y: s.py + (ny - s.py) * k / (D_CREA_GHOSTS + 1),
+      face: nx > s.px ? 1 : -1, life: D_CREA_TP_STEP * 4 - k, max: D_CREA_TP_STEP * 4 });
+  }
+  cr.shake = D_CREA_SHAKE;
+  s.face = nx > s.px ? 1 : -1;
+  s.px = nx; s.py = ny;
+  // ⚠ Les pieds doivent arriver PAR AU-DESSUS de la dalle — et le test de la boucle borne le
+  // haut avec `p.pvy`, la hauteur de la dalle AVANT les déplacements de la frame : sur un 🛗
+  // Ascenseur qui descend, un `prevFeet` calculé sur la seule position d'arrivée serait déjà
+  // trop bas et l'atterrissage ne se déclencherait pas.
+  s.prevFeet = Math.min(p.y, p.pvy != null ? p.pvy : p.y) - 2;
+  s.vy = 1;                  // … et en chute, sinon l'atterrissage n'est pas testé du tout
+  s.fly = 0;                 // un vol en cours annulerait le test (et la Création prime dessus)
+  s.inv = Math.max(s.inv || 0, D_CREA_TP_LIFE - cr.tp + 120);
+}
+// L'onde, les traits de course et les fantômes. ⚠ Dessinés SOUS le doodler (appelés depuis
+// `doodleDraw` avant lui) : par-dessus, la traînée l'aurait effacé à chaque saut.
+function doodleCreaDraw(ctx, s, W, H) {
+  const cr = s.crea;
+  if (!cr) return;
+  if (cr.ph === 'wave') {
+    ctx.save(); ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(cr.x, cr.y, cr.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,214,120,0.75)'; ctx.lineWidth = 12;
+    ctx.beginPath(); ctx.arc(cr.x, cr.y, Math.max(0, cr.r - 9), 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,236,170,0.30)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(cr.x, cr.y, Math.max(0, cr.r - 26), 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+  // La SENSATION DE VITESSE : le fuseau du trajet, ses filets parallèles, et les fantômes.
+  ctx.save(); ctx.lineCap = 'round';
+  for (const k of cr.streaks) {
+    const a = k.life / k.max;
+    ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.30) + ')'; ctx.lineWidth = 13;
+    ctx.beginPath(); ctx.moveTo(k.x1, k.y1); ctx.lineTo(k.x2, k.y2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,' + (a * 0.85) + ')'; ctx.lineWidth = 3.4;
+    ctx.beginPath(); ctx.moveTo(k.x1, k.y1); ctx.lineTo(k.x2, k.y2); ctx.stroke();
+    const dx = k.x2 - k.x1, dy = k.y2 - k.y1, L = Math.hypot(dx, dy) || 1, nx = -dy / L, ny = dx / L;
+    ctx.strokeStyle = 'rgba(255,236,170,' + (a * 0.6) + ')'; ctx.lineWidth = 1.2;
+    for (const o of [-7, -3.5, 3.5, 7]) {
+      ctx.beginPath();
+      ctx.moveTo(k.x1 + nx * o + dx * 0.18, k.y1 + ny * o + dy * 0.18);
+      ctx.lineTo(k.x1 + nx * o + dx * 0.82, k.y1 + ny * o + dy * 0.82);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+  for (const g of cr.ghosts) {
+    ctx.save(); ctx.globalAlpha = (g.life / g.max) * 0.42;
+    ctx.translate(g.x, g.y); ctx.scale(1.14, 0.86); ctx.translate(-g.x, -g.y);
+    doodleDoodler(ctx, g.x, g.y, g.face, null, s.t, doodlePaintPal(s));
+    ctx.restore();
+  }
+  if (cr.ph === 'tp') {                                   // les rais qui s'ouvrent à l'arrivée
+    ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.4;
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4 + s.t * 0.25;
+      ctx.beginPath();
+      ctx.moveTo(s.px + Math.cos(a) * 17, s.py + 2 + Math.sin(a) * 17);
+      ctx.lineTo(s.px + Math.cos(a) * 25, s.py + 2 + Math.sin(a) * 25);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
 function doodleSpawnRow(s, ny, risky) {
   const diff = Math.min(1, s.score / 700);
   const w = D_PLAT_W, x = 6 + Math.random() * (DOODLE_W - w - 12);
@@ -8565,6 +8810,7 @@ function doodleRules() {
       { i:'⬜', n:'Blanche',      d:'un seul rebond, puis elle disparaît. Elle marque les sauts limites.' },
       { i:'🎁', n:'Tuile coffre', d:'au premier rebond, un coffre apparaît dessus ; elle s\'éteint ensuite. Le coffre se ramasse et se tire comme celui d\'un monstre.' },
       { i:'🌈', n:'Multicolore',  d:'se téléporte plus haut à chaque rebond et tient 3 à 5 passages. Les points sur elle comptent les passages restants. Tant qu\'elle est en vie, le reste du décor se raréfie de moitié.' },
+      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre. Puis, pendant ${Math.round(D_CREA_TP_LIFE / 60)} secondes, tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Tu es invulnérable pendant tout le voyage.` },
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
