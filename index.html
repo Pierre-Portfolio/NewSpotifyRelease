@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.4.0';
+const APP_VERSION = '13.4.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1139,11 +1139,19 @@ function gdriveBlobForget(fileId) {
 const ACTIFS_LS      = 'spotifyplus_actifs';        // cache { fetched_at, file, months, totals }
 const ACTIFS_FILE_LS = 'spotifyplus_actifs_file';   // fichier trouvé { id, name, modifiedTime }
 const ACTIFS_TTL     = 6 * 3600 * 1000;             // re-fetch auto au-delà de 6h
+// ⚠ Version du FORMAT du cache, à incrémenter dès qu'une valeur change d'unité ou de sens
+// (v2 : pourcentages rangés en fraction, cf. `actifsPct`). Une entrée d'une autre version
+// est jetée plutôt que réinterprétée : l'effet de montage la re-synchronise aussitôt.
+const ACTIFS_CACHE_V = 2;
 
 let _actifsCache;                                    // cache mémoire (évite le re-JSON.parse)
 function loadActifs() {
   if (_actifsCache !== undefined) return _actifsCache;
   try { _actifsCache = JSON.parse(localStorage.getItem(ACTIFS_LS)) || null; } catch { _actifsCache = null; }
+  if (_actifsCache && _actifsCache.v !== ACTIFS_CACHE_V) {
+    _actifsCache = null;
+    try { localStorage.removeItem(ACTIFS_LS); } catch {}
+  }
   return _actifsCache;
 }
 function saveActifs(d) {
@@ -1184,6 +1192,24 @@ function actifsNum(raw) {
   else if (lc !== -1) s = s.split(',').length > 2 ? s.replace(/,/g, '') : s.replace(',', '.');
   const n = parseFloat(s);
   return isNaN(n) ? null : n;
+}
+
+// Colonnes de POURCENTAGE (50/30/20, pyramide 10/80/5/5, rendement) → toujours ramenées
+// à une FRACTION, c'est l'unité que suppose tout l'affichage (`v * 100`).
+// ⚠ L'export CSV de Drive donne la valeur FORMATÉE : une cellule au format pourcentage
+// sort en « 50,82% », dont `actifsNum` a retiré le signe — il reste 50.82, à diviser par
+// 100. Sans ça la barre affichait « 5082 % » (et « 6514 % » pour la pyramide). Un nombre
+// nu (API Sheets en UNFORMATTED_VALUE, cellule non formatée) est déjà la fraction : rien
+// à faire, la présence du « % » dans la source est le SEUL discriminant fiable.
+const ACTIFS_PCT_KEYS = new Set([
+  'charge', 'loisir', 'invest',
+  'pyrMatelas', 'pyrImmo', 'pyrEtf', 'pyrCrypto', 'pyrGold', 'pyrExotique',
+  'rendement',
+]);
+function actifsPct(raw) {
+  const n = actifsNum(raw);
+  if (n == null) return null;
+  return String(raw).indexOf('%') !== -1 ? n / 100 : n;
 }
 
 // Date de la colonne A : ISO « 2026-06-01 » / « 2026-06 » (mois seul), « 01/06/2026 » (fr),
@@ -1297,7 +1323,7 @@ function actifsParseCsv(text) {
     const my = a.match(/^total\s+(\d{4})$/i);
     if (!t && !my) continue;
     const o = t ? { t } : { year: +my[1] };
-    for (const k in col) if (col[k] >= 0) o[k] = actifsNum(r[col[k]]);
+    for (const k in col) if (col[k] >= 0) o[k] = (ACTIFS_PCT_KEYS.has(k) ? actifsPct : actifsNum)(r[col[k]]);
     (t ? months : sheetTotals).push(o);
   }
   months.sort((a, b) => b.t - a.t);
@@ -1359,7 +1385,7 @@ async function actifsFetch(force) {
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const parsed = actifsParseCsv(await res.text());
   if (!parsed || !parsed.months.length) throw new Error('EMPTY');
-  const data = { fetched_at: Date.now(),
+  const data = { v: ACTIFS_CACHE_V, fetched_at: Date.now(),
     file: { id: file.id, name: file.name, modifiedTime: file.modifiedTime || null },
     months: parsed.months, totals: parsed.totals };
   saveActifs(data);
@@ -29816,6 +29842,8 @@ function fmtEur(v, dec) {
 }
 function fmtEurSigned(v) { return v == null || isNaN(v) ? '—' : (v >= 0 ? '+' : '') + fmtEur(v, 0); }
 function fmtActifMonth(t) { return new Date(t).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' }); }
+// Pourcentage déjà en points (12.5 → « 12,5 % »), signe négatif conservé
+function fmtPct1(v) { return v == null || isNaN(v) ? '—' : Number(v).toLocaleString('fr-FR', { minimumFractionDigits:1, maximumFractionDigits:1 }) + ' %'; }
 
 // Carte-section (même gabarit que FinanceSection, sans le badge EUR/USD)
 function ActifSection({ title, right, children }) {
@@ -29852,7 +29880,10 @@ function ActifBar({ label, value, pct, color, valueTxt }) {
         <span style={{ fontSize:11, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{label}</span>
         <span style={{ fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text, flexShrink:0 }}>
           {valueTxt != null ? valueTxt : fmtEur(value, 0)}
-          {pct != null && !isNaN(pct) && <span style={{ fontSize:9, color:C.muted, fontWeight:500, marginLeft:5 }}>{p.toFixed(p >= 10 ? 0 : 1)}%</span>}
+          {/* Suffixe de part : seulement quand la valeur affichée est un MONTANT — un
+              `valueTxt` porte déjà son propre pourcentage (50/30/20, pyramide), le
+              répéter donnait « 50,8 % 51% » sur la même ligne. */}
+          {valueTxt == null && pct != null && !isNaN(pct) && <span style={{ fontSize:9, color:C.muted, fontWeight:500, marginLeft:5 }}>{p.toFixed(p >= 10 ? 0 : 1)}%</span>}
         </span>
       </div>
       <div style={{ height:4, background:C.surfaceHigh, borderRadius:2, marginTop:3 }}>
@@ -30059,7 +30090,7 @@ function MesActifsPanel() {
           <div style={{ marginTop:6 }}>
             <div style={{ fontSize:9, color:C.muted, fontWeight:700, letterSpacing:'0.05em', margin:'4px 0 2px' }}>RÈGLE 50/30/20 <span style={{ fontWeight:400 }}>(part du revenu — cible entre parenthèses)</span></div>
             {budget503020.map(x => (
-              <ActifBar key={x.k} label={`${x.label} (${x.target})`} pct={x.v * 100} color={x.color} valueTxt={(x.v * 100).toFixed(0) + ' %'} />
+              <ActifBar key={x.k} label={`${x.label} (${x.target})`} pct={x.v * 100} color={x.color} valueTxt={fmtPct1(x.v * 100)} />
             ))}
           </div>
         )}
@@ -30089,7 +30120,7 @@ function MesActifsPanel() {
       {pyramide.length > 0 && (
         <ActifSection title="🔺 PYRAMIDE 10/80/5/5" right="répartition du patrimoine">
           {pyramide.map(x => (
-            <ActifBar key={x.k} label={x.label} pct={x.v * 100} color={x.color} valueTxt={(x.v * 100).toFixed(1) + ' %'} />
+            <ActifBar key={x.k} label={x.label} pct={x.v * 100} color={x.color} valueTxt={fmtPct1(x.v * 100)} />
           ))}
         </ActifSection>
       )}
