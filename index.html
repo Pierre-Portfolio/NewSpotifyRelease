@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.4.1';
+const APP_VERSION = '13.4.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29893,6 +29893,186 @@ function ActifBar({ label, value, pct, color, valueTxt }) {
   );
 }
 
+// ── Graphiques multi-séries de Mes Actifs (SVG maison, aucune lib → CSP inchangée) ──
+// Deux modes : 'line' (une courbe par série, échelle commune) et 'pct100' (aires
+// empilées ramenées à 100 % — une RÉPARTITION, pas des montants ; les valeurs négatives
+// y sont ramenées à 0, un empilement n'ayant pas de sens en dessous de zéro).
+// Légende cliquable : une série masquée sort AUSSI du calcul d'échelle et de
+// l'empilement, sinon isoler une petite courbe ne servirait à rien.
+// ⚠ Les mois sans aucune valeur visible sont écartés, et en mode ligne un trou isolé
+// COUPE le segment : relier par-dessus inventerait un relevé qui n'existe pas.
+const ACTIF_CHART_PALETTE = ['#4ea3f5', '#f5545f', '#e0c060', '#45c552', '#b06cf5', '#2fc1c1',
+  '#f5813c', '#8fd14f', '#f57ec1', '#7d8cf5', '#5ad1a0', '#d98cf5', '#c9a227', '#9aa4b2'];
+const actifChartSeries = defs => defs.map(([k, label], i) =>
+  ({ k, label, color: ACTIF_CHART_PALETTE[i % ACTIF_CHART_PALETTE.length] }));
+
+// Séries partagées par les graphiques du bas — définies une fois pour toutes hors du
+// composant : une nouvelle référence à chaque rendu ferait repartir de zéro la légende.
+const ACTIF_BUDGET_SERIES = [
+  { k:'invest', label:'Investissement (20)', color:'#45c552' },
+  { k:'loisir', label:'Loisir (30)',         color:'#f5b81f' },
+  { k:'charge', label:'Charge (50)',         color:'#4ea3f5' },
+];
+const ACTIF_PYR_SERIES = [
+  { k:'pyrMatelas',  label:'Matelas sécurité', color:'#4ea3f5' },
+  { k:'pyrImmo',     label:'Immobilier',       color:'#45c552' },
+  { k:'pyrEtf',      label:'ETF / Actions',    color:'#2fc1c1' },
+  { k:'pyrCrypto',   label:'Crypto',           color:'#b06cf5' },
+  { k:'pyrGold',     label:'Gold',             color:'#e0c060' },
+  { k:'pyrExotique', label:'Exotique',         color:'#f5813c' },
+];
+const ACTIF_PHYS_SERIES = actifChartSeries(ACTIFS_PHYSIQUES.map(([k, label]) => [k, label]));
+
+function ActifMultiChart({ months, series, fmt, mode, scale, height }) {
+  const [hidden, setHidden] = React.useState(() => new Set());
+  const [hover, setHover]   = React.useState(null);
+  const svgRef = React.useRef(null);
+
+  const stack = mode === 'pct100';
+  const mul   = stack ? 1 : (scale || 1);
+  const W = 400, H = height || 155, AX = 21, PT = 8, PB = 6, PL = 4, PR = 4;
+  const fmtV = fmt || (stack ? (v => Math.round(v) + ' %') : (v => fmtEur(v, 0)));
+
+  const vis  = series.filter(s => !hidden.has(s.k));
+  const rows = months.filter(m => vis.some(s => m[s.k] != null && !isNaN(m[s.k])))
+    .slice().sort((a, b) => a.t - b.t);
+  const toggle = k => setHidden(prev => {
+    const n = new Set(prev);
+    n.has(k) ? n.delete(k) : n.add(k);
+    return n;
+  });
+  // Légende toujours rendue, même sans tracé : sans elle on ne pourrait pas ré-afficher
+  // la dernière série qu'on vient de masquer.
+  const legend = (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:'3px 8px', marginTop:6 }}>
+      {series.map(s => {
+        const off = hidden.has(s.k);
+        return (
+          <button key={s.k} onClick={() => toggle(s.k)} title={off ? 'Afficher' : 'Masquer'}
+            style={{ display:'flex', alignItems:'center', gap:4, background:'none', border:'none', padding:0,
+              cursor:'pointer', fontSize:9, fontWeight:600, color: off ? C.dim : C.muted, opacity: off ? 0.5 : 1 }}>
+            <span style={{ width:8, height:8, borderRadius:2, flexShrink:0,
+              background: off ? 'transparent' : s.color, border:`1px solid ${s.color}` }} />
+            {s.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+  if (rows.length < 2 || !vis.length) {
+    return (
+      <div>
+        <div style={{ fontSize:10, color:C.muted, textAlign:'center', padding:'14px 0' }}>Pas assez de points relevés.</div>
+        {legend}
+      </div>
+    );
+  }
+
+  const t0 = rows[0].t, t1 = rows[rows.length - 1].t, tSpan = (t1 - t0) || 1;
+  const X = t => PL + ((t - t0) / tSpan) * (W - PL - PR);
+  const tots = stack ? rows.map(r => vis.reduce((a, s) => a + Math.max(0, r[s.k] || 0), 0)) : null;
+  const val = (i, k) => {
+    const v = rows[i][k];
+    if (stack) return tots[i] > 0 ? Math.max(0, v || 0) / tots[i] * 100 : 0;
+    return v == null || isNaN(v) ? null : v * mul;
+  };
+
+  let vmin = 0, vmax = 100;
+  if (!stack) {
+    vmin = Infinity; vmax = -Infinity;
+    for (let i = 0; i < rows.length; i++) for (const s of vis) {
+      const v = val(i, s.k);
+      if (v == null) continue;
+      if (v < vmin) vmin = v;
+      if (v > vmax) vmax = v;
+    }
+    if (!isFinite(vmin)) { vmin = 0; vmax = 1; }
+    if (vmax === vmin) { const e = Math.abs(vmax) * 0.01 || 1; vmax += e; vmin -= e; }
+  }
+  const Y = v => PT + (1 - (v - vmin) / (vmax - vmin)) * (H - PT - PB);
+
+  // Aires empilées : la frontière haute de la série N devient la base de la N+1.
+  const areas = [];
+  if (stack) {
+    let base = rows.map(() => 0);
+    for (const s of vis) {
+      const top = rows.map((r, i) => base[i] + val(i, s.k));
+      const up  = rows.map((r, i) => `${i ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(top[i]).toFixed(1)}`).join('');
+      let dn = '';
+      for (let i = rows.length - 1; i >= 0; i--) dn += `L${X(rows[i].t).toFixed(1)},${Y(base[i]).toFixed(1)}`;
+      areas.push({ s, d: up + dn + 'Z' });
+      base = top;
+    }
+  }
+  const lines = stack ? [] : vis.map(s => {
+    let d = '', pen = false;
+    for (let i = 0; i < rows.length; i++) {
+      const v = val(i, s.k);
+      if (v == null) { pen = false; continue; }
+      d += `${pen ? 'L' : 'M'}${X(rows[i].t).toFixed(1)},${Y(v).toFixed(1)}`;
+      pen = true;
+    }
+    return { s, d };
+  }).filter(l => l.d.indexOf('L') !== -1);
+
+  const onMove = e => {
+    const rect = svgRef.current && svgRef.current.getBoundingClientRect();
+    if (!rect || !rect.width) return;
+    const t = t0 + ((e.clientX - rect.left) / rect.width) * tSpan;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < rows.length; i++) { const d = Math.abs(rows[i].t - t); if (d < bd) { bd = d; best = i; } }
+    setHover(best);
+  };
+  const hi = hover != null && hover < rows.length ? hover : null;
+  const readout = hi == null ? [] : vis
+    .map(s => ({ s, v: val(hi, s.k) }))
+    .filter(x => x.v != null && (!stack || x.v > 0))
+    .sort((a, b) => b.v - a.v);
+
+  return (
+    <div>
+      {/* Slot de lecture à hauteur FIXE : sans lui le graphe sauterait au survol. */}
+      <div style={{ minHeight:26, fontSize:9.5, fontFamily:'DM Mono,monospace', color:C.muted,
+        display:'flex', flexWrap:'wrap', gap:'2px 9px', justifyContent:'center', marginBottom:2 }}>
+        {hi != null && <span style={{ color:C.text, fontWeight:700 }}>{fmtActifMonth(rows[hi].t)}</span>}
+        {readout.map(x => (
+          <span key={x.s.k} style={{ color:x.s.color, fontWeight:700 }}>{x.s.label} {fmtV(x.v)}</span>
+        ))}
+      </div>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H + AX}`} style={{ width:'100%', height:'auto', display:'block', touchAction:'none', cursor:'crosshair' }}
+        onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
+        {[0.25, 0.5, 0.75].map(f => {
+          const gy = PT + f * (H - PT - PB);
+          return (
+            <g key={f}>
+              <line x1={PL} x2={W - PR} y1={gy} y2={gy} stroke={C.border} strokeWidth="1" strokeDasharray="3 4" />
+              <text x={PL + 1} y={gy - 3} fill={C.muted} fontSize="8.5" fontFamily="DM Mono,monospace">{fmtV(vmax - f * (vmax - vmin))}</text>
+            </g>
+          );
+        })}
+        {/* Zéro marqué quand la plage le traverse (économies négatives, patrimoine net). */}
+        {!stack && vmin < 0 && vmax > 0 && <line x1={PL} x2={W - PR} y1={Y(0)} y2={Y(0)} stroke={C.muted} strokeWidth="1" />}
+        {areas.map(a => <path key={a.s.k} d={a.d} fill={a.s.color} fillOpacity="0.55" stroke={a.s.color} strokeWidth="0.75" />)}
+        {lines.map(l => <path key={l.s.k} d={l.d} fill="none" stroke={l.s.color} strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />)}
+        <line x1={PL} x2={W - PR} y1={H} y2={H} stroke={C.border} strokeWidth="1" />
+        {Array.from({ length: CHART_TICKS }, (_, i) => {
+          const t = t0 + (tSpan * i) / (CHART_TICKS - 1);
+          const x = X(t), last = i === CHART_TICKS - 1;
+          return (
+            <g key={i}>
+              <line x1={x} x2={x} y1={H - 4} y2={H + 4} stroke={C.muted} strokeWidth="1" />
+              <text x={x} y={H + 15} fill={C.dim} fontSize="8.5" fontFamily="DM Mono,monospace"
+                textAnchor={i === 0 ? 'start' : last ? 'end' : 'middle'}>{fmtChartTick(t, '5a')}</text>
+            </g>
+          );
+        })}
+        {hi != null && <line x1={X(rows[hi].t)} x2={X(rows[hi].t)} y1={PT} y2={H} stroke={C.muted} strokeWidth="1" strokeDasharray="2 3" />}
+      </svg>
+      {legend}
+    </div>
+  );
+}
+
 function MesActifsPanel() {
   const [data, setData]       = React.useState(loadActifs);
   const [loading, setLoading] = React.useState(false);
@@ -30172,6 +30352,65 @@ function MesActifsPanel() {
           </div>
         </ActifSection>
       )}
+
+      {/* ── GRAPHIQUES (tout en bas : l'historique complet, section par section) ──
+          Les séries sont les MÊMES colonnes que les blocs ci-dessus, lues sur tous les
+          mois du classeur au lieu du seul dernier. `scale={100}` sur les colonnes de
+          pourcentage : elles sont rangées en FRACTION (cf. `actifsPct`). */}
+      <ActifSection title="🔥 LIBERTÉ FINANCIÈRE" right="années restantes">
+        <ActifMultiChart months={months} fmt={fmtYears} series={[
+          { k:'libApprox',  label:'Liberté approx',   color:'#4ea3f5' },
+          { k:'libMensuel', label:'Liberté mensuel',  color:'#f5545f' },
+          { k:'libAnnuel',  label:'Liberté annuel',   color:'#e0c060' },
+        ]} />
+      </ActifSection>
+
+      <ActifSection title="🔥 LIBERTÉ FINANCIÈRE" right="capital vs cible">
+        <ActifMultiChart months={months} series={[
+          { k:'capital', label:'Capital actuel (C)', color:'#4ea3f5' },
+          { k:'cible',   label:'Capital cible (T)',  color:'#f5545f' },
+        ]} />
+      </ActifSection>
+
+      <ActifSection title="💰 PATRIMOINE BRUT" right="brut vs net">
+        <ActifMultiChart months={months} series={[
+          { k:'net',  label:'Patrimoine net',  color:'#4ea3f5' },
+          { k:'brut', label:'Patrimoine brut', color:'#f5545f' },
+        ]} />
+      </ActifSection>
+
+      <ActifSection title="💰 PATRIMOINE NET" right="physique vs numérique">
+        <ActifMultiChart months={months} series={[
+          { k:'net',       label:'Patrimoine net', color:'#4ea3f5' },
+          { k:'physique',  label:'Physique',       color:'#f5545f' },
+          { k:'numerique', label:'Numérique',      color:'#e0c060' },
+        ]} />
+      </ActifSection>
+
+      <ActifSection title="📆 RÉPARTITION DU SALAIRE" right="part du revenu (empilée)">
+        <ActifMultiChart months={months} mode="pct100" series={ACTIF_BUDGET_SERIES} />
+      </ActifSection>
+
+      <ActifSection title="📆 RÉPARTITION DU SALAIRE" right="part du revenu (courbes)">
+        <ActifMultiChart months={months} scale={100} fmt={fmtPct1} series={ACTIF_BUDGET_SERIES} />
+      </ActifSection>
+
+      <ActifSection title="🧸 ACTIF" right="valeur des actifs physiques">
+        <ActifMultiChart months={months} height={175} series={ACTIF_PHYS_SERIES} />
+      </ActifSection>
+
+      <ActifSection title="🔺 ACTIF" right="pyramide 10/80/5/5 (empilée)">
+        <ActifMultiChart months={months} mode="pct100" series={ACTIF_PYR_SERIES} />
+      </ActifSection>
+
+      <ActifSection title="📊 MARCHÉ FINANCIER" right="comptes d'investissement">
+        <ActifMultiChart months={months} series={[
+          { k:'pea',      label:'PEA',           color:'#4ea3f5' },
+          { k:'etoro',    label:'eToro',         color:'#f5545f' },
+          { k:'traderep', label:'TradeRepublic', color:'#e0c060' },
+          { k:'binance',  label:'Binance',       color:'#45c552' },
+        ]} />
+      </ActifSection>
 
       {/* ── Pied : source + refresh ── */}
       <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
