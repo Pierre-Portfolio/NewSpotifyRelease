@@ -2079,7 +2079,7 @@ const D_TILES = [
   // celle de départ, qui renvoyait… — un aller-retour sans fin, à la même hauteur, dont rien ne
   // faisait sortir. Bouchées, ce sont deux dalles ordinaires — mais y retomber une SECONDE fois
 // renvoie plus haut (voir `p.hops` au calcul du rebond), ce qui rend la bouche d'arrivée utile.
-  { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre — une seule fois, puis les deux bouches se bouchent ; y retomber une seconde fois te renvoie plus haut' },
+  { k: 'pipe',    icon:'🚇', name: 'Tuyaux',        txt: 'ils naissent par deux : saute dans l\'un, tu ressors par l\'autre — une seule fois, puis les deux bouches se bouchent ; y retomber une seconde fois te renvoie plus haut. La seconde bouche s\'installe où elle veut : la dalle qu\'elle touche est effacée, une paire ne peut pas naître à moitié' },
   // 🪙 9.9.1 — QUITTE OU DOUBLE (demande utilisateur) : une seule fois par dalle, pile ou face.
   { k: 'gamble',  icon:'🪙', name: 'Quitte ou double', txt: 'une chance sur deux de DOUBLER le NOMBRE de tes effets (autant de neufs que tu en as, au moins ' + D_GAMBLE_MIN + ') et de tes tuiles… une chance sur deux d\'en perdre la MOITIÉ, tirée au hasard — jamais tout' },
   // 🕯️ 9.9.6 — ESPRITS (demande utilisateur) : trois apparitions qui fondent sur toi chacune
@@ -8639,7 +8639,32 @@ function doodleTileBirth(s, p, diff) {
     p.pipe = id;
     let x2 = 6 + Math.random() * (DOODLE_W - w - 12);
     for (let k = 0; k < 10 && Math.abs(x2 - x) < D_PIPE_MINX; k++) x2 = 6 + Math.random() * (DOODLE_W - w - 12);
-    s.platforms.push({ x: x2, y: ny + D_PIPE_DY[0] + Math.random() * (D_PIPE_DY[1] - D_PIPE_DY[0]), w, h: D_PLAT_H, type: 'pipe', pipe: id, dead: false });
+    const y2 = ny + D_PIPE_DY[0] + Math.random() * (D_PIPE_DY[1] - D_PIPE_DY[0]);
+    // ⚠ 12.9.7 (demande utilisateur) — LA BOUCHE JUMELLE NE PEUT PAS NAÎTRE SUR UNE DALLE
+    // EXISTANTE. Contrairement à la 🪜 Échelle, qui RENONCE quand la place est prise
+    // (`doodleRectFree`), c'est ici la dalle qui s'efface : les tuyaux naissent par PAIRE, et un
+    // tuyau sans sortie serait un piège — mieux vaut perdre une plateforme que la moitié d'une
+    // paire. Sa jumelle, elle, tombe à une abscisse et une hauteur libres entre deux rangées :
+    // c'est elle qui pouvait atterrir en plein sur une dalle déjà là.
+    // ⚠ La boîte à dégager MONTE de D_PIPE_RISE : le tuyau dépasse d'autant au-dessus de sa
+    // dalle, et une tuile posée juste au-dessus se serait retrouvée traversée par le fût.
+    // ⚠ `dead = true` et non un `splice` : c'est ainsi que le moteur retire une plateforme —
+    // elle cesse d'être solide sur-le-champ (`doodleSolid`) et le filtre de fin de frame
+    // l'emporte, en laissant coffres posés et créatures perchées se recaler comme d'habitude.
+    // ⚠ La dalle sous les pieds du joueur est ÉPARGNÉE : la jumelle naît une à deux rangées
+    // sous une rangée neuve, donc très loin de lui, mais l'effacer serait un ratage sans recours.
+    // ⚠ Les DEUX bouches déblaient, pas seulement la jumelle : la première est une dalle de la
+    // rangée, mais son fût dépasse lui aussi, et une tuile posée juste au-dessus serait
+    // traversée de la même façon.
+    const degage = (bx, by) => {
+      const box = { x: bx, y: by - D_PIPE_RISE, w, h: D_PLAT_H + D_PIPE_RISE };
+      for (const q of s.platforms) {
+        if (q === p || q.dead || q === s.lastPlat || q.type === 'pipe') continue;
+        if (box.x - 2 < q.x + q.w && q.x < box.x + box.w + 2 && box.y - 2 < q.y + q.h && q.y < box.y + box.h + 2) q.dead = true;
+      }
+    };
+    degage(x, ny); degage(x2, y2);
+    s.platforms.push({ x: x2, y: y2, w, h: D_PLAT_H, type: 'pipe', pipe: id, dead: false });
   }
   p.type = type;
   return p;
