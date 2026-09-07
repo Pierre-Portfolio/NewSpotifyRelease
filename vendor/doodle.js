@@ -182,7 +182,9 @@ const D_LOOT = [
   // jamais la survie.
   // ⚠ Elle ne couvre QUE le courant. Le ⚙️ Piège à picots partage la ligne de code de la
   // ⚡ Électrifiée mais reste mortel : ce sont des piques de métal, pas de l'électricité.
-  { k:'shZap',  icon:'🧤', label:'Immunité électrique', txt:'le courant ne t\'atteint plus : la ⚡ Électrifiée et l\'📡 Arc électrique crépitent sur toi sans mordre', max: 1, w: 1.5 },
+  // ⚠ 13.3.8 — ELLE N'EST PLUS PERMANENTE (demande utilisateur) : elle pare UN choc électrique
+  // et se grille. Le niveau retombe donc à 0, et les gants redeviennent tirables au coffre.
+  { k:'shZap',  icon:'🧤', label:'Immunité électrique', txt:'le PROCHAIN choc électrique ne t\'atteint pas — ⚡ Électrifiée, ⛈️ foudre ou 📡 Arc crépitent sur toi sans mordre — puis les gants sont grillés et tout recommence à te faire mal', max: 1, w: 1.5 },
   // 🧴 12.4.4 — PANACÉE (demande utilisateur) : le butin qui EFFACE d'un coup tout ce qui joue
   // contre le doodler à l'instant où le coffre s'ouvre — les malus à durée de la ☠️ case
   // malchance, les effets de tuile qui durent (🍄 vertige, 🎨 couleurs inversées, 🏜️ sable,
@@ -210,6 +212,24 @@ const D_LOOT_INST = new Set(['ammo', 'cure']);
 // `doodleWpnOf` : ce dernier renvoie 0 pendant un gel, et l'immunité aurait lâché juste au
 // moment où le joueur compte dessus.
 function doodleZapImmune(s) { return !!(s.wpn && s.wpn.shZap > 0); }
+// ⚠ 13.3.8 — LES GANTS SE CONSOMMENT (demande utilisateur) : l'immunité n'est plus permanente,
+// elle PARE UN CHOC et grille.
+// ⚠ `doodleZapUse` est le SEUL point de passage des trois dangers électriques (⚡ Électrifiée,
+// ⛈️ foudre de l'Orage, 📡 Arc électrique). Un `doodleZapImmune` laissé nu sur l'un d'eux
+// rendrait l'immunité éternelle sur ce danger-là, et le joueur ne comprendrait jamais pourquoi
+// elle tient parfois — d'où un helper qui teste ET dépense d'un seul geste.
+// ⚠ Il pose `s.inv` comme tout bouclier consommé, et c'est essentiel ici : les trois dangers
+// sont CONTINUS (on est posé sur la dalle, dans la travée, sous l'orage). Sans ces 2 s, les
+// gants grillaient et la frame suivante tuait — le butin n'aurait rien paré du tout.
+// ⚠ `doodleZapImmune` n'est plus qu'un PRÉDICAT — plus aucun chemin de dégât ne l'appelle nu.
+// S'en servir un jour pour afficher quelque chose est légitime ; pour parer un choc, non.
+function doodleZapUse(s) {
+  if (!doodleZapImmune(s)) return false;
+  s.wpn.shZap = 0;
+  s.inv = D_INV;
+  s.toast = { txt: '🧤 Les gants encaissent le choc — ils sont grillés', life: D_TOAST_LIFE };
+  return true;
+}
 const D_LASER_V = 2.2;             // 🔆 le trait part bien plus vite qu'une balle
 const D_LASER_PIERCE = 99;         // … et ne s'arrête sur rien
 const D_WPN_RATE = 3;              // ⚠ gain de cadence de « Cadence » — unique, donc appliqué une seule fois
@@ -3135,7 +3155,7 @@ const D_BIOMES = [
     tiles:[
       { k:'ghost',  icon:'👻', name:'Fantôme', own:true, txt:'s\'efface deux secondes après qu\'on a marché dessus' },
       { k:'gale',   icon:'🌬️', name:'Direction du vent', own:true, txt:'une girouette tournée vers l\'un des quatre points cardinaux. Elle ne souffle QUE si tu marches dessus, et alors pendant ' + Math.round(D_GALE_LIFE / 60) + ' s : toutes les ' + Math.round(D_GALE_EVERY / 60) + ' s elle pousse TOUTES les plateformes de ' + D_GALE_PUSH + ' px dans son sens — elles restent où le vent les a menées — et il te fait dériver en continu, tes sauts montant ' + Math.round(D_GALE_JUMP * 100) + ' % plus haut quand il monte, autant de moins quand il descend. Des filets d\'air balaient l\'écran tant qu\'il souffle, une seule bourrasque à la fois, et tout retombe au changement de biome' },
-      { k:'storm',  icon:'⛈️', name:'Orage',   own:true, w:D_BIOME_TILE_RARE, txt:'toutes les ' + Math.round(D_STORM_EVERY / 60) + ' s, la foudre frappe ce qu\'il y a de plus proche PLUS BAS qu\'elle : une dalle, ou toi. Le coup s\'annonce ' + Math.round(D_STORM_TELL / 60) + ' s à l\'avance par une jauge qui se vide sur le bord de la dalle. La dalle frappée ne décroche PAS — sauf une ⚪ blanche ou une 🟫 cassante, qui tombent dans le vide. L\'immunité électrique te protège' },
+      { k:'storm',  icon:'⛈️', name:'Orage',   own:true, w:D_BIOME_TILE_RARE, txt:'toutes les ' + Math.round(D_STORM_EVERY / 60) + ' s, la foudre frappe ce qu\'il y a de plus proche PLUS BAS qu\'elle : une dalle, ou toi. Le coup s\'annonce ' + Math.round(D_STORM_TELL / 60) + ' s à l\'avance par une jauge qui se vide sur le bord de la dalle. La dalle frappée ne décroche PAS — sauf une ⚪ blanche ou une 🟫 cassante, qui tombent dans le vide. L\'🧤 Immunité électrique pare le coup, une seule fois' },
     ],
     mobs:[{ k:'cherub', icon:'👼', w:38, h:34, vx:1.15, wave:2.2, drawn:true },
           { k:'seraph', icon:'😇', w:56, h:46, vx:0.85, rare:true, drawn:true }] },
