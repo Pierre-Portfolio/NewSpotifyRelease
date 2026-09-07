@@ -3183,8 +3183,12 @@ function doodleStrike(s, m, W) {
   // là : une balle perforante qui traverserait un dragonneau encore debout aurait volé au
   // joueur la seule chose que ses points de vie promettent, un tir par point.
   if (m.hp > 1) {
+    // 🔮 Prisme : l'orbe qui éclate est celle de l'élément COURANT — ses éclats en prennent la
+    // couleur, sinon on ne verrait pas laquelle des cinq vient de partir.
+    const lost = m.kind === 'prism' ? doodlePrismElem(m) : null;
     m.hp--; m.hurt = D_HATCH_TEL / 4;
-    for (let k = 0; k < 8; k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 2.5; s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 18, max: 18, sz: 3, c: k % 2 ? '#ffd54a' : '#e2564a' }); }
+    const pc = lost ? [lost.c, lost.d] : ['#e2564a', '#ffd54a'];
+    for (let k = 0; k < (lost ? 12 : 8); k++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * 2.5; s.parts.push({ x: m.x + m.w / 2, y: m.y + m.h / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 18, max: 18, sz: 3, c: pc[k % 2] }); }
     return true;
   }
   if (m.builder) {
@@ -3423,6 +3427,52 @@ function doodleMakeRock(pl) {
   return { x: Math.max(6, Math.min(DOODLE_W - w - 6, pl.x + pl.w / 2 - w / 2)), y: pl.y - h,
            w, h, type: 1, alive: true, kind: 'rock', rare: true, perch: pl, throw: D_ROCK_GAP, vx: 0 };
 }
+// ═══ 🔮 LE PRISME — LA CRÉATURE DES CINQ ÉLÉMENTS (12.9.3, demande utilisateur) ═══
+// « À partir du moment où les biomes deviennent différents, fais apparaître un monstre qui a
+// 5 vies et qui représente les 5 éléments ; il peut tirer. »
+//   • 5 vies = 5 ORBES en orbite autour d'un cristal, une par élément. Chaque tir encaissé en
+//     fait éclater une, de la dernière vers la première : on LIT ses points de vie sans pastille
+//     de vie à côté, c'est le corps lui-même qui les porte.
+//   • L'élément COURANT est celui de la dernière orbe encore en vie (`doodlePrismElem`) : il
+//     donne la couleur du noyau ET la forme du tir. Le Prisme change donc d'arme à chaque
+//     blessure, et finit toujours au 🔥 Feu — sa dernière vie.
+//   • Il apparaît dès D_PRISM_FROM, c'est-à-dire au PREMIER changement de biome (D_BIOME_STEP) :
+//     c'est littéralement « à partir du moment où les biomes deviennent différents ».
+// ⚠ Ses points de vie ne valent QUE contre les projectiles — `doodleStrike` les décompte, comme
+// pour le 🐉 Dragonneau. L'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent
+// d'un coup : un Prisme qui survivrait à une bombe ferait mentir toutes ces tuiles à la fois.
+// ⚠ Sa cadence vit sur LUI (`m.spit`), jamais sur `s.t` : deux Prismes à l'écran doivent tirer
+// chacun sur son rythme et non à l'unisson.
+// ⚠ Ses tirs partent dans `s.tshots`, le tableau des projectiles HOSTILES — celui qui porte déjà
+// le défilement de la caméra, la cascade de boucliers et le nettoyage hors écran.
+// ⚠ `lob` plutôt que la constante de gravité : la table est évaluée AU CHARGEMENT du module et
+// D_ROCK_G est déclarée plus bas — l'y lire serait une TDZ, donc un écran noir.
+const D_PRISM_ELEMS = [
+  { k:'feu',    ico:'🔥', c:'#ff6b2a', d:'#a83a0c', n:1, spread:0,    v:2.0, r:7 },
+  { k:'eau',    ico:'💧', c:'#3aa8e8', d:'#14608f', n:3, spread:0.30, v:1.8, r:5 },
+  { k:'terre',  ico:'🪨', c:'#8a9a4a', d:'#4d5a1e', n:1, spread:0,    v:2.6, r:8, lob:true },
+  { k:'air',    ico:'🌪️', c:'#cfe0ef', d:'#7f97ab', n:2, spread:0.16, v:3.0, r:5 },
+  { k:'foudre', ico:'⚡', c:'#ffd54a', d:'#b8860b', n:1, spread:0,    v:4.2, r:5 },
+];
+const D_PRISM_HP = D_PRISM_ELEMS.length;      // 5 vies : une par élément, par construction
+const D_PRISM_FROM = D_BIOME_STEP;            // dès le premier changement de biome
+const D_PRISM_P = 0.02;                       // part des monstres, prise en HAUT du tirage
+const D_PRISM_GAP = 155;                      // frames entre deux tirs
+const D_PRISM_ORB_R = 30;                     // rayon de l'orbite des orbes
+const D_PRISM_SPIN = 0.02;                    // vitesse de rotation de l'orbite
+// L'élément courant = celui de la DERNIÈRE orbe encore en vie. Borné des deux côtés : un `hp`
+// abîmé (0, ou plus grand que la table) ne doit jamais faire lire hors du tableau.
+function doodlePrismElem(m) {
+  return D_PRISM_ELEMS[Math.max(0, Math.min(D_PRISM_ELEMS.length - 1, (m.hp || 1) - 1))];
+}
+function doodleMakePrism(ny) {
+  const y = ny - 46;
+  return { x: 10 + Math.random() * (DOODLE_W - 76), y, y0: y, w: 56, h: 48, type: 1, alive: true,
+           kind: 'prism', rare: true, hp: D_PRISM_HP, hpMax: D_PRISM_HP, spit: D_PRISM_GAP, hurt: 0,
+           loot: 2,                                            // mini-boss : il vaut deux coffres
+           vx: (Math.random() < 0.5 ? -1 : 1) * 0.8,
+           vy2: (Math.random() < 0.5 ? -1 : 1) * 0.55, span: 38, wt: Math.random() * 6.28 };
+}
 function doodleMakeSpiky(ny) {
   const y = ny - 42;
   return { x: 10 + Math.random() * (DOODLE_W - 66), y, y0: y, w: 46, h: 40, type: 1, alive: true,
@@ -3596,6 +3646,9 @@ function doodleMakeMob(s, ny, pl) {
     return { x: 10 + Math.random() * (DOODLE_W - 66), y: ny - 42, w: 46, h: 40, type: 1, alive: true,
              kind: 'builder', rare: true, builder: true, vx: (Math.random() < 0.5 ? -1 : 1) * 0.6 };
   }
+  // 🔮 Prisme : sa bande est prise EN HAUT du tirage (`r >= 1 - D_PRISM_P`), donc DISJOINTE de
+  // toutes les autres, qui vivent toutes en bas de `r`. Aucun seuil existant n'est déplacé.
+  if (s.score >= D_PRISM_FROM && r >= 1 - D_PRISM_P) return doodleMakePrism(ny);
   // 👁 Rôdeur : testé AVANT les créatures de biome, il est plus rare qu'elles et doit garder
   // sa part propre plutôt que d'être noyé dans leur tirage.
   if (s.score >= D_ROAM_FROM && r < D_ROAM_P) {
@@ -6821,6 +6874,49 @@ const D_MOB_DRAW = {
       ctx.beginPath(); ctx.arc(sx0, y, 13 + (1 - fl) * 9, a0, a1); ctx.stroke();
     }
   },
+  // 🔮 Prisme — le cristal des cinq éléments. ⚠ Ce que le dessin DOIT dire d'un coup d'œil :
+  // combien de vies il reste (le nombre d'orbes) et de quel élément va être le prochain tir
+  // (la couleur du noyau). Tout le reste est décor.
+  // ⚠ Les orbes tournent AUTOUR de la boîte de collision et débordent donc du rectangle :
+  // c'est assumé — la zone dangereuse reste le corps, et une orbe touchée ne tue pas. Sans
+  // ce débord, cinq orbes tenant dans 56 px seraient devenues cinq pixels indistincts.
+  prism(ctx, m, cx, cy, t) {
+    const hp = Math.max(0, Math.min(D_PRISM_HP, m.hp || 0));
+    const cur = doodlePrismElem(m);
+    const hit = m.hurt > 0;
+    const ink = '#171326';
+    const y = cy + Math.sin(t * 0.1 + m.x) * 1.8;
+    // Les orbes encore en vie, sur leur orbite.
+    for (let i = 0; i < hp; i++) {
+      const a = -Math.PI / 2 + i * Math.PI * 2 / D_PRISM_HP + t * D_PRISM_SPIN;
+      const ox = cx + Math.cos(a) * D_PRISM_ORB_R, oy = y + Math.sin(a) * D_PRISM_ORB_R;
+      const el = D_PRISM_ELEMS[i];
+      ctx.strokeStyle = el.c + '66'; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(ox, oy); ctx.stroke();
+      ctx.fillStyle = el.c; ctx.strokeStyle = el.d; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(ox, oy, 8.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.save(); ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff'; ctx.fillText(el.ico, ox, oy + 0.5); ctx.restore();
+    }
+    // Le noyau : un cristal à six faces, plus clair quand il vient d'encaisser.
+    ctx.fillStyle = hit ? '#8d84ac' : '#3b3550'; ctx.strokeStyle = hit ? '#4a4364' : ink; ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3 - Math.PI / 2; ctx[i ? 'lineTo' : 'moveTo'](cx + Math.cos(a) * 17, y + Math.sin(a) * 17); }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Le disque de l'élément courant + SES DEUX YEUX (demande utilisateur), et 20 % plus gros
+    // que le disque d'origine (6,5 px) — c'est lui qu'on regarde pour savoir ce qui va sortir.
+    const R = 6.5 * 1.2;
+    ctx.fillStyle = cur.c; ctx.beginPath(); ctx.arc(cx, y, R, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#0d0b18';
+    [-R * 0.42, R * 0.42].forEach(dx => { ctx.beginPath(); ctx.ellipse(cx + dx, y - R * 0.06, R * 0.24, R * 0.32, 0, 0, Math.PI * 2); ctx.fill(); });
+    // La charge du tir se VOIT : le noyau s'auréole sur les dernières frames avant de partir.
+    const tel = m.spit == null ? 0 : Math.max(0, 1 - m.spit / 40);
+    if (tel > 0) {
+      const gg = ctx.createRadialGradient(cx, y, 0, cx, y, 22);
+      gg.addColorStop(0, `rgba(255,255,255,${0.35 * tel})`); gg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(cx, y, 22, 0, Math.PI * 2); ctx.fill();
+    }
+  },
   // 🐉 Dragonneau — la bête de l'œuf, et la seule créature du jeu qui riposte.
   // ⚠ Sa charge se VOIT : la gueule s'allume sur les D_HATCH_TEL dernières frames avant le
   // crachat. Un trait de feu visé qui partirait sans annonce serait une mort inesquivable.
@@ -8003,6 +8099,12 @@ function doodleDraw(ctx, s, W, H) {
       ctx.fillStyle = 'rgba(191,228,245,0.35)'; ctx.beginPath(); ctx.ellipse(0, 0, r * 2.4, r * 1.2, 0, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#5fa9dd'; ctx.beginPath(); ctx.ellipse(0, 0, r * 1.4, r * 0.75, 0, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = '#eaf7ff'; ctx.beginPath(); ctx.arc(r * 0.45, 0, r * 0.4, 0, Math.PI * 2); ctx.fill();
+    } else if (sh.prism) {
+      // 🔮 Tir du Prisme : une bille à halo, TEINTÉE de son élément — c'est la seule chose qui
+      // dise, en vol, de quel élément vient le coup (et donc à quelle vitesse il arrive).
+      ctx.fillStyle = sh.cd + '55'; ctx.beginPath(); ctx.ellipse(0, 0, r * 2.2, r * 1.15, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = sh.cc; ctx.beginPath(); ctx.ellipse(0, 0, r * 1.25, r * 0.85, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(r * 0.4, 0, r * 0.34, 0, Math.PI * 2); ctx.fill();
     } else if (sh.fire) {
       const flick = 1 + Math.sin(s.t * 0.45 + sh.x) * 0.1;
       [[r * 3.1, r * 1.5, 'rgba(255,140,58,0.26)'], [r * 2.1, r * 1.05, '#e2564a'], [r * 1.35, r * 0.68, '#ff8c3a'], [r * 0.72, r * 0.4, '#ffe89a']].forEach(([rx, ry, col], i) => {
@@ -8939,6 +9041,7 @@ function doodleRules() {
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
+      { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} points — c'est-à-dire dès que les biomes commencent à changer. ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche 2 coffres.` },
       { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
       { i:'🏆⚰️', n:'Coffre spécial lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés sont dorés et autant sont maudits — tirés coffre par coffre, contenu identique à la dalle du même nom.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
