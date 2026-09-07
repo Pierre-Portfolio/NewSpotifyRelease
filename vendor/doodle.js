@@ -137,10 +137,11 @@ const D_LOOT = [
   // ⚠ Il a sa propre cadence (D_MISSILE_GAP), sinon une cadence améliorée en aurait rempli
   // l'écran et l'arme aurait tout balayé sans qu'on vise plus rien.
   // ⚠ 12.8.9 — UN PALIER INTERMÉDIAIRE (demande utilisateur) : le départ automatique était le
-  // 2e exemplaire, il passe au 3e ; le 2e se contente de DOUBLER la fusée d'accompagnement.
+  // 2e exemplaire, il passe au 3e ; le 2e se contente de DOUBLER la fusée d'accompagnement,
+  // et le 3e la ramène à une seule (12.9.0) — la tourelle EST la récompense du dernier palier.
   // Le saut « un missile » → « tourelle » se payait d'un seul cran et rendait le 1er palier
   // sans intérêt dès qu'un second coffre tombait.
-  { k:'missile', icon:'🚀', label:'Missile',   txt:'un missile téléguidé part avec tes tirs et explose sur sa cible — au 2e exemplaire ils partent par DEUX, au 3e un missile part aussi TOUT SEUL tant qu\'une créature est à l\'écran', max: 3, w: 1.2 },
+  { k:'missile', icon:'🚀', label:'Missile',   txt:'un missile téléguidé part avec tes tirs et explose sur sa cible — au 2e exemplaire ils partent par DEUX, au 3e ils repartent par UN mais un missile part aussi TOUT SEUL tant qu\'une créature est à l\'écran', max: 3, w: 1.2 },
   // ⚠ 9.3.4 — TROIS BOUCLIERS (demande utilisateur), CUMULABLES : on peut porter les trois à la
   // fois et ils se relaient dans cet ordre — le temporel absorbe sans se consommer, puis le
   // bouclier à charges, puis la carapace des paliers. Le parachute ne sert QUE sur une chute.
@@ -234,8 +235,10 @@ const D_MISSILE_V = 4.6, D_MISSILE_TURN = 0.12, D_MISSILE_GAP = 45, D_MISSILE_BO
 // pas — le missile accompagne toujours les tirs — et le départ automatique s'AJOUTE au dernier.
 // ⚠ 12.8.9 — LE PALIER INTERMÉDIAIRE (demande utilisateur) : le 2e double la fusée
 // d'accompagnement (D_MISSILE_PAIR px de part et d'autre, la poursuite les recolle aussitôt),
-// le 3e ouvre la tourelle. Le nombre de fusées d'accompagnement reste PLAFONNÉ à deux : au 3e
-// palier on gagne la tourelle, pas une troisième fusée par tir.
+// le 3e ouvre la tourelle.
+// ⚠ 12.9.0 — Et la paire n'appartient qu'au palier 2 (demande utilisateur) : au 3e,
+// l'accompagnement REDESCEND à une seule fusée. Deux fusées plus la tourelle, c'était trois
+// missiles en vol en permanence — le tir ordinaire ne servait plus à rien.
 // ⚠ Cadence PROPRE et bien plus lente que celle du missile d'accompagnement : à
 // D_MISSILE_GAP, la tourelle aurait rempli l'écran de fusées et supprimé le tir.
 // ⚠ Il ne coûte AUCUNE munition et ne passe pas par `shoot` : c'est une tourelle, pas un
@@ -2474,6 +2477,16 @@ function doodleTileBand(score) { return D_TILE_P * (score >= 1000 ? 1.2 : score 
 // Ce sont eux qui empêchent qu'un malus soit subi en boucle, pas le taux — et c'est pour ça
 // qu'on peut régler celui-ci sans qu'un malus puisse être subi en boucle.
 const D_LUCKY_MAX = 3, D_LUCKY_GAP = 500, D_LUCKY_P = (0.0012 * 1.20 + 0.01) * 0.70;
+// 🏆 COFFRE DORÉ (12.9.0, demande utilisateur) : « 1/1000, et il contient un des effets d'une
+// case Lucky ». Il donne donc EXACTEMENT ce que donne la 🍀 case chance — `doodlePerkGrant`,
+// l'un des 5 bonus permanents — et rien d'autre : deux tirages différents pour la même
+// promesse auraient fini par diverger.
+// ⚠ Une chance sur MILLE par rangée éligible, écrite telle quelle : à ce taux les garde-fous
+// de la case chance (3 par partie, 500 points d'écart) n'ont pas lieu d'être — la rareté suffit,
+// et un plafond aurait rendu le coffre doré introuvable après trois trouvailles chanceuses.
+// ⚠ Comme la 🍀 case chance : jamais deux spéciales de suite (D_SPECIAL), aucun monstre ni trou
+// sur sa rangée (D_NOMOB), et absent du mode Classique — il n'y a ni coffre ni bonus là-bas.
+const D_GCHEST_P = 0.001;
 const D_MALUS = [
   { k: 'mrev',   icon: '🌀', label: 'Vertige',    txt: 'commandes inversées' },
   { k: 'mheavy', icon: '🪨', label: 'Plomb',      txt: 'saut alourdi' },
@@ -3566,7 +3579,7 @@ function doodleMakeMob(s, ny, pl) {
   return { x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.72 : 0 };
 }
 // « max 1 de suite » : jamais une tuile spéciale juste après une autre (ni après une cassante).
-const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'unlucky', 'chest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
+const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'unlucky', 'chest', 'gchest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
 // 🎲 Les leurres de la roulette russe : dessinés comme une dalle, mais RIEN ne s'y pose —
 // ni le doodler, ni un coffre qui tombe, ni une météorite. Un seul prédicat pour les trois,
 // sinon un coffre finirait par flotter en l'air sur une plateforme qui n'existe pas.
@@ -3574,7 +3587,7 @@ const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'luck
 // les coffres et les météorites, sinon un coffre serait resté posé sur du vide.
 function doodleSolid(p) { return !p.dead && p.type !== 'rrfake' && p.ori !== 2 && p.tama !== false; }
 // Ces cases-là n'emmènent jamais de monstre ni de trou sur leur propre ligne.
-const D_NOMOB = new Set(['rainbow', 'perk', 'lucky', 'unlucky']);
+const D_NOMOB = new Set(['rainbow', 'perk', 'lucky', 'unlucky', 'gchest']);
 const D_ICE_SLIP = 22;          // frames sans contrôle après un rebond sur la glace
 // ⚠ 10.8.2 — La ❄️ Plaque de glace glisse PLUS LONGTEMPS (demande utilisateur, « augmente
 // légèrement la glisse ») : +36 %. C'est le seul effet qui lui reste, et sa constante est
@@ -4759,6 +4772,27 @@ function doodleTileDraw(ctx, p, t) {
     ctx.fillStyle = '#ffd54a'; ctx.fillRect(x + w / 2 - 3, y + h * 0.3, 6, 6);
     ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 1.3;
     if (!p.used) { ctx.save(); ctx.globalAlpha = 0.5 + Math.sin(t * 0.15) * 0.5; doodleRR(ctx, x + 1.5, y + 1.5, w - 3, h - 3, 5, 'rgba(0,0,0,0)'); ctx.stroke(); ctx.restore(); }
+    if (p.used) doodleTileSpent(ctx, p);
+    return;
+  }
+  // 🏆 Coffre doré : le même coffre, mais tout en or et posé sur du bois sombre — il ne
+  // s'y trompe pas avec la 🎁 tuile coffre, qui est brune à cerclage doré. Une étincelle
+  // tourne autour tant qu'il n'a pas été ouvert ; ensuite la dalle s'éteint comme les autres.
+  if (p.type === 'gchest') {
+    doodleRR(ctx, x, y, w, h, 6, '#4a3418');
+    ctx.fillStyle = '#2b1d0c'; ctx.fillRect(x, y + h - 4, w, 4);
+    ctx.fillStyle = '#ffd54a'; ctx.fillRect(x + 3, y + 2.5, w - 6, h - 7);
+    ctx.fillStyle = '#ffeb9c'; ctx.fillRect(x + 3, y + 2.5, w - 6, (h - 7) * 0.38);   // couvercle, plus clair
+    ctx.fillStyle = '#8a5a10'; ctx.fillRect(x + 3, y + 2.5 + (h - 7) * 0.38, w - 6, 1.6);
+    ctx.fillStyle = '#7a4e0a'; ctx.fillRect(x + w / 2 - 3.5, y + h * 0.34, 7, 7);      // serrure
+    ctx.fillStyle = '#ffeb9c'; ctx.fillRect(x + w / 2 - 1, y + h * 0.40, 2, 3);
+    if (!p.used) {
+      ctx.save();
+      ctx.globalAlpha = 0.45 + Math.sin(t * 0.18) * 0.45;
+      ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('✨', x + w - 9, y + h * 0.5 + Math.sin(t * 0.11) * 1.6);
+      ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
     if (p.used) doodleTileSpent(ctx, p);
     return;
   }
@@ -6343,7 +6377,7 @@ function doodlePlatform(ctx, p, t) {
   if (p.type === 'rainbow') return doodleRainbowPlat(ctx, p);
   if (p.type === 'perk' || p.type === 'lucky' || p.type === 'unlucky') return doodleCase(ctx, p, t || 0);
   if (D_BIOME_TILES.has(p.type) && !D_BIOME_OWNDRAW.has(p.type)) return doodleBiomeTile(ctx, p, t || 0);
-  if (p.type === 'chest' || p.type === 'rrfake' || p.type === 'nightmare' || p.type === 'bambooed' || p.type === 'creation' || D_BIOME_OWNDRAW.has(p.type) || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni les leurres 🎲, ni la 💀 cauchemardesque, ni la ✨ Création ne sont dans D_TILES
+  if (p.type === 'chest' || p.type === 'gchest' || p.type === 'rrfake' || p.type === 'nightmare' || p.type === 'bambooed' || p.type === 'creation' || D_BIOME_OWNDRAW.has(p.type) || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni le 🏆 Coffre doré, ni les leurres 🎲, ni la 💀 cauchemardesque, ni la ✨ Création ne sont dans D_TILES
   const c = cols[p.type] || cols.green;
   doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
   ctx.fillStyle = c[1]; ctx.fillRect(p.x + 3, p.y + p.h - 4, p.w - 6, 3);
@@ -8696,6 +8730,12 @@ function doodleSpawnRow(s, ny, risky) {
   else if (!doodleClassic(s) && (!s.bossDone || (s.ultime && doodleUltDone(s).boss < D_ULT_BOSS && !s.boss && !s.bossHide)) && s.score >= D_BOSS_FROM && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'nightmare';
   }
+  // 🏆 Coffre doré : une rangée sur mille, sans plafond ni écart minimum — voir D_GCHEST_P.
+  // ⚠ Placé APRÈS les cases dues et la cauchemardesque : à 1/1000 il ne doit voler la rangée
+  // à aucune d'elles, et sa propre rareté suffit à ce qu'il reste un événement.
+  else if (!doodleClassic(s) && !D_SPECIAL.has(s.lastType) && Math.random() < D_GCHEST_P) {
+    type = 'gchest';
+  }
   // ⚠ 9.2.8 — La tuile du biome ne remplace qu'une plateforme ORDINAIRE : elle ne doit voler la
   // rangée ni à une case (due), ni à une multicolore, ni à une tuile débloquée. Et jamais deux
   // spéciales de suite, comme partout ailleurs.
@@ -8794,6 +8834,7 @@ function doodleRules() {
       { i:'🍀', n:'Case chance',  d:`${doodlePct(D_LUCKY_P)} des rangées éligibles, ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
       { i:'☠️', n:'Case malchance', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}) et mêmes garde-fous, mais comptés séparément : ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
       { i:'💀', n:'Case cauchemardesque', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}), à partir de ${D_BOSS_FROM} points, UNE SEULE fois par partie.` },
+      { i:'🏆', n:'Coffre doré',  d:`${doodlePct(D_GCHEST_P)} des rangées éligibles — une sur mille. Ni plafond par partie ni écart minimum : la rareté suffit.` },
       { i:'🔓', n:'Tuiles débloquées', d:`une nouvelle tous les ${D_TILE_STEP} points ; elles se partagent ensuite ${doodlePct(D_TILE_P)} des rangées.` },
       { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_EACH)} des rangées au tirage PAR TUILE du biome courant — soit ${doodlePct(D_BIOME_TILE_EACH * D_BIOME_TILE_SEEN)} réellement vues, le reste partant aux garde-fous : elles ne prennent qu'une rangée ordinaire, et jamais deux spéciales de suite. Une tuile par biome est volontairement RARE (🍄 Champignon, 𓂀 Égypte, 🧊 Stalactite, 🔥 Magma, 💫 Attraction, 🦑 Tentacule, ⚡ Électrifiée, ⛈️ Orage) : ${Math.round((1 - D_BIOME_TILE_RARE) * 100)} % de moins que ses deux voisines, sa rangée retombe en plateforme ordinaire ${Math.round((1 - D_BIOME_TILE_RARE) * 100)} fois sur 100, et ses deux voisines n'y gagnent rien. Au changement de biome, une seule tuile du précédent est tirée au sort et reste jouable ici — le « vestige » — pour ${doodlePct(D_RELIC_SHARE)} de cette bande, quel que soit son poids. Rien d'autre ne s'accumule d'un palier à l'autre.` },
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
@@ -8816,6 +8857,7 @@ function doodleRules() {
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
       { i:'🍀', n:'Case chance',  d:`très rare (${D_LUCKY_MAX} par partie au maximum, jamais deux à moins de ${D_LUCKY_GAP} points). Elle donne un bonus permanent, et rien d'autre. Elle ne rend qu'au premier rebond mais reste une plateforme.` },
       { i:'☠️', n:'Case malchance', d:`la jumelle sombre de la case chance, aussi rare qu'elle et comptée à part. Elle donne l'un des malus ci-dessous, et rien d'autre. Elle ne frappe qu'au premier rebond mais reste une plateforme.` },
+      { i:'🏆', n:'Coffre doré',  d:`une rangée sur mille. Il donne EXACTEMENT ce que donne la 🍀 case chance : un bonus permanent au hasard parmi les cinq, et rien d'autre. Il ne s'ouvre qu'au premier rebond mais reste une plateforme.` },
       { i:'💀', n:'Case cauchemardesque', d:`une seule par partie. Elle ouvre un combat : les dalles disparaissent, un plancher apparaît, tu ne sautes plus et tu ne fais que te déplacer et tirer — le tir y est gratuit. ${doodleBossHp(0)} points de vie (${doodleBossHp(D_BOSS_HP_HI_FROM)} au-delà de ${D_BOSS_HP_HI_FROM} points), l'un des ${D_BOSS_KINDS.length} monstres (${D_BOSS_KINDS.map(b => b.name).join(', ')}) et ses ${D_BOSS_KINDS[0].atk.length} attaques. Dès qu'il a fini un sort il se pose un bouclier qui tanque ${D_BOSS_SH} balles : brise-le pour reprendre des points de vie. Terrassé : ${D_BOSS_LOOT} trésors et une tuile neuve ; une fois les trésors ramassés, les dalles reviennent.` },
     ] },
     { t:'Bonus permanents', c:'#7b4bd0', rows: D_PERKS.map(p => ({ i:p.icon, n:p.label, d:p.txt + ' — cumulable.' })) },
