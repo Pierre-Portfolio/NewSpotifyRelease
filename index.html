@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.0.0';
+const APP_VERSION = '13.0.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -15821,12 +15821,20 @@ function SportPanelInner() {
 
 // ══════════════════════════════════════════════════════════════════
 // COLLECTION (module « Collection »)
-// ⚠ 7.8.2 — LES 5 CATÉGORIES NE SONT PLUS DES BOUTONS MAIS DES COLLAPSES (demande
+// ⚠ 7.8.2 — LES CATÉGORIES NE SONT PAS DES BOUTONS MAIS DES COLLAPSES (demande
 // utilisateur), tous repliés au départ. La grille 2×2 + barre « Autre » de 7.7.1/7.7.4
 // est supprimée : `StatsCollapse` ne monte ses enfants qu'à l'ouverture, donc le contenu
 // (et plus tard les requêtes) d'une catégorie ne coûte rien tant qu'on ne l'ouvre pas.
 // `COLLECTION_CATS` reste la SEULE source de vérité de l'ordre et des libellés ; le
 // drapeau `wide` (barre pleine largeur) n'a plus de sens avec des collapses et disparaît.
+// ⚠ LA CATÉGORIE FOURRE-TOUT « 📦 Autre » A DISPARU (demande utilisateur) : ses trois
+// sous-collections (💎 Pierre précieuse · ⌚ Montre · 🍷 Vin) sont devenues des catégories
+// À PART ENTIÈRE, donc des collapses DIRECTS — plus un collapse à ouvrir avant le leur.
+// Techniquement c'est le motif déjà utilisé par Displate/Pop/Jeux vidéo : une catégorie
+// dont l'unique sous-collection porte le MÊME id que la catégorie (`single` de
+// `CollectionCat`) rend sa bannière sans second collapse.
+// ⚠ RIEN À MIGRER : le stockage est indexé par id de SOUS-collection (`gemme`, `montre`,
+// `vin`), qui n'ont pas changé — seule la catégorie qui les enveloppait a disparu.
 // ══════════════════════════════════════════════════════════════════
 const COLLECTION_COLOR = '#5a95e6';   // bleu (entre Bon Plan et Emploi dans l'arc-en-ciel)
 const COLLECTION_CATS = [
@@ -15834,7 +15842,9 @@ const COLLECTION_CATS = [
   { id:'displate',  label:'Displate',   icon:'🖼️' },
   { id:'pop',       label:'Pop',        icon:'🧸' },
   { id:'jeuxvideo', label:'Jeux vidéo', icon:'🎮' },
-  { id:'autre',     label:'Autre',      icon:'📦' },
+  { id:'gemme',     label:'Pierre précieuse', icon:'💎' },
+  { id:'montre',    label:'Montre',     icon:'⌚' },
+  { id:'vin',       label:'Vin',        icon:'🍷' },
 ];
 // ── Moteur COMMUN des collections (7.8.3) ────────────────────────────────────────
 // Toutes les catégories (cartes Pokémon/Magic, Displate, Pop, jeux vidéo, montres…)
@@ -15879,6 +15889,95 @@ function collPublish(data) {
   for (const f of _coll.subs) { try { f(data); } catch {} }
   return ok;
 }
+// ── 📁 PHOTOS D'ANALYSE → GOOGLE DRIVE (demande utilisateur) ─────────────────────
+// « Save les photos prises pour analyse par IA » : la photo envoyée au modèle (estimation
+// d'une pièce, scan d'une étagère) est désormais CONSERVÉE — dans Google Drive, jamais en
+// local. Même protocole que Vêtement/Revente, et pour les mêmes raisons (piège 15 : une
+// data URL de 50 ko × N références ferait exploser le quota localStorage du Hub) :
+//   · dossier `HUB_Pierre/Collection` ;
+//   · UN fichier par référence, NOMMÉ AVEC SON ID → le lien fiche ↔ photo est porté par le
+//     NOM, rien n'est stocké en local et le Drive fait autorité ;
+//   · un fichier Drive privé n'a pas d'URL affichable → `gdriveBlobUrl` (Bearer + blob:).
+// ⚠ Les ids de référence contiennent « : » et des accents (`photo:gemme:rubis-…`) : le nom
+// de fichier est donc une version ASSAINIE de l'id, et c'est cette même clé qui indexe la
+// map — jamais l'id brut, sinon la photo ne se retrouverait plus.
+// ⚠ Drive non connecté ⇒ ON N'EMPÊCHE RIEN : l'analyse et l'ajout se font comme avant, la
+// photo n'est simplement pas conservée (l'UI le dit).
+// ⚠ Une photo de SCAN peut donner plusieurs références : elle est envoyée une fois PAR
+// référence ajoutée (chacune sous son propre nom). C'est le prix de la règle « le nom porte
+// le lien » — le cliché est réduit à 640 px par `vetPhotoBlob` (~50 ko), pas la photo brute.
+const COLL_DRIVE_SUB  = 'Collection';        // sous-dossier de HUB_Pierre
+const collPhotoKey    = id => String(id || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120) || 'sans-id';
+const collPhotoName   = (id, mime) => collPhotoKey(id) + (VET_MIME_EXT[mime] || '.jpg');
+const collKeyFromName = n => String(n || '').replace(/\.(webp|jpe?g|png|gif|avif)$/i, '');
+// État PARTAGÉ (même motif que `_coll`) : plusieurs sous-collections sont montées en même
+// temps, l'index des photos est listé UNE fois pour toutes. `state` : idle | loading | ready | off | error
+const _collPhotos = { map: {}, state: 'idle', err: '', subs: new Set() };
+function collPhotosPublish() { for (const f of _collPhotos.subs) { try { f(); } catch {} } }
+function collPhotoFileId(id) { return _collPhotos.map[collPhotoKey(id)] || null; }
+// Indexe `HUB_Pierre/Collection` (une seule fois par session, sauf `force`).
+async function collPhotosSync(force) {
+  if (!force && (_collPhotos.state === 'loading' || _collPhotos.state === 'ready')) return;
+  const token = gdriveToken();
+  if (!token) { _collPhotos.state = 'off'; _collPhotos.err = ''; collPhotosPublish(); return; }
+  _collPhotos.state = 'loading'; collPhotosPublish();
+  try {
+    const folder = await gdriveHubSubfolder(token, COLL_DRIVE_SUB);
+    const files  = await gdriveListFolder(token, folder);
+    const map = {};
+    for (const f of files) map[collKeyFromName(f.name)] = f.id;
+    _collPhotos.map = map; _collPhotos.state = 'ready'; _collPhotos.err = '';
+  } catch (e) {
+    // Dossier caché disparu côté Drive → on oublie son id, la prochaine tentative le recrée.
+    gdriveHubFolderReset(COLL_DRIVE_SUB);
+    _collPhotos.state = 'error'; _collPhotos.err = (e && e.message) || 'Erreur Google Drive';
+  }
+  collPhotosPublish();
+}
+// Envoie (ou remplace) la photo d'une référence. Renvoie l'id du fichier, ou null si Drive
+// n'est pas connecté / l'envoi a échoué — l'appelant n'a JAMAIS à bloquer là-dessus.
+async function collPhotoUpload(id, blob) {
+  const token = gdriveToken();
+  if (!token || !blob) return null;
+  const key = collPhotoKey(id);
+  try {
+    let fid;
+    try {
+      const folder = await gdriveHubSubfolder(token, COLL_DRIVE_SUB);
+      fid = await gdriveUploadMedia(token, { fileId: _collPhotos.map[key], name: collPhotoName(id, blob.type), parentId: folder, blob });
+    } catch {
+      gdriveHubFolderReset(COLL_DRIVE_SUB);
+      const folder2 = await gdriveHubSubfolder(token, COLL_DRIVE_SUB);
+      fid = await gdriveUploadMedia(token, { name: collPhotoName(id, blob.type), parentId: folder2, blob });
+    }
+    gdriveBlobForget(_collPhotos.map[key]); gdriveBlobForget(fid);   // l'ancien cliché ne doit pas rester en cache
+    _collPhotos.map = { ..._collPhotos.map, [key]: fid };
+    _collPhotos.state = 'ready';
+    collPhotosPublish();
+    return fid;
+  } catch { return null; }
+}
+async function collPhotoDelete(id) {
+  const key = collPhotoKey(id), fid = _collPhotos.map[key];
+  const token = gdriveToken();
+  if (!fid || !token) return false;
+  try { await gdriveDeleteFile(token, fid); } catch { return false; }
+  gdriveBlobForget(fid);
+  const next = { ..._collPhotos.map }; delete next[key];
+  _collPhotos.map = next; collPhotosPublish();
+  return true;
+}
+// Abonnement des composants à l'index (un compteur suffit : la map est module-level).
+function useCollPhotos() {
+  const [, bump] = React.useState(0);
+  React.useEffect(() => {
+    const f = () => bump(n => n + 1);
+    _collPhotos.subs.add(f);
+    return () => { _collPhotos.subs.delete(f); };
+  }, []);
+  return _collPhotos;
+}
 function collList(data, subId) { return Array.isArray(data && data[subId]) ? data[subId] : []; }
 function collCount(data) { return Object.keys(data || {}).reduce((a, k) => a + collList(data, k).length, 0); }
 // Normalise un résultat de recherche en item stockable (jette ce qui n'a ni id ni nom).
@@ -15921,6 +16020,30 @@ function collAddMany(data, subId, rows, extraMeta) {
     added++;
   }
   return { data: next, added, skipped, full };
+}
+// ── ✏️ ÉDITION D'UNE RÉFÉRENCE (demande utilisateur : « rends chaque item éditable ») ──
+// Tout ce qui s'affiche sur une vignette se corrige : nom, sous-titre, prix, quantité, lien
+// et adresse d'image. ⚠ L'`id` n'est JAMAIS touché — c'est la clé de dédoublonnage de
+// `collAdd`, le nom du fichier photo sur Drive et l'ancre de tout ce qui pointe la
+// référence : le renommer en ferait une nouvelle entrée et orphelinerait sa photo.
+// ⚠ Les champs sont assainis ICI, avec les MÊMES règles que `collItem` (`safeHref` sur les
+// deux URL — piège 30 : la CSP autorise `unsafe-inline`, un `javascript:` s'exécuterait) :
+// une saisie libre ne doit pas pouvoir entrer par une porte moins gardée que l'ajout.
+function collEdit(data, subId, id, patch) {
+  const list = collList(data, subId).map(x => {
+    if (!x || x.id !== id) return x;
+    const name = String(patch.name != null ? patch.name : x.name).trim();
+    if (!name) return x;                                   // un nom vide rendrait la fiche introuvable
+    const pr = patch.price;
+    const price = (typeof pr === 'number' && isFinite(pr) && pr >= 0) ? pr : (pr === null ? null : x.price);
+    const qty = Math.max(1, Math.round(Number(patch.qty != null ? patch.qty : x.qty) || 1));
+    return { ...x, name: name.slice(0, 120), sub: String(patch.sub != null ? patch.sub : x.sub || '').slice(0, 120),
+      price, qty,
+      url: patch.url != null ? (safeHref(String(patch.url)) || null) : x.url,
+      img: patch.img != null ? (safeHref(String(patch.img)) || null) : x.img,
+      meta: { ...(x.meta || {}), edited: true, editedAt: Date.now() } };
+  });
+  return { ...data, [subId]: list };
 }
 function collRemove(data, subId, id) { return { ...data, [subId]: collList(data, subId).filter(x => x && x.id !== id) }; }
 function collBump(data, subId, id, d) {
@@ -15991,14 +16114,135 @@ async function magicSearch(q) {
 
 // Vignette d'un élément : une URL morte (catalogue tiers, lien proposé par une IA…) ne
 // doit pas laisser une image cassée → on retombe sur l'icône de la sous-collection.
-function CollImg({ src, icon }) {
+function CollImg({ src, icon, fileId }) {
   const [ko, setKo] = React.useState(false);
+  // Photo Drive (aucune URL affichable → téléchargement au Bearer + `createObjectURL`).
+  // ⚠ N'est tentée QUE faute d'`img` distante, et l'URL blob: est mise en cache par
+  // `gdriveBlobUrl` pour toute la vie de la page : ne rien révoquer ici, une autre vignette
+  // (ou la même remontée) réutilise la même.
+  const [blob, setBlob] = React.useState(null);
   React.useEffect(() => { setKo(false); }, [src]);
-  if (!src || ko) return <span style={{ fontSize:26 }}>{icon}</span>;
+  React.useEffect(() => {
+    let dead = false;
+    setBlob(null);
+    if (!fileId || src) return;
+    gdriveBlobUrl(fileId).then(u => { if (!dead) setBlob(u); }).catch(() => {});
+    return () => { dead = true; };
+  }, [fileId, src]);
+  const url = src || blob;
+  if (!url || ko) return <span style={{ fontSize:26 }}>{icon}</span>;
   // ⚠ no-referrer : `img` est une URL DISTANTE d'hôte quelconque (proposée par l'IA ou
   // saisie à la main) — elle n'a pas à apprendre sur quelle page elle s'affiche.
-  return <img src={src} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setKo(true)}
+  return <img src={url} alt="" loading="lazy" referrerPolicy="no-referrer" onError={() => setKo(true)}
     style={{ width:'100%', height:'100%', objectFit:'cover' }} />;
+}
+
+// ── ✏️ POP-UP D'ÉDITION D'UNE RÉFÉRENCE ──────────────────────────────────────────
+// Ouverte au clic sur la vignette de MA collection (jamais sur un résultat de recherche).
+// Elle édite les champs affichés + la PHOTO Drive de la référence — c'est le seul endroit
+// d'où l'on peut en attacher une à une référence ajoutée à la main.
+// ⚠ Le prix accepte la virgule décimale (clavier FR) via `actifsNum`, et un champ VIDE vaut
+// « prix inconnu » (null) — pas 0, qui serait compté dans la valeur de la collection.
+function CollEditModal({ sub, item, onSave, onDelete, onClose }) {
+  const [name, setName]   = React.useState(item.name || '');
+  const [sub2, setSub2]   = React.useState(item.sub || '');
+  const [price, setPrice] = React.useState(item.price != null ? String(item.price).replace('.', ',') : '');
+  const [qty, setQty]     = React.useState(String(item.qty || 1));
+  const [url, setUrl]     = React.useState(item.url || '');
+  const [img, setImg]     = React.useState(item.img || '');
+  const [busy, setBusy]   = React.useState('');
+  const [msg, setMsg]     = React.useState('');
+  const photos = useCollPhotos();
+  const fid = collPhotoFileId(item.id);
+  React.useEffect(() => {
+    const k = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
+  }, [onClose]);
+  const save = () => {
+    if (!name.trim()) return;
+    const n = actifsNum(price);
+    onSave({ name, sub: sub2, price: (typeof n === 'number' && n >= 0) ? n : null, qty, url, img });
+    onClose();
+  };
+  const onPhoto = async f => {
+    if (!f) return;
+    if (!gdriveToken()) { setMsg('Connecte Google Drive (À propos → Autorisations) pour enregistrer une photo.'); return; }
+    setBusy('photo'); setMsg('');
+    const blob = await vetPhotoBlob(f);
+    if (!blob) { setBusy(''); setMsg('✗ Image illisible.'); return; }
+    const ok = await collPhotoUpload(item.id, blob);
+    setBusy(''); setMsg(ok ? '✓ Photo enregistrée dans Google Drive.' : "✗ Envoi impossible — réessaie.");
+  };
+  const delPhoto = async () => {
+    if (!confirm('Supprimer la photo de cette référence dans Google Drive ?')) return;
+    setBusy('photo'); setMsg('');
+    const ok = await collPhotoDelete(item.id);
+    setBusy(''); setMsg(ok ? 'Photo supprimée.' : '✗ Suppression impossible.');
+  };
+  const inp = { width:'100%', background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
+    padding:'6px 9px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
+  const lab = { fontSize:9, fontWeight:700, letterSpacing:'0.06em', color:C.dim, marginBottom:3 };
+  const field = (label, node) => <div style={{ minWidth:0 }}><div style={lab}>{label}</div>{node}</div>;
+  return ReactDOM.createPortal(
+    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:460, background:'rgba(0,0,0,0.72)',
+      display:'flex', alignItems:'flex-start', justifyContent:'center', padding:'26px 12px', overflowY:'auto' }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Modifier la référence"
+        style={{ width:'100%', maxWidth:400, background:C.surface, border:`1px solid ${C.border}`, borderRadius:14,
+          padding:14, display:'flex', flexDirection:'column', gap:9 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <div style={{ flex:1, fontSize:12, fontWeight:800, color:COLLECTION_COLOR, letterSpacing:'0.05em' }}>✏️ MODIFIER</div>
+          <button onClick={onClose} aria-label="Fermer (Échap)"
+            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim, fontSize:13, lineHeight:1, padding:'3px 8px', cursor:'pointer' }}>×</button>
+        </div>
+        <div style={{ display:'flex', gap:10 }}>
+          <div style={{ width:74, height:100, borderRadius:8, overflow:'hidden', background:'#111', flexShrink:0,
+            display:'flex', alignItems:'center', justifyContent:'center', border:`1px solid ${C.border}` }}>
+            <CollImg src={img} fileId={fid} icon={sub.icon} />
+          </div>
+          <div style={{ flex:1, minWidth:0, display:'flex', flexDirection:'column', gap:7 }}>
+            {field('NOM', <input type="text" value={name} onChange={e => setName(e.target.value)} style={inp} />)}
+            {field('SOUS-TITRE', <input type="text" value={sub2} onChange={e => setSub2(e.target.value)} placeholder="série, millésime, plateforme…" style={inp} />)}
+          </div>
+        </div>
+        <div style={{ display:'flex', gap:8 }}>
+          <div style={{ flex:1 }}>{field('PRIX € (unité)', <input type="text" inputMode="decimal" value={price} onChange={e => setPrice(e.target.value)} placeholder="inconnu" style={inp} />)}</div>
+          <div style={{ width:90 }}>{field('QUANTITÉ', <input type="number" min="1" step="1" value={qty} onChange={e => setQty(e.target.value)} style={inp} />)}</div>
+        </div>
+        {field('LIEN (facultatif)', <input type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…" style={inp} />)}
+        {field('IMAGE — ADRESSE DISTANTE (facultatif)', <input type="url" value={img} onChange={e => setImg(e.target.value)} placeholder="https://…" style={inp} />)}
+        {/* PHOTO DRIVE — l'image distante ci-dessus reste prioritaire à l'affichage. */}
+        <div style={{ background:C.surfaceHigh, borderRadius:10, padding:'9px 11px', display:'flex', flexDirection:'column', gap:6 }}>
+          <div style={{ fontSize:10, fontWeight:700, color:C.text }}>📁 Photo — Google Drive · {GDRIVE_HUB_FOLDER}/{COLL_DRIVE_SUB}</div>
+          <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+            <label style={{ background:`${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6,
+              color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 11px',
+              cursor: busy ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
+              {busy === 'photo' ? '⏳ Envoi…' : (fid ? '📷 Remplacer' : '📷 Ajouter une photo')}
+              <input type="file" accept="image/*" disabled={!!busy}
+                onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; onPhoto(f); }}
+                style={{ display:'none' }} />
+            </label>
+            {fid && (
+              <button onClick={delPhoto} disabled={!!busy}
+                style={{ background:'none', border:'1px solid #e0505055', borderRadius:6, color:'#e05050',
+                  fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>🗑 Retirer</button>
+            )}
+            {photos.state === 'off' && <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>Drive non connecté</span>}
+          </div>
+          {msg && <div style={{ fontSize:9.5, color: msg[0] === '✗' ? '#e05050' : C.muted, lineHeight:1.5 }}>{msg}</div>}
+        </div>
+        <div style={{ display:'flex', gap:8, marginTop:2 }}>
+          <button onClick={save} disabled={!name.trim()}
+            style={{ flex:1, background: name.trim() ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${name.trim() ? COLLECTION_COLOR + '66' : C.border}`,
+              borderRadius:8, color: name.trim() ? COLLECTION_COLOR : C.dim, fontSize:11.5, fontWeight:700,
+              padding:'8px 0', cursor: name.trim() ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' }}>✓ Enregistrer</button>
+          <button onClick={() => { if (confirm(`Retirer « ${item.name} » de ta collection ?`)) { onDelete(); onClose(); } }}
+            style={{ background:'none', border:'1px solid #e0505055', borderRadius:8, color:'#e05050',
+              fontSize:11.5, fontWeight:700, padding:'8px 14px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>Retirer</button>
+        </div>
+      </div>
+    </div>, document.body);
 }
 
 // ── Rendu commun d'une sous-collection ───────────────────────────────────────────
@@ -16016,6 +16260,8 @@ function CollImg({ src, icon }) {
 // reste plus collé sous les résultats de recherche.
 function CollectionSub({ sub, data, onData }) {
   const [open, setOpen] = React.useState(false);     // bannière cliquée = visuel de ma collection
+  const [edit, setEdit] = React.useState(null);      // id de la référence en cours d'édition
+  useCollPhotos();                                   // re-rend quand l'index Drive change
   const [q, setQ] = React.useState('');
   const [st, setSt] = React.useState({ busy: false, results: null, err: '' });
   const [mName, setMName] = React.useState('');    // ajout manuel (sub.manual)
@@ -16077,12 +16323,24 @@ function CollectionSub({ sub, data, onData }) {
     const next = collAdd(data, sub.id, r, extra || null);
     if (next === data) { alert(`Collection pleine (${COLLECTION_MAX} références). Retire des éléments avant d'en ajouter.`); return; }
     onData(next);
+    // ⚠ `__photoBlob` (posé par `CollPhotoEstimate`) ne rejoint JAMAIS le stockage : `collItem`
+    // rebâtit l'item champ par champ. La photo part sur Drive une fois l'ajout accepté, en
+    // tâche de fond — un échec Drive ne doit pas remettre en cause la référence ajoutée.
+    if (r0.__photoBlob) collPhotoUpload(r.id || r.name, r0.__photoBlob);
   };
-  const card = (it, actions) => (
+  // `onEdit` n'est passé QUE par « ma collection » : un résultat de recherche n'est pas
+  // encore une référence, il n'y a rien à éditer tant qu'il n'est pas ajouté.
+  const card = (it, actions, onEdit) => (
     <div key={it.id} style={{ width:96, flexShrink:0 }}>
-      <div style={{ width:96, height:134, borderRadius:8, overflow:'hidden', background:'#111',
-        display:'flex', alignItems:'center', justifyContent:'center', border:`1px solid ${C.border}` }}>
-        <CollImg src={it.img} icon={sub.icon} />
+      <div onClick={onEdit} title={onEdit ? 'Modifier cette référence' : undefined}
+        style={{ width:96, height:134, borderRadius:8, overflow:'hidden', background:'#111', position:'relative',
+        display:'flex', alignItems:'center', justifyContent:'center', border:`1px solid ${C.border}`,
+        cursor: onEdit ? 'pointer' : 'default' }}>
+        <CollImg src={it.img} fileId={collPhotoFileId(it.id)} icon={sub.icon} />
+        {onEdit && (
+          <span aria-hidden="true" style={{ position:'absolute', right:3, bottom:3, background:'rgba(0,0,0,0.62)',
+            border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:5, fontSize:9, lineHeight:1, padding:'3px 4px' }}>✏️</span>
+        )}
       </div>
       <div style={{ fontSize:9.5, fontWeight:700, color:C.text, marginTop:4, lineHeight:1.25,
         display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>
@@ -16133,10 +16391,20 @@ function CollectionSub({ sub, data, onData }) {
                   <button onClick={() => { if (confirm(`Retirer « ${it.name} » de ta collection ?`)) onData(collRemove(data, sub.id, it.id)); }} title="Retirer"
                     style={{ background:'none', border:'1px solid #e0505055', borderRadius:5, color:'#e05050', fontSize:11, lineHeight:1, padding:'1px 5px', cursor:'pointer' }}>×</button>
                 </div>
-              )))}
+              ), () => setEdit(it.id)))}
             </div>}
 
       </>}
+      {/* ✏️ ÉDITION — l'item est RELU dans `list` à chaque rendu (et non figé au clic) :
+          la pop-up reflète ce qui vient d'être enregistré, et se ferme toute seule si la
+          référence disparaît (retirée depuis la pop-up elle-même ou un autre onglet). */}
+      {edit && (() => {
+        const it = list.find(x => x && x.id === edit);
+        if (!it) return null;
+        return <CollEditModal key={it.id} sub={sub} item={it} onClose={() => setEdit(null)}
+          onSave={patch => onData(collEdit(data, sub.id, it.id, patch))}
+          onDelete={() => onData(collRemove(data, sub.id, it.id))} />;
+      })()}
 
       {/* ── OUTILS D'AJOUT — HORS DU COLLAPSE, donc toujours visibles ────────────── */}
       {/* RECHERCHE */}
@@ -16877,15 +17145,15 @@ function SteamLibraryImport({ onImport }) {
   );
 }
 
-// ── 📦 AUTRE (7.8.8) : 💎 Pierre précieuse · ⌚ Montre · 🍷 Vin ──────────────────
+// ── 💎 PIERRE PRÉCIEUSE · ⌚ MONTRE · 🍷 VIN (7.8.8) ─────────────────────────────
 // Ces trois-là n'ont AUCUN catalogue interrogeable (pas d'API de gemmologie, d'horlogerie
 // ni de cotation de vin gratuite et à CORS ouvert), et c'est précisément pourquoi la
 // demande était « avec prise de photo et IA qui calcule le prix » : on photographie
 // l'objet, l'IA l'identifie et l'estime.
-// ⚠ LA PHOTO N'EST JAMAIS CONSERVÉE (même règle qu'en 7.6.83 pour les plats de Santé, et
-// « ne save pas les images » de la consigne 15) : elle est redimensionnée en mémoire par
-// `frigoPhotoData`, envoyée au modèle, et seul le RÉSULTAT (nom + prix estimé) est
-// enregistré. Aucune écriture localStorage, aucun upload Drive, rien dans buildBackup.
+// ⚠ RIEN EN LOCAL : la photo est redimensionnée en mémoire par `frigoPhotoData`, envoyée au
+// modèle, et seul le RÉSULTAT (nom + prix estimé) rejoint le localStorage — aucune data URL,
+// rien dans buildBackup (« ne save pas les images », piège 15). Le CLICHÉ lui-même est
+// conservé dans Google Drive quand la référence est ajoutée (`collPhotoUpload`).
 const COLL_PHOTO_MAX_PRICE = 5000000;
 // Un prompt par famille : les critères de prix n'ont rien à voir d'une pierre à un vin.
 const COLL_PHOTO_PROMPTS = {
@@ -16959,7 +17227,7 @@ function CollEstimatePick({ onFile, onClose }) {
           {choice(true,  '📷', 'Photos',  'Ouvre l’appareil photo et prend le cliché maintenant')}
           {choice(false, '🖼️', 'Galerie', 'Choisit une photo déjà présente sur l’appareil')}
           <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:2 }}>
-            L'estimation part dès que la photo est choisie. La photo n'est ni enregistrée ni envoyée ailleurs qu'au modèle.
+            L'estimation part dès que la photo est choisie. La photo n'est envoyée nulle part ailleurs qu'au modèle — et, si tu ajoutes la référence, conservée dans ton Google Drive.
           </div>
         </div>
       </div>
@@ -16972,6 +17240,12 @@ function CollPhotoEstimate({ kind, onAdd }) {
   const [prev, setPrev] = React.useState('');
   const [st, setSt] = React.useState({ busy: false, r: null, err: '' });
   const urlRef = React.useRef('');
+  // ⚠ Cliché RÉDUIT (640 px, `vetPhotoBlob`) préparé PENDANT l'analyse : au clic sur
+  // « + Ajouter » il faut un Blob tout de suite, l'encodage canvas est asynchrone. Il ne
+  // part sur Drive que si la référence est effectivement ajoutée (cf. `add` de
+  // `CollectionSub`) — une estimation qu'on jette ne laisse aucune trace.
+  const blobRef = React.useRef(null);
+  const photos = useCollPhotos();
   const [pick2, setPick2] = React.useState(false);   // pop-up « Photos / Galerie » ouverte
   const hasKey = aiAnyKey(true, 'collection');   // photo → fournisseur avec vision obligatoire
   const drop = () => { if (urlRef.current) { try { URL.revokeObjectURL(urlRef.current); } catch {} urlRef.current = ''; } setPrev(''); };
@@ -16980,7 +17254,9 @@ function CollPhotoEstimate({ kind, onAdd }) {
   const pick = async f => {
     if (!f) return;
     drop();
+    blobRef.current = null;
     try { urlRef.current = URL.createObjectURL(f); setPrev(urlRef.current); } catch {}
+    vetPhotoBlob(f).then(b => { blobRef.current = b; }).catch(() => {});
     setSt({ busy: true, r: null, err: '' });
     try {
       const img = await frigoPhotoData(f);
@@ -17001,7 +17277,9 @@ function CollPhotoEstimate({ kind, onAdd }) {
             cursor: st.busy || !hasKey ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
           {st.busy ? '⏳ Analyse…' : '✨ Faire une estimation'}
         </button>
-        <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>la photo n'est jamais enregistrée</span>
+        <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>
+          {photos.state === 'off' ? "photo non conservée (Drive non connecté)" : `photo conservée dans Drive · ${GDRIVE_HUB_FOLDER}/${COLL_DRIVE_SUB}`}
+        </span>
         {pick2 && <CollEstimatePick onFile={pick} onClose={() => setPick2(false)} />}
       </div>
       {prev && <img src={prev} alt="" style={{ width:88, height:88, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}` }} />}
@@ -17017,7 +17295,7 @@ function CollPhotoEstimate({ kind, onAdd }) {
             </div>
             {st.r.meta.confiance && <div style={{ fontSize:9, color:C.dim, marginTop:2 }}>confiance : {st.r.meta.confiance}</div>}
           </div>
-          <button onClick={() => { onAdd(st.r); setSt({ busy:false, r:null, err:'' }); drop(); }}
+          <button onClick={() => { onAdd({ ...st.r, __photoBlob: blobRef.current }); setSt({ busy:false, r:null, err:'' }); drop(); }}
             style={{ background:`${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6,
               color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 11px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
             + Ajouter
@@ -17027,7 +17305,7 @@ function CollPhotoEstimate({ kind, onAdd }) {
     </div>
   );
 }
-const COLL_PHOTO_NOTE = "Aucun catalogue interrogeable n'existe pour cette famille : l'estimation vient d'une IA à partir de ta photo (clé du module API), et une estimation n'est pas une expertise. ⚠ La photo n'est ni enregistrée ni envoyée ailleurs qu'au modèle : seuls le nom et le prix estimé sont conservés. L'ajout à la main fonctionne sans aucune clé.";
+const COLL_PHOTO_NOTE = "Aucun catalogue interrogeable n'existe pour cette famille : l'estimation vient d'une IA à partir de ta photo (clé du module API), et une estimation n'est pas une expertise. ⚠ La photo n'est envoyée nulle part ailleurs qu'au modèle ; si tu ajoutes la référence, elle est conservée dans ton Google Drive (HUB_Pierre/Collection, un fichier par référence) et jamais sur le téléphone. L'ajout à la main fonctionne sans aucune clé.";
 
 // Sous-collections par catégorie. `CARTES` (7.8.3) = Pokémon + Magic, chacune avec sa
 // propre source de recherche ; les autres catégories arrivent ensuite.
@@ -17060,11 +17338,15 @@ const COLLECTION_SUBS = {
       // venait à passer plus bas un jour (TDZ = écran noir). En fonction, c'est différé.
       note: () => `À l'ajout, l'app demande sur quelle plateforme tu possèdes le jeu (${GAME_PLATFORMS.join(', ')}) — c'est elle qui s'affiche sous la vignette. La recherche interroge le catalogue Steam (sans clé) : un jeu Wii ou DS n'y figure pas, ajoute-le à la main. L'import automatique n'existe QUE pour Steam : Epic Games et Ubisoft n'exposent aucune API de bibliothèque utilisable depuis un navigateur.` },
   ],
-  autre: [
+  gemme: [
     { id:'gemme', label:'Pierre précieuse', icon:'💎', unit:'pierre', article:'une première pierre',
       photo:'gemme', manual:true, manualPlaceholder:'Ajouter à la main : nature de la pierre…', note: COLL_PHOTO_NOTE },
+  ],
+  montre: [
     { id:'montre', label:'Montre', icon:'⌚', unit:'montre', article:'une première montre',
       photo:'montre', manual:true, manualPlaceholder:'Ajouter à la main : marque et modèle…', note: COLL_PHOTO_NOTE },
+  ],
+  vin: [
     { id:'vin', label:'Vin', icon:'🍷', unit:'bouteille', article:'une première bouteille',
       photo:'vin', manual:true, manualPlaceholder:'Ajouter à la main : domaine et millésime…', note: COLL_PHOTO_NOTE },
   ],
@@ -17226,9 +17508,11 @@ function CollectionTopButton({ anchor }) {
 // estime UN objet dans le contexte d'UNE sous-collection déjà ouverte ; celui-ci part du
 // titre du module, demande la collection, et sait ramener PLUSIEURS éléments d'une même
 // photo (une planche de cartes, une étagère de figurines…).
-// ⚠ LA PHOTO N'EST JAMAIS CONSERVÉE (même règle que 7.6.83 / 7.8.8 et « ne save pas les
-// images ») : l'aperçu est un object URL révoqué, le base64 n'est référencé que par l'appel
-// en vol, et seuls les éléments explicitement ajoutés (nom + prix) sont enregistrés.
+// ⚠ RIEN N'EST STOCKÉ EN LOCAL (« ne save pas les images », piège 15) : l'aperçu est un
+// object URL révoqué, le base64 n'est référencé que par l'appel en vol, et seuls les
+// éléments explicitement ajoutés (nom + prix) rejoignent le localStorage. La PHOTO, elle,
+// part dans Google Drive (`collPhotoUpload`) pour chaque élément ajouté — voir le bloc
+// « photos d'analyse → Google Drive ».
 const COLL_SCAN_MAX = 12;         // éléments retenus au maximum dans une photo
 // Aplatit COLLECTION_CATS × COLLECTION_SUBS. ⚠ Fonction et non constante : évaluée au
 // rendu, donc insensible à l'ordre de déclaration des deux tables (une `const` ici serait
@@ -17308,6 +17592,11 @@ function CollectionScanModal({ onClose }) {
   const [err, setErr]     = React.useState('');
   const [added, setAdded] = React.useState({});        // id → 'ok' | 'full' | 'err'
   const urlRef = React.useRef('');
+  // Cliché réduit gardé le temps de la pop-up : chaque référence ajoutée en reçoit une copie
+  // sur Drive, sous SON id (cf. `collPhotoUpload`) — une planche de 6 cartes = 6 fichiers de
+  // la même photo, c'est le prix de la règle « le nom du fichier porte le lien ».
+  const blobRef = React.useRef(null);
+  const photos = useCollPhotos();
   const pname = aiLabel(aiChain(true)[0] ? aiChain(true)[0].id : 'gemini');
   const hasKey = aiAnyKey(true, 'collection');   // photo → fournisseur avec vision obligatoire
   const all = collAllSubs();
@@ -17322,7 +17611,9 @@ function CollectionScanModal({ onClose }) {
   const onFile = async f => {
     if (!chosen) return;
     drop(); setRes(null); setErr(''); setAdded({});
+    blobRef.current = null;
     try { urlRef.current = URL.createObjectURL(f); setPrev(urlRef.current); } catch {}
+    vetPhotoBlob(f).then(b => { blobRef.current = b; }).catch(() => {});
     setBusy(true);
     try {
       const img = await frigoPhotoData(f);
@@ -17345,7 +17636,9 @@ function CollectionScanModal({ onClose }) {
     const next = collAdd(cur, subId, it, { photo:true, ai:aiLastProvider(), scan:true });
     const exists = collList(cur, subId).some(x => x && x.id === it.id);
     if (!exists && collCount(next) === before) { setAdded(a => ({ ...a, [it.id]:'full' })); return; }
-    setAdded(a => ({ ...a, [it.id]: collPublish(next) ? 'ok' : 'err' }));
+    const ok = collPublish(next);
+    setAdded(a => ({ ...a, [it.id]: ok ? 'ok' : 'err' }));
+    if (ok && blobRef.current) collPhotoUpload(it.id, blobRef.current);   // en fond : un échec Drive ne remet pas l'ajout en cause
   };
   const card = { background:C.surfaceHigh, borderRadius:10, padding:'9px 11px' };
   return ReactDOM.createPortal(
@@ -17396,7 +17689,9 @@ function CollectionScanModal({ onClose }) {
           {chosen && hasKey && (
             <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
               <VetPhotoPick onFile={onFile} disabled={busy} busy={busy} color={COLLECTION_COLOR} hasPhoto={!!prev} />
-              <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>la photo n'est jamais enregistrée</span>
+              <span style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>
+                {photos.state === 'off' ? "photo non conservée (Drive non connecté)" : `photo conservée dans Drive · ${GDRIVE_HUB_FOLDER}/${COLL_DRIVE_SUB}`}
+              </span>
             </div>
           )}
           {prev && <img src={prev} alt="" style={{ width:96, height:96, objectFit:'cover', borderRadius:8, border:`1px solid ${C.border}` }} />}
@@ -17447,7 +17742,7 @@ function CollectionScanModal({ onClose }) {
 
         <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, fontStyle:'italic' }}>
           Les prix sont des estimations de {pname} à partir de ta seule photo, pas des cotations : vérifie avant d'acheter ou de vendre.
-          La photo n'est ni enregistrée ni envoyée ailleurs qu'au modèle.
+          La photo n'est envoyée nulle part ailleurs qu'au modèle — chaque élément ajouté en garde une copie dans ton Google Drive.
         </div>
       </div>
     </div>, document.body);
@@ -17456,6 +17751,11 @@ function CollectionScanModal({ onClose }) {
 function CollectionPanel() {
   const rootRef = React.useRef(null);
   const [scan, setScan] = React.useState(false);
+  // Index des photos Drive : listé UNE fois par session, à l'ouverture du module (aucune
+  // requête si Drive n'est pas connecté — `collPhotosSync` s'arrête sur `gdriveToken()`).
+  // ⚠ Pas de `gdriveAutoLogin()` ici : ouvrir Collection ne doit pas déclencher de popup.
+  const photos = useCollPhotos();
+  React.useEffect(() => { collPhotosSync(); }, []);
   return (
     <div ref={rootRef} style={{ display:'flex', flexDirection:'column', gap:8 }}>
       {/* Titre rendu ICI (`selfHeading:true` dans SECTION, et plus de heading dans MobileApp)
@@ -17472,6 +17772,17 @@ function CollectionPanel() {
             fontSize:13, lineHeight:1, padding:'3px 8px', cursor:'pointer' }}>📷</button>
       </div>
       {scan && <CollectionScanModal onClose={() => setScan(false)} />}
+      {/* Où vivent les photos — dit une seule fois, en haut, et seulement quand il y a
+          quelque chose à savoir (Drive absent = les clichés d'analyse ne sont pas gardés). */}
+      {photos.state === 'off' && (
+        <div style={{ fontSize:9.5, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+          📁 Google Drive non connecté : les photos prises pour l'analyse IA ne seront pas conservées
+          (À propos → Autorisations pour l'activer). Les estimations, elles, fonctionnent normalement.
+        </div>
+      )}
+      {photos.state === 'error' && (
+        <div style={{ fontSize:9.5, color:'#ff8a8a', lineHeight:1.5 }}>⚠ Google Drive : {photos.err}</div>
+      )}
       {COLLECTION_CATS.map(c => (
         <StatsCollapse key={c.id} title={`${c.icon} ${c.label.toUpperCase()}`} color={COLLECTION_COLOR} defaultOpen={false}>
           <CollectionCat cat={c} />
