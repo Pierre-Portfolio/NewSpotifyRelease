@@ -8888,11 +8888,14 @@ const D_CREA_WAVE_V   = 9;      // vitesse du front de lumière, en px/frame
 // d'attendre indéfiniment une 10e dalle qui ne viendra pas.
 const D_CREA_TP_HOPS  = 10;     // dalles visitées, après quoi l'effet est terminé
 const D_CREA_TP_LIFE  = 600;    // garde-fou : 10 s à 60 fps, si les 10 dalles ne se trouvent pas
-// ⚠ 13.2.4 — LE VOYAGE EST QUATRE FOIS PLUS LENT (demande utilisateur) : 2 → 8 frames par
-// dalle, écrit comme `2 * 4` pour que le facteur demandé reste lisible. Les traînées et les
-// fantômes DÉRIVENT de ce pas (`D_CREA_TP_STEP * 5`, `* 4`) : ils s'allongent d'eux-mêmes, il
-// n'y a rien à réajuster. Le garde-fou D_CREA_TP_LIFE reste large (10 dalles × 8 = 80 frames).
-const D_CREA_TP_STEP  = 2 * 4;  // une dalle toutes les 8 frames (7,5/s) — vitesse divisée par 4
+// ⚠ LE VOYAGE A ÉTÉ RALENTI DEUX FOIS (demandes utilisateur) : ÷4 en 13.2.4, puis encore
+// −50 % en 13.3.9 — 2 → 16 frames par dalle. Écrit `8 * 2` et non `16` : c'est le facteur
+// demandé qui doit rester lisible, pas le résultat.
+// ⚠ Les traînées et les doodlers fantômes DÉRIVENT de ce pas (`D_CREA_TP_STEP * 5`, `* 4`) :
+// ils s'allongent d'eux-mêmes, il n'y a jamais rien à réajuster à côté.
+// ⚠ Le garde-fou D_CREA_TP_LIFE (600) couvre toujours largement le voyage : 10 dalles × 16 =
+// 160 frames. Il faudrait un pas au-delà de 60 pour qu'il coupe un voyage normal.
+const D_CREA_TP_STEP  = 8 * 2;  // une dalle toutes les 16 frames (3,75/s) — encore ÷2 (13.3.9)
 // ⚠ L'invulnérabilité ne suit plus la durée du voyage (il tient maintenant en une demi-seconde) :
 // elle est REPOUSSÉE à chaque saut et déborde d'autant après le dernier, le temps de reprendre
 // la main sur la dalle d'arrivée.
