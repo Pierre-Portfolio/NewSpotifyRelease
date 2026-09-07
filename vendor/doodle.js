@@ -4396,20 +4396,39 @@ function doodleTileDraw(ctx, p, t) {
   // peigne et on ne voyait plus les moitiés. Les petits triangles du haut comptent les
   // générations restantes : ils reprennent le 🔺 de l'icône, là où des pastilles rondes se
   // seraient lues comme les yeux de la 👀 Vivante.
+  // 🔺 13.3.3 — LA FRACTALE DEVIENT UNE CELLULE EN MITOSE (demande utilisateur). Elle n'est plus
+  // une ardoise déjà fendue — une de plus parmi les dalles sombres — mais un corps VIVANT en
+  // train de se couper en deux : la membrane se pince au milieu, et le pincement RESPIRE.
+  // ⚠ C'est ce mouvement, pas un décompte à lire, qui annonce la scission : l'information passe
+  // sans que le joueur ait rien à apprendre.
+  // ⚠ Le noyau garde UN LOBE PAR SCISSION RESTANTE, exactement comme les triangles d'avant :
+  // c'est la seule donnée qu'on doit pouvoir COMPTER, elle reste donc explicite.
+  // ⚠ L'écart des lobes est DÉRIVÉ de la largeur : la dalle rétrécit à chaque génération
+  // (D_FRACT_SHRINK) et un espacement en dur aurait débordé de la petite-fille.
+  // ⚠ La membrane n'est retirée que de 1,5 px sur les côtés : une dalle dessinée plus étroite
+  // que sa boîte de collision promet MOINS qu'elle ne donne — l'inverse serait un mensonge.
   if (p.type === 'fractal') {
     const gen = p.gen || 0, left = Math.max(1, D_FRACT_GEN - gen);
-    doodleRR(ctx, x, y, w, h, 5, '#3a2a6b');                         // le fond sombre = les fentes
-    const piece = (px, pw, d) => {
-      const gap = 1.1 * d;
-      if (d > 0 && (pw - gap) / 2 >= 11) { piece(px, (pw - gap) / 2, d - 1); piece(px + (pw + gap) / 2, (pw - gap) / 2, d - 1); return; }
-      doodleRR(ctx, px, y, pw, h, 4, '#a78bfa');
-      ctx.fillStyle = '#6d4bc7'; ctx.fillRect(px, y + h - 4, pw, 4);
-    };
-    piece(x, w, left);
-    ctx.lineJoin = 'round'; ctx.strokeStyle = '#2a1e52'; ctx.lineWidth = 1.6; ctx.fillStyle = '#f0e9ff';
+    const br = 0.5 + 0.5 * Math.sin(t * 0.045);      // la respiration de la cellule
+    const waist = 2.2 + br * 1.6;                    // le pincement central, qui va la couper
+    const m = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x + m, y + h - 1);
+    ctx.quadraticCurveTo(x + m, y + 1, x + w / 2 - 1, y + waist);
+    ctx.quadraticCurveTo(x + w / 2, y + h / 2, x + w / 2 + 1, y + waist);
+    ctx.quadraticCurveTo(x + w - m, y + 1, x + w - m, y + h - 1);
+    ctx.closePath();
+    ctx.fillStyle = '#cbe9b6'; ctx.fill();
+    ctx.strokeStyle = '#4e8f3a'; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.fillStyle = '#3f7a2a'; ctx.fillRect(x + m, y + h - 3.5, w - m * 2, 3.5);   // la sous-face : où l'on pose le pied
+    ctx.strokeStyle = 'rgba(63,122,42,0.5)'; ctx.lineWidth = 0.8;                  // le fuseau, qui tirera les deux moitiés
+    ctx.beginPath(); ctx.moveTo(x + w * 0.2, y + h / 2 + 1); ctx.lineTo(x + w * 0.8, y + h / 2 + 1); ctx.stroke();
+    const step = Math.min(9, (w - 12) / Math.max(1, left - 1));
     for (let i = 0; i < left; i++) {
-      const dx = x + w / 2 + (i - (left - 1) / 2) * 6.4, dy = y + 2.4;
-      ctx.beginPath(); ctx.moveTo(dx, dy); ctx.lineTo(dx + 2.6, dy + 4.4); ctx.lineTo(dx - 2.6, dy + 4.4); ctx.closePath(); ctx.stroke(); ctx.fill();
+      const lx = x + w / 2 + (i - (left - 1) / 2) * step;
+      ctx.beginPath(); ctx.arc(lx, y + h / 2 + 0.6, 2.6 + br * 0.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#2f6b28'; ctx.fill();
+      ctx.strokeStyle = '#1d4a18'; ctx.lineWidth = 0.7; ctx.stroke();
     }
     return;
   }
