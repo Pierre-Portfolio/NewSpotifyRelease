@@ -1895,7 +1895,11 @@ function doodlePaintChaosPick(s) {
 // créature. C'est assumé — la dalle est un pacte, pas un cadeau — mais c'est aussi la fin des
 // trous noirs, qui se tirent dans le même `else if` que les monstres et ne sortent donc plus.
 // ⚠ Une seule fois par dalle (`p.used`) : elle reste une plateforme, elle ne rend plus.
-const D_YY_PERKS = 2, D_YY_MOB = 1.20;
+// ⚠ 13.2.6 — LE PACTE MAIGRIT DES DEUX CÔTÉS (demande utilisateur) : UN seul bonus par passage
+// au lieu de deux, et « en contrepartie » l'incrément de créatures baisse de 20 % — 20 % DE
+// L'INCRÉMENT ACTUEL, pas 20 points de pourcentage : +20 % devient +16 %, d'où `0.20 * 0.80`.
+// Le taux reste MULTIPLICATIF et composé (×1,16, ×1,35, ×1,56…), rien d'autre ne change.
+const D_YY_PERKS = 1, D_YY_MOB = 1 + 0.20 * 0.80;
 // 🐛 10.7.1 — BUGUÉE (demande utilisateur) : une dalle au design cyberpunk qui déraille, et qui
 // DÉRIVE EN DIAGONALE — les deux axes à la fois, là où la 🟦 bleue ne va que de côté et le
 // 🛗 Ascenseur que de haut en bas.
