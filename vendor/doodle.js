@@ -1308,7 +1308,8 @@ const D_BUBBLE_LIFE = 105, D_BUBBLE_VY = -2.6;
 // 🥚 10.2.7 — TAMAGOTCHI (demande utilisateur) : elle a un APPÉTIT de D_TAMA_MEALS balles et
 // chaque repas la change. Affamée (0) elle n'est pas solide, on la traverse ; repue (1) elle est
 // heureuse et REND UN SUPER SAUT ; rassasiée (2) elle jaunit, fin d'appétit, et redevient une
-// dalle ordinaire ; gavée (3) elle vire au rouge et TIRE sur le doodler.
+// dalle ordinaire ; gavée (3) elle vire au rouge, TIRE sur le doodler, RAMPE vers lui comme une
+// 👀 Vivante et le TUE au contact (13.2.9, voir `doodleTamaMad`).
 // ⚠ DEUX champs et non un compteur seul : `p.tama` (false = affamée, true = nourrie) reste le
 // seul état que lit `doodleSolid` — une dalle non solide se traverse aussi pour les coffres et
 // les météorites, ce qu'un test posé au seul endroit de l'atterrissage aurait laissé passer — et
@@ -1319,6 +1320,14 @@ const D_BUBBLE_LIFE = 105, D_BUBBLE_VY = -2.6;
 // ⚠ Le tir de la furieuse part dans `s.tshots`, le tableau des projectiles HOSTILES, comme celui
 // de la 🔴 dalle laser : il porte déjà le défilement de la caméra, la boîte de collision, les
 // teintes qui parent et le nettoyage hors écran. Un second tableau, c'était les oublier tous.
+// ⚠ 13.2.9 — LE GAVÉ DEVIENT UNE 👀 VIVANTE EN COLÈRE (demande utilisateur) : au 3e repas il
+// ne se contente plus de tirer, il RAMPE vers le doodler dans une boîte ancrée là où il est né
+// — exactement le déplacement de la 👀 Vivante, dont il emprunte la boucle et les constantes
+// (D_ALIVE_V, D_ALIVE_SPAN) plutôt que d'en refaire une à côté — et il TUE AU CONTACT.
+// ⚠ La colère est le SEUL état létal : affamé, repu et rassasié restent ce qu'ils étaient.
+// ⚠ `doodleTamaMad` se lit sur le type EFFECTIF : un 🃏 Casino qui a tiré le tamagotchi rampe
+// et tue comme lui, sinon la copie aurait été une pâle imitation.
+function doodleTamaMad(p) { return !p.dead && doodleEffType(p) === 'tamagotchi' && (p.meals || 0) >= D_TAMA_MEALS; }
 const D_TAMA_EAT = 20;   // frames d'animation de mastication
 const D_TAMA_MEALS = 3, D_TAMA_GAP = 200, D_TAMA_TEL = 40, D_TAMA_V = 1.85;
 // 🔴 10.2.8 — LASER (demande utilisateur) : la dalle TIRE sur le doodler, une fois toutes les
@@ -2109,7 +2118,7 @@ const D_TILES = [
   { k: 'fog',      icon:'🌁', name: 'Brouillard',     txt: 'toutes les dalles disparaissent pour le saut qui suit — elles réapparaissent dès que tu en retouches une' },
   { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre. Elle est, avec l\'onde de la ✨ Création, la seule à en finir DÉFINITIVEMENT avec un 🦴 squelette d\'ossuaire : il ne se reconstruit pas (mais ne lâche toujours rien)' },
   { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'son canon te suit et elle tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — pendant les ' + (D_TLASER_TEL / 60).toFixed(1).replace('.', ',') + ' s qui précèdent le coup, un rayon de visée en pointillés s\'allonge devant elle et deux anneaux se referment sur son œil : c\'est le moment de bouger. Se prendre le tir fait mal' },
-  { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
+  { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge, te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes, RAMPE vers toi comme une 👀 Vivante et TUE AU CONTACT' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
   { k: 'popcorn',  icon:'🍿', name: 'Pop-corn',       txt: 'elle éclate sous tes pieds et la hauteur du saut est tirée au sort, entre un peu moins et un peu plus qu\'un saut ordinaire. Au premier rebond, elle TIRE en plus ' + D_POP_THROW + ' grains en gerbe, vers le haut ou vers le bas à pile ou face : ils tuent les créatures qu\'ils touchent, les TRAVERSENT pour faucher les suivantes, et ne s\'arrêtent qu\'en sortant de l\'écran' },
   { k: 'sticky',   icon:'🍯', name: 'Collante',       txt: 'tu restes collé dessus ' + Math.round(D_STICKY_HOLD / 60) + ' secondes, sans pouvoir bouger d\'un pas, puis tu repars d\'un saut ordinaire' },
