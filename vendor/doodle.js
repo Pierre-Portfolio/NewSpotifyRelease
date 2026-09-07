@@ -8538,8 +8538,8 @@ function doodleTileBirth(s, p, diff) {
 // Ce qu'elle fait, au contact :
 //   1. une onde de lumière part de son centre et grandit jusqu'à sortir de la carte ; tout
 //      monstre que le front rattrape meurt et lâche son coffre (`doodleKillMonster(force)`) ;
-//   2. puis, pendant D_CREA_TP_LIFE, le doodler est téléporté DE DALLE EN DALLE, du plus BAS
-//      au plus HAUT, une dalle toutes les D_CREA_TP_STEP frames.
+//   2. puis le doodler est téléporté DE DALLE EN DALLE, du plus BAS au plus HAUT, une dalle
+//      toutes les D_CREA_TP_STEP frames — D_CREA_TP_HOPS dalles, puis l'effet est fini.
 // ⚠ AUCUN effet de tuile n'est réécrit ici : à chaque saut on REPOSE réellement le doodler sur
 // la dalle (position, `prevFeet`, `vy > 0`) et c'est le code d'atterrissage ordinaire qui joue,
 // la frame même. C'est ce qui garantit que « leurs effets s'appliquent » sans exception — un
@@ -8551,8 +8551,18 @@ function doodleTileBirth(s, p, diff) {
 // n'aurait plus été vrai avec une liste prise une fois pour toutes.
 const D_CREA_TOUCH    = 3;      // px de jeu tolérés entre deux dalles pour les dire « collées »
 const D_CREA_WAVE_V   = 9;      // vitesse du front de lumière, en px/frame
-const D_CREA_TP_LIFE  = 600;    // 10 s à 60 fps
+// ⚠ 12.9.1 — LE VOYAGE SE COMPTE EN DALLES, PLUS EN SECONDES (demande utilisateur : « ça doit
+// te jump sur 10 cases et après effet fini »). `D_CREA_TP_HOPS` est donc la vraie condition
+// d'arrêt ; `D_CREA_TP_LIFE` ne sert plus que de GARDE-FOU : si plus aucune dalle neuve n'est
+// à visiter (rien ne monte, le joueur est coincé), la séquence doit finir quand même au lieu
+// d'attendre indéfiniment une 10e dalle qui ne viendra pas.
+const D_CREA_TP_HOPS  = 10;     // dalles visitées, après quoi l'effet est terminé
+const D_CREA_TP_LIFE  = 600;    // garde-fou : 10 s à 60 fps, si les 10 dalles ne se trouvent pas
 const D_CREA_TP_STEP  = 2;      // une dalle toutes les 2 frames (30/s) — vitesse demandée
+// ⚠ L'invulnérabilité ne suit plus la durée du voyage (il tient maintenant en une demi-seconde) :
+// elle est REPOUSSÉE à chaque saut et déborde d'autant après le dernier, le temps de reprendre
+// la main sur la dalle d'arrivée.
+const D_CREA_INV_TAIL = 120;    // 2 s d'invulnérabilité au-delà du dernier saut
 const D_CREA_GHOSTS   = 4;      // doodlers fantômes étirés laissés sur chaque trajet
 const D_CREA_SHAKE    = 3.2;    // secousse d'écran à chaque saut (sensation de vitesse)
 // Une dalle peut-elle fusionner ? ⚠ On écarte celles qui sont le PIED d'une structure : la 🌈
@@ -8600,9 +8610,9 @@ function doodleCreaFuse(s) {
 }
 // Au contact : l'onde part, la séquence commence.
 function doodleCreaStart(s, p) {
-  s.crea = { x: p.x + p.w / 2, y: p.y + D_PLAT_H / 2, r: 0, ph: 'wave', tp: 0, hop: 0,
+  s.crea = { x: p.x + p.w / 2, y: p.y + D_PLAT_H / 2, r: 0, ph: 'wave', tp: 0, hop: 0, hops: 0,
              seen: new Set([p]), streaks: [], ghosts: [], shake: 0 };
-  s.inv = Math.max(s.inv || 0, D_CREA_TP_LIFE + 120);
+  s.inv = Math.max(s.inv || 0, D_CREA_TP_LIFE + D_CREA_INV_TAIL);   // couvre l'onde, que rien ne borne en frames
   s.toast = { txt: '✨ La Création — la lumière balaie tout', life: D_TOAST_LIFE };
 }
 // La dalle non visitée la plus BASSE encore à l'écran (la file, recalculée à chaque saut).
@@ -8644,6 +8654,7 @@ function doodleCreaStep(s, W, H, sf) {
   const p = doodleCreaNext(s, H);
   if (!p) return;                                  // rien de neuf à visiter : on attend la rangée suivante
   cr.seen.add(p);
+  cr.hops++;
   const nx = p.x + p.w / 2, ny = p.y - D_FEET + 2;
   cr.streaks.push({ x1: s.px, y1: s.py, x2: nx, y2: ny, life: D_CREA_TP_STEP * 5, max: D_CREA_TP_STEP * 5 });
   for (let k = 1; k <= D_CREA_GHOSTS; k++) {
@@ -8660,7 +8671,12 @@ function doodleCreaStep(s, W, H, sf) {
   s.prevFeet = Math.min(p.y, p.pvy != null ? p.pvy : p.y) - 2;
   s.vy = 1;                  // … et en chute, sinon l'atterrissage n'est pas testé du tout
   s.fly = 0;                 // un vol en cours annulerait le test (et la Création prime dessus)
-  s.inv = Math.max(s.inv || 0, D_CREA_TP_LIFE - cr.tp + 120);
+  s.inv = Math.max(s.inv || 0, D_CREA_INV_TAIL);
+  // ⚠ 12.9.1 — Coupé APRÈS avoir reposé le doodler : la 10e dalle doit jouer son effet comme
+  // les neuf autres, c'est le code d'atterrissage ordinaire qui s'en charge à la frame suivante.
+  // L'invulnérabilité, elle, survit à la coupure (D_CREA_INV_TAIL) — atterrir sur une ⚡ à la
+  // frame où l'effet s'arrête tuerait sans que le joueur ait pu jouer.
+  if (cr.hops >= D_CREA_TP_HOPS) { s.crea = null; }
 }
 // L'onde, les traits de course et les fantômes. ⚠ Dessinés SOUS le doodler (appelés depuis
 // `doodleDraw` avant lui) : par-dessus, la traînée l'aurait effacé à chaque saut.
@@ -8914,7 +8930,7 @@ function doodleRules() {
       { i:'⬜', n:'Blanche',      d:'un seul rebond, puis elle disparaît. Elle marque les sauts limites.' },
       { i:'🎁', n:'Tuile coffre', d:'au premier rebond, un coffre apparaît dessus ; elle s\'éteint ensuite. Le coffre se ramasse et se tire comme celui d\'un monstre.' },
       { i:'🌈', n:'Multicolore',  d:'se téléporte plus haut à chaque rebond et tient 3 à 5 passages. Les points sur elle comptent les passages restants. Tant qu\'elle est en vie, le reste du décor se raréfie de moitié.' },
-      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre. Puis, pendant ${Math.round(D_CREA_TP_LIFE / 60)} secondes, tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Tu es invulnérable pendant tout le voyage.` },
+      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre. Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
