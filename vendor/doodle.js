@@ -2059,6 +2059,31 @@ function doodlePendPos(p, t) {
   const a = doodlePendAng(p, t);
   return { x: p.x + p.w / 2 + Math.sin(a) * D_PEND_LEN, y: p.y + p.h + Math.cos(a) * D_PEND_LEN, a };
 }
+// ⏸️ Facteur de temps des MONSTRES : 1 = normal, en dessous ils traînent, au-dessus ils
+// s'emballent.
+// ⚠ DÉCLARÉ AVANT D_TILES, dont la règle affichée de la ⏸️ Pause lit D_FREEZE_MUL : une const
+// module-level lue plus haut est une TDZ, et `D_TILES` est construit AU CHARGEMENT du module.
+// Le module entier échoue alors, `DOODLE_READY` n'est jamais posé, et le jeu s'annonce
+// « impossible à charger (réseau ?) » alors que le fichier est arrivé intact.
+// ⚠ 13.3.0 — LA PAUSE DEVIENT UNE ÉCHELLE (demande utilisateur : « rend ça scalable »). Elle ne
+// REMPLACE plus le facteur, elle le MULTIPLIE : pile ÷2, face ×2. Deux dalles chanceuses de
+// suite et les créatures rampent à ÷4 ; deux malchanceuses et elles vont quatre fois trop vite.
+// « À peu près infini vers le haut ou vers le bas — ça dépend de la chance », littéralement.
+// ⚠ Les bornes ne sont PAS un rééquilibrage, c'est un garde-fou de moteur : au-delà de ×64 un
+// monstre franchit la moitié de l'écran par frame et traverse le doodler sans le toucher, et en
+// dessous de ÷64 il est figé de toute façon. Il faut six dalles du même côté pour les atteindre
+// (une chance sur 64), donc en pratique on ne les voit jamais.
+const D_FREEZE_MUL = 2;                       // le facteur du tirage : ÷2 ou ×2
+const D_FREEZE_MIN = 1 / 64, D_FREEZE_MAX = 64;
+// Le tirage d'une dalle ⏸️ : le multiplicateur seul, la boucle de jeu le compose avec `mobTime`.
+function doodleFreezeMul() { return Math.random() < 0.5 ? 1 / D_FREEZE_MUL : D_FREEZE_MUL; }
+// Le facteur courant après un tirage, bornes comprises — une seule règle, lue par la boucle.
+function doodleFreezeApply(s, mul) {
+  return Math.max(D_FREEZE_MIN, Math.min(D_FREEZE_MAX, (s.mobTime == null ? 1 : s.mobTime) * mul));
+}
+// « 4 », « 1,5 » : le facteur écrit court. ⚠ Les puissances de 2 tombent juste, mais une borne
+// atteinte peut rendre un nombre bâtard — une décimale, et jamais de « .0 » traînant.
+function doodleFreezeTxt(v) { return (Math.round(v * 10) / 10).toString().replace('.', ','); }
 const D_TILES = [
   { k: 'warp',  icon: '🌀', name: 'Téléporteur', txt: 'te renvoie sur une dalle tirée au hasard, n\'importe où à l\'écran' },
   { k: 'bomb',  icon: '🧨', name: 'Bombe',       txt: 'explose et nettoie les monstres' },
@@ -2132,7 +2157,7 @@ const D_TILES = [
   { k: 'paint',    icon:'🖌️', name: 'Peinture fraîche', txt: 'elle repeint ta peau de la teinte qu\'elle affiche — une des ' + D_PAINTS.length + ' — et te donne l\'effet qui va avec, une seule fois par dalle' },
   { k: 'zoom',     icon:'🔍', name: 'Zoom',           txt: 'à pile ou face, elle rapproche ou éloigne la vue de ' + Math.round((D_ZOOM_STEP - 1) * 100) + ' % — pour le reste de la partie, et ça se cumule. C\'est l\'ÉCHELLE DU DESSIN qui bouge, jamais les distances de saut. Une seule fois par dalle' },
   { k: 'bamboo',   icon:'🎋', name: 'Bambou',         txt: 'les ' + D_BAMB_N + ' prochaines dalles sur lesquelles tu te poses deviennent du bambou : leur effet, quel qu\'il soit, est annulé pour de bon — et ce sont désormais de simples plateformes' },
-  { k: 'yinyang',  icon:'☯️', name: 'Yin et Yang',     txt: 'un pacte : +' + D_YY_PERKS + ' bonus permanents, et ' + Math.round((D_YY_MOB - 1) * 100) + ' % de créatures en plus pour le reste de la partie. Le taux se COMPOSE d\'une dalle à l\'autre (×' + D_YY_MOB.toFixed(2) + ', ×' + (D_YY_MOB * D_YY_MOB).toFixed(2) + ', ×' + (D_YY_MOB * D_YY_MOB * D_YY_MOB).toFixed(2) + '…) et ne redescend jamais. Une seule fois par dalle' },
+  { k: 'yinyang',  icon:'☯️', name: 'Yin et Yang',     txt: 'un pacte : +' + D_YY_PERKS + ' bonus permanent' + (D_YY_PERKS > 1 ? 's' : '') + ', et ' + Math.round((D_YY_MOB - 1) * 100) + ' % de créatures en plus pour le reste de la partie. Le taux se COMPOSE d\'une dalle à l\'autre (×' + D_YY_MOB.toFixed(2) + ', ×' + (D_YY_MOB * D_YY_MOB).toFixed(2) + ', ×' + (D_YY_MOB * D_YY_MOB * D_YY_MOB).toFixed(2) + '…) et ne redescend jamais. Une seule fois par dalle' },
   { k: 'pendul',   icon:'⏲️', name: 'Balancier',      txt: 'un pendule pend sous la dalle et balaie sans fin de gauche à droite : tout ce que la masse touche meurt — les créatures comme toi. Se poser sur la dalle ne risque rien, le danger est EN DESSOUS' },
   // 🌈 11.2.6 — un arc tendu entre la dalle mère et un SECOND PIED qui est une vraie tuile de
   // la partie. Coffre garanti d'un côté, monstre garanti de l'autre.
@@ -2289,27 +2314,6 @@ const D_TARGET_TOL = 8;
 // conséquence assumée : allonger `life` pour retrouver l'altitude d'avant aurait annulé la
 // demande, le ballon serait juste devenu un vol plus long pour le même résultat.
 const D_BALLOON_LIFE = 150, D_BALLOON_VY = -5.2 * 0.7;
-// ⏸️ Facteur de temps des MONSTRES : 1 = normal, en dessous ils traînent, au-dessus ils
-// s'emballent.
-// ⚠ 13.3.0 — LA PAUSE DEVIENT UNE ÉCHELLE (demande utilisateur : « rend ça scalable »). Elle ne
-// REMPLACE plus le facteur, elle le MULTIPLIE : pile ÷2, face ×2. Deux dalles chanceuses de
-// suite et les créatures rampent à ÷4 ; deux malchanceuses et elles vont quatre fois trop vite.
-// « À peu près infini vers le haut ou vers le bas — ça dépend de la chance », littéralement.
-// ⚠ Les bornes ne sont PAS un rééquilibrage, c'est un garde-fou de moteur : au-delà de ×64 un
-// monstre franchit la moitié de l'écran par frame et traverse le doodler sans le toucher, et en
-// dessous de ÷64 il est figé de toute façon. Il faut six dalles du même côté pour les atteindre
-// (une chance sur 64), donc en pratique on ne les voit jamais.
-const D_FREEZE_MUL = 2;                       // le facteur du tirage : ÷2 ou ×2
-const D_FREEZE_MIN = 1 / 64, D_FREEZE_MAX = 64;
-// Le tirage d'une dalle ⏸️ : le multiplicateur seul, la boucle de jeu le compose avec `mobTime`.
-function doodleFreezeMul() { return Math.random() < 0.5 ? 1 / D_FREEZE_MUL : D_FREEZE_MUL; }
-// Le facteur courant après un tirage, bornes comprises — une seule règle, lue par la boucle.
-function doodleFreezeApply(s, mul) {
-  return Math.max(D_FREEZE_MIN, Math.min(D_FREEZE_MAX, (s.mobTime == null ? 1 : s.mobTime) * mul));
-}
-// « 4 », « 1,5 » : le facteur écrit court. ⚠ Les puissances de 2 tombent juste, mais une borne
-// atteinte peut rendre un nombre bâtard — une décimale, et jamais de « .0 » traînant.
-function doodleFreezeTxt(v) { return (Math.round(v * 10) / 10).toString().replace('.', ','); }
 // 🎰 Une fois DÉBLOQUÉE, la machine à sous revient d'elle-même tous les D_SLOT_STEP points
 // (demande utilisateur). Le jalon est posé au déblocage, à partir du score COURANT : parti de
 // zéro, il aurait rattrapé d'un coup tous les paliers déjà franchis.
