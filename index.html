@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.0.1';
+const APP_VERSION = '13.0.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4224,6 +4224,7 @@ function StoreProvider({ children }) {
   // ⚠ `otherTab` : deux onglets qui scrapent en parallèle doubleraient la consommation du quota
   // et s'écraseraient mutuellement la base (chaque `saveDB()` exporte TOUT).
   // ── FINANCE : relevé de prix quotidien automatique (9.0.3) ────────────────────
+  // ⚠ Son déclencheur est l'effet SÉPARÉ juste en dessous, pas celui du scraping musique.
   // « Comme si je cliquais sur Finance » : `startFinanceLight()` (idempotent) fait arriver
   // les prix, donc `_finNotify` → `finHistSnapshot()` pose le point du jour dans l'historique
   // local — exactement ce qui est enregistré quand l'utilisateur ouvre le module lui-même.
@@ -4246,11 +4247,34 @@ function StoreProvider({ children }) {
 
   React.useEffect(() => {
     if (authState !== 'connected' || !dbReady || offline || otherTab) return;
-    const run = () => { musicAutoTry(); financeAutoTry(); };
+    const run = () => { musicAutoTry(); };
     const t = setTimeout(run, MUSIC_AUTO_DELAY_MS);
     const iv = setInterval(run, MUSIC_AUTO_CHECK_MS);
     return () => { clearTimeout(t); clearInterval(iv); };
-  }, [authState, dbReady, offline, otherTab, musicAutoTry, financeAutoTry]);
+  }, [authState, dbReady, offline, otherTab, musicAutoTry]);
+
+  // ── FINANCE : effet SÉPARÉ du scraping musique (même raison que la pluie ci-dessous) ──
+  // Le relevé quotidien ne doit RIEN à Spotify ni à la base SQLite : ses sources sont
+  // `data/indices.json` (same-origin), CoinGecko, gold-api, Alpha Vantage et Twelve Data.
+  // Tant qu'il partageait l'effet du scraping, il héritait de ses deux gardes — et ne
+  // partait donc PAS quand on entre par « 📴 Continuer sans Spotify » (`offline`), ni tant
+  // que la base n'était pas ouverte (`dbReady`), alors que dans les deux cas le module
+  // Finance, lui, s'ouvre et enregistre normalement si on clique dessus. Résultat : des
+  // trous dans l'historique les jours où la session démarrait ainsi.
+  // ⚠ Réseau vraiment coupé ⇒ aucune valeur n'arrive, `finAutoGotData()` reste faux et la
+  // journée N'EST PAS marquée : la re-tentative de 10 min (ou la connexion suivante) reprend.
+  // ⚠ `otherTab` : deux onglets brûleraient deux fois le quota Twelve Data pour le même point.
+  // ⚠ Module Finance désactivé ⇒ rien (comme la météo) : on ne consomme pas de quota pour un
+  // module que l'utilisateur a retiré du Hub, et « comme si je cliquais dessus » n'a alors
+  // plus de sens — l'onglet n'existe plus.
+  React.useEffect(() => {
+    if (authState !== 'connected' || otherTab) return;
+    if (!moduleEnabled(moduleToggles, 'finance')) return;
+    const run = () => { financeAutoTry(); };
+    const t  = setTimeout(run, FIN_AUTO_DELAY_MS);
+    const iv = setInterval(run, FIN_AUTO_CHECK_MS);
+    return () => { clearTimeout(t); clearInterval(iv); };
+  }, [authState, otherTab, moduleToggles, financeAutoTry]);
 
   // ── MÉTÉO : alerte pluie dans les 2 h (11.6.6) ───────────────────────────────
   // Effet SÉPARÉ du bloc auto ci-dessus : Open-Meteo n'a rien de Spotify, l'alerte vaut
@@ -29541,6 +29565,11 @@ async function startFinanceLight() {
 // jeton Google Drive obtenu par un geste de l'utilisateur.
 const FIN_AUTO_LS     = 'spotifyplus_finance_autosync';      // 'off' = désactivé (absent = activé)
 const FIN_AUTO_DAY_LS = 'spotifyplus_finance_autosync_day';  // jour du dernier relevé RÉUSSI
+// Cadence du relevé : un peu APRÈS le scraping musique (les deux partent à la connexion, et
+// le premier tick de Finance tient la file Twelve Data ~16 s), puis re-tentative tant que la
+// journée n'est pas marquée — une session ouverte à minuit prend le point du jour suivant.
+const FIN_AUTO_DELAY_MS = 8000;
+const FIN_AUTO_CHECK_MS = 10 * 60 * 1000;
 function finAutoOn()      { try { return localStorage.getItem(FIN_AUTO_LS) !== 'off'; } catch { return true; } }
 function finAutoSet(on)   { return lsSet(FIN_AUTO_LS, on ? 'on' : 'off'); }
 function finAutoDay()     { try { return localStorage.getItem(FIN_AUTO_DAY_LS) || ''; } catch { return ''; } }
