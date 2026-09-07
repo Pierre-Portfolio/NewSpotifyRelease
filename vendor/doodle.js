@@ -2074,7 +2074,7 @@ const D_TILES = [
   { k: 'rebound', icon:'🦘', name: 'Rebond',        txt: 'les 3 prochains sauts montent deux fois plus haut' },
   { k: 'invert',  icon:'🔃', name: 'Inversion',     txt: 'inverse la gauche et la droite pendant ' + Math.round(D_INVERT_LIFE / 60) + ' secondes' },
   { k: 'slot',    icon:'🎰', name: 'Machine à sous', txt: 'met le jeu en pause et tire 3 tuiles du catalogue, aussitôt ajoutées à la partie — trois tuiles DIFFÉRENTES, jamais une que tu possèdes déjà, et jamais une tuile de biome' },
-  { k: 'freeze',  icon:'⏸️', name: 'Pause',          txt: 'fige tous les monstres pour le reste de la partie… ou double leur vitesse. Une chance sur deux, et chaque nouvelle dalle annule la précédente' },
+  { k: 'freeze',  icon:'⏸️', name: 'Pause',          txt: 'une chance sur deux : elle DIVISE par ' + D_FREEZE_MUL + ' la vitesse de tous les monstres, ou elle la MULTIPLIE par ' + D_FREEZE_MUL + '. Les dalles se CUMULENT pour le reste de la partie (÷2, ÷4, ÷8… ou ×2, ×4, ×8…) : à la chance de dire jusqu\'où' },
   { k: 'balloon', icon:'🎈', name: 'Ballon',         txt: 'un ballon gonfle sous toi, t\'emporte en l\'air, puis éclate' },
   { k: 'target',  icon:'🎯', name: 'Cible',          txt: 'atterris pile au centre et tu gagnes un butin de coffre ; sinon elle se détruit' },
   { k: 'roulette', icon:'🎲', name: 'Roulette russe', txt: 'plusieurs dalles identiques apparaissent, une seule est réelle — et il y en a une de plus à chaque fois' },
@@ -2285,9 +2285,27 @@ const D_TARGET_TOL = 8;
 // conséquence assumée : allonger `life` pour retrouver l'altitude d'avant aurait annulé la
 // demande, le ballon serait juste devenu un vol plus long pour le même résultat.
 const D_BALLOON_LIFE = 150, D_BALLOON_VY = -5.2 * 0.7;
-// ⏸️ Facteur de temps des MONSTRES : 0 figé, 1 normal, 2 déchaîné. ⚠ Il vaut pour le reste de
-// la partie et n'est jamais cumulé — chaque dalle pause REMPLACE le facteur précédent.
-const D_FREEZE_SLOW = 0, D_FREEZE_FAST = 2;
+// ⏸️ Facteur de temps des MONSTRES : 1 = normal, en dessous ils traînent, au-dessus ils
+// s'emballent.
+// ⚠ 13.3.0 — LA PAUSE DEVIENT UNE ÉCHELLE (demande utilisateur : « rend ça scalable »). Elle ne
+// REMPLACE plus le facteur, elle le MULTIPLIE : pile ÷2, face ×2. Deux dalles chanceuses de
+// suite et les créatures rampent à ÷4 ; deux malchanceuses et elles vont quatre fois trop vite.
+// « À peu près infini vers le haut ou vers le bas — ça dépend de la chance », littéralement.
+// ⚠ Les bornes ne sont PAS un rééquilibrage, c'est un garde-fou de moteur : au-delà de ×64 un
+// monstre franchit la moitié de l'écran par frame et traverse le doodler sans le toucher, et en
+// dessous de ÷64 il est figé de toute façon. Il faut six dalles du même côté pour les atteindre
+// (une chance sur 64), donc en pratique on ne les voit jamais.
+const D_FREEZE_MUL = 2;                       // le facteur du tirage : ÷2 ou ×2
+const D_FREEZE_MIN = 1 / 64, D_FREEZE_MAX = 64;
+// Le tirage d'une dalle ⏸️ : le multiplicateur seul, la boucle de jeu le compose avec `mobTime`.
+function doodleFreezeMul() { return Math.random() < 0.5 ? 1 / D_FREEZE_MUL : D_FREEZE_MUL; }
+// Le facteur courant après un tirage, bornes comprises — une seule règle, lue par la boucle.
+function doodleFreezeApply(s, mul) {
+  return Math.max(D_FREEZE_MIN, Math.min(D_FREEZE_MAX, (s.mobTime == null ? 1 : s.mobTime) * mul));
+}
+// « 4 », « 1,5 » : le facteur écrit court. ⚠ Les puissances de 2 tombent juste, mais une borne
+// atteinte peut rendre un nombre bâtard — une décimale, et jamais de « .0 » traînant.
+function doodleFreezeTxt(v) { return (Math.round(v * 10) / 10).toString().replace('.', ','); }
 // 🎰 Une fois DÉBLOQUÉE, la machine à sous revient d'elle-même tous les D_SLOT_STEP points
 // (demande utilisateur). Le jalon est posé au déblocage, à partir du score COURANT : parti de
 // zéro, il aurait rattrapé d'un coup tous les paliers déjà franchis.
@@ -4785,12 +4803,14 @@ function doodleTileDraw(ctx, p, t) {
     ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.beginPath(); ctx.ellipse(bx - 1.6, y - 1, 1.4, 2, -0.4, 0, Math.PI * 2); ctx.fill();
     return;
   }
-  // ⏸️ Pause : deux barres, aux couleurs de ce qu'elle vient de faire (bleu = figé, rouge =
+  // ⏸️ Pause : deux barres, aux couleurs de ce qu'elle vient de faire (bleu = ralenti, rouge =
   // déchaîné) ou neutres tant qu'on n'y a pas touché.
+  // ⚠ `p.froze` porte le MULTIPLICATEUR tiré (0,5 ou 2) depuis 13.3.0, plus un facteur absolu :
+  // la couleur se lit donc sur « < 1 » et non sur une égalité avec une constante.
   if (p.type === 'freeze') {
     const st = p.froze;
-    doodleRR(ctx, x, y, w, h, 6, st == null ? '#5b6470' : st === D_FREEZE_SLOW ? '#3f6fd8' : '#c0392b');
-    ctx.fillStyle = st == null ? '#3c434c' : st === D_FREEZE_SLOW ? '#2b4a96' : '#7a1f18'; ctx.fillRect(x, y + h - 4, w, 4);
+    doodleRR(ctx, x, y, w, h, 6, st == null ? '#5b6470' : st < 1 ? '#3f6fd8' : '#c0392b');
+    ctx.fillStyle = st == null ? '#3c434c' : st < 1 ? '#2b4a96' : '#7a1f18'; ctx.fillRect(x, y + h - 4, w, 4);
     ctx.fillStyle = '#f2f4f7';
     [-3.5, 2].forEach(dx => ctx.fillRect(x + w / 2 + dx, y + 3.5, 3, h - 9));
     return;
@@ -6372,7 +6392,10 @@ function doodlePerkHud(ctx, s, W) {
   // ☯️ Le prix payé à la Yin et Yang. ⚠ Affiché en PERMANENCE dès qu'il dépasse 1 : c'est un
   // engagement pris pour toute la partie, pas un effet qui passe, et rien d'autre ne le dirait.
   if (s.mobRate && s.mobRate > 1.001) chips.push({ t: `👾×${s.mobRate.toFixed(2)}`, bg:'rgba(122,75,208,0.92)', fg:'#fff' });
-  if (s.mobTime != null && s.mobTime !== 1) chips.push({ t: s.mobTime === 0 ? '⏸️' : '⏸️×2', bg: s.mobTime === 0 ? 'rgba(63,111,216,0.92)' : 'rgba(192,57,43,0.92)', fg:'#fff' });
+  // ⏸️ Le facteur de temps des créatures, tel qu'il est. ⚠ Affiché « ÷4 » plutôt que « ×0.25 »
+  // en dessous de 1 : c'est ainsi que la dalle l'annonce, et deux écritures pour un seul nombre
+  // auraient demandé au joueur de faire la conversion de tête.
+  if (s.mobTime != null && Math.abs(s.mobTime - 1) > 0.001) chips.push({ t: s.mobTime < 1 ? `⏸️÷${doodleFreezeTxt(1 / s.mobTime)}` : `⏸️×${doodleFreezeTxt(s.mobTime)}`, bg: s.mobTime < 1 ? 'rgba(63,111,216,0.92)' : 'rgba(192,57,43,0.92)', fg:'#fff' });
   if (!chips.length) return;
   ctx.save(); ctx.font = 'bold 12px sans-serif'; ctx.textBaseline = 'middle';
   let x = W - 8, y = 6;
