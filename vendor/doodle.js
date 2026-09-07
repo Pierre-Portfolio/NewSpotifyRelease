@@ -2489,56 +2489,57 @@ function doodleTileBand(score) { return D_TILE_P * (score >= 1000 ? 1.2 : score 
 // Ce sont eux qui empêchent qu'un malus soit subi en boucle, pas le taux — et c'est pour ça
 // qu'on peut régler celui-ci sans qu'un malus puisse être subi en boucle.
 const D_LUCKY_MAX = 3, D_LUCKY_GAP = 500, D_LUCKY_P = (0.0012 * 1.20 + 0.01) * 0.70;
-// 🏆 COFFRE DORÉ (12.9.0, demande utilisateur) : « 1/1000, et il contient un des effets d'une
-// case Lucky ». Il donne donc EXACTEMENT ce que donne la 🍀 case chance — `doodlePerkGrant`,
-// l'un des 5 bonus permanents — et rien d'autre : deux tirages différents pour la même
-// promesse auraient fini par diverger.
-// ⚠ Une chance sur MILLE par rangée éligible, écrite telle quelle : à ce taux les garde-fous
-// de la case chance (3 par partie, 500 points d'écart) n'ont pas lieu d'être — la rareté suffit,
-// et un plafond aurait rendu le coffre doré introuvable après trois trouvailles chanceuses.
-// ⚠ Comme la 🍀 case chance : jamais deux spéciales de suite (D_SPECIAL), aucun monstre ni trou
-// sur sa rangée (D_NOMOB), et absent du mode Classique — il n'y a ni coffre ni bonus là-bas.
-const D_GCHEST_P = 0.001;
-// ⚰️ COFFRE MAUDIT (12.9.1, demande utilisateur) : le jumeau noir du coffre doré — même
-// taux (1/1000), mais il RETIRE deux niveaux de bonus permanents au lieu d'en donner un.
-// ⚠ Ce sont bien les 🎁 bonus permanents (D_PERKS) qu'il mange, pas les butins d'arme :
-// c'est exactement la monnaie que donne le coffre doré, sinon les deux coffres ne seraient
-// pas les deux faces d'une même pièce.
-// ⚠ Un joueur qui n'a AUCUN bonus ne perd rien et le toast le dit : un coffre qui semblerait
+// 🏆 COFFRE DORÉ / ⚰️ COFFRE MAUDIT (12.9.0 → 12.9.6, demandes utilisateur)
+// ⚠ 12.9.6 — CE NE SONT PLUS DES DALLES. Ils étaient au départ deux tuiles tirées une rangée
+// sur mille ; ils n'existent désormais QUE comme variantes d'un COFFRE — celui qu'une créature
+// lâche et celui que fait naître la 🎁 Tuile coffre. Un coffre sur mille est doré, un sur mille
+// est maudit, et rien d'autre ne les fait apparaître.
+//   • 🏆 doré  : il donne ce que donne la 🍀 case chance (`doodlePerkGrant`), un bonus permanent.
+//   • ⚰️ maudit : il RETIRE des BUTINS D'ARME (`s.wpn`, ceux des coffres de créature : ⚡ Cadence,
+//     🎯 Perforant, 🌟 Éventail, 🚀 Missile…) — et NON les bonus permanents de la case chance.
+//     Il s'attaque à l'arsenal, pas à la corpulence : un coffre qui retire ce qu'un autre coffre
+//     a donné se lit tout seul.
+// ⚠ Les butins INSTANTANÉS (D_LOOT_INST : munitions, panacée) n'ont aucun niveau à retirer — ils
+// sont bus à l'ouverture, il n'en reste rien à voler.
+// ⚠ Un joueur qui n'a AUCUN butin ne perd rien et le toast le dit : un coffre qui semblerait
 // n'avoir rien fait passerait pour un bug.
-const D_CCHEST_P = 0.001, D_CCHEST_TAKE = 2;
-// 12.9.3 (demande utilisateur) — LES CRÉATURES PEUVENT LÂCHER CES DEUX COFFRES-LÀ. Une dalle
-// dorée ou maudite est une rencontre d'une rangée sur mille ; un monstre tué, lui, est chose
-// courante, donc le taux est bien plus bas que ce que « 1/1000 » laisserait croire pour une
-// rangée : D_CHEST_SPECIAL_P de chaque côté, soit environ un coffre spécial tous les 25 tués.
-// ⚠ Le coffre lâché ne change RIEN d'autre que son contenu : il tombe, se pose et se ramasse
+const D_CCHEST_TAKE = 2;
+// Retire D_CCHEST_TAKE niveaux, un par un, TIRÉS AU SORT PARMI CEUX QU'ON POSSÈDE — et non parmi
+// tous les butins : tirer un butin déjà à zéro aurait rendu le coffre inoffensif dès qu'il en
+// manquait la moitié. Un 🌟 Éventail à 3 peut donc en perdre deux d'un coup.
+// ⚠ Deux butins laissent une trace AILLEURS que dans `s.wpn` : les ✴️ shurikens sont des OBJETS
+// en orbite (`s.shur`) et le ⏱️ bouclier temporel un compte à rebours (`s.shTimeLeft`). Ils sont
+// RECALÉS sur le niveau restant après la boucle — même geste que le 🪙 pari, qui divise déjà les
+// butins : ce sont des conséquences, pas des effets, et les décrémenter à part finirait par
+// diverger (l'orbite garderait des lames que le butin ne porte plus).
+function doodleCursedGrant(s) {
+  const lost = [];
+  s.wpn = s.wpn || {};
+  for (let i = 0; i < D_CCHEST_TAKE; i++) {
+    const owned = D_LOOT.filter(l => !D_LOOT_INST.has(l.k) && (s.wpn[l.k] || 0) > 0);
+    if (!owned.length) break;
+    const l = owned[Math.floor(Math.random() * owned.length)];
+    s.wpn[l.k]--;
+    lost.push(l.icon);
+  }
+  s.shTimeLeft = Math.min(s.shTimeLeft || 0, (s.wpn.shTime || 0) * D_SHTIME);
+  if (s.shur) s.shur = s.shur.slice(0, (s.wpn.shuriken || 0) * D_SHURIKEN_N);
+  s.toast = { txt: lost.length
+    ? `⚰️ Coffre maudit ! ${lost.join(' ')} ${lost.length > 1 ? 'perdus' : 'perdu'}`
+    : '⚰️ Coffre maudit… mais tu n\'avais aucun butin à perdre.', life: D_TOAST_LIFE };
+  return lost;
+}
+// ⚠ UNE CHANCE SUR MILLE PAR COFFRE (demande utilisateur), et le coffre est la SEULE façon de
+// les rencontrer : celui qu'une créature lâche et celui que fait naître la 🎁 Tuile coffre
+// passent tous deux par ce tirage.
+// ⚠ Le coffre spécial ne change RIEN d'autre que son contenu : il tombe, se pose et se ramasse
 // exactement comme un coffre ordinaire. Seule l'ouverture bifurque (`c.kind`).
-const D_CHEST_SPECIAL_P = 0.02;
+const D_CHEST_SPECIAL_P = 0.001;
 function doodleChestKind() {
   const r = Math.random();
   if (r < D_CHEST_SPECIAL_P) return 'gold';
   if (r < D_CHEST_SPECIAL_P * 2) return 'cursed';
   return null;
-}
-// Retire D_CCHEST_TAKE niveaux, un par un, TIRÉS AU SORT PARMI CEUX QU'ON POSSÈDE — et non
-// parmi les 5 bonus : tirer un bonus déjà à zéro aurait rendu le coffre inoffensif dès qu'il
-// manquait deux bonus sur cinq. Un bonus à 3 peut donc en perdre deux d'un coup.
-// ⚠ `armorLeft` est RABATTU sur le nouveau total : la carapace en réserve ne doit pas
-// survivre au bonus qui la fournit, sinon le malus ne se verrait qu'à la partie suivante.
-function doodleCursedGrant(s) {
-  const lost = [];
-  for (let i = 0; i < D_CCHEST_TAKE; i++) {
-    const owned = D_PERKS.filter(p => (s.perks[p.k] || 0) > 0);
-    if (!owned.length) break;
-    const p = owned[Math.floor(Math.random() * owned.length)];
-    s.perks[p.k]--;
-    lost.push(p.icon);
-  }
-  s.armorLeft = Math.min(s.armorLeft, s.perks.armor);
-  s.toast = { txt: lost.length
-    ? `⚰️ Coffre maudit ! ${lost.join(' ')} ${lost.length > 1 ? 'perdus' : 'perdu'}`
-    : '⚰️ Coffre maudit… mais tu n\'avais aucun bonus à perdre.', life: D_TOAST_LIFE };
-  return lost;
 }
 const D_MALUS = [
   { k: 'mrev',   icon: '🌀', label: 'Vertige',    txt: 'commandes inversées' },
@@ -3685,7 +3686,7 @@ function doodleMakeMob(s, ny, pl) {
   return { x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.72 : 0 };
 }
 // « max 1 de suite » : jamais une tuile spéciale juste après une autre (ni après une cassante).
-const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'unlucky', 'chest', 'gchest', 'cchest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
+const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'lucky', 'unlucky', 'chest', 'rrfake', 'nightmare'], [...D_BIOME_TILES]));
 // 🎲 Les leurres de la roulette russe : dessinés comme une dalle, mais RIEN ne s'y pose —
 // ni le doodler, ni un coffre qui tombe, ni une météorite. Un seul prédicat pour les trois,
 // sinon un coffre finirait par flotter en l'air sur une plateforme qui n'existe pas.
@@ -3693,7 +3694,7 @@ const D_SPECIAL = new Set(D_TILES.map(t => t.k).concat(['rainbow', 'perk', 'luck
 // les coffres et les météorites, sinon un coffre serait resté posé sur du vide.
 function doodleSolid(p) { return !p.dead && p.type !== 'rrfake' && p.ori !== 2 && p.tama !== false; }
 // Ces cases-là n'emmènent jamais de monstre ni de trou sur leur propre ligne.
-const D_NOMOB = new Set(['rainbow', 'perk', 'lucky', 'unlucky', 'gchest', 'cchest']);
+const D_NOMOB = new Set(['rainbow', 'perk', 'lucky', 'unlucky']);
 const D_ICE_SLIP = 22;          // frames sans contrôle après un rebond sur la glace
 // ⚠ 10.8.2 — La ❄️ Plaque de glace glisse PLUS LONGTEMPS (demande utilisateur, « augmente
 // légèrement la glisse ») : +36 %. C'est le seul effet qui lui reste, et sa constante est
@@ -4878,25 +4879,6 @@ function doodleTileDraw(ctx, p, t) {
     ctx.fillStyle = '#ffd54a'; ctx.fillRect(x + w / 2 - 3, y + h * 0.3, 6, 6);
     ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 1.3;
     if (!p.used) { ctx.save(); ctx.globalAlpha = 0.5 + Math.sin(t * 0.15) * 0.5; doodleRR(ctx, x + 1.5, y + 1.5, w - 3, h - 3, 5, 'rgba(0,0,0,0)'); ctx.stroke(); ctx.restore(); }
-    if (p.used) doodleTileSpent(ctx, p);
-    return;
-  }
-  // 🏆 Coffre doré / ⚰️ Coffre maudit : une planche ordinaire SUR LAQUELLE est posé un vrai
-  // coffre — le même dessin que le 📦 coffre de récompense (`doodleChestBody`), à la palette
-  // près. ⚠ 12.9.2 — Ils étaient peints à plat sur la dalle, comme une tuile colorée : on ne
-  // voyait plus un coffre, on voyait une barre dorée. Le coffre déborde donc VOLONTAIREMENT
-  // au-dessus de la dalle, exactement comme le fait le coffre qu'une créature lâche.
-  // ⚠ Une fois ouvert, le coffre disparaît et il ne reste que la planche, éteinte : la
-  // récompense est prise, la plateforme demeure.
-  if (p.type === 'gchest' || p.type === 'cchest') {
-    const gold = p.type === 'gchest';
-    doodleRR(ctx, x, y, w, h, 6, gold ? '#8a6a3a' : '#3a2440');                        // la planche qui le porte
-    ctx.fillStyle = gold ? '#5b4620' : '#221429'; ctx.fillRect(x, y + h - 4, w, 4);
-    if (!p.used) {
-      const cw = D_CHEST_W, ch = D_CHEST_H, bob = Math.sin(t * 0.13) * 1.4;
-      doodleChestBody(ctx, x + w / 2 - cw / 2, y - ch + 1 + bob, cw, ch,
-        gold ? D_CHEST_PAL.gold : D_CHEST_PAL.cursed, t, gold ? 'gold' : 'cursed');
-    }
     if (p.used) doodleTileSpent(ctx, p);
     return;
   }
@@ -6481,7 +6463,7 @@ function doodlePlatform(ctx, p, t) {
   if (p.type === 'rainbow') return doodleRainbowPlat(ctx, p);
   if (p.type === 'perk' || p.type === 'lucky' || p.type === 'unlucky') return doodleCase(ctx, p, t || 0);
   if (D_BIOME_TILES.has(p.type) && !D_BIOME_OWNDRAW.has(p.type)) return doodleBiomeTile(ctx, p, t || 0);
-  if (p.type === 'chest' || p.type === 'gchest' || p.type === 'cchest' || p.type === 'rrfake' || p.type === 'nightmare' || p.type === 'bambooed' || p.type === 'creation' || D_BIOME_OWNDRAW.has(p.type) || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni le 🏆 Coffre doré, ni le ⚰️ Coffre maudit, ni les leurres 🎲, ni la 💀 cauchemardesque, ni la ✨ Création ne sont dans D_TILES
+  if (p.type === 'chest' || p.type === 'rrfake' || p.type === 'nightmare' || p.type === 'bambooed' || p.type === 'creation' || D_BIOME_OWNDRAW.has(p.type) || D_TILES.some(t2 => t2.k === p.type)) return doodleTileDraw(ctx, p, t || 0);   // ⚠ ni la 🎁 Coffre, ni les leurres 🎲, ni la 💀 cauchemardesque, ni la ✨ Création ne sont dans D_TILES
   const c = cols[p.type] || cols.green;
   doodleRR(ctx, p.x, p.y, p.w, p.h, 6, c[0]);
   ctx.fillStyle = c[1]; ctx.fillRect(p.x + 3, p.y + p.h - 4, p.w - 6, 3);
@@ -8936,17 +8918,6 @@ function doodleSpawnRow(s, ny, risky) {
   else if (!doodleClassic(s) && (!s.bossDone || (s.ultime && doodleUltDone(s).boss < D_ULT_BOSS && !s.boss && !s.bossHide)) && s.score >= D_BOSS_FROM && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'nightmare';
   }
-  // 🏆 Coffre doré : une rangée sur mille, sans plafond ni écart minimum — voir D_GCHEST_P.
-  // ⚠ Placé APRÈS les cases dues et la cauchemardesque : à 1/1000 il ne doit voler la rangée
-  // à aucune d'elles, et sa propre rareté suffit à ce qu'il reste un événement.
-  else if (!doodleClassic(s) && !D_SPECIAL.has(s.lastType) && Math.random() < D_GCHEST_P) {
-    type = 'gchest';
-  }
-  // ⚰️ Coffre maudit : même taux, même rang, tirage SÉPARÉ — deux `else if` de suite et non un
-  // tirage partagé, sinon le second coffre n'aurait jamais que la moitié des chances du premier.
-  else if (!doodleClassic(s) && !D_SPECIAL.has(s.lastType) && Math.random() < D_CCHEST_P) {
-    type = 'cchest';
-  }
   // ⚠ 9.2.8 — La tuile du biome ne remplace qu'une plateforme ORDINAIRE : elle ne doit voler la
   // rangée ni à une case (due), ni à une multicolore, ni à une tuile débloquée. Et jamais deux
   // spéciales de suite, comme partout ailleurs.
@@ -9045,8 +9016,6 @@ function doodleRules() {
       { i:'🍀', n:'Case chance',  d:`${doodlePct(D_LUCKY_P)} des rangées éligibles, ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
       { i:'☠️', n:'Case malchance', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}) et mêmes garde-fous, mais comptés séparément : ${D_LUCKY_MAX} par partie au maximum et jamais deux à moins de ${D_LUCKY_GAP} points.` },
       { i:'💀', n:'Case cauchemardesque', d:`même taux que la case chance (${doodlePct(D_LUCKY_P)}), à partir de ${D_BOSS_FROM} points, UNE SEULE fois par partie.` },
-      { i:'🏆', n:'Coffre doré',  d:`${doodlePct(D_GCHEST_P)} des rangées éligibles — une sur mille. Ni plafond par partie ni écart minimum : la rareté suffit.` },
-      { i:'⚰️', n:'Coffre maudit', d:`${doodlePct(D_CCHEST_P)} des rangées éligibles — une sur mille aussi, tirée à part.` },
       { i:'🔓', n:'Tuiles débloquées', d:`une nouvelle tous les ${D_TILE_STEP} points ; elles se partagent ensuite ${doodlePct(D_TILE_P)} des rangées.` },
       { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_EACH)} des rangées au tirage PAR TUILE du biome courant — soit ${doodlePct(D_BIOME_TILE_EACH * D_BIOME_TILE_SEEN)} réellement vues, le reste partant aux garde-fous : elles ne prennent qu'une rangée ordinaire, et jamais deux spéciales de suite. Une tuile par biome est volontairement RARE (🍄 Champignon, 𓂀 Égypte, 🧊 Stalactite, 🔥 Magma, 💫 Attraction, 🦑 Tentacule, ⚡ Électrifiée, ⛈️ Orage) : ${Math.round((1 - D_BIOME_TILE_RARE) * 100)} % de moins que ses deux voisines, sa rangée retombe en plateforme ordinaire ${Math.round((1 - D_BIOME_TILE_RARE) * 100)} fois sur 100, et ses deux voisines n'y gagnent rien. Au changement de biome, une seule tuile du précédent est tirée au sort et reste jouable ici — le « vestige » — pour ${doodlePct(D_RELIC_SHARE)} de cette bande, quel que soit son poids. Rien d'autre ne s'accumule d'un palier à l'autre.` },
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
@@ -9054,7 +9023,7 @@ function doodleRules() {
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
       { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} points — c'est-à-dire dès que les biomes commencent à changer. ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche 2 coffres.` },
       { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
-      { i:'🏆⚰️', n:'Coffre spécial lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés sont dorés et autant sont maudits — tirés coffre par coffre, contenu identique à la dalle du même nom.` },
+      { i:'🏆⚰️', n:'Coffre spécial', d:`une chance sur mille (${doodlePct(D_CHEST_SPECIAL_P)}) qu'un coffre soit doré, autant qu'il soit maudit — tiré coffre par coffre, qu'il vienne d'une créature ou de la 🎁 Tuile coffre. C'est la SEULE façon de les rencontrer.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
       { i:'🎩', n:'Chapeau, jetpack', d:`${doodlePct(0.03)} des plateformes vertes et bleues sans ressort. Ressort ${doodlePct(0.09)}, trampoline ${doodlePct(0.02)}.` },
     ] },
@@ -9071,16 +9040,14 @@ function doodleRules() {
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
       { i:'🍀', n:'Case chance',  d:`très rare (${D_LUCKY_MAX} par partie au maximum, jamais deux à moins de ${D_LUCKY_GAP} points). Elle donne un bonus permanent, et rien d'autre. Elle ne rend qu'au premier rebond mais reste une plateforme.` },
       { i:'☠️', n:'Case malchance', d:`la jumelle sombre de la case chance, aussi rare qu'elle et comptée à part. Elle donne l'un des malus ci-dessous, et rien d'autre. Elle ne frappe qu'au premier rebond mais reste une plateforme.` },
-      { i:'🏆', n:'Coffre doré',  d:`une rangée sur mille. Il donne EXACTEMENT ce que donne la 🍀 case chance : un bonus permanent au hasard parmi les cinq, et rien d'autre. Il ne s'ouvre qu'au premier rebond mais reste une plateforme.` },
-      { i:'⚰️', n:'Coffre maudit', d:`son jumeau noir, aussi rare que lui (une rangée sur mille). Il RETIRE ${D_CCHEST_TAKE} niveaux de bonus permanents, tirés parmi ceux que tu possèdes — un bonus à 3 peut en perdre deux d'un coup. Sans aucun bonus, tu ne perds rien. Il ne frappe qu'au premier rebond mais reste une plateforme.` },
       { i:'💀', n:'Case cauchemardesque', d:`une seule par partie. Elle ouvre un combat : les dalles disparaissent, un plancher apparaît, tu ne sautes plus et tu ne fais que te déplacer et tirer — le tir y est gratuit. ${doodleBossHp(0)} points de vie (${doodleBossHp(D_BOSS_HP_HI_FROM)} au-delà de ${D_BOSS_HP_HI_FROM} points), l'un des ${D_BOSS_KINDS.length} monstres (${D_BOSS_KINDS.map(b => b.name).join(', ')}) et ses ${D_BOSS_KINDS[0].atk.length} attaques. Dès qu'il a fini un sort il se pose un bouclier qui tanque ${D_BOSS_SH} balles : brise-le pour reprendre des points de vie. Terrassé : ${D_BOSS_LOOT} trésors et une tuile neuve ; une fois les trésors ramassés, les dalles reviennent.` },
     ] },
     { t:'Bonus permanents', c:'#7b4bd0', rows: D_PERKS.map(p => ({ i:p.icon, n:p.label, d:p.txt + ' — cumulable.' })) },
     { t:'Malus de la case malchance', c:'#e2564a', rows: D_MALUS.map(m => ({ i:m.icon, n:m.label, d:m.txt + (['jam','ambush'].indexOf(m.k) < 0 ? ' — pendant environ 6 s.' : '.') })) },
     { t:'Coffres des monstres', c:'#c98b3a', rows:[
       { i:'📦', n:'Coffre',  d:'chaque monstre tué en lâche un ; il tombe et se pose sur la première plateforme. La créature très rare d\'un biome en lâche deux.' },
-      { i:'🏆', n:'Coffre doré lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés : au lieu d'un butin d'arme, il donne un bonus permanent — exactement la dalle 🏆 Coffre doré.` },
-      { i:'⚰️', n:'Coffre maudit lâché', d:`${doodlePct(D_CHEST_SPECIAL_P)} des coffres lâchés : il RETIRE ${D_CCHEST_TAKE} niveaux de bonus permanents — exactement la dalle ⚰️ Coffre maudit. On le reconnaît à sa couleur AVANT de le ramasser.` },
+      { i:'🏆', n:'Coffre doré',  d:`un coffre sur mille : au lieu d'un butin d'arme, il donne un BONUS PERMANENT, comme la 🍀 case chance.` },
+      { i:'⚰️', n:'Coffre maudit', d:`un coffre sur mille : il RETIRE ${D_CCHEST_TAKE} niveaux de BUTIN D'ARME, tirés parmi ceux que tu possèdes — un 🌟 Éventail à 3 peut en perdre deux d'un coup. Sans aucun butin, tu ne perds rien. On le reconnaît à sa couleur AVANT de le ramasser.` },
       ...odds.map(l => ({ i:l.icon, n:l.label, d:`${l.txt} — ${pOf(l.k)} du contenu d'un coffre, ` + (l.max === 1 ? 'une seule fois par partie.' : l.max > 1 && l.max < 99 ? `cumulable jusqu'à ${l.max}.` : 'répétable.') })),
     ] },
     { t:`Tuiles débloquées (une par palier de ${D_TILE_STEP} points)`, c:'#2f7fbf', rows: D_TILES.map(t => ({ i:t.icon, n:t.name, d:t.txt })) },
