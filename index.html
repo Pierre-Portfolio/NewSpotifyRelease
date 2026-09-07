@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.5.0';
+const APP_VERSION = '13.5.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -13339,6 +13339,8 @@ const AI_MODULES = {
     why:"Photographier une étagère et en sortir la liste des aliments, puis croiser ça avec des recettes réalisables : aucune base d'aliments ne fait ni l'un ni l'autre. Sans IA, il ne reste que la saisie à la main." },
   histoire: { label:"Fiche d'œuvre · fil de questions",
     why:"Wikipédia ne répond pas à « qu'est-ce que ce bâtiment sur ma photo ». L'IA identifie l'œuvre à partir de la ville et des photos, la résume et explique son lien avec la ville ; le fil de questions sous la fiche s'appuie sur la même IA." },
+  musique: { label:'Delta → 🤖 IA : artistes et titres à découvrir',
+    why:"Spotify a retiré /recommendations et les « artistes similaires » de son API (nov. 2024) : plus aucune source ne dit ce qui pourrait te plaire. La base locale, elle, ne connaît que ce que tu écoutes DÉJÀ. L'IA relit tes titres likés, tes abonnements et tes genres, et propose 10 artistes que tu ne suis pas et 10 titres — chaque ligne étant ensuite recherchée dans le catalogue Spotify pour écarter l'inventé." },
   revente: { label:'Rédaction des annonces',
     why:"L'IA rédige titre, description et prix conseillé à partir de tes photos et des infos de l'article, un texte par plateforme (Vinted, Leboncoin, eBay) avec leurs codes. ⚠ Publier automatiquement reste impossible : aucune de ces plateformes n'ouvre d'API de dépôt." },
   food: { label:'Calories · photo du plat',
@@ -42761,6 +42763,15 @@ async function deltaScan(onProgress) {
     followedTotal: followed.length,
     followedGap,
     likedGap,
+    // ── Matière du sous-collapse 🤖 IA (13.5.1) ────────────────────────────────
+    // `likedTop` = les artistes les plus likés, la description la plus honnête des goûts
+    // qu'on puisse tirer d'ici (comptes EXACTS, pas un nom recollé depuis « A, B »).
+    // `followedNames` = TOUS les abonnements : c'est la seule liste qui permette de tenir
+    // la promesse « 10 artistes que je ne suis pas » côté filtre local, le prompt n'en
+    // recevant qu'un extrait. ⚠ Des NOMS, pas des objets : quelques Ko contre les dizaines
+    // de Ko d'une liste de pistes — mais comptés quand même dans le volume du cache.
+    likedTop: [...likedArtists.values()].sort((x, y) => y.count - x.count).slice(0, 60),
+    followedNames: followed.map(a => a.name).filter(Boolean),
   };
 }
 
@@ -42770,7 +42781,8 @@ function deltaCacheSave(d) {
   try {
     // `all` est mémorisé en plus du delta (mode debug) → il compte dans le volume
     const n = (d.likedAll || d.likedOnly).length + d.playlists.reduce((s, p) => s + (p.all || p.tracks).length, 0)
-            + (d.followedGap || []).length + (d.likedGap || []).length;
+            + (d.followedGap || []).length + (d.likedGap || []).length
+            + (d.followedNames || []).length + (d.likedTop || []).length;
     if (n > DELTA_CACHE_MAX) { localStorage.removeItem(DELTA_CACHE_KEY); return false; }
     localStorage.setItem(DELTA_CACHE_KEY, JSON.stringify(d));
     return true;
@@ -42988,6 +43000,286 @@ function DeltaLikedArtistList({ artists, empty }) {
   );
 }
 
+// ════════════════════════════════════════════════
+// 🤖 IA — « des sons que je pourrais aimer » (13.5.1, demande utilisateur)
+// Dernier sous-collapse de Delta : 10 ARTISTES que tu ne suis pas + 10 TITRES, déduits de
+// tes goûts. ⚠ Ce que l'IA apporte ici et qu'aucune API ne sait faire : Spotify n'ouvre plus
+// /recommendations (retiré en nov. 2024) ni les « related artists », et la base locale ne
+// connaît que ce que tu écoutes DÉJÀ — sortir de ce cercle demande un modèle.
+// ⚠ Elle part des DONNÉES DE L'ANALYSE, pas de la mémoire du modèle sur toi : artistes les
+// plus likés, abonnements, genres de la base locale. Sans analyse, pas de suggestion — comme
+// partout dans Delta, rien n'est interrogé tant qu'on n'a pas cliqué.
+// ⚠ TOUT ce qui revient est repassé au filtre LOCAL : un artiste déjà suivi est jeté (la
+// promesse « que je ne suis pas » ne peut pas dépendre du bon vouloir du modèle), un titre
+// déjà liké aussi. Puis chaque ligne est cherchée sur Spotify — ce qui donne la pochette et
+// le bouton ▶, et écarte au passage ce que le modèle aurait inventé.
+const DELTA_AI_LS   = 'spotifyplus_delta_ai';   // cache re-fetchable ⇒ JAMAIS dans buildBackup
+const DELTA_AI_WANT = 10;                        // 10 artistes + 10 titres (demande utilisateur)
+const DELTA_AI_BAN  = 120;                       // noms d'artistes envoyés comme « déjà suivis »
+
+// Comparaison de noms tolérante : casse, accents, ponctuation et « the » initial.
+function deltaAiNorm(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/^the\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+// Ce qu'on sait des goûts, tiré de l'analyse + de la base locale (genres).
+// ⚠ Repli pour une analyse d'avant 13.5.1 (pas de `likedTop`) : on recompte depuis les
+// titres likés, dont le champ `artist` est une chaîne « A, B » — un nom contenant une
+// virgule y perd, d'où la préférence pour `likedTop` quand il est là.
+function deltaAiTaste(data, artists) {
+  let top = Array.isArray(data.likedTop) ? data.likedTop.slice(0, 40) : null;
+  if (!top) {
+    const cnt = new Map();
+    for (const t of (data.likedAll || data.likedOnly || [])) {
+      for (const raw of String(t.artist || '').split(',')) {
+        const n = raw.trim();
+        if (!n || n === '—') continue;
+        cnt.set(n, (cnt.get(n) || 0) + 1);
+      }
+    }
+    top = [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40).map(([name, count]) => ({ name, count }));
+  }
+  const g = new Map();
+  for (const a of (artists || [])) for (const x of (a.genres || [])) g.set(x, (g.get(x) || 0) + 1);
+  return {
+    liked:   top,
+    followed: Array.isArray(data.followedNames) ? data.followedNames : [],
+    genres:  [...g.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(e => e[0]),
+  };
+}
+function deltaAiPrompt(t) {
+  const liked = t.liked.map(a => `${a.name} (${a.count})`).join(', ') || '(aucun)';
+  const ban   = t.followed.slice(0, DELTA_AI_BAN).join(', ') || '(aucun)';
+  return [
+    'Tu es un conseiller musical. Voici les goûts réels d\'un auditeur, relevés dans sa bibliothèque Spotify.',
+    '',
+    `Artistes dont il a liké le plus de titres (nombre de titres likés entre parenthèses) : ${liked}`,
+    t.genres.length ? `Genres dominants de ses abonnements : ${t.genres.join(', ')}` : '',
+    `Artistes qu'il suit DÉJÀ (extrait) : ${ban}`,
+    '',
+    `Propose EXACTEMENT ${DELTA_AI_WANT} artistes qu'il ne suit pas encore et ${DELTA_AI_WANT} titres précis qu'il pourrait aimer.`,
+    'Règles :',
+    `- aucun artiste de la liste « suit déjà », aucun artiste de la liste de ses artistes les plus likés ;`,
+    '- des artistes et des titres qui EXISTENT vraiment, orthographiés comme sur Spotify (pas de titre inventé) ;',
+    '- varie : ne mets pas les 10 titres du même artiste ;',
+    '- « pourquoi » = une phrase courte reliant la proposition à ses goûts ci-dessus, en français.',
+    '',
+    'Réponds UNIQUEMENT par ce JSON, sans texte autour :',
+    '{"artistes":[{"nom":"","genre":"","pourquoi":""}],"titres":[{"titre":"","artiste":"","pourquoi":""}]}',
+  ].filter(Boolean).join('\n');
+}
+
+// Recherche Spotify d'une suggestion → pochette + URI jouable. Rend null quand Spotify ne
+// trouve rien (proposition inventée, ou orthographe trop éloignée) : la ligne reste affichée
+// mais sans ▶, avec un lien de recherche.
+// ⚠ apiGet THROW sur 429 : sans ce try, une seule 429 ferait échouer toute la génération
+// alors que les suggestions, elles, sont déjà là.
+async function deltaAiFind(kind, q) {
+  try {
+    const d = deltaGuard(await apiGet(
+      `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=${kind}&limit=1&market=FR`));
+    const it = kind === 'track' ? d?.tracks?.items?.[0] : d?.artists?.items?.[0];
+    if (!it?.id) return null;
+    const imgs = (kind === 'track' ? it.album?.images : it.images) || [];
+    return {
+      id: it.id,
+      uri: it.uri || '',
+      name: it.name || '',
+      image: imgs.length ? (imgs[imgs.length - 1]?.url || '') : '',
+      url: it.external_urls?.spotify || '',
+      artist: kind === 'track' ? (it.artists || []).map(a => a?.name).filter(Boolean).join(', ') : '',
+    };
+  } catch { return null; }
+}
+function deltaAiSearchUrl(q) { return 'https://open.spotify.com/search/' + encodeURIComponent(q); }
+
+// État PARTAGÉ module-level (même patron que `_delta`) : StatsCollapse démonte ses enfants,
+// et une génération dure plusieurs secondes.
+const _deltaAi = { state:'idle', progress:'', err:'', data:null, loaded:false, subs:new Set() };
+function deltaAiSet(patch) {
+  Object.assign(_deltaAi, patch);
+  _deltaAi.subs.forEach(f => { try { f(); } catch {} });
+}
+function deltaAiCacheSave(d) {
+  try { localStorage.setItem(DELTA_AI_LS, JSON.stringify(d)); } catch { try { localStorage.removeItem(DELTA_AI_LS); } catch {} }
+}
+function deltaAiCacheLoad() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DELTA_AI_LS));
+    return (d && Array.isArray(d.artistes) && Array.isArray(d.titres)) ? d : null;
+  } catch { return null; }
+}
+async function deltaAiRun(data, artists) {
+  if (_deltaAi.state === 'loading') return;
+  deltaAiSet({ state:'loading', progress:'L\'IA écoute tes goûts…', err:'' });
+  try {
+    const taste = deltaAiTaste(data, artists);
+    if (!taste.liked.length && !taste.followed.length) throw new Error('EMPTY_TASTE');
+    const txt  = await aiGenerate('musique', [{ text: deltaAiPrompt(taste) }]);
+    const meta = aiMeta();
+    const j    = geminiExtract(txt, '{', '}');
+    if (!j) throw new Error('Réponse de l\'IA illisible.');
+
+    // ── Filtre LOCAL : la promesse « que je ne suis pas » ne dépend pas du modèle ──
+    const banned = new Set(taste.followed.map(deltaAiNorm));
+    taste.liked.forEach(a => banned.add(deltaAiNorm(a.name)));
+    const likedKeys = new Set((data.likedAll || data.likedOnly || [])
+      .map(t => deltaAiNorm(t.title) + '|' + deltaAiNorm(String(t.artist || '').split(',')[0])));
+
+    const seenA = new Set();
+    let artistes = (Array.isArray(j.artistes) ? j.artistes : [])
+      .map(a => ({ name: String(a?.nom || '').trim(), genre: String(a?.genre || '').slice(0, 40), why: String(a?.pourquoi || '').slice(0, 200) }))
+      .filter(a => {
+        const k = deltaAiNorm(a.name);
+        if (!k || banned.has(k) || seenA.has(k)) return false;
+        seenA.add(k); return true;
+      })
+      .slice(0, DELTA_AI_WANT);
+
+    const seenT = new Set();
+    let titres = (Array.isArray(j.titres) ? j.titres : [])
+      .map(t => ({ title: String(t?.titre || '').trim(), artist: String(t?.artiste || '').trim(), why: String(t?.pourquoi || '').slice(0, 200) }))
+      .filter(t => {
+        const k = deltaAiNorm(t.title) + '|' + deltaAiNorm(t.artist);
+        if (!t.title || !t.artist || seenT.has(k) || likedKeys.has(k)) return false;
+        seenT.add(k); return true;
+      })
+      .slice(0, DELTA_AI_WANT);
+    if (!artistes.length && !titres.length) throw new Error('L\'IA n\'a proposé que des artistes que tu suis déjà ou des titres déjà likés.');
+
+    // ── Résolution Spotify (pochette + ▶). Facultative : une ligne non trouvée reste. ──
+    for (let i = 0; i < artistes.length; i++) {
+      deltaAiSet({ progress: `Recherche sur Spotify · artiste ${i + 1}/${artistes.length}` });
+      artistes[i].found = await deltaAiFind('artist', artistes[i].name);
+      await sleep(DELTA_GAP_MS);
+    }
+    for (let i = 0; i < titres.length; i++) {
+      deltaAiSet({ progress: `Recherche sur Spotify · titre ${i + 1}/${titres.length}` });
+      titres[i].found = await deltaAiFind('track', `${titres[i].title} ${titres[i].artist}`);
+      await sleep(DELTA_GAP_MS);
+    }
+    const out = { at: Date.now(), ai: meta.ai, fb: meta.fb, artistes, titres };
+    deltaAiCacheSave(out);
+    deltaAiSet({ state:'ok', data: out, progress:'' });
+  } catch (e) {
+    const m = String(e?.message || e || '');
+    deltaAiSet({ state:'err', progress:'', err:
+      m === 'NO_KEY'      ? 'Aucune clé d\'IA enregistrée — ouvre le module API pour en ajouter une.'
+      : m === AI_OFF_MSG  ? m
+      : m === 'EMPTY_TASTE' ? 'L\'analyse n\'a trouvé ni titre liké ni abonnement : il n\'y a rien à partir de quoi suggérer.'
+      : 'Suggestions impossibles : ' + (m || 'erreur') + '.' });
+  }
+}
+
+// Une ligne de suggestion : pochette (celle de Spotify si la recherche a abouti), libellé,
+// raison, et ▶ quand un URI jouable a été trouvé.
+function DeltaAiRow({ icon, title, sub, why, found, query, color }) {
+  return (
+    <div style={{ display:'flex', alignItems:'flex-start', gap:10, padding:'7px 4px' }}>
+      <AlbumArt size={38} letter={(title || '?')[0].toUpperCase()} color={color} image={found?.image || ''} />
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>
+          {icon} {title}
+        </div>
+        {sub && <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{sub}</div>}
+        {why && <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.45, marginTop:2 }}>{why}</div>}
+        {!found && (
+          <div style={{ fontSize:9, color:'#e0a050', fontFamily:'DM Mono,monospace', marginTop:2 }}>
+            introuvable sur Spotify — à vérifier
+          </div>
+        )}
+      </div>
+      {found?.uri && found.uri.startsWith('spotify:track:') ? (
+        <button onClick={() => playTrack(found.uri)} title="Écouter"
+          style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
+          <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
+        </button>
+      ) : null}
+      <a href={safeHref(found?.url || deltaAiSearchUrl(query))} target="_blank" rel="noopener noreferrer"
+        title={found?.url ? 'Ouvrir sur Spotify' : 'Chercher sur Spotify'}
+        style={{ fontSize:13, color:C.accent, textDecoration:'none', flexShrink:0, padding:'0 4px' }}>↗</a>
+    </div>
+  );
+}
+
+function DeltaAiPanel({ data }) {
+  const { artists } = useStore();
+  const [, force] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => {
+    _deltaAi.subs.add(force);
+    if (!_deltaAi.loaded) {
+      _deltaAi.loaded = true;
+      const c = deltaAiCacheLoad();
+      if (c) deltaAiSet({ data:c, state:'ok' });
+    }
+    return () => { _deltaAi.subs.delete(force); };
+  }, []);
+  const { state, progress, err } = _deltaAi;
+  const res = _deltaAi.data;
+  const loading = state === 'loading';
+  // ⚠ Chaîne vide alors que des clés existent = décoché dans le Paramétrage : message
+  // distinct de « aucune clé » (AI_OFF_MSG), sinon on cherche une clé qu'on a déjà.
+  const hasAi = aiAnyKey(false, 'musique');
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+        {DELTA_AI_WANT} artistes que tu ne suis pas et {DELTA_AI_WANT} titres, déduits de tes titres likés,
+        de tes abonnements et des genres de ta base locale. Spotify ne propose plus d'API de recommandation :
+        c'est le modèle qui sort de ce que tu écoutes déjà.
+      </div>
+      <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+        <button onClick={() => deltaAiRun(data, artists)} disabled={loading || !hasAi}
+          style={{ background:`${DELTA_COLOR}22`, border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px',
+            fontSize:11, fontWeight:700, cursor: (loading || !hasAi) ? 'default' : 'pointer', opacity: (loading || !hasAi) ? 0.5 : 1, fontFamily:'inherit' }}>
+          {loading ? '⏳ L\'IA cherche…' : (res ? '↻ De nouvelles idées' : '🤖 Trouver des idées')}
+        </button>
+        {res && (
+          <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+            {deltaWhen(res.at)}{res.ai ? ` · ${aiLabel(res.ai)}` : ''}
+            {res.fb ? <AiFallbackBadge fb={res.fb} /> : null}
+          </span>
+        )}
+      </div>
+      {!hasAi && (
+        <div style={{ fontSize:10.5, color:'#e0a050', background:'#e0a05012', border:'1px solid #e0a05044', borderRadius:8, padding:'8px 10px', lineHeight:1.5 }}>
+          {aiAnyKey(false) ? AI_OFF_MSG : 'Aucune clé d\'IA enregistrée — ajoute-en une dans le module API.'}
+        </div>
+      )}
+      {loading && <div style={{ fontSize:11, color:C.muted, fontFamily:'DM Mono,monospace' }}>{progress}</div>}
+      {state === 'err' && (
+        <div style={{ fontSize:11, color:'#e05050', background:'#e0505015', border:'1px solid #e0505044', borderRadius:8, padding:'9px 11px' }}>{err}</div>
+      )}
+      {res && (
+        <>
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:DELTA_COLOR, marginTop:2 }}>
+            🎤 {res.artistes.length} ARTISTE(S) À DÉCOUVRIR
+          </div>
+          {res.artistes.length
+            ? res.artistes.map(a => (
+                <DeltaAiRow key={'a:' + a.name} icon="🎤" title={a.name} sub={a.genre} why={a.why}
+                  found={a.found} query={a.name} color={DELTA_COLOR} />
+              ))
+            : <div style={{ fontSize:10.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>Aucun artiste retenu (tous déjà suivis).</div>}
+          <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.05em', color:'#e05050', marginTop:8 }}>
+            🎵 {res.titres.length} TITRE(S) À ÉCOUTER
+          </div>
+          {res.titres.length
+            ? res.titres.map(t => (
+                <DeltaAiRow key={'t:' + t.title + '|' + t.artist} icon="🎵" title={t.title} sub={t.artist} why={t.why}
+                  found={t.found} query={`${t.title} ${t.artist}`} color="#e05050" />
+              ))
+            : <div style={{ fontSize:10.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>Aucun titre retenu (tous déjà likés).</div>}
+          <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5, marginTop:6 }}>
+            Suggestions d'un modèle : elles ne viennent pas de Spotify. Chaque ligne a été cherchée dans son catalogue —
+            celles marquées « introuvable » n'y ont pas été retrouvées.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DeltaPanel() {
   const { user, logout, reloadArtists } = useStore();
   const [, force] = React.useReducer(x => x + 1, 0);
@@ -43170,6 +43462,13 @@ function DeltaPanel() {
                   empty="Tous les artistes de tes titres likés font partie de tes abonnements." />
               </>
             )}
+          </StatsCollapse>
+
+          {/* ─── Sous-collapse 3 : 🤖 IA — ce qui pourrait te plaire (13.5.1) ───
+              En DERNIER parce qu'il part des deux autres : il lui faut l'analyse pour
+              connaître les goûts ET la liste des abonnements. Aucun appel au montage. */}
+          <StatsCollapse defaultOpen={false} color={DELTA_COLOR} title={<span>🤖 IA</span>}>
+            <DeltaAiPanel data={data} />
           </StatsCollapse>
         </>
       )}
