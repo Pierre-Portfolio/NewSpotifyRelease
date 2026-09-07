@@ -2778,13 +2778,23 @@ function doodleGalePush(s, dx, dy, W) {
   }
 }
 // ⛈️ L'ORAGE : toutes les D_STORM_EVERY frames, la dalle foudroie ce qu'il y a de plus PROCHE
-// d'elle — mais uniquement PLUS BAS qu'elle (sa propre rangée est exclue). Une plateforme
-// frappée DÉCROCHE et tombe (`fvy`, comme sous une 🧊 Stalactite) ; le doodler frappé encaisse.
+// d'elle — mais uniquement PLUS BAS qu'elle (sa propre rangée est exclue). Une plateforme frappée
+// encaisse sans bouger, sauf ⚪ blanche ou 🟫 cassante qui DÉCROCHENT (`fvy`, comme sous une
+// 🧊 Stalactite, voir 13.3.2 plus bas) ; le doodler frappé encaisse.
 // ⚠ L'🧤 Immunité électrique le sauve, exactement comme sur une ⚡ Électrifiée : c'est la même
 // foudre, il aurait été incompréhensible qu'elle protège d'une dalle et pas de l'autre.
 // ⚠ Elle ne frappe que si elle est À L'ÉCRAN : sortie par le bas, elle aurait continué de
 // foudroyer un joueur qui ne pouvait ni la voir venir ni la fuir.
+// ⚠ 13.3.2 — DEUX CHANGEMENTS (demande utilisateur) :
+//   • la dalle frappée NE DÉCROCHE PLUS, sauf ⚪ blanche ou 🟫 cassante — celles-là cèdent déjà
+//     de leur nature, la foudre ne fait que hâter ce qu'elles font. L'orage reste un danger pour
+//     le doodler au lieu d'ouvrir sous lui des trous infranchissables ;
+//   • le coup s'annonce sur D_STORM_TELL frames (2 s) et non plus une seule seconde, et
+//     l'annonce porte une JAUGE qui se vide — « pour avoir une idée plus précise de quand il va
+//     péter ». La lueur et l'averse continuent de s'emballer par-dessus, mais elles disent un
+//     « bientôt » ; seule la jauge dit COMBIEN il reste.
 const D_STORM_EVERY = 300, D_STORM_LIFE = 26;
+const D_STORM_TELL = 120;      // 2 s d'annonce avant le coup
 const D_STORM_DROPS = 12;      // gouttes dessinées sous la dalle (voir doodleTileDraw)
 // ⚠ 11.1.7 — TOUTES LES TUILES D'UN BIOME NE SE VALENT PLUS (demande utilisateur) : huit d'entre
 // elles — une par biome, les plus lourdes de conséquences — apparaissent 60 % moins souvent.
@@ -3121,7 +3131,7 @@ const D_BIOMES = [
     tiles:[
       { k:'ghost',  icon:'👻', name:'Fantôme', own:true, txt:'s\'efface deux secondes après qu\'on a marché dessus' },
       { k:'gale',   icon:'🌬️', name:'Direction du vent', own:true, txt:'une girouette tournée vers l\'un des quatre points cardinaux. Elle ne souffle QUE si tu marches dessus, et alors pendant ' + Math.round(D_GALE_LIFE / 60) + ' s : toutes les ' + Math.round(D_GALE_EVERY / 60) + ' s elle pousse TOUTES les plateformes de ' + D_GALE_PUSH + ' px dans son sens — elles restent où le vent les a menées — et il te fait dériver en continu, tes sauts montant ' + Math.round(D_GALE_JUMP * 100) + ' % plus haut quand il monte, autant de moins quand il descend. Des filets d\'air balaient l\'écran tant qu\'il souffle, une seule bourrasque à la fois, et tout retombe au changement de biome' },
-      { k:'storm',  icon:'⛈️', name:'Orage',   own:true, w:D_BIOME_TILE_RARE, txt:'toutes les ' + Math.round(D_STORM_EVERY / 60) + ' s, la foudre frappe ce qu\'il y a de plus proche PLUS BAS qu\'elle : une dalle, qui décroche et tombe dans le vide, ou toi. L\'immunité électrique t\'en protège' },
+      { k:'storm',  icon:'⛈️', name:'Orage',   own:true, w:D_BIOME_TILE_RARE, txt:'toutes les ' + Math.round(D_STORM_EVERY / 60) + ' s, la foudre frappe ce qu\'il y a de plus proche PLUS BAS qu\'elle : une dalle, ou toi. Le coup s\'annonce ' + Math.round(D_STORM_TELL / 60) + ' s à l\'avance par une jauge qui se vide sur le bord de la dalle. La dalle frappée ne décroche PAS — sauf une ⚪ blanche ou une 🟫 cassante, qui tombent dans le vide. L\'immunité électrique te protège' },
     ],
     mobs:[{ k:'cherub', icon:'👼', w:38, h:34, vx:1.15, wave:2.2, drawn:true },
           { k:'seraph', icon:'😇', w:56, h:46, vx:0.85, rare:true, drawn:true }] },
@@ -5382,13 +5392,16 @@ function doodleTileDraw(ctx, p, t) {
   // ⛈️ Orage : le même nuage que sa sœur la girouette, mais d'ardoise, et une VRAIE averse sous le
   // ventre. ⚠ 10.11.0 — L'ÉCLAIR PENDU EST RETIRÉ (demande utilisateur, « retire l'icône orage
   // dessus ») et la pluie est TROIS FOIS plus dense pour prendre sa place.
-  // ⚠ L'annonce du coup ne disparaît pas pour autant : `near` (indexé sur `stormT`) fait
-  // ACCÉLÉRER et BLANCHIR l'averse, et allume une lueur dans le ventre du nuage. Sans elle,
-  // la foudre serait devenue une punition au hasard au lieu d'un rythme qu'on peut lire.
+  // ⚠ L'annonce du coup ne disparaît pas pour autant : `near` (indexé sur `stormT`, sur les
+  // D_STORM_TELL dernières frames) fait ACCÉLÉRER et FONCER l'averse, allume une lueur dans le
+  // ventre du nuage, y fait crépiter des amorces d'éclair sur la dernière seconde, et VIDE UNE
+  // JAUGE sous la dalle. Sans elle, la foudre serait une punition au hasard au lieu d'un rythme.
+  // ⚠ La jauge est la seule à donner l'instant EXACT : une lueur qui monte dit « bientôt », une
+  // barre qui se vide dit « dans tant ». C'est elle qu'on regarde pour sauter au bon moment.
   // ⚠ La pluie tombe SOUS la dalle, jamais dessus : au-dessus, elle se serait confondue avec le
   // doodler qui vient s'y poser.
   if (p.type === 'storm') {
-    const near = p.stormT == null ? 0 : Math.max(0, 1 - p.stormT / 60);
+    const near = p.stormT == null ? 0 : Math.max(0, 1 - p.stormT / D_STORM_TELL);
     doodleCloudBody(ctx, x, y, w, h, '#69727f', '#434b57');
     ctx.save();
     // La lueur qui monte dans le ventre : l'annonce du coup. ⚠ Un dégradé RADIAL et non un
@@ -5416,6 +5429,35 @@ function doodleTileDraw(ctx, p, t) {
       ctx.fillRect(rx, ry, 1.4, dl);
     }
     ctx.restore();
+    // ⏱️ L'annonce des 2 dernières secondes. ⚠ Elle est dessinée APRÈS l'averse : une jauge
+    // derrière la pluie se serait perdue dans les gouttes, exactement au moment où elle compte.
+    if (near > 0) {
+      ctx.save();
+      // 1. LA JAUGE : une barre pleine largeur qui se vide de la droite vers la gauche, sur le
+      //    bord haut de la dalle. Vide = le coup part. C'est le seul repère exact.
+      const gw = w * (1 - near);
+      ctx.fillStyle = 'rgba(20,24,32,0.30)'; ctx.fillRect(x, y - 4, w, 2.6);
+      ctx.fillStyle = near > 0.75 ? '#ffe98a' : '#8fb4d6'; ctx.fillRect(x, y - 4, gw, 2.6);
+      // 2. LES AMORCES : de courtes fourches crépitent dans le ventre du nuage sur la dernière
+      //    seconde, de plus en plus vite. ⚠ Leur clignotement est indexé sur `t` et non sur un
+      //    hasard tiré à la frame : un scintillement aléatoire ne se compte pas, une pulsation
+      //    accélérée se sent — et c'est elle qui double la jauge à la périphérie du regard.
+      const puls = Math.sin(t * (0.18 + near * 0.55));
+      if (near > 0.5 && puls > 0) {
+        ctx.strokeStyle = 'rgba(255,246,200,' + (0.35 + near * 0.55).toFixed(2) + ')';
+        ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+        for (let i = 0; i < 3; i++) {
+          const bx = x + w * (0.28 + i * 0.22) + (doodleRnd(i + 7) - 0.5) * 4;
+          const by = y + h - 2, len = 5 + near * 7 + doodleRnd(i + 13) * 3;
+          ctx.beginPath();
+          ctx.moveTo(bx, by);
+          ctx.lineTo(bx + (doodleRnd(i + 23) - 0.5) * 5, by + len * 0.55);
+          ctx.lineTo(bx + (doodleRnd(i + 37) - 0.5) * 6, by + len);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
     return;
   }
   // 🌈 Arc-en-ciel : la dalle est une bande de six couleurs, et l'arc s'élève de son dos jusqu'au
