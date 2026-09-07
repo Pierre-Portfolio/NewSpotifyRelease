@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.3.6';
+const APP_VERSION = '13.3.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -6571,6 +6571,36 @@ function GameAirHockey() {
 // `ready()` dit si le script est déjà en place (drapeau `window.*_READY` posé en fin de
 // fichier : un chargement COUPÉ à mi-chemin ne compte pas). Promesse mémorisée par URL,
 // oubliée en cas d'échec pour que « ↻ Réessayer » reparte vraiment.
+// ⚠ DEUX ÉCHECS DISTINCTS, qui ne se réparent pas pareil — les confondre, c'est accuser le
+// réseau d'un fichier parfaitement arrivé (le vrai symptôme du 07/09/26 sur mobile) :
+//   · `reason:'net'`   → `onerror` : le fichier n'est jamais arrivé. Là, oui, c'est le réseau.
+//   · `reason:'stale'` → `onload` a tiré, mais le drapeau `*_READY` (posé en FIN de fichier) est
+//     resté faux : le script est arrivé ENTIER et n'a pas démarré — erreur au niveau module
+//     (TDZ, redéclaration) ou, bien plus souvent, COPIE PÉRIMÉE servie par le cache.
+// ⚠ Le décalage vient du service worker lui-même : l'app shell est en network-first (1,5 s) mais
+// `vendor/` est en cache-first. Un shell FRAIS peut donc tourner avec un moteur d'HIER, et c'est
+// mortel dès que les deux ne sont plus d'accord — sur mobile, où la PWA garde son ancien worker
+// bien plus longtemps qu'un onglet de bureau, c'est le cas courant, pas le cas rare.
+const VENDOR_HEAL_LS = 'spotifyplus_vendor_heal';
+// Purge le cache d'app shell (`spotifyplus-v<N>` SEULEMENT — jamais `spotifyplus-vendor-v*`,
+// 1,9 Mo d'immuables, ni `spotifyplus-compiled`), réveille le worker, puis recharge.
+// ⚠ UNE SEULE FOIS par session et par script (sessionStorage, comme `spotifyplus_boot_retry`) :
+// sur une erreur qui n'est PAS un cache périmé, une réparation qui se rejoue boucle la page.
+// ⚠ Jamais hors ligne : vider le shell puis recharger sans réseau, c'est perdre l'app entière
+// pour réparer un module. `force` (bouton de l'écran d'erreur) passe outre le compteur, jamais
+// le test de connexion.
+function vendorHeal(src, force) {
+  if (navigator.onLine === false) return false;
+  let done = [];
+  try { done = JSON.parse(sessionStorage.getItem(VENDOR_HEAL_LS) || '[]'); } catch {}
+  if (!force && done.indexOf(src) >= 0) return false;
+  try { sessionStorage.setItem(VENDOR_HEAL_LS, JSON.stringify(done.concat(src))); } catch {}
+  const jobs = [];
+  if (window.caches) jobs.push(caches.keys().then(ks => Promise.all(ks.filter(k => /^spotifyplus-v\d+$/.test(k)).map(k => caches.delete(k)))));
+  if (navigator.serviceWorker) jobs.push(navigator.serviceWorker.getRegistration().then(r => r && r.update()));
+  Promise.all(jobs.map(j => j.catch(() => {}))).then(() => location.reload());
+  return true;
+}
 const _vendorP = {};
 function loadVendorScript(src, ready) {
   if (ready()) return Promise.resolve();
@@ -6578,20 +6608,30 @@ function loadVendorScript(src, ready) {
   _vendorP[src] = new Promise((res, rej) => {
     const s = document.createElement('script');
     s.src = src;
-    s.onload = () => (ready() ? res() : rej(new Error('script incomplet ' + src)));
-    s.onerror = () => rej(new Error('échec ' + src));
+    s.onload = () => { if (ready()) return res(); const e = new Error('script incomplet ' + src); e.reason = 'stale'; rej(e); };
+    s.onerror = () => { const e = new Error('échec ' + src); e.reason = 'net'; rej(e); };
     document.head.appendChild(s);
-  }).catch(e => { delete _vendorP[src]; throw e; });
+  }).catch(e => { delete _vendorP[src]; if (e && e.reason === 'stale') vendorHeal(src, false); throw e; });
   return _vendorP[src];
 }
 // Écran d'attente / d'erreur commun aux modules à données lazy (Doodle, Sport).
-function VendorLoading({ label, err, retry, color }) {
+// ⚠ `err` vaut 'net' ou 'stale' (voir loadVendorScript), plus un booléen : le second cas dit
+// « copie périmée » et non « réseau », et son bouton VIDE LE CACHE au lieu de retenter le même
+// fichier — « ↻ Réessayer » sur un fichier périmé rejoue exactement le même fichier périmé.
+function VendorLoading({ label, err, retry, color, src }) {
+  const stale = err === 'stale';
+  const btn = { alignSelf:'center', background:`${color}18`, border:`1px solid ${color}55`, color, borderRadius:8, padding:'6px 12px', fontSize:12, fontWeight:700, cursor:'pointer' };
   return (
     <div style={{ textAlign:'center', display:'flex', flexDirection:'column', gap:8, padding:'18px 0' }}>
       {err
         ? <React.Fragment>
-            <div style={{ fontSize:11.5, color:'#e05050' }}>Impossible de charger {label} (réseau ?)</div>
-            <button onClick={retry} style={{ alignSelf:'center', background:`${color}18`, border:`1px solid ${color}55`, color, borderRadius:8, padding:'6px 12px', fontSize:12, fontWeight:700, cursor:'pointer' }}>↻ Réessayer</button>
+            <div style={{ fontSize:11.5, color:'#e05050' }}>
+              {stale ? `Version périmée de ${label} en cache` : `Impossible de charger ${label} (réseau ?)`}
+            </div>
+            {stale && <div style={{ fontSize:10.5, color:C.muted, maxWidth:280, alignSelf:'center', lineHeight:1.45 }}>Le fichier est bien arrivé mais n'a pas démarré. Vide le cache pour reprendre la version à jour.</div>}
+            <button onClick={stale && src ? () => vendorHeal(src, true) : retry} style={btn}>
+              {stale && src ? '🧹 Vider le cache et recharger' : '↻ Réessayer'}
+            </button>
           </React.Fragment>
         : <div style={{ fontSize:12, color:C.muted }}>⏳ Chargement {label}…</div>}
     </div>
@@ -6610,10 +6650,10 @@ function VendorLoading({ label, err, retry, color }) {
 const loadDoodle = () => loadVendorScript('./vendor/doodle.js', () => !!window.DOODLE_READY);
 function GameDoodle() {
   const [ready, setReady] = React.useState(() => !!window.DOODLE_READY);
-  const [err, setErr] = React.useState(false);
-  const load = () => { setErr(false); loadDoodle().then(() => setReady(true)).catch(() => setErr(true)); };
+  const [err, setErr] = React.useState(null);
+  const load = () => { setErr(null); loadDoodle().then(() => setReady(true)).catch(e => setErr(e && e.reason === 'stale' ? 'stale' : 'net')); };
   React.useEffect(() => { if (!ready) load(); }, []);
-  if (!ready) return <VendorLoading label="du jeu" err={err} retry={load} color={GAMES_COLOR} />;
+  if (!ready) return <VendorLoading label="du jeu" err={err} retry={load} color={GAMES_COLOR} src="./vendor/doodle.js" />;
   return <GameDoodleInner />;
 }
 // Portage maison du jeu culte : le doodler saute automatiquement de plateforme en plateforme,
@@ -15745,10 +15785,10 @@ const SPORT_HOLD_MS = 450;        // durée de l'appui long qui ouvre la fiche
 const loadSportData = () => loadVendorScript('./vendor/sport-data.js', () => !!window.SPORT_DATA_READY);
 function SportPanel() {
   const [ready, setReady] = React.useState(() => !!window.SPORT_DATA_READY);
-  const [err, setErr] = React.useState(false);
-  const load = () => { setErr(false); loadSportData().then(() => setReady(true)).catch(() => setErr(true)); };
+  const [err, setErr] = React.useState(null);
+  const load = () => { setErr(null); loadSportData().then(() => setReady(true)).catch(e => setErr(e && e.reason === 'stale' ? 'stale' : 'net')); };
   React.useEffect(() => { if (!ready) load(); }, []);
-  if (!ready) return <VendorLoading label="des exercices" err={err} retry={load} color={SPORT_COLOR} />;
+  if (!ready) return <VendorLoading label="des exercices" err={err} retry={load} color={SPORT_COLOR} src="./vendor/sport-data.js" />;
   return <SportPanelInner />;
 }
 const SPORT_DEMO_MS = 900;        // cadence d'alternance des deux phases du mouvement
