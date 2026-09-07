@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.4.2';
+const APP_VERSION = '13.4.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1550,9 +1550,10 @@ function cryptoParseRows(rows) {
     columns: cols.map(c => c.label + ' → ' + c.id) };
 }
 
-// Lecture de la feuille nommée via l'API Sheets (scope drive.readonly déjà accordé).
-// Erreurs typées comme actifsFetch : AUTH / SCOPE / NOTFOUND / NOSHEET / EMPTY.
-async function cryptoSheetFetch(force) {
+// Lecture d'un onglet NOMMÉ du classeur Finance via l'API Sheets (scope drive.readonly
+// déjà accordé). Partagée par le portefeuille crypto et l'import Collection.
+// Erreurs typées comme actifsFetch : AUTH / SCOPE / NOTFOUND / NOSHEET.
+async function actifsSheetRead(sheetRe, force) {
   const token = gdriveToken();
   if (!token) throw new Error('AUTH');
   if (force) try { localStorage.removeItem(ACTIFS_FILE_LS); } catch {}
@@ -1568,7 +1569,7 @@ async function cryptoSheetFetch(force) {
   const base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(file.id)}`;
   const meta = await get(`${base}?fields=${encodeURIComponent('sheets.properties.title')}`);
   const titles = (meta.sheets || []).map(s => s.properties && s.properties.title).filter(Boolean);
-  const title = titles.find(t => CRYPTO_SHEET_RE.test(t));
+  const title = titles.find(t => sheetRe.test(t));
   if (!title) throw new Error('NOSHEET');
   // ⚠ Le titre doit être quoté dans la plage A1 (un onglet peut contenir des espaces).
   // ⚠ `UNFORMATTED_VALUE` est OBLIGATOIRE pour les QUANTITÉS : en valeurs formatées, l'API
@@ -1580,7 +1581,13 @@ async function cryptoSheetFetch(force) {
   // `actifsDate`. C'est le seul couple d'options qui donne des nombres bruts ET des dates.
   const opts = 'majorDimension=ROWS&valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING';
   const vals = await get(`${base}/values/${encodeURIComponent(`'${title.replace(/'/g, "''")}'!A1:ZZ`)}?${opts}`);
-  const parsed = cryptoParseRows(vals.values);
+  return { file, title, rows: vals.values };
+}
+
+// Portefeuille crypto : même lecture, parsing dédié (+ EMPTY quand rien n'est exploitable).
+async function cryptoSheetFetch(force) {
+  const { title, rows } = await actifsSheetRead(CRYPTO_SHEET_RE, force);
+  const parsed = cryptoParseRows(rows);
   if (!parsed) throw new Error('EMPTY');
   const data = { fetched_at: Date.now(), period: cryptoPeriodKey(), sheet: title,
     month: parsed.month, holdings: parsed.holdings, unknown: parsed.unknown, columns: parsed.columns };
@@ -16526,6 +16533,13 @@ function CollectionSub({ sub, data, onData }) {
     if (r.added) onData(r.data);
     return r;
   };
+  // Fusion d'un relevé du classeur Finance : contrairement à `addMany`, un id DÉJÀ présent
+  // n'est pas ignoré — sa valeur est réalignée sur le classeur (cf. `collMergeFinance`).
+  const mergeRows = rows => {
+    const r = collMergeFinance(dataRef.current, sub.id, rows);
+    if (r.added || r.updated) onData(r.data);
+    return r;
+  };
   const add = r0 => {
     // Copie : `onAdd` peut retoucher l'item avant enregistrement (les jeux vidéo y posent
     // la plateforme choisie) sans altérer la liste de résultats affichée.
@@ -16666,7 +16680,7 @@ function CollectionSub({ sub, data, onData }) {
       )}
 
       {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (jeux vidéo → Steam) */}
-      {sub.importer && <sub.importer onImport={addMany} />}
+      {sub.importer && <sub.importer sub={sub} onImport={addMany} onMerge={mergeRows} />}
 
       {/* ESTIMATION PAR PHOTO (Pierre précieuse / Montre / Vin) */}
       {sub.photo && <CollPhotoEstimate kind={sub.photo} onAdd={add} />}
@@ -17357,6 +17371,198 @@ function SteamLibraryImport({ onImport }) {
   );
 }
 
+// ── 📥 IMPORT DEPUIS LE CLASSEUR FINANCE (Displate · Pop · Montre) ──────────────
+// Ces trois sous-collections ont un onglet DÉDIÉ dans le classeur « Finance » du Drive,
+// celui-là même que lit Mes Actifs. Gabarit relevé sur le vrai classeur :
+//   ligne 1 = en-têtes : A « Date » · B « Total » (+ d'autres agrégats : « Total USD »,
+//             « Ratio vente Moyen »), PUIS **UNE COLONNE PAR OBJET**, dont l'en-tête est
+//             son nom (« The Moon », « Kaneki 61 », « Montre Tissot PR 100 ») ;
+//   lignes suivantes = un mois par ligne, la cellule portant la valeur de l'objet ;
+//   une ligne dont la colonne A vaut « Lien » porte l'URL de chaque objet (onglet Montre).
+// On ne garde que le mois le PLUS RÉCENT : c'est la valeur courante, la seule qui ait un
+// sens dans une fiche de collection (l'historique, lui, est déjà tracé par Mes Actifs).
+//
+// ⚠⚠ LA CELLULE N'EST PAS TOUJOURS DES EUROS. Relevé dans le classeur :
+//   Pop     → `Total = SUM(C:W)`            : les colonnes SONT des euros ;
+//   Montre  → `Total = C`                   : idem ;
+//   Displate→ `Total USD = SUM(E:PS) * D` puis `Total = Total USD / Actif!Taux` : les
+//             colonnes sont des DOLLARS AVANT le « Ratio vente Moyen » (0,66). Prendre la
+//             cellule telle quelle donnait 8 543 € pour un bloc qui en vaut 4 861.
+// D'où le FACTEUR : `Total ÷ somme des colonnes d'objets`, lu sur la ligne même. Il vaut 1
+// là où les colonnes sont déjà en euros, 0,569 sur Displate, et il suit tout seul un
+// changement de ratio ou de taux de change — aucune constante à maintenir ici. Invariant
+// obtenu : la somme des fiches importées = le Total du classeur = ce qui alimente le
+// patrimoine. À défaut de colonne « Total » exploitable, il vaut 1 (valeurs brutes).
+//
+// ⚠ Une colonne à 0 sur ce mois-là n'est PAS un objet à 0 € : c'est un objet pas encore
+// acquis (ou revendu). Elle est écartée, et comptée à part pour que ça se voie.
+// ⚠ Les colonnes retenues et le facteur sont AFFICHÉS après l'import (même parti pris que
+// Displate) : si une colonne d'agrégat est ajoutée au classeur un jour, on voit
+// immédiatement si elle a été prise pour un objet.
+const COLL_FIN_SHEETS  = { displate: /^displates?$/i, pop: /^pop$/i, montre: /^montres?$/i };
+const COLL_FIN_SKIP_RE = /^(date|total(\s|$)|ratio\s|moyenne|somme|cumul)/i;   // colonnes d'agrégat
+const COLL_FIN_LINK_RE = /^(liens?|links?|urls?)$/i;                          // ligne des liens
+const COLL_FIN_IMG_RE  = /^(images?|img|photos?|visuels?)$/i;                  // ligne des images
+
+function collFinanceParse(rows) {
+  if (!rows || rows.length < 2) return null;
+  const header = rows[0] || [];
+  const cols = [];
+  let iTotal = -1;
+  for (let i = 1; i < header.length; i++) {
+    const label = String(header[i] == null ? '' : header[i]).trim();
+    if (!label) continue;
+    // ⚠ La PREMIÈRE colonne « Total » seulement : Displate en a une deuxième (« Total USD »),
+    // et c'est bien le total en euros qui donne le facteur.
+    if (iTotal < 0 && /^total(\s|$)/i.test(label)) iTotal = i;
+    if (!COLL_FIN_SKIP_RE.test(label)) cols.push({ i, label });
+  }
+  if (!cols.length) return null;
+  let best = null, links = null, imgs = null;
+  for (const r of rows.slice(1)) {
+    if (!r) continue;
+    const key = String(r[0] == null ? '' : r[0]).trim();
+    if (COLL_FIN_LINK_RE.test(key)) { links = r; continue; }
+    if (COLL_FIN_IMG_RE.test(key))  { imgs  = r; continue; }
+    const t = actifsDate(r[0]);
+    if (t == null || (best && t <= best.t)) continue;
+    if (cols.some(c => actifsNum(r[c.i]) != null)) best = { t, row: r };
+  }
+  if (!best) return null;
+  const cell = (row, i) => String((row && row[i]) == null ? '' : row[i]).trim();
+  const raw = cols.map(c => ({ c, v: actifsNum(best.row[c.i]) }));
+  const brut  = raw.reduce((a, x) => a + (x.v > 0 ? x.v : 0), 0);
+  const total = iTotal >= 0 ? actifsNum(best.row[iTotal]) : null;
+  const factor = (total != null && total > 0 && brut > 0) ? total / brut : 1;
+  const items = [], vides = [];
+  for (const { c, v } of raw) {
+    // ⚠ L'en-tête est l'id ET le nom : c'est la seule clé stable du classeur, et deux
+    // colonnes qui ne diffèrent que par la casse (« The World » / « The world ») sont bien
+    // deux Displate différents — surtout ne pas normaliser, ça les fusionnerait.
+    if (v != null && v > 0) items.push({ id: c.label, name: c.label,
+      price: Math.round(v * factor * 100) / 100,
+      url: cell(links, c.i), img: cell(imgs, c.i) });
+    else vides.push(c.label);
+  }
+  return { month: best.t, items, vides, factor, total, columns: cols.map(c => c.label) };
+}
+
+async function collFinanceFetch(subId, force) {
+  const re = COLL_FIN_SHEETS[subId];
+  if (!re) throw new Error('NOSHEET');
+  const { title, rows } = await actifsSheetRead(re, force);
+  const parsed = collFinanceParse(rows);
+  if (!parsed || !parsed.items.length) throw new Error('EMPTY');
+  return { sheet: title, ...parsed };
+}
+
+// Fusion d'un relevé dans une sous-collection. La fiche existante GARDE sa quantité, son
+// image et le reste de ses métadonnées ; seuls le prix et le lien suivent le classeur —
+// c'est lui la source de vérité de la VALEUR (c'est ce chiffre qui alimente le patrimoine),
+// y compris pour un Displate déjà coté par le catalogue tiers.
+// ⚠ Rien n'est jamais SUPPRIMÉ : une colonne retirée du classeur laisse la fiche en place
+// (l'app n'a aucun moyen de distinguer « revendu » de « colonne renommée »).
+function collMergeFinance(data, subId, items) {
+  const list = collList(data, subId).slice();
+  const byId = new Map();
+  list.forEach((x, i) => { if (x && x.id) byId.set(x.id, i); });
+  let added = 0, updated = 0, full = false, count = collCount(data);
+  for (const it of (items || [])) {
+    const at = byId.has(it.id) ? byId.get(it.id) : -1;
+    const stamp = { finance: true, financeAt: Date.now() };
+    if (at >= 0) {
+      const cur = list[at];
+      const price = (typeof it.price === 'number' && isFinite(it.price) && it.price >= 0) ? it.price : cur.price;
+      const url   = it.url ? (safeHref(it.url) || cur.url) : cur.url;
+      if (cur.price === price && cur.url === url) continue;
+      list[at] = { ...cur, price, url, meta: { ...(cur.meta || {}), ...stamp } };
+      updated++;
+    } else {
+      if (count >= COLLECTION_MAX) { full = true; break; }
+      const n = collItem({ ...it, sub: 'classeur Finance', meta: stamp });
+      if (!n) continue;
+      byId.set(n.id, list.length);
+      list.push(n); added++; count++;
+    }
+  }
+  return { data: (added || updated) ? { ...data, [subId]: list } : data, added, updated, full };
+}
+
+const COLL_FIN_ERR = {
+  AUTH:     'Session Google expirée — reconnecte Google Drive (À propos → Autorisations).',
+  SCOPE:    "Lecture du Drive non autorisée : c'est le même accès que Mes Actifs.",
+  NOTFOUND: "Aucun classeur trouvé : ni dossier « finance » contenant un Google Sheets, ni tableur nommé « Finance » dans le Drive.",
+  NOSHEET:  "Le classeur a été trouvé mais il n'a pas d'onglet portant ce nom.",
+  EMPTY:    "L'onglet a été lu mais aucune colonne d'objet n'y porte de valeur sur le dernier mois.",
+  NET:      'Lecture impossible (réseau ou API Sheets).',
+};
+
+// Bloc « importer depuis le classeur », rendu par `CollectionSub` via `sub.importer`.
+function CollFinanceImport({ sub, onMerge }) {
+  const [busy, setBusy] = React.useState(false);
+  const [res, setRes]   = React.useState(null);    // { month, sheet, columns, vides, added, updated, full }
+  const [err, setErr]   = React.useState('');
+  const canRead = gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_READ);
+
+  const run = async force => {
+    if (busy) return;
+    setBusy(true); setErr(''); setRes(null);
+    try {
+      const d = await collFinanceFetch(sub.id, force);
+      const r = onMerge(d.items);
+      setRes({ ...d, ...r });
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      setErr(COLL_FIN_ERR[m] || (/^HTTP /.test(m) ? `${COLL_FIN_ERR.NET} (${m})` : COLL_FIN_ERR.NET));
+    }
+    setBusy(false);
+  };
+  const btn = on => ({ background: on ? `${COLLECTION_COLOR}22` : 'none',
+    border:`1px solid ${on ? COLLECTION_COLOR + '88' : C.border}`, borderRadius:6,
+    color: on ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
+    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
+  const bilan = res && [
+    res.added   ? `${res.added} ajouté${res.added > 1 ? 's' : ''}` : null,
+    res.updated ? `${res.updated} mis à jour` : null,
+    !res.added && !res.updated ? 'déjà à jour' : null,
+    `relevé de ${fmtActifMonth(res.month)}`,
+    res.vides.length ? `${res.vides.length} colonne${res.vides.length > 1 ? 's' : ''} à 0 € ignorée${res.vides.length > 1 ? 's' : ''}` : null,
+    res.full ? `collection pleine (${COLLECTION_MAX})` : null,
+  ].filter(Boolean).join(' · ');
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
+      background:`${COLLECTION_COLOR}10`, border:`1px solid ${COLLECTION_COLOR}44`, borderRadius:8 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+        <span style={{ fontSize:11, fontWeight:800, color:COLLECTION_COLOR }}>📥 Importer depuis le classeur Finance</span>
+        <button onClick={() => run(false)} disabled={busy || !canRead} style={btn(!busy && canRead)}>
+          {busy ? '⏳ Lecture du classeur…' : 'Importer'}
+        </button>
+        {canRead && <button onClick={() => run(true)} disabled={busy} title="Re-chercher le classeur dans le Drive"
+          style={{ ...btn(!busy), fontWeight:400, padding:'5px 8px' }}>↻</button>}
+        {!canRead && <button onClick={() => gdriveLogin({ scopes: GDRIVE_SCOPES })} style={{ ...btn(true), fontWeight:400 }}>△ Autoriser la lecture du Drive</button>}
+      </div>
+      {bilan && <div style={{ fontSize:10, color:COLLECTION_COLOR, fontWeight:600 }}>✓ {bilan}</div>}
+      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
+      {res && (
+        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+          Onglet « {res.sheet} » · colonnes prises pour des objets : {res.columns.join(' · ')}
+          {Math.abs(res.factor - 1) > 0.005 && <> · valeurs brutes converties par ×{res.factor.toFixed(4)} pour retomber sur le Total du classeur ({fmtEur(res.total, 0)})</>}
+          {res.vides.length > 0 && <> · à 0 € ce mois-ci (donc ignorées) : {res.vides.join(' · ')}</>}
+        </div>
+      )}
+      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+        Une colonne = un objet, son en-tête donne le nom et sa valeur du dernier mois donne le prix —
+        <b>ramené en euros par le Total de la ligne</b> (les colonnes Displate sont en dollars avant
+        le ratio de revente), si bien que la somme des fiches retombe sur le Total du classeur.
+        Une référence déjà là garde sa quantité, sa photo et ses notes : <b>seuls le prix et le lien
+        sont réalignés sur le classeur</b>, qui fait foi pour la valeur. Rien n'est jamais supprimé —
+        une colonne retirée du classeur laisse sa fiche en place, à toi de l'enlever.
+      </div>
+    </div>
+  );
+}
+
 // ── 💎 PIERRE PRÉCIEUSE · ⌚ MONTRE · 🍷 VIN (7.8.8) ─────────────────────────────
 // Ces trois-là n'ont AUCUN catalogue interrogeable (pas d'API de gemmologie, d'horlogerie
 // ni de cotation de vin gratuite et à CORS ouvert), et c'est précisément pourquoi la
@@ -17533,12 +17739,13 @@ const COLLECTION_SUBS = {
   displate: [
     { id:'displate', label:'Displate', icon:'🖼️', unit:'Displate', article:'un premier Displate',
       search: displateSearch, placeholder:'Chercher un Displate (titre ou artiste)…',
-      hydrate: displateHydrate, note: displateNote },
+      hydrate: displateHydrate, importer: CollFinanceImport, note: displateNote },
   ],
   pop: [
     { id:'pop', label:'Pop', icon:'🧸', unit:'figurine', article:'une première figurine',
       search: popSearch, placeholder:'Chercher une figurine Funko Pop…',
-      manual: true, manualPlaceholder:'Ajouter à la main : nom de la figurine…', note: popNote },
+      manual: true, manualPlaceholder:'Ajouter à la main : nom de la figurine…',
+      importer: CollFinanceImport, note: popNote },
   ],
   jeuxvideo: [
     { id:'jeuxvideo', label:'Jeux vidéo', icon:'🎮', unit:'jeu', article:'un premier jeu',
@@ -17556,7 +17763,8 @@ const COLLECTION_SUBS = {
   ],
   montre: [
     { id:'montre', label:'Montre', icon:'⌚', unit:'montre', article:'une première montre',
-      photo:'montre', manual:true, manualPlaceholder:'Ajouter à la main : marque et modèle…', note: COLL_PHOTO_NOTE },
+      photo:'montre', manual:true, manualPlaceholder:'Ajouter à la main : marque et modèle…',
+      importer: CollFinanceImport, note: COLL_PHOTO_NOTE },
   ],
   vin: [
     { id:'vin', label:'Vin', icon:'🍷', unit:'bouteille', article:'une première bouteille',
