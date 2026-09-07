@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.0.3';
+const APP_VERSION = '13.0.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20865,10 +20865,11 @@ function buildBackup() {
     // Mot de passe : blob CHIFFRÉ du coffre { v, salt, iv, ct } — jamais en clair,
     // déchiffrable uniquement avec le mot de passe maître
     mdp_vault: loadVaultBlob(),
-    // Santé : profil + totaux caloriques quotidiens + journal des pesées (section Poids).
-    // La COMPOSITION des repas (spotifyplus_food_meals) est volontairement EXCLUE de
-    // l'export (demande utilisateur) ; les pesées, elles, sont sauvegardées.
-    food: { profile: lsJson(FOOD_PROFILE_KEY), days: lsJson(FOOD_DAYS_KEY) || {}, weights: lsJson(WEIGHT_KEY) || [], favs: lsJson(FOOD_FAVS_KEY) || [] },
+    // Santé : profil + totaux caloriques quotidiens + journal des pesées (section Poids)
+    // + séances de sport. La COMPOSITION des repas (spotifyplus_food_meals) est volontairement
+    // EXCLUE de l'export (demande utilisateur) ; les pesées et les séances, elles, sont
+    // sauvegardées — elles sont saisies à la main et rien ne pourrait les re-fetcher.
+    food: { profile: lsJson(FOOD_PROFILE_KEY), days: lsJson(FOOD_DAYS_KEY) || {}, weights: lsJson(WEIGHT_KEY) || [], favs: lsJson(FOOD_FAVS_KEY) || [], sport: lsJson(FOOD_SPORT_KEY) || {} },
     // Bon Plan : jeux suivis (⭐ Ma liste) + prix cibles — les caches promos/boutiques
     // (re-fetchables) restent exclus
     bonplan: lsJson(CMP_WATCH_LS) || [],
@@ -20956,7 +20957,7 @@ const EXPORT_SECTIONS = [
   { key:'maps',     label:'Maps',         icon:'🗺️', hint:'trajets Google Timeline',    fields:['maps'] },
   { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…)', fields:['finance'] },
   { key:'bonplan',  label:'Bon Plan',     icon:'🛒', hint:'jeux suivis + prix cibles', fields:['bonplan'] },
-  { key:'food',     label:'Santé',        icon:'🍎', hint:'profil + calories quotidiennes + pesées (pas la composition)', fields:['food'] },
+  { key:'food',     label:'Santé',        icon:'🍎', hint:'profil + calories quotidiennes + pesées + séances de sport (pas la composition des repas)', fields:['food'] },
   { key:'frigo',    label:'Frigo',        icon:'🧊', hint:'contenu + dates de péremption', fields:['frigo'] },
   { key:'vetement', label:'Vêtement',     icon:'👕', hint:'inventaire + fiches + marques (photos sur Drive)', fields:['vetement'] },
   { key:'revente',  label:'Revente',      icon:'🏷️', hint:'articles + annonces rédigées (photos sur Drive)', fields:['revente'] },
@@ -21336,6 +21337,24 @@ function applyBackup(data) {
     // évidents (même jour + même poids) sont ignorés, tout le reste est ajouté.
     if (Array.isArray(data.food.weights)) {
       try { saveWeights(weightMerge(loadWeights(), data.food.weights)); } catch {}
+    }
+    // Séances de sport — UNION par jour puis par id de séance : le local gagne, les
+    // séances absentes sont ajoutées. ⚠ Jamais de somme (piège 17) : ré-importer deux fois
+    // la même sauvegarde doublerait les calories brûlées.
+    if (data.food.sport && typeof data.food.sport === 'object') {
+      try {
+        const local = loadFoodSport();
+        const merged = { ...local };
+        for (const k of Object.keys(data.food.sport)) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) continue;             // clé de jour uniquement (et donc jamais `__proto__`)
+          const inc = Array.isArray(data.food.sport[k]) ? data.food.sport[k] : [];
+          const cur = Array.isArray(merged[k]) ? merged[k] : [];
+          const have = new Set(cur.map(x => x && x.id));
+          const add = inc.filter(x => x && x.id && !have.has(x.id) && (parseInt(x.min, 10) || 0) > 0);
+          if (cur.length || add.length) merged[k] = cur.concat(add);
+        }
+        if (!saveFoodSport(merged)) failed.push(FOOD_SPORT_KEY);
+      } catch {}
     }
     // Aliments favoris — UNION par id (nom|marque) : le local gagne, les absents sont ajoutés.
     if (Array.isArray(data.food.favs)) {
@@ -35356,6 +35375,84 @@ function saveFoodMeals(m) {
   lsSet(FOOD_MEALS_KEY, JSON.stringify(out));
   return out;
 }
+// ── 🏃 SÉANCES DE SPORT (spotifyplus_food_sport) ─────────────────────────────
+// { 'YYYY-MM-DD': [{ id, sport, intens, min, kcal, manual }] } — une séance = un type de
+// sport, une durée et une intensité, dont on DÉDUIT les calories brûlées.
+// ⚠ Les calories brûlées ne sont JAMAIS mélangées aux calories avalées (`spotifyplus_food_days`,
+// qui reste le total des repas) : elles RELÈVENT l'objectif du jour (target + brûlé), comme
+// dans les applis de suivi — sinon une séance ferait « baisser » ce qu'on a mangé.
+// ⚠ Formule MET (Compendium of Physical Activities) : kcal = MET × poids(kg) × heures.
+// Le poids vient du profil ; sans profil on retombe sur FOOD_SPORT_KG et l'UI l'annonce
+// (un ordre de grandeur affiché vaut mieux qu'un champ vide).
+// `manual:true` = kcal corrigées à la main → ne plus jamais les recalculer.
+const FOOD_SPORT_KEY  = 'spotifyplus_food_sport';
+const FOOD_SPORT_KG   = 70;    // poids de repli quand le profil n'est pas rempli
+const FOOD_SPORT_KEEP = 400;   // jours conservés (borne le localStorage, ≈ 1 an)
+// [id, emoji, label, [MET léger, MET modéré, MET intense]] — valeurs grand public issues du
+// Compendium of Physical Activities, arrondies : ordres de grandeur, pas une mesure.
+const FOOD_SPORTS = [
+  ['marche',     '🚶', 'Marche',            [2.8,  3.8,  5.0]],
+  ['course',     '🏃', 'Course à pied',     [7.0,  9.8, 12.5]],
+  ['velo',       '🚴', 'Vélo',              [4.0,  8.0, 12.0]],
+  ['natation',   '🏊', 'Natation',          [4.5,  7.0, 10.0]],
+  ['muscu',      '🏋️', 'Musculation',       [3.5,  5.0,  6.5]],
+  ['cardio',     '🤸', 'Cardio / HIIT',     [5.0,  8.0, 11.0]],
+  ['rameur',     '🚣', 'Rameur',            [4.8,  7.0, 12.0]],
+  ['elliptique', '🌀', 'Elliptique',        [4.6,  5.5,  8.0]],
+  ['corde',      '🪢', 'Corde à sauter',    [8.8, 11.8, 12.3]],
+  ['foot',       '⚽', 'Football',          [5.0,  7.0, 10.0]],
+  ['basket',     '🏀', 'Basket',            [4.5,  6.5,  9.0]],
+  ['volley',     '🏐', 'Volley',            [3.0,  4.0,  6.0]],
+  ['tennis',     '🎾', 'Tennis / padel',    [5.0,  7.0,  8.5]],
+  ['badminton',  '🏸', 'Badminton / squash',[4.5,  5.5,  7.5]],
+  ['boxe',       '🥊', 'Boxe',              [5.5,  8.0, 12.0]],
+  ['arts',       '🥋', 'Arts martiaux',     [5.3,  8.0, 10.3]],
+  ['escalade',   '🧗', 'Escalade',          [5.8,  8.0, 11.0]],
+  ['rando',      '🥾', 'Randonnée',         [4.0,  6.0,  7.5]],
+  ['ski',        '🎿', 'Ski / snowboard',   [4.3,  7.0,  9.6]],
+  ['roller',     '🛼', 'Roller / skate',    [5.5,  7.5, 12.0]],
+  ['danse',      '💃', 'Danse',             [3.5,  5.0,  7.8]],
+  ['yoga',       '🧘', 'Yoga / pilates',    [2.5,  3.0,  4.0]],
+  ['equitation', '🐴', 'Équitation',        [4.0,  5.5,  7.3]],
+  ['golf',       '⛳', 'Golf',              [3.5,  4.8,  5.3]],
+  ['menage',     '🧹', 'Ménage / jardinage',[3.0,  4.0,  5.5]],
+  ['autre',      '🤾', 'Autre sport',       [3.0,  5.0,  7.0]],
+];
+const FOOD_INTENS = [
+  ['low',  '🐢', 'Léger',   'je peux discuter sans être essoufflé'],
+  ['mod',  '💨', 'Modéré',  'respiration rapide, phrases courtes'],
+  ['high', '🔥', 'Intense', 'à bout de souffle, effort maximal'],
+];
+function foodSportDef(id) { return FOOD_SPORTS.find(s => s[0] === id) || FOOD_SPORTS[FOOD_SPORTS.length - 1]; }
+function foodSportMet(id, intens) {
+  const mets = foodSportDef(id)[3];
+  const i = FOOD_INTENS.findIndex(x => x[0] === intens);
+  return mets[i >= 0 ? i : 1];
+}
+// kcal brûlées = MET × poids × durée. `weight` absent ⇒ FOOD_SPORT_KG (l'UI le signale).
+function foodSportKcal(id, intens, min, weight) {
+  const kg = Number(weight) > 0 ? Number(weight) : FOOD_SPORT_KG;
+  const m  = parseFloat(String(min).replace(',', '.')) || 0;
+  if (m <= 0) return 0;
+  return Math.round(foodSportMet(id, intens) * kg * m / 60);
+}
+function loadFoodSport() { try { const o = JSON.parse(localStorage.getItem(FOOD_SPORT_KEY)); return o && typeof o === 'object' ? o : {}; } catch { return {}; } }
+// ⚠ Renvoie l'objet purgé, ou `null` si le quota localStorage a refusé l'écriture : rien
+// n'a été enregistré, l'appelant ne doit donc pas afficher une séance fantôme (piège 14).
+function saveFoodSport(s) {
+  const cutoff = new Date(Date.now() - FOOD_SPORT_KEEP * 86400000);
+  const min = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}`;
+  const out = {};
+  for (const k of Object.keys(s)) if (k >= min && (s[k] || []).length) out[k] = s[k];
+  return lsSet(FOOD_SPORT_KEY, JSON.stringify(out)) ? out : null;
+}
+function foodSportBurn(list) { return (list || []).reduce((n, s) => n + (Number(s.kcal) || 0), 0); }
+function foodSportLabel(s) {
+  const d = foodSportDef(s.sport);
+  const i = FOOD_INTENS.find(x => x[0] === s.intens) || FOOD_INTENS[1];
+  return `${d[1]} ${d[2]} · ${s.min} min · ${i[1]} ${i[2]}`;
+}
+
 // ── ⭐ Aliments favoris (spotifyplus_food_favs) ───────────────────────────────
 // Un résultat de recherche (Open Food Facts, IA ou photo) épinglé pour le retrouver sans
 // re-chercher : on ne garde que les valeurs pour 100 g, JAMAIS d'image (quota localStorage).
@@ -35656,10 +35753,159 @@ function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav }) {
   );
 }
 
+// Section « Séances de sport » du module Santé (7.6.90) : type de sport + durée +
+// intensité → calories brûlées (MET × poids × heures), pour le JOUR sélectionné.
+// ⚠ Le jour vient du parent (les chips partagées avec les repas), la section n'en choisit
+// aucun : les deux cartes doivent toujours parler de la même journée.
+// ⚠ `onChange` reçoit la liste COMPLÈTE du jour ; c'est le parent qui persiste (une seule
+// écriture localStorage, et lui seul sait si le quota l'a refusée).
+function FoodSportSection({ day, dayLabel, isToday, weight, list, onChange }) {
+  const [open, setOpen]     = React.useState(true);
+  const [sport, setSport]   = React.useState('course');
+  const [intens, setIntens] = React.useState('mod');
+  const [min, setMin]       = React.useState('30');
+  // Séance en cours d'édition : `ef` = brouillon { sport, intens, min, kcal, manual }.
+  // `manual` passe à true dès qu'on touche au champ kcal → la valeur saisie n'est plus
+  // écrasée par le recalcul MET (une montre connectée est plus juste que la formule).
+  const [editId, setEditId] = React.useState('');
+  const [ef, setEf]         = React.useState(null);
+  // Changer de journée abandonne l'édition en cours : le brouillon vise un id qui n'est
+  // plus dans la liste affichée.
+  React.useEffect(() => { setEditId(''); setEf(null); }, [day]);
+
+  const burn  = foodSportBurn(list);
+  const mins  = (list || []).reduce((n, s) => n + (parseInt(s.min, 10) || 0), 0);
+  const kcal  = foodSportKcal(sport, intens, min, weight);
+  const inSt  = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box', width:'100%' };
+  const btnSt = (on) => ({ background: on ? `${FOOD_COLOR}22` : 'none', border:`1px solid ${on ? FOOD_COLOR + '66' : C.border}`, borderRadius:6, color: on ? FOOD_COLOR : C.muted, fontSize:10, padding:'4px 8px', cursor:'pointer' });
+
+  const addSession = () => {
+    const m = parseInt(min, 10) || 0;
+    if (m <= 0 || kcal <= 0) return;
+    onChange([...(list || []), { id: Date.now() + '_' + Math.random().toString(36).slice(2), sport, intens, min:m, kcal }]);
+    setMin('30');
+  };
+  const startEdit = (s) => { setEditId(s.id); setEf({ sport:s.sport, intens:s.intens, min:String(s.min), kcal:String(s.kcal), manual: !!s.manual }); };
+  const cancelEdit = () => { setEditId(''); setEf(null); };
+  // Changer sport / intensité / durée RECALCULE les kcal — sauf si elles ont été corrigées
+  // à la main (`manual`), auquel cas on ne touche jamais au chiffre saisi.
+  const editSet = (patch) => setEf(f => {
+    const n = { ...f, ...patch };
+    if (!n.manual && !('kcal' in patch)) n.kcal = String(foodSportKcal(n.sport, n.intens, n.min, weight));
+    return n;
+  });
+  const saveEdit = () => {
+    const m = parseInt(ef.min, 10) || 0;
+    const k = parseInt(ef.kcal, 10) || 0;
+    if (m <= 0 || k <= 0) return;
+    onChange((list || []).map(s => s.id === editId ? { ...s, sport:ef.sport, intens:ef.intens, min:m, kcal:k, ...(ef.manual ? { manual:true } : {}) } : s));
+    cancelEdit();
+  };
+  const removeSession = (id) => { if (editId === id) cancelEdit(); onChange((list || []).filter(s => s.id !== id)); };
+
+  return (
+    <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+      <div onClick={() => setOpen(o => !o)} style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:8, cursor:'pointer', userSelect:'none' }}>
+        <span style={{ fontSize:12, fontWeight:800, letterSpacing:'0.05em', color:FOOD_COLOR }}>
+          🏃 SÉANCES DE SPORT{isToday ? '' : ` · ${dayLabel}`}
+        </span>
+        <span style={{ display:'flex', alignItems:'baseline', gap:8 }}>
+          <span style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: burn ? '#e07b54' : C.muted }}>
+            {burn ? `🔥 ${burn} kcal` : 'aucune séance'}
+          </span>
+          <span style={{ fontSize:11, color:C.dim, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s', display:'inline-block' }}>▶</span>
+        </span>
+      </div>
+      {open && <>
+        {/* Saisie : sport, intensité, durée → calories estimées en direct */}
+        <label style={{ fontSize:9, color:C.muted }}>Sport
+          <select value={sport} onChange={e => setSport(e.target.value)} style={inSt}>
+            {FOOD_SPORTS.map(([id, emo, lbl]) => <option key={id} value={id}>{emo} {lbl}</option>)}
+          </select>
+        </label>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+          {FOOD_INTENS.map(([v, emo, lbl, hint]) => (
+            <button key={v} onClick={() => setIntens(v)} title={hint} style={btnSt(intens === v)}>{emo} {lbl}</button>
+          ))}
+        </div>
+        <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+          <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>durée</span>
+          <input type="number" value={min} placeholder="minutes" onChange={e => setMin(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') addSession(); }}
+            style={{ ...inSt, flex:1, width:'auto', minWidth:0 }} />
+          <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>min</span>
+          <span style={{ fontSize:11, color:'#e07b54', fontFamily:'DM Mono,monospace', width:76, textAlign:'right', whiteSpace:'nowrap', flexShrink:0 }}>🔥 {kcal} kcal</span>
+          <button onClick={addSession} disabled={kcal <= 0} title="Enregistrer la séance"
+            style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:16, lineHeight:1, padding:'0 11px', cursor: kcal > 0 ? 'pointer' : 'default', opacity: kcal > 0 ? 1 : 0.5, flexShrink:0 }}>+</button>
+        </div>
+        <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>
+          MET {foodSportMet(sport, intens)} × {Number(weight) > 0 ? `${weight} kg` : `${FOOD_SPORT_KG} kg (poids par défaut — remplis ton profil)`} × durée
+        </div>
+        {/* Séances du jour */}
+        {(list || []).length === 0 ? (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'4px 0', fontFamily:'DM Mono,monospace' }}>
+            {isToday ? "Aucune séance enregistrée aujourd'hui" : 'Aucune séance enregistrée ce jour-là'}
+          </div>
+        ) : (
+          <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+            <div style={{ fontSize:9, fontWeight:700, color:C.muted, letterSpacing:'0.05em' }}>
+              {(list || []).length} SÉANCE{list.length > 1 ? 'S' : ''} · {mins} MIN · <span style={{ color:'#e07b54' }}>{burn} kcal</span>
+            </div>
+            {(list || []).map(s => editId === s.id ? (
+              <div key={s.id} style={{ display:'flex', flexDirection:'column', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'7px 9px', border:`1px solid ${FOOD_COLOR}55` }}>
+                <select value={ef.sport} onChange={e => editSet({ sport:e.target.value })} style={inSt}>
+                  {FOOD_SPORTS.map(([id, emo, lbl]) => <option key={id} value={id}>{emo} {lbl}</option>)}
+                </select>
+                <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+                  {FOOD_INTENS.map(([v, emo, lbl, hint]) => (
+                    <button key={v} onClick={() => editSet({ intens:v })} title={hint} style={btnSt(ef.intens === v)}>{emo} {lbl}</button>
+                  ))}
+                </div>
+                <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                  <input type="number" value={ef.min} onChange={e => editSet({ min:e.target.value })} title="Durée en minutes"
+                    style={{ ...inSt, flex:1, width:'auto', minWidth:0 }} />
+                  <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>min</span>
+                  <input type="number" value={ef.kcal} onChange={e => editSet({ kcal:e.target.value, manual:true })} title="Calories brûlées (corrigées à la main = plus jamais recalculées)"
+                    style={{ ...inSt, flex:1, width:'auto', minWidth:0 }} />
+                  <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>kcal</span>
+                </div>
+                {ef.manual && (
+                  <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                    calories saisies à la main — le changement de sport ou de durée ne les recalcule plus
+                    <button onClick={() => setEf(f => ({ ...f, manual:false, kcal:String(foodSportKcal(f.sport, f.intens, f.min, weight)) }))}
+                      style={{ marginLeft:6, background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:8.5, padding:'1px 6px', cursor:'pointer', fontFamily:'inherit' }}>recalculer</button>
+                  </div>
+                )}
+                <div style={{ display:'flex', gap:6 }}>
+                  <button onClick={saveEdit} style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:10, fontWeight:700, padding:'4px 10px', cursor:'pointer', fontFamily:'inherit' }}>✓ Enregistrer</button>
+                  <button onClick={cancelEdit} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'4px 10px', cursor:'pointer', fontFamily:'inherit' }}>Annuler</button>
+                </div>
+              </div>
+            ) : (
+              <div key={s.id} style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'5px 8px' }}>
+                <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>
+                  {foodSportLabel(s)}{s.manual && <span style={{ color:C.dim }} title="calories corrigées à la main"> ✎</span>}
+                </div>
+                <span style={{ fontSize:10, color:'#e07b54', fontFamily:'DM Mono,monospace', flexShrink:0 }}>🔥 {s.kcal} kcal</span>
+                <button onClick={() => startEdit(s)} title="Modifier la séance"
+                  style={{ background:'none', border:'none', color:C.dim, fontSize:11, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
+                <button onClick={() => removeSession(s.id)} title="Supprimer"
+                  style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </>}
+    </div>
+  );
+}
+
 function NourriturePanel() {
   const [profile, setProfile] = React.useState(loadFoodProfile);
   const [meals, setMeals]     = React.useState(loadFoodMeals);
   const [days, setDays]       = React.useState(loadFoodDays);
+  // 🏃 Séances de sport du jour ({ 'YYYY-MM-DD': [séance] }) — voir FOOD_SPORT_KEY.
+  const [sportAll, setSportAll] = React.useState(loadFoodSport);
   const [editProfile, setEditProfile] = React.useState(() => !loadFoodProfile());
   const [form, setForm]       = React.useState(() => loadFoodProfile() || { weight:'', height:'', age:'', sex:'m', activity:'1.375', goal:'keep' });
   const [cat, setCat]         = React.useState('breakfast');
@@ -35687,6 +35933,10 @@ function NourriturePanel() {
   const histHold = React.useRef({ timer:null, fired:false });
   React.useEffect(() => () => clearTimeout(histHold.current.timer), []);
   const [todayOpen, setTodayOpen] = React.useState(true);   // section Aujourd'hui repliable (ouverte par défaut)
+  // ✏️ Repas en cours d'édition : { id, name, cat, kcal, c, p, f } — les macros sont des
+  // CHAÎNES, vide = « non renseignée » (jamais 0 : un aliment sans macros connues et un
+  // aliment à 0 g de glucides ne sont pas la même information).
+  const [mealEdit, setMealEdit] = React.useState(null);
   const today = todoTodayStr();
   // Jour ÉDITÉ (défaut : aujourd'hui). Les 7 derniers jours restent éditables (chips
   // dans la section + ✏️ dans l'historique) — ajout/suppression de repas rétroactifs.
@@ -35696,6 +35946,11 @@ function NourriturePanel() {
   const macroTargets = foodMacroTargets(profile);   // repères g/jour déduits de la corpulence
   const dayMeals = meals[selDay] || [];
   const dayTotal = days[selDay] || 0;
+  const daySport = sportAll[selDay] || [];
+  const dayBurn  = foodSportBurn(daySport);
+  // ⚠ Le sport ne DÉDUIT rien des repas : il RELÈVE l'objectif du jour. `target` reste le
+  // besoin calculé par le profil, `targetEff` est ce qu'on peut manger CE jour-là.
+  const targetEff = target ? target + dayBurn : 0;
 
   const saveProfileForm = () => {
     const p = {
@@ -35730,7 +35985,41 @@ function NourriturePanel() {
     commitMeals({ ...meals, [selDay]: [...dayMeals, entry] });
     setName(''); setKcal(''); setResults(null); setSearchErr('');
   };
-  const removeMeal = id => commitMeals({ ...meals, [selDay]: dayMeals.filter(m => m.id !== id) });
+  const removeMeal = id => { setMealEdit(e => (e && e.id === id ? null : e)); commitMeals({ ...meals, [selDay]: dayMeals.filter(m => m.id !== id) }); };
+  // ✏️ Édition d'un repas DÉJÀ ajouté (nom, catégorie, kcal, macros) — indispensable pour
+  // corriger une estimation de l'IA (photo du plat, suggestion) qui tombe à côté.
+  // ⚠ `commitMeals` recalcule le total du jour depuis la composition : il n'y a rien
+  // d'autre à mettre à jour, `spotifyplus_food_days` suit tout seul.
+  const startMealEdit = (m) => setMealEdit({
+    id: m.id, name: m.name || '', cat: m.cat || 'breakfast', kcal: String(m.kcal || ''),
+    ...Object.fromEntries(FOOD_MACROS.map(x => [x.key, m[x.key] == null ? '' : String(m[x.key])])),
+  });
+  const saveMealEdit = () => {
+    if (!mealEdit) return;
+    const v = parseInt(mealEdit.kcal, 10);
+    if (!v || v <= 0) return;
+    const patch = { name: mealEdit.name.trim() || 'Repas', cat: mealEdit.cat, kcal: v };
+    // Champ vidé ⇒ la macro est SUPPRIMÉE de l'entrée (elle redevient inconnue), sinon
+    // `foodMacroTotals` compterait un 0 comme une valeur mesurée.
+    FOOD_MACROS.forEach(x => {
+      const n = parseFloat(String(mealEdit[x.key]).replace(',', '.'));
+      patch[x.key] = isFinite(n) && n >= 0 ? Math.round(n * 10) / 10 : undefined;
+    });
+    const next = dayMeals.map(m => {
+      if (m.id !== mealEdit.id) return m;
+      const o = { ...m, ...patch };
+      FOOD_MACROS.forEach(x => { if (o[x.key] === undefined) delete o[x.key]; });
+      return o;
+    });
+    commitMeals({ ...meals, [selDay]: next });
+    setMealEdit(null);
+  };
+  // 🏃 Séances de sport du jour édité — l'écriture est validée AVANT de toucher l'état
+  // (quota plein ⇒ rien n'a été écrit, on n'affiche pas une séance fantôme, piège 14).
+  const commitSport = (nextList) => {
+    const saved = saveFoodSport({ ...sportAll, [selDay]: nextList });
+    if (saved) setSportAll(saved);
+  };
   // 🔎 Cherche les calories de l'aliment saisi : Gemini EN TÊTE (suggestions,
   // clés déjà configurées ailleurs dans le Hub), Open Food Facts en dessous (mesures).
   // Les trois partent EN PARALLÈLE : une IA lente ne retarde pas la base, et inversement.
@@ -35815,11 +36104,13 @@ function NourriturePanel() {
   const favShown = favQn ? favs.filter(f => (f.name + ' ' + (f.brand || '')).toLowerCase().includes(favQn)) : favs;
 
   const imc = profile && profile.weight && profile.height ? profile.weight / Math.pow(profile.height / 100, 2) : 0;
-  const pct = target ? Math.min(100, Math.round(dayTotal / target * 100)) : 0;
-  const over = target && dayTotal > target;
+  const pct = targetEff ? Math.min(100, Math.round(dayTotal / targetEff * 100)) : 0;
+  const over = targetEff > 0 && dayTotal > targetEff;   // ⚠ `>` explicite : `targetEff && …` renverrait 0 et React afficherait « 0 »
   const inputSt = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box', width:'100%' };
   // Historique élargi à 30 jours (demande utilisateur — les totaux quotidiens sont conservés)
-  const histDays = _lastNDays(30).map(d => ({ ...d, kcal: days[d.key] || 0 })).filter(d => d.kcal > 0 || d.key === today).reverse();
+  // ⚠ Une journée sans repas mais AVEC une séance de sport doit rester visible.
+  const histDays = _lastNDays(30).map(d => ({ ...d, kcal: days[d.key] || 0 }))
+    .filter(d => d.kcal > 0 || foodSportBurn(sportAll[d.key]) > 0 || d.key === today).reverse();
   const editableSet = new Set(editableDays.map(d => d.key));
   const dayMacros = foodMacroTotals(dayMeals);                       // macros du jour édité
   // Appui long sur une ligne d'historique → macros de CETTE journée (recalculées depuis la
@@ -35896,6 +36187,25 @@ function NourriturePanel() {
       {/* ── Poids : journal de pesées (poids, IMC, graisse, eau, métabolisme…) + export/import ── */}
       <PoidsSection profile={profile} onProfileWeight={syncProfileWeight} />
 
+      {/* ── Jour édité : chips PARTAGÉES par le sport ET les repas ──────────────────
+          ⚠ Elles vivaient dans la carte des repas ; le sport se saisit lui aussi par
+          journée, deux sélecteurs de jour se seraient contredits. Un seul, au-dessus des
+          deux cartes, et toujours visible (jamais replié avec l'une d'elles). */}
+      <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'8px 12px', display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+        <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', flexShrink:0 }}>📅 jour édité</span>
+        {editableDays.map(d => (
+          <button key={d.key} onClick={() => { setSelDay(d.key); setMealEdit(null); setResults(null); setSearchErr(''); }}
+            title={`Éditer les repas et le sport du ${d.full}`}
+            style={{ background: selDay === d.key ? `${FOOD_COLOR}22` : 'none', border:`1px solid ${selDay === d.key ? FOOD_COLOR + '66' : C.border}`, borderRadius:6, color: selDay === d.key ? FOOD_COLOR : C.muted, fontSize:9, fontFamily:'DM Mono,monospace', padding:'3px 6px', cursor:'pointer' }}>
+            {d.key === today ? "auj." : d.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── 🏃 Séances de sport : type + durée + intensité → calories brûlées (MET) ── */}
+      <FoodSportSection day={selDay} dayLabel={(editableDays.find(d => d.key === selDay) || {}).full || selDay}
+        isToday={selDay === today} weight={profile && profile.weight} list={daySport} onChange={commitSport} />
+
       {/* ── Jour édité (aujourd'hui par défaut, 7 derniers jours éditables) : jauge + saisie des repas ── */}
       <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
         <div onClick={() => setTodayOpen(o => !o)} style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:8, cursor:'pointer', userSelect:'none' }}>
@@ -35904,29 +36214,28 @@ function NourriturePanel() {
           </span>
           <span style={{ display:'flex', alignItems:'baseline', gap:8 }}>
             <span style={{ fontSize:10, fontFamily:'DM Mono,monospace', color: over ? '#e05050' : C.muted }}>
-              {dayTotal} {target ? `/ ${target}` : ''} kcal
+              {dayTotal} {targetEff ? `/ ${targetEff}` : ''} kcal
             </span>
             <span style={{ fontSize:11, color:C.dim, transform: todayOpen ? 'rotate(90deg)' : 'none', transition:'transform 0.15s', display:'inline-block' }}>▶</span>
           </span>
         </div>
         {todayOpen && <>
-        {/* Choix du jour édité : chips des 7 derniers jours (rétro-saisie des repas) */}
-        <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
-          {editableDays.map(d => (
-            <button key={d.key} onClick={() => { setSelDay(d.key); setResults(null); setSearchErr(''); }}
-              title={`Éditer les repas du ${d.full}`}
-              style={{ background: selDay === d.key ? `${FOOD_COLOR}22` : 'none', border:`1px solid ${selDay === d.key ? FOOD_COLOR + '66' : C.border}`, borderRadius:6, color: selDay === d.key ? FOOD_COLOR : C.muted, fontSize:9, fontFamily:'DM Mono,monospace', padding:'3px 6px', cursor:'pointer' }}>
-              {d.key === today ? "auj." : d.label}
-            </button>
-          ))}
-        </div>
-        {target > 0 && (
+        {targetEff > 0 && (
           <div style={{ height:8, background:'#111', borderRadius:4, overflow:'hidden' }}>
             <div style={{ width:`${pct}%`, height:'100%', background: over ? '#e05050' : FOOD_COLOR, transition:'width 0.3s' }} />
           </div>
         )}
-        {target > 0 && !over && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{target - dayTotal} kcal restantes</div>}
-        {over && <div style={{ fontSize:9, color:'#e05050', fontFamily:'DM Mono,monospace' }}>⚠ objectif dépassé de {dayTotal - target} kcal</div>}
+        {targetEff > 0 && !over && <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>{targetEff - dayTotal} kcal restantes</div>}
+        {over && <div style={{ fontSize:9, color:'#e05050', fontFamily:'DM Mono,monospace' }}>⚠ objectif dépassé de {dayTotal - targetEff} kcal</div>}
+        {/* D'où vient l'objectif du jour quand du sport a été enregistré : besoin du profil
+            + calories brûlées. Sans profil (target = 0) il n'y a pas d'objectif à relever. */}
+        {dayBurn > 0 && (
+          <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+            {target > 0
+              ? <>🎯 {target} kcal + <span style={{ color:'#e07b54' }}>🔥 {dayBurn} kcal de sport</span> = {targetEff} kcal pour aujourd’hui</>
+              : <><span style={{ color:'#e07b54' }}>🔥 {dayBurn} kcal brûlées</span> — remplis ton profil pour en déduire un objectif</>}
+          </div>
+        )}
         {/* Glucides / protéines / graisses du jour — UNE BARRE PAR MACRO (7.6.77), sous la
             jauge de calories, remplies vers le repère quotidien déduit de la corpulence.
             Visible dès qu'un aliment validé porte ses macros (Open Food Facts ou IA). */}
@@ -36076,6 +36385,43 @@ function NourriturePanel() {
               </div>
               {list.map(m => {
                 const hasM = FOOD_MACROS.some(x => m[x.key] != null);
+                // ✏️ Mode édition : nom, catégorie, kcal et les 3 macros deviennent des
+                // champs. Corriger une estimation d'IA (photo du plat, suggestion) ne
+                // demande plus de supprimer la ligne pour la ressaisir.
+                if (mealEdit && mealEdit.id === m.id) return (
+                  <div key={m.id} style={{ display:'flex', flexDirection:'column', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'7px 9px', border:`1px solid ${FOOD_COLOR}55` }}>
+                    <input type="text" value={mealEdit.name} placeholder="Nom de l'aliment" onChange={e => setMealEdit(f => ({ ...f, name:e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter') saveMealEdit(); }} style={inputSt} />
+                    <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+                      {FOOD_CATS.map(([k, emo, lbl]) => (
+                        <button key={k} onClick={() => setMealEdit(f => ({ ...f, cat:k }))} title={`Déplacer vers ${lbl}`}
+                          style={{ background: mealEdit.cat === k ? `${FOOD_COLOR}22` : 'none', border:`1px solid ${mealEdit.cat === k ? FOOD_COLOR + '66' : C.border}`, borderRadius:6, color: mealEdit.cat === k ? FOOD_COLOR : C.muted, fontSize:10, padding:'4px 8px', cursor:'pointer' }}>
+                          {emo} {lbl}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                      <input type="number" value={mealEdit.kcal} placeholder="kcal" onChange={e => setMealEdit(f => ({ ...f, kcal:e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') saveMealEdit(); }}
+                        style={{ ...inputSt, flex:1, width:'auto', minWidth:0 }} />
+                      <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>kcal</span>
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6 }}>
+                      {FOOD_MACROS.map(x => (
+                        <label key={x.key} style={{ fontSize:9, color:x.color }}>{x.short} (g)
+                          <input type="number" value={mealEdit[x.key]} placeholder="—" onChange={e => setMealEdit(f => ({ ...f, [x.key]:e.target.value }))}
+                            onKeyDown={e => { if (e.key === 'Enter') saveMealEdit(); }} style={inputSt} /></label>
+                      ))}
+                    </div>
+                    <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>champ de macro laissé vide = « non renseignée »</div>
+                    <div style={{ display:'flex', gap:6 }}>
+                      <button onClick={saveMealEdit} style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:10, fontWeight:700, padding:'4px 10px', cursor:'pointer', fontFamily:'inherit' }}>✓ Enregistrer</button>
+                      <button onClick={() => setMealEdit(null)} style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'4px 10px', cursor:'pointer', fontFamily:'inherit' }}>Annuler</button>
+                      <button onClick={() => removeMeal(m.id)} title="Supprimer ce repas"
+                        style={{ marginLeft:'auto', background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:10, padding:'4px 10px', cursor:'pointer', fontFamily:'inherit' }}>🗑 Supprimer</button>
+                    </div>
+                  </div>
+                );
                 return (
                 <div key={m.id} style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'5px 8px' }}>
                   <div style={{ flex:1, minWidth:0 }}>
@@ -36091,6 +36437,8 @@ function NourriturePanel() {
                     )}
                   </div>
                   <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{m.kcal} kcal</span>
+                  <button onClick={() => startMealEdit(m)} title="Modifier ce repas (nom, calories, macros)"
+                    style={{ background:'none', border:'none', color:C.dim, fontSize:11, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
                   <button onClick={() => removeMeal(m.id)} title="Supprimer"
                     style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
                 </div>
@@ -36111,8 +36459,12 @@ function NourriturePanel() {
             appui long sur une journée = glucides / protéines / graisses
           </div>
           {histDays.map(d => {
-          const p = target ? Math.min(100, Math.round(d.kcal / target * 100)) : 0;
-          const o = target && d.kcal > target;
+          // ⚠ La jauge d'une journée passée se lit sur SON objectif à elle : besoin du
+          // profil + calories brûlées ce jour-là (une grosse séance justifie un gros total).
+          const burn = foodSportBurn(sportAll[d.key]);
+          const tgt = target ? target + burn : 0;
+          const p = tgt ? Math.min(100, Math.round(d.kcal / tgt * 100)) : 0;
+          const o = tgt > 0 && d.kcal > tgt;
           const openMac = macroDay === d.key;
           const mac = openMac ? foodMacroTotals(meals[d.key] || []) : null;
           return (
@@ -36126,8 +36478,9 @@ function NourriturePanel() {
                   <div style={{ width:`${p}%`, height:'100%', background: o ? '#e05050' : FOOD_COLOR }} />
                 </div>
                 <span style={{ fontSize:9, color: o ? '#e05050' : C.muted, fontFamily:'DM Mono,monospace', width:58, textAlign:'right', flexShrink:0 }}>{d.kcal} kcal</span>
+                {burn > 0 && <span style={{ fontSize:9, color:'#e07b54', fontFamily:'DM Mono,monospace', flexShrink:0 }} title={`${burn} kcal brûlées en sport ce jour-là`}>🔥{burn}</span>}
                 {editableSet.has(d.key) && (
-                  <button onClick={() => { if (histHold.current.fired) { histHold.current.fired = false; return; } setSelDay(d.key); setTodayOpen(true); setResults(null); setSearchErr(''); }}
+                  <button onClick={() => { if (histHold.current.fired) { histHold.current.fired = false; return; } setSelDay(d.key); setTodayOpen(true); setMealEdit(null); setResults(null); setSearchErr(''); }}
                     title={`Éditer les repas du ${d.full}`}
                     style={{ background:'none', border:'none', color: selDay === d.key ? FOOD_COLOR : C.dim, fontSize:11, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
                 )}
