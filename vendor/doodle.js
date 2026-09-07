@@ -3447,8 +3447,10 @@ function doodleMakeRock(pl) {
 //   • L'élément COURANT est celui de la dernière orbe encore en vie (`doodlePrismElem`) : il
 //     donne la couleur du noyau ET la forme du tir. Le Prisme change donc d'arme à chaque
 //     blessure, et finit toujours au 🔥 Feu — sa dernière vie.
-//   • Il apparaît dès D_PRISM_FROM, c'est-à-dire au PREMIER changement de biome (D_BIOME_STEP) :
-//     c'est littéralement « à partir du moment où les biomes deviennent différents ».
+//   • Il apparaît dès D_PRISM_FROM, soit après CINQ biomes différents (demande utilisateur,
+//     12.9.9). Les 1000 premiers points ne comptent pas : ils se passent au 📄 Départ, qui n'est
+//     pas un biome. Le 1er biome couvre 1000→2000, le 5e 5000→6000 : c'est donc à 6000 points,
+//     et pas avant, qu'on a « fait 5 biomes différents ».
 // ⚠ Ses points de vie ne valent QUE contre les projectiles — `doodleStrike` les décompte, comme
 // pour le 🐉 Dragonneau. L'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent
 // d'un coup : un Prisme qui survivrait à une bombe ferait mentir toutes ces tuiles à la fois.
@@ -3466,7 +3468,10 @@ const D_PRISM_ELEMS = [
   { k:'foudre', ico:'⚡', c:'#ffd54a', d:'#b8860b', n:1, spread:0,    v:4.2, r:5 },
 ];
 const D_PRISM_HP = D_PRISM_ELEMS.length;      // 5 vies : une par élément, par construction
-const D_PRISM_FROM = D_BIOME_STEP;            // dès le premier changement de biome
+// ⚠ Le +1 est le 📄 Départ, qui n'est pas un biome : 5 biomes traversés ⇒ 6 paliers franchis.
+// Écrit comme un calcul et non « 6000 » en dur — le jour où D_BIOME_STEP bouge, le seuil suit.
+const D_PRISM_BIOMES = 5;                     // biomes DIFFÉRENTS à avoir traversés
+const D_PRISM_FROM = (D_PRISM_BIOMES + 1) * D_BIOME_STEP;
 const D_PRISM_P = 0.02;                       // part des monstres, prise en HAUT du tirage
 const D_PRISM_GAP = 155;                      // frames entre deux tirs
 const D_PRISM_ORB_R = 30;                     // rayon de l'orbite des orbes
@@ -9052,7 +9057,7 @@ function doodleRules() {
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
-      { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} points — c'est-à-dire dès que les biomes commencent à changer. ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche 2 coffres.` },
+      { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} points — soit après ${D_PRISM_BIOMES} biomes DIFFÉRENTS (les 1000 premiers points se passent au 📄 Départ, qui n'en est pas un). ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche 2 coffres.` },
       { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
       { i:'🏆⚰️', n:'Coffre spécial', d:`une chance sur mille (${doodlePct(D_CHEST_SPECIAL_P)}) qu'un coffre soit doré, autant qu'il soit maudit — tiré coffre par coffre, qu'il vienne d'une créature ou de la 🎁 Tuile coffre. C'est la SEULE façon de les rencontrer.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
