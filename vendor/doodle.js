@@ -4803,53 +4803,22 @@ function doodleTileDraw(ctx, p, t) {
     if (p.used) doodleTileSpent(ctx, p);
     return;
   }
-  // 🏆 Coffre doré : le même coffre, mais tout en or et posé sur du bois sombre — il ne
-  // s'y trompe pas avec la 🎁 tuile coffre, qui est brune à cerclage doré. Une étincelle
-  // tourne autour tant qu'il n'a pas été ouvert ; ensuite la dalle s'éteint comme les autres.
-  if (p.type === 'gchest') {
-    doodleRR(ctx, x, y, w, h, 6, '#4a3418');
-    ctx.fillStyle = '#2b1d0c'; ctx.fillRect(x, y + h - 4, w, 4);
-    ctx.fillStyle = '#ffd54a'; ctx.fillRect(x + 3, y + 2.5, w - 6, h - 7);
-    ctx.fillStyle = '#ffeb9c'; ctx.fillRect(x + 3, y + 2.5, w - 6, (h - 7) * 0.38);   // couvercle, plus clair
-    ctx.fillStyle = '#8a5a10'; ctx.fillRect(x + 3, y + 2.5 + (h - 7) * 0.38, w - 6, 1.6);
-    ctx.fillStyle = '#7a4e0a'; ctx.fillRect(x + w / 2 - 3.5, y + h * 0.34, 7, 7);      // serrure
-    ctx.fillStyle = '#ffeb9c'; ctx.fillRect(x + w / 2 - 1, y + h * 0.40, 2, 3);
+  // 🏆 Coffre doré / ⚰️ Coffre maudit : une planche ordinaire SUR LAQUELLE est posé un vrai
+  // coffre — le même dessin que le 📦 coffre de récompense (`doodleChestBody`), à la palette
+  // près. ⚠ 12.9.2 — Ils étaient peints à plat sur la dalle, comme une tuile colorée : on ne
+  // voyait plus un coffre, on voyait une barre dorée. Le coffre déborde donc VOLONTAIREMENT
+  // au-dessus de la dalle, exactement comme le fait le coffre qu'une créature lâche.
+  // ⚠ Une fois ouvert, le coffre disparaît et il ne reste que la planche, éteinte : la
+  // récompense est prise, la plateforme demeure.
+  if (p.type === 'gchest' || p.type === 'cchest') {
+    const gold = p.type === 'gchest';
+    doodleRR(ctx, x, y, w, h, 6, gold ? '#8a6a3a' : '#3a2440');                        // la planche qui le porte
+    ctx.fillStyle = gold ? '#5b4620' : '#221429'; ctx.fillRect(x, y + h - 4, w, 4);
     if (!p.used) {
-      ctx.save();
-      ctx.globalAlpha = 0.45 + Math.sin(t * 0.18) * 0.45;
-      ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('✨', x + w - 9, y + h * 0.5 + Math.sin(t * 0.11) * 1.6);
-      ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      const cw = D_CHEST_W, ch = D_CHEST_H, bob = Math.sin(t * 0.13) * 1.4;
+      doodleChestBody(ctx, x + w / 2 - cw / 2, y - ch + 1 + bob, cw, ch,
+        gold ? D_CHEST_PAL.gold : D_CHEST_PAL.cursed, t, gold ? 'gold' : 'cursed');
     }
-    if (p.used) doodleTileSpent(ctx, p);
-    return;
-  }
-  // ⚰️ Coffre maudit : le même coffre, mais noir violacé et fendu, avec un crâne à la place
-  // de la serrure. ⚠ Il ne doit JAMAIS être pris pour le 🏆 doré : couleurs opposées, silhouette
-  // identique — c'est le pari, on reconnaît un coffre, on hésite une seconde sur sa couleur.
-  if (p.type === 'cchest') {
-    doodleRR(ctx, x, y, w, h, 6, '#241030');
-    ctx.fillStyle = '#140820'; ctx.fillRect(x, y + h - 4, w, 4);
-    ctx.fillStyle = '#5b2470'; ctx.fillRect(x + 3, y + 2.5, w - 6, h - 7);
-    ctx.fillStyle = '#7b2d8e'; ctx.fillRect(x + 3, y + 2.5, w - 6, (h - 7) * 0.38);   // couvercle
-    ctx.fillStyle = '#150a1c'; ctx.fillRect(x + 3, y + 2.5 + (h - 7) * 0.38, w - 6, 1.6);
-    // Deux fêlures qui traversent le coffre de haut en bas, de part et d'autre du crâne —
-    // c'est ce qui le dit BRISÉ plutôt que simplement sombre. Trait fin, sinon on lit une flèche.
-    ctx.strokeStyle = '#0e0616'; ctx.lineWidth = 0.9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    for (const [bx, dir] of [[10, 1], [w - 12, -1]]) {
-      ctx.beginPath();
-      ctx.moveTo(x + bx, y + 2.5);
-      ctx.lineTo(x + bx + dir * 2.4, y + 5.5);
-      ctx.lineTo(x + bx - dir * 1.2, y + 8.5);
-      ctx.lineTo(x + bx + dir * 2.8, y + 12.5);
-      ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(x + bx - dir * 1.2, y + 8.5); ctx.lineTo(x + bx - dir * 4, y + 11); ctx.stroke();   // l'éclat qui part de côté
-    }
-    ctx.save(); ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#e8dcf5';
-    ctx.fillText('☠', x + w / 2, y + h / 2 + 0.5);                                    // le « verrou » : un crâne
-    if (!p.used) { ctx.globalAlpha = 0.35 + Math.sin(t * 0.13) * 0.35; ctx.fillStyle = '#c17ce0'; ctx.fillText('☠', x + w / 2, y + h / 2 + 0.5); }
-    ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
     if (p.used) doodleTileSpent(ctx, p);
     return;
   }
@@ -7375,15 +7344,50 @@ function doodleMonster(ctx, m, t) {
 
 // Coffre au butin. Il flotte légèrement une fois posé (repère visuel : ce qui bouge s'attrape),
 // et garde une ombre portée tant qu'il tombe pour qu'on anticipe où il va se poser.
+// 📦 LE COFFRE, UN SEUL DESSIN POUR LES TROIS (12.9.2, demande utilisateur : « je veux que ce
+// soit les coffres donnés en récompense, pas des tuiles »). Le coffre lâché par un monstre, le
+// 🏆 doré et le ⚰️ maudit partagent donc cette forme-ci ; seule la PALETTE change, plus deux
+// ornements optionnels (l'étincelle du doré, les fêlures et le crâne du maudit).
+// ⚠ Une seconde fonction « coffre mais en or » aurait divergé du vrai dès la première retouche :
+// c'est exactement ce qui rendait les deux nouveaux coffres méconnaissables (ils étaient dessinés
+// comme des dalles peintes, pas comme des coffres).
+const D_CHEST_PAL = {
+  loot:   { base:'#8a5a2c', lid:'#b9793a', band:'#6b4420', lock:'#ffd54a', edge:'#5b3a1c' },
+  gold:   { base:'#c8961f', lid:'#ffd54a', band:'#8a6510', lock:'#fff3b0', edge:'#7a4e0a' },
+  cursed: { base:'#4a1f5c', lid:'#7b2d8e', band:'#2a0f36', lock:'#c17ce0', edge:'#150a1c' },
+};
+function doodleChestBody(ctx, x, y, w, h, pal, t, kind) {
+  const P = pal;
+  doodleRR(ctx, x, y, w, h, 4, P.base);
+  ctx.fillStyle = P.lid;  ctx.fillRect(x + 2, y + 2, w - 4, h * 0.42);
+  ctx.fillStyle = P.band; ctx.fillRect(x, y + h * 0.46, w, 3);
+  ctx.fillStyle = P.lock; ctx.fillRect(x + w / 2 - 3, y + h * 0.34, 6, 7);             // fermoir
+  ctx.strokeStyle = P.edge; ctx.lineWidth = 1.5; ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+  if (kind === 'gold') {
+    // Une étincelle tourne au-dessus du couvercle : c'est ce qui dit « celui-là n'est pas ordinaire ».
+    ctx.save(); ctx.globalAlpha = 0.45 + Math.sin(t * 0.16) * 0.45;
+    ctx.font = '9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff8d0'; ctx.fillText('✨', x + w - 3, y + 1 + Math.sin(t * 0.1) * 1.5);
+    ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  } else if (kind === 'cursed') {
+    // Deux fêlures qui descendent du couvercle, et un crâne à la place du fermoir.
+    ctx.strokeStyle = P.edge; ctx.lineWidth = 0.9; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const [bx, dir] of [[w * 0.24, 1], [w * 0.76, -1]]) {
+      ctx.beginPath();
+      ctx.moveTo(x + bx, y + 1.5); ctx.lineTo(x + bx + dir * 2.2, y + h * 0.3);
+      ctx.lineTo(x + bx - dir * 1.2, y + h * 0.55); ctx.lineTo(x + bx + dir * 2.6, y + h - 2);
+      ctx.stroke();
+    }
+    ctx.save(); ctx.font = '10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e8dcf5'; ctx.fillText('☠', x + w / 2, y + h * 0.52);
+    ctx.globalAlpha = 0.3 + Math.sin(t * 0.12) * 0.3; ctx.fillStyle = '#c17ce0'; ctx.fillText('☠', x + w / 2, y + h * 0.52);
+    ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  }
+}
 function doodleChest(ctx, c, t) {
   const bob = c.landed ? Math.sin(t * 0.13) * 1.4 : 0;
-  const x = c.x, y = c.y + bob, w = c.w, h = c.h;
-  doodleRR(ctx, x, y, w, h, 4, '#8a5a2c');
-  ctx.fillStyle = '#b9793a'; ctx.fillRect(x + 2, y + 2, w - 4, h * 0.42);
-  ctx.fillStyle = '#6b4420'; ctx.fillRect(x, y + h * 0.46, w, 3);
-  ctx.fillStyle = '#ffd54a'; ctx.fillRect(x + w / 2 - 3, y + h * 0.34, 6, 7);          // fermoir doré
-  ctx.strokeStyle = '#5b3a1c'; ctx.lineWidth = 1.5; ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
-  if (!c.landed) { ctx.globalAlpha = 0.18; ctx.fillStyle = '#000'; ctx.beginPath(); ctx.ellipse(x + w / 2, y + h + 7, w * 0.42, 3, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
+  doodleChestBody(ctx, c.x, c.y + bob, c.w, c.h, D_CHEST_PAL.loot, t, 'loot');
+  if (!c.landed) { ctx.globalAlpha = 0.18; ctx.fillStyle = '#000'; ctx.beginPath(); ctx.ellipse(c.x + c.w / 2, c.y + bob + c.h + 7, c.w * 0.42, 3, 0, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1; }
 }
 function doodleItem(ctx, it, t) {
   const cx = it.x + it.w / 2, cy = it.y + it.h / 2;
