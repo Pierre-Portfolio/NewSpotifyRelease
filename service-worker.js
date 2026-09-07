@@ -189,7 +189,7 @@
 // (essai direct en en-tête d'abord, case à cocher ensuite) ; cours boursiers relayés
 // contrôlés et leur provenance affichée ; redirections bornées à http/https côté Action ;
 // origine vérifiée sur les messages du lecteur YouTube.
-const CACHE  = 'spotifyplus-v443';          // app shell — bumpé à chaque déploiement
+const CACHE  = 'spotifyplus-v444';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
