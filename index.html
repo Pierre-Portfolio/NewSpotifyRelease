@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.4.5';
+const APP_VERSION = '13.4.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -42351,10 +42351,11 @@ function CompactPlayer() {
 }
 
 // ════════════════════════════════════════════════
-// DELTA PLAYLIST — l'écart entre les titres LIKÉS et le contenu des playlists du compte
-// Deux questions symétriques, une par sous-collapse :
-//   1. « ❤ Titres likés »  = les likés présents dans AUCUNE playlist (à ranger quelque part)
-//   2. « <nom de playlist> » = les titres de CETTE playlist qui ne sont PAS likés (à liker ?)
+// DELTA — l'écart entre ce que tu aimes et ce que tes playlists contiennent vraiment
+// UN scan, deux sous-collapses de résultat (voir `DeltaPanel`) :
+//   🔀 Delta Playlist — « ❤ Titres likés » = les likés présents dans AUCUNE playlist (à ranger
+//      quelque part), puis un collapse par playlist = ses titres qui ne sont PAS likés (à liker ?)
+//   🎤 Delta Artiste  — les artistes suivis dont AUCUN titre n'est dans une playlist
 // ⚠ AUCUNE requête automatique (même philosophie que le bouton Découvertes, 7.6.65) : le scan
 // ne part QUE sur un clic. Il coûte cher (1 page de 50 titres likés + 1 page de 50 playlists +
 // 1 à N pages par playlist), d'où le cache localStorage relu tel quel au montage, sans TTL :
@@ -42769,7 +42770,15 @@ function DeltaArtistList({ artists, empty }) {
   );
 }
 
-function DeltaPlaylistPanel() {
+// ⚠ 13.4.6 — UN SEUL point d'entrée : le collapse « 🔀 DELTA » porte le bouton ▶ Analyser
+// (une analyse pour les DEUX questions, elles sortent du même scan) et deux sous-collapses
+// qui n'affichent QUE le résultat :
+//   🔀 Delta Playlist → les likés rangés nulle part + ce que chaque playlist contient de non-liké
+//   🎤 Delta Artiste  → les artistes suivis dont AUCUN titre n'est dans une playlist
+// ⚠ Rien ne doit relancer le scan depuis un sous-collapse : `StatsCollapse` DÉMONTE ses
+// enfants à la fermeture (piège 5) — un bouton logé là-dedans disparaîtrait avec son état.
+// C'est aussi pourquoi tout vit dans `_delta` (module-level) et non dans un `useState`.
+function DeltaPanel() {
   const { user, logout } = useStore();
   const [, force] = React.useReducer(x => x + 1, 0);
   React.useEffect(() => {
@@ -42794,7 +42803,7 @@ function DeltaPlaylistPanel() {
   const mine = data && user?.id && data.playlists.some(p => p.ownerId !== undefined)
     ? data.playlists.filter(p => p.ownerId === user.id).length : null;
   // Playlists dont Spotify a refusé le contenu : leurs artistes n'ont pas pu être comptés,
-  // le collapse « artistes sans titre en playlist » peut donc en lister à tort.
+  // le collapse « Delta Artiste » peut donc en lister à tort.
   const plUnreadable = data ? data.playlists.filter(p => p.unreadable).length : 0;
 
   return (
@@ -42813,7 +42822,7 @@ function DeltaPlaylistPanel() {
       <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
         <button onClick={deltaRun} disabled={loading}
           style={{ background:`${DELTA_COLOR}22`, border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px', fontSize:11, fontWeight:700, cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.5 : 1, fontFamily:'inherit' }}>
-          {loading ? '⏳ Analyse…' : (data ? '↻ Relancer l\'analyse' : '▶ Lancer l\'analyse')}
+          {loading ? '⏳ Analyse…' : (data ? '↻ Relancer l\'analyse' : '▶ Analyser')}
         </button>
         {/* Bascule DEBUG : « tout afficher » rend le contenu BRUT lu par l'analyse (aucun
             filtre likés/non-likés) → permet de voir si un titre a bien été lu dans une
@@ -42851,49 +42860,54 @@ function DeltaPlaylistPanel() {
             {!cached && ' · résultat trop volumineux pour être mémorisé (relance l\'analyse au prochain chargement)'}
           </div>
 
-          {/* ⚠ Les listes `all` n'existent pas dans un cache écrit avant 7.6.96 → repli sur le
-              delta (le mode debug le dit, plutôt que d'afficher un tableau vide trompeur). */}
-          <StatsCollapse defaultOpen={false} color="#e05050"
-            title={<span>❤ TITRES LIKÉS {cnt(showAll ? (data.likedAll || data.likedOnly).length : data.likedOnly.length)}</span>}>
-            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-              {showAll ? 'Mode debug : TOUS les titres likés lus par l\'analyse.' : 'Likés présents dans aucune de tes playlists.'}
-            </div>
-            {showAll && <DeltaDebug received={data.likedReceived} parsed={data.likedTotal} sample={data.likedSample} legacy={!data.likedAll} />}
-            <DeltaTrackList
-              tracks={showAll ? (data.likedAll || data.likedOnly) : data.likedOnly}
-              empty={showAll ? 'Aucun titre liké lu.' : 'Tous tes titres likés sont rangés dans au moins une playlist.'} />
+          {/* ─── Sous-collapse 1 : DELTA PLAYLIST (résultat seul, aucun bouton) ─── */}
+          <StatsCollapse defaultOpen={false} color={DELTA_COLOR}
+            title={<span>🔀 DELTA PLAYLIST {cnt(`${data.playlists.length} playlist(s)`)}</span>}>
+            {/* ⚠ Les listes `all` n'existent pas dans un cache écrit avant 7.6.96 → repli sur le
+                delta (le mode debug le dit, plutôt que d'afficher un tableau vide trompeur). */}
+            <StatsCollapse defaultOpen={false} color="#e05050"
+              title={<span>❤ TITRES LIKÉS {cnt(showAll ? (data.likedAll || data.likedOnly).length : data.likedOnly.length)}</span>}>
+              <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                {showAll ? 'Mode debug : TOUS les titres likés lus par l\'analyse.' : 'Likés présents dans aucune de tes playlists.'}
+              </div>
+              {showAll && <DeltaDebug received={data.likedReceived} parsed={data.likedTotal} sample={data.likedSample} legacy={!data.likedAll} />}
+              <DeltaTrackList
+                tracks={showAll ? (data.likedAll || data.likedOnly) : data.likedOnly}
+                empty={showAll ? 'Aucun titre liké lu.' : 'Tous tes titres likés sont rangés dans au moins une playlist.'} />
+            </StatsCollapse>
+
+            {data.playlists.map(p => {
+              const list = showAll ? (p.all || p.tracks) : p.tracks;
+              return (
+                <StatsCollapse key={p.id} defaultOpen={false} color={DELTA_COLOR}
+                  title={<span>{p.name} {cnt(p.unreadable ? '?' : list.length)}</span>}>
+                  <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                    {p.unreadable
+                      ? 'Contenu refusé par Spotify (playlist éditoriale non lisible depuis la migration de février 2026).'
+                      : showAll
+                        ? `Mode debug : TOUT le contenu lu dans cette playlist${p.owner ? ` · par ${p.owner}` : ''}.`
+                        : `Titres de cette playlist qui ne sont pas likés — ${p.read} titre(s) lu(s)${p.owner ? ` · par ${p.owner}` : ''}.`}
+                  </div>
+                  {showAll && !p.unreadable && (
+                    <DeltaDebug received={p.received} parsed={p.read} sample={p.sample} endpoint={p.endpoint}
+                      announced={p.total} attempts={p.attempts} legacy={!p.all} />
+                  )}
+                  {!p.unreadable && (
+                    <DeltaTrackList tracks={list}
+                      empty={showAll ? 'Aucun titre lu dans cette playlist.' : 'Tous les titres de cette playlist sont likés.'} />
+                  )}
+                </StatsCollapse>
+              );
+            })}
           </StatsCollapse>
 
-          {data.playlists.map(p => {
-            const list = showAll ? (p.all || p.tracks) : p.tracks;
-            return (
-              <StatsCollapse key={p.id} defaultOpen={false} color={DELTA_COLOR}
-                title={<span>{p.name} {cnt(p.unreadable ? '?' : list.length)}</span>}>
-                <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-                  {p.unreadable
-                    ? 'Contenu refusé par Spotify (playlist éditoriale non lisible depuis la migration de février 2026).'
-                    : showAll
-                      ? `Mode debug : TOUT le contenu lu dans cette playlist${p.owner ? ` · par ${p.owner}` : ''}.`
-                      : `Titres de cette playlist qui ne sont pas likés — ${p.read} titre(s) lu(s)${p.owner ? ` · par ${p.owner}` : ''}.`}
-                </div>
-                {showAll && !p.unreadable && (
-                  <DeltaDebug received={p.received} parsed={p.read} sample={p.sample} endpoint={p.endpoint}
-                    announced={p.total} attempts={p.attempts} legacy={!p.all} />
-                )}
-                {!p.unreadable && (
-                  <DeltaTrackList tracks={list}
-                    empty={showAll ? 'Aucun titre lu dans cette playlist.' : 'Tous les titres de cette playlist sont likés.'} />
-                )}
-              </StatsCollapse>
-            );
-          })}
-
-          {/* Dernier collapse : les artistes SUIVIS dont aucun titre n'apparaît dans une
-              playlist. Calculé sur les ids d'artistes croisés pendant le scan (aucune
-              requête de plus que la lecture de /me/following). ⚠ Absent d'un cache écrit
-              avant 12.0.1 → on invite à relancer plutôt que d'afficher une liste vide. */}
+          {/* ─── Sous-collapse 2 : DELTA ARTISTE — les artistes SUIVIS dont aucun titre
+              n'apparaît dans une playlist. Calculé sur les ids d'artistes croisés pendant
+              le scan (aucune requête de plus que la lecture de /me/following). ⚠ Absent
+              d'un cache écrit avant 12.0.1 → on invite à relancer plutôt que d'afficher
+              une liste vide. */}
           <StatsCollapse defaultOpen={false} color={DELTA_COLOR}
-            title={<span>🎤 ARTISTES SANS TITRE EN PLAYLIST {cnt(data.followedGap ? data.followedGap.length : '?')}</span>}>
+            title={<span>🎤 DELTA ARTISTE {cnt(data.followedGap ? data.followedGap.length : '?')}</span>}>
             {!data.followedGap ? (
               <div style={{ fontSize:10, color:'#f5a623', fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
                 ⚠ Cette section n'existait pas lors de ta dernière analyse — relance-la pour l'obtenir.
@@ -42957,8 +42971,8 @@ function MusiquePanel() {
       <StatsCollapse defaultOpen={false} color="#6f7bf5" title={<span>🎤 ARTISTES SUIVIS {cnt(artists.length)}</span>}>
         <ArtistsPanel />
       </StatsCollapse>
-      <StatsCollapse defaultOpen={false} color={DELTA_COLOR} title={<span>🔀 DELTA PLAYLIST</span>}>
-        <DeltaPlaylistPanel />
+      <StatsCollapse defaultOpen={false} color={DELTA_COLOR} title={<span>🔀 DELTA</span>}>
+        <DeltaPanel />
       </StatsCollapse>
     </div>
   );
