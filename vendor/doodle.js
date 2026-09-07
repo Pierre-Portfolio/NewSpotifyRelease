@@ -396,6 +396,7 @@ function doodleKillMonster(s, m, force, annihilate) {
   // l'emporte) — mais il ne lâche pas de coffre pour autant, voir l'en-tête de la fonction.
   if (m.revive) return;
   if (doodleClassic(s)) return;   // 🎮 Classique : pas de coffres, donc pas de butins
+  if (m.noLoot) return;           // 🚨 les gardiens d'une rafle, sauf le premier : voir D_RAID_GAP
   // ⚠ L'étalement est DÉRIVÉ de `n` et centré, et non écrit en dur pour deux : c'est ce qui
   // le laisse juste si un jour une créature en lâche davantage.
   // ⚠ `m.loot` prime sur la rareté : une créature peut fixer son butin sans rien devoir à
@@ -2964,6 +2965,16 @@ const D_PROJ_HALF = 0.24;            // demi-ouverture du cône, en radians (~28
 const D_PROJ_SPD = 0.013;            // vitesse de rotation, rad/frame (~8 s le tour complet)
 const D_PROJ_COOL = 260;             // recharge de l'alarme, par dalle
 const D_WARDEN_V = 1.35;             // le gardien appelé fonce droit sur le doodler
+// 🚨 13.2.3 — L'ALARME EST UNE RAFLE, PAS UN GARDIEN (demande utilisateur) : un 👮 toutes les
+// D_RAID_GAP frames pendant D_RAID_LIFE, en alternant DIAGONALE GAUCHE puis DIAGONALE DROITE —
+// ils naissent hors champ, dans un coin haut, et leur `homing` fait le reste : la course vers le
+// doodler EST la diagonale, rien à incliner à la main.
+// ⚠ La vague vit sur l'ÉTAT DE PARTIE (`s.raid`) et non sur la dalle : la dalle sort de l'écran
+// au premier saut, et sa boucle s'arrête net hors champ — la rafle se serait interrompue.
+// ⚠ SEUL LE PREMIER lâche un coffre (`noLoot` sur les suivants) : cinq gardiens à deux coffres
+// auraient fait du 🔦 Projecteur la meilleure machine à butin du jeu, alors que c'est un piège.
+const D_RAID_GAP = 120;              // 2 s entre deux gardiens
+const D_RAID_LIFE = 600;             // 10 s de rafle, soit cinq gardiens
 // L'angle du faisceau à cet instant. ⚠ SENS HORAIRE : en repère écran (y vers le bas), l'angle
 // qui CROÎT tourne déjà dans le sens des aiguilles d'une montre — il n'y a donc pas de signe à
 // inverser, et c'est exactement le contre-sens qu'on aurait écrit sans y penser.
@@ -2971,8 +2982,8 @@ function doodleProjAng(p, t) { return t * D_PROJ_SPD + (p.ph || 0); }
 // Le gardien appelé par l'alarme : il ne patrouille pas, il POURSUIT (`homing`, comme le monstre
 // arc-en-ciel). ⚠ Il n'est PAS marqué `rare` : il n'a rien à voir avec le tirage du biome, et
 // l'auréole rouge des très rares aurait laissé croire à un butin double.
-function doodleMakeWarden(x, y) {
-  return { x, y, w: 52, h: 46, type: 1, alive: true, kind: 'warden', icon: '👮',
+function doodleMakeWarden(x, y, noLoot) {
+  return { x, y, w: 52, h: 46, type: 1, alive: true, kind: 'warden', icon: '👮', noLoot: !!noLoot,
            homing: D_WARDEN_V, wt: Math.random() * 6.28 };
 }
 const D_BIOMES = [
@@ -3092,7 +3103,7 @@ const D_BIOMES = [
     tiles:[
       { k:'ladder',  icon:'🪜', name:'Échelle de prison', own:true, txt:'une échelle en part vers la PROCHAINE dalle disponible au-dessus, quelle que soit son abscisse — elle est donc souvent en diagonale, et ne mène jamais à une 🟫 cassante. T\'y poser, c\'est en monter les barreaux jusqu\'en haut, où tu repars d\'un saut' },
       { k:'barbed',  icon:'🌪️', name:'Tornade de barbelés', own:true, txt:'le fil s\'ARRACHE de la dalle par la droite, fonce sur toi comme aimanté et se referme en anneau tournant pendant ' + Math.round(D_BARB_LIFE / 60) + ' s, déchirant toute créature qu\'il croise — puis il explose en ' + D_BARB_NEEDLES + ' aiguilles. Il ne te blesse jamais : c\'est une garde. Un seul fil en l\'air à la fois' },
-      { k:'searchlight', icon:'🔦', name:'Projecteur', own:true, w:D_BIOME_TILE_RARE, txt:'une tourelle au centre de la dalle et deux caméras de surveillance. Le faisceau tourne dans le sens des aiguilles d\'une montre, sans fin : t\'y faire prendre DÉCLENCHE L\'ALARME et fait rappliquer un 👮 gardien, qui fonce droit sur toi. Une alarme toutes les ' + Math.round(D_PROJ_COOL / 60) + ' s par dalle' },
+      { k:'searchlight', icon:'🔦', name:'Projecteur', own:true, w:D_BIOME_TILE_RARE, txt:'une tourelle au centre de la dalle et deux caméras de surveillance. Le faisceau tourne dans le sens des aiguilles d\'une montre, sans fin : t\'y faire prendre DÉCLENCHE L\'ALARME : une RAFLE de ' + Math.round(D_RAID_LIFE / D_RAID_GAP) + ' gardiens, un toutes les ' + Math.round(D_RAID_GAP / 60) + ' s pendant ' + Math.round(D_RAID_LIFE / 60) + ' s, en diagonale par la gauche puis par la droite — et seul le PREMIER lâche un coffre. Une alarme toutes les ' + Math.round(D_PROJ_COOL / 60) + ' s par dalle' },
     ],
     mobs:[{ k:'inmate', icon:'🧍', w:36, h:42, vx:1.3, drawn:true },
           { k:'warden', icon:'👮', w:52, h:46, vx:1.0, rare:true, drawn:true }] },
