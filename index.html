@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.4.7';
+const APP_VERSION = '13.4.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1921,6 +1921,45 @@ async function spotifyArtistsByIds(ids) {
 const spotifyUnfollowArtists = ids =>
   apiDel(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
 
+// ── Se désabonner SANS rien perdre (13.4.7) ───────────────────────────────────
+// Demande utilisateur : « si je me désabonne d'un artiste, laisse-le dans la liste des
+// artistes (dernière date de scrapping) mais tu le scrapes plus, il n'est plus dans le
+// X/X artistes à scraper, et tu conserves ses data si jamais un jour je me réabonne ».
+// D'où la colonne `following` plutôt qu'un DELETE : la ligne garde `last_scraped_at`,
+// `scan_count`, `total_tracks_added`… La boucle de scan ne visite QUE /me/following, donc
+// un désabonné n'est de toute façon plus scanné et ne compte plus dans le X/X (ce total
+// vient de Spotify) ; `following` sert à le DIRE dans l'interface et à le retrouver.
+// ⚠ RÉABONNEMENT : rien à faire à la main — le prochain scan revoit l'artiste dans
+// /me/following, ses deux UPSERT reposent `following = 1` et le scan incrémental repart
+// de sa `last_scraped_at` d'origine. C'est tout l'intérêt de garder la ligne.
+// ⚠ Si l'artiste n'a JAMAIS été scrapé (quota 100/jour : suivi mais pas encore visité), il
+// n'a pas de ligne → on en crée une avec la sentinelle FULL_SCRAPE_FROM, celle-là même qui
+// vaut « jamais scrapé » pour la boucle : un réabonnement prendra toute sa discographie.
+// Le désabonnement Spotify exige le scope `user-follow-modify` (403 sur un jeton ancien) ;
+// comme pour « 🗑 Supprimer », l'écriture LOCALE se fait quand même — l'utilisateur voit
+// alors le message qui lui dit de se reconnecter.
+async function artistUnfollowKeepData(a) {
+  let refused = false, sent = false;
+  try {
+    const r = await spotifyUnfollowArtists([a.id]);
+    if (r && r.ok) sent = true;
+    else if (r && r.error === 'forbidden') refused = true;
+  } catch {}
+  try {
+    dbRun(
+      `INSERT INTO artists_scraped (spotify_id, last_scraped_at, name, image_url, spotify_url, following)
+       VALUES (?, ?, ?, ?, ?, 0)
+       ON CONFLICT(spotify_id) DO UPDATE SET
+         following   = 0,
+         name        = COALESCE(name, excluded.name),
+         image_url   = COALESCE(image_url, excluded.image_url),
+         spotify_url = COALESCE(spotify_url, excluded.spotify_url)`,
+      [a.id, FULL_SCRAPE_FROM, a.name || null, a.image || null, a.url || null]
+    );
+    await saveDB();
+  } catch { return { ok:false, refused, sent }; }
+  return { ok:true, refused, sent };
+}
 // ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
 // puis 100 de plus à 00h30 (1h plus tard). Désormais, atteindre 100 démarre un
@@ -42297,7 +42336,7 @@ function ArtistRow({ a }) {
   const err     = a.lastScanStatus === 'error';
   const partial = a.lastScanStatus === 'partial';
   const gone    = a.lastScanStatus === 'gone';
-  // Désabonné : ligne CONSERVÉE mais plus jamais scannée (colonne `following`).
+  // Désabonné : ligne CONSERVÉE mais plus jamais scannée (voir artistUnfollowKeepData).
   const unfollowed = a.following === false;
   // Jamais scrapé : ligne créée par un désabonnement avant que la boucle n'ait eu le temps
   // de visiter l'artiste (quota 100/jour) — sa date est la sentinelle, pas un vrai scan.
@@ -42804,30 +42843,65 @@ function DeltaTrackList({ tracks, empty }) {
   );
 }
 
+// Une ligne d'artiste du collapse « Delta Artiste », avec son bouton ⊘ Se désabonner
+// (13.4.7). ⚠ Le bouton fait DEUX choses d'un coup — retrait de l'abonnement Spotify ET
+// archivage local — mais ne SUPPRIME rien : la ligne d'`artists_scraped` garde sa date de
+// dernier scrapping et ses compteurs (voir `artistUnfollowKeepData`).
+// ⚠ Si Spotify refuse (jeton sans `user-follow-modify`), la ligne est quand même archivée
+// localement : ce n'est pas un mensonge durable, le prochain scan complet reverra l'artiste
+// dans /me/following et lui reposera `following = 1` tout seul.
+function DeltaArtistRow({ a, onUnfollow }) {
+  const [busy, setBusy] = React.useState(false);
+  const [msg,  setMsg]  = React.useState('');
+  const off = !!a.unfollowed;
+  const click = async () => {
+    if (busy || off) return;
+    if (!confirm(`Se désabonner de ${a.name} ?\n\nIl sort de tes abonnements Spotify et ne sera plus scanné.\nSa ligne reste dans « Artistes suivis » avec sa date de dernier scrapping : si tu te réabonnes un jour, le scan repart de cette date au lieu de tout reprendre.`)) return;
+    setBusy(true); setMsg('');
+    const r = await onUnfollow(a);
+    setBusy(false);
+    if (!r.ok)          setMsg('Désabonnement non enregistré localement — la base n\'a pas pu être écrite.');
+    else if (r.refused) setMsg('Spotify a refusé le désabonnement (permission « user-follow-modify » manquante) : déconnecte-toi puis reconnecte-toi.');
+    else if (!r.sent)   setMsg('Spotify n\'a pas confirmé le désabonnement — vérifie dans l\'app Spotify.');
+  };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:3, padding:'7px 4px', opacity: off ? 0.55 : 1 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        <AlbumArt size={38} letter={(a.name || '?')[0].toUpperCase()} color={off ? '#8a8a8a' : DELTA_COLOR} image={a.image} />
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{a.name}</div>
+          <div style={{ fontSize:10, color:C.muted }}>
+            {off ? '⊘ désabonné — données conservées dans Artistes suivis'
+                 : a.liked ? '❤ présent dans tes titres likés' : 'aucun titre, ni en playlist ni en liké'}
+          </div>
+        </div>
+        {!off && (
+          <button onClick={click} disabled={busy} title="Se désabonner sur Spotify (les données de scrapping sont conservées)"
+            style={{ flexShrink:0, background:'none', border:`1px solid ${busy ? C.border : '#e0505055'}`, borderRadius:6,
+              color: busy ? C.dim : '#e05050', fontSize:10, fontWeight:700, padding:'4px 8px', cursor: busy ? 'default' : 'pointer', fontFamily:'inherit' }}>
+            {busy ? '⏳' : '⊘'}
+          </button>
+        )}
+        {a.url && (
+          <a href={safeHref(a.url)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
+            style={{ fontSize:13, color:C.accent, textDecoration:'none', flexShrink:0, padding:'0 4px' }}>↗</a>
+        )}
+      </div>
+      {msg && <div style={{ fontSize:9.5, color:'#e0a050', fontFamily:'DM Mono,monospace', lineHeight:1.45, paddingLeft:48 }}>{msg}</div>}
+    </div>
+  );
+}
+
 // Même liste paginée, pour des ARTISTES (collapse « Delta Artiste »).
 // Le ❤ signale un artiste absent des playlists mais présent dans les titres likés.
-function DeltaArtistList({ artists, empty }) {
+function DeltaArtistList({ artists, empty, onUnfollow }) {
   const [max, setMax] = React.useState(DELTA_PAGE);
   if (!artists.length) {
     return <div style={{ fontSize:11, color:C.dim, fontFamily:'DM Mono,monospace', padding:'14px 0', textAlign:'center' }}>{empty}</div>;
   }
   return (
     <div style={{ display:'flex', flexDirection:'column' }}>
-      {artists.slice(0, max).map(a => (
-        <div key={a.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px' }}>
-          <AlbumArt size={38} letter={(a.name || '?')[0].toUpperCase()} color={DELTA_COLOR} image={a.image} />
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{a.name}</div>
-            <div style={{ fontSize:10, color:C.muted }}>
-              {a.liked ? '❤ présent dans tes titres likés' : 'aucun titre, ni en playlist ni en liké'}
-            </div>
-          </div>
-          {a.url && (
-            <a href={safeHref(a.url)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
-              style={{ fontSize:13, color:C.accent, textDecoration:'none', flexShrink:0, padding:'0 4px' }}>↗</a>
-          )}
-        </div>
-      ))}
+      {artists.slice(0, max).map(a => <DeltaArtistRow key={a.id} a={a} onUnfollow={onUnfollow} />)}
       {artists.length > max && (
         <button onClick={() => setMax(m => m + DELTA_PAGE * 2)}
           style={{ marginTop:8, background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:'7px 12px', fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>
@@ -42838,8 +42912,16 @@ function DeltaArtistList({ artists, empty }) {
   );
 }
 
+// ⚠ 13.4.6 — UN SEUL point d'entrée : le collapse « 🔀 DELTA » porte le bouton ▶ Analyser
+// (une analyse pour les DEUX questions, elles sortent du même scan) et deux sous-collapses
+// qui n'affichent QUE le résultat :
+//   🔀 Delta Playlist → les likés rangés nulle part + ce que chaque playlist contient de non-liké
+//   🎤 Delta Artiste  → les artistes suivis dont AUCUN titre n'est dans une playlist
+// ⚠ Rien ne doit relancer le scan depuis un sous-collapse : `StatsCollapse` DÉMONTE ses
+// enfants à la fermeture (piège 5) — un bouton logé là-dedans disparaîtrait avec son état.
+// C'est aussi pourquoi tout vit dans `_delta` (module-level) et non dans un `useState`.
 function DeltaPanel() {
-  const { user, logout } = useStore();
+  const { user, logout, reloadArtists } = useStore();
   const [, force] = React.useReducer(x => x + 1, 0);
   React.useEffect(() => {
     _delta.subs.add(force);
@@ -42865,6 +42947,22 @@ function DeltaPanel() {
   // Playlists dont Spotify a refusé le contenu : leurs artistes n'ont pas pu être comptés,
   // le collapse « Delta Artiste » peut donc en lister à tort.
   const plUnreadable = data ? data.playlists.filter(p => p.unreadable).length : 0;
+
+  // ⊘ Désabonnement depuis la liste. La ligne n'est PAS retirée du résultat : elle est
+  // marquée sur place (`unfollowed`) et le cache réécrit — une liste qui se réordonne sous
+  // les doigts après chaque clic serait impossible à parcourir. Le marquage vit dans
+  // `_delta.data` (module-level), il survit donc à la fermeture du collapse (piège 5).
+  const unfollowArtist = async (a) => {
+    const r = await artistUnfollowKeepData(a);
+    if (r.ok) {
+      const row = (_delta.data?.followedGap || []).find(x => x.id === a.id);
+      if (row) row.unfollowed = true;
+      try { deltaCacheSave(_delta.data); } catch {}
+      deltaSet({});          // republie l'état aux abonnés (le compteur et la ligne suivent)
+      reloadArtists();
+    }
+    return r;
+  };
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
@@ -42979,7 +43077,7 @@ function DeltaPanel() {
                   — {data.followedGap.length} sur {data.followedTotal ?? '?'} abonnement(s).
                   {plUnreadable > 0 && ` ⚠ ${plUnreadable} playlist(s) illisible(s) : leur contenu n'a pas pu être compté, la liste peut donc être trop longue.`}
                 </div>
-                <DeltaArtistList artists={data.followedGap}
+                <DeltaArtistList artists={data.followedGap} onUnfollow={unfollowArtist}
                   empty="Chacun de tes artistes suivis a au moins un titre dans une playlist." />
               </>
             )}

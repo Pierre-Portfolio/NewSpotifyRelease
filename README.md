@@ -45,9 +45,9 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 **Découvertes de la semaine**
 Rien n'est importé automatiquement. Deux moyens : le **bouton violet** dans ⚙ Scraping (qui teste l'accès et importe ce qui est lisible), et surtout la **capture par la lecture** — lance la playlist une fois par semaine et le Hub range les titres dans « En attente » tout seul. Spotify ne laissant plus toujours lire le contenu des playlists éditoriales, la capture par la lecture reste le moyen fiable.
 
-L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scraping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta : un bouton **▶ Analyser** et deux résultats — **Delta Playlist** (l'écart entre tes likes et le contenu de tes playlists) et **Delta Artiste** (les artistes que tu suis dont aucun titre n'est rangé en playlist).
+L'onglet **Musique** regroupe le tout en sections repliables : ⚙ Scraping · ⏳ En attente · ❤ Likés · 🕘 Historique · 🎤 Artistes suivis · 🔀 Delta : un bouton **▶ Analyser** et deux résultats — **Delta Playlist** (l'écart entre tes likes et le contenu de tes playlists) et **Delta Artiste** (les artistes que tu suis dont aucun titre n'est rangé en playlist, avec un bouton **⊘** pour t'en désabonner sur Spotify).
 
-Te désabonner d'un artiste dans l'app Spotify ne l'efface **jamais** : il reste dans 🎤 Artistes suivis, marqué **⊘ Désabonné**, avec sa date de dernier scrapping et ses compteurs. Il n'est simplement plus scanné et ne compte plus dans le X/X de la synchro. Si tu te réabonnes un jour, le prochain scan le réactive tout seul et **repart de sa dernière date** au lieu de tout reprendre depuis le début.
+Te désabonner d'un artiste — depuis ce bouton ⊘ ou depuis l'app Spotify — ne l'efface **jamais** : il reste dans 🎤 Artistes suivis, marqué **⊘ Désabonné**, avec sa date de dernier scrapping et ses compteurs. Il n'est simplement plus scanné et ne compte plus dans le X/X de la synchro. Si tu te réabonnes un jour, le prochain scan le réactive tout seul et **repart de sa dernière date** au lieu de tout reprendre depuis le début.
 
 ---
 
