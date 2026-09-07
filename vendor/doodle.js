@@ -8707,8 +8707,14 @@ const D_CREA_SHAKE    = 3.2;    // secousse d'écran à chaque saut (sensation d
 // Une dalle peut-elle fusionner ? ⚠ On écarte celles qui sont le PIED d'une structure : la 🌈
 // Arc-en-ciel et son second pied, les 🚇 Tuyaux, les ⛓️ Chaînes. Les faire disparaître laisserait
 // leur jumelle pointer un fantôme — et une paire est déjà, par construction, deux dalles liées.
+// ⚠ 12.9.8 (demande utilisateur) — LA 🔺 FRACTALE EST INTERDITE DE FUSION, elle ET toute sa
+// descendance (`p.gen`, posé sur chaque fille à chaque génération, y compris la dernière, née
+// verte). Elle se scinde en DEUX dalles à la même hauteur et à quelques pixels l'une de l'autre :
+// c'était une ✨ Création offerte à chaque rebond, alors que la Création doit rester une rencontre
+// du terrain. `gen` n'est posé nulle part ailleurs dans le jeu, c'est donc le marqueur exact.
 function doodleCreaCan(p) {
   return p && !p.dead && p.fvy == null && doodleSolid(p) && p.type !== 'creation'
+    && p.type !== 'fractal' && p.gen == null
     && p.pipe == null && p.chain == null && !p.arcTo && !p.rbPair;   // (les leurres 🎲 sont déjà écartés par doodleSolid)
 }
 // Deux dalles se touchent-elles ? Même rangée (à une hauteur de dalle près) et bords jointifs.
@@ -9059,7 +9065,7 @@ function doodleRules() {
       { i:'⬜', n:'Blanche',      d:'un seul rebond, puis elle disparaît. Elle marque les sauts limites.' },
       { i:'🎁', n:'Tuile coffre', d:'au premier rebond, un coffre apparaît dessus ; elle s\'éteint ensuite. Le coffre se ramasse et se tire comme celui d\'un monstre.' },
       { i:'🌈', n:'Multicolore',  d:'se téléporte plus haut à chaque rebond et tient 3 à 5 passages. Les points sur elle comptent les passages restants. Tant qu\'elle est en vie, le reste du décor se raréfie de moitié.' },
-      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
+      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. Ne fusionnent JAMAIS : la 🔺 Fractale et tout ce qu'elle engendre (elle se scinde en deux dalles voisines, ce serait une Création à chaque rebond), ni les dalles liées par paire (🌈 Arc-en-ciel, 🚇 Tuyaux, ⛓️ Chaînes). En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
