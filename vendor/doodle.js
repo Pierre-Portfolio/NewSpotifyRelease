@@ -5671,16 +5671,53 @@ function doodleTileDraw(ctx, p, t) {
   }
   // 🪝 Grappin : treuil de fer avec sa bobine, sa manivelle et le croc rangé dessus — la corde,
   // elle, n'est dessinée que quand elle est lancée (voir doodleDraw).
+  // 🪝 13.3.5 — LE GRAPPIN DEVIENT UN TREUIL DE CHANTIER (demande utilisateur). La dalle grise à
+  // bobine ne disait ni qu'elle visait, ni quand elle allait tirer. Hachures jaune et noir pour
+  // qu'on la repère de loin, tambour dont on voit les couches de câble, manivelle, et surtout
+  // un CROC PENDU SOUS LA DALLE : c'est lui qui la fait reconnaître quand elle arrive par le bas.
+  // ⚠ La recharge se VOIT (`p.grapCool`, qui décompte de D_GRAP_GAP à 0) : la manivelle
+  // s'emballe et le croc est REMONTÉ à mesure que le tir approche. Le joueur lit le rythme de
+  // la tuile sur la tuile elle-même, au lieu de subir un lancer qui ne s'annonçait pas.
+  // ⚠ Le croc pendu n'est dessiné que si aucun grappin n'est en vol (`p.grap`) : la tête volante
+  // est peinte par une passe à part, et deux crocs à l'écran auraient menti sur ce qui se passe.
+  // ⚠ Il descend SOUS la boîte de la dalle, comme la masse du ⏲️ Balancier ou les piques de la
+  // 🧊 Stalactite — c'est admis à cette passe, et c'est ce qui le rend visible à l'avance.
   if (p.type === 'grapple') {
-    doodleRR(ctx, x, y, w, h, 6, '#6b6270');
+    doodleRR(ctx, x, y, w, h, 3, '#f0b429');
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x, y, w, h - 4); ctx.clip();
+    ctx.fillStyle = '#2b2620';
+    for (let i = -2; i < w / 6 + 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(x + i * 6, y + h); ctx.lineTo(x + i * 6 + 4, y + h);
+      ctx.lineTo(x + i * 6 + 4 + h, y); ctx.lineTo(x + i * 6 + h, y);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
     ctx.fillStyle = '#3a3440'; ctx.fillRect(x, y + h - 4, w, 4);
-    const cx = x + w / 2, cy = y + h / 2;
-    ctx.fillStyle = '#c9ced6'; ctx.strokeStyle = '#3a3440'; ctx.lineWidth = 1.3;
-    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();   // la bobine
-    ctx.strokeStyle = '#3a3440'; ctx.lineWidth = 1.1;
-    for (let i = 0; i < 3; i++) { const a = t * 0.05 + i * 2.09; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * 4.4, cy + Math.sin(a) * 4.4); ctx.stroke(); }
-    ctx.strokeStyle = '#c9ced6'; ctx.lineWidth = 2;                                  // le croc au repos
-    ctx.beginPath(); ctx.arc(x + w - 12, y + 5, 3.4, -0.4, Math.PI * 1.3); ctx.stroke();
+    const cx = x + w / 2, cy = y + h / 2 - 0.5;
+    ctx.fillStyle = '#5d6672'; ctx.strokeStyle = '#2b2620'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, cy, 5.4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();   // le tambour
+    ctx.strokeStyle = '#c9ced6'; ctx.lineWidth = 0.7;                                  // les couches de câble
+    for (let r = 1.6; r < 5; r += 1.3) { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke(); }
+    // `k` : 0 au sortir d'un tir, 1 juste avant le suivant. Inconnu tant que la dalle n'est pas
+    // entrée à l'écran (`grapCool` n'y est posé qu'alors) — le croc pend alors au plus bas.
+    const k = p.grapCool == null ? 0 : Math.max(0, Math.min(1, 1 - p.grapCool / D_GRAP_GAP));
+    const a = t * (0.03 + k * 0.12);
+    ctx.strokeStyle = '#2b2620'; ctx.lineWidth = 1.4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * 7.5, cy + Math.sin(a) * 7.5); ctx.stroke();
+    ctx.fillStyle = '#c9ced6';
+    ctx.beginPath(); ctx.arc(cx + Math.cos(a) * 7.5, cy + Math.sin(a) * 7.5, 1.5, 0, Math.PI * 2); ctx.fill();
+    if (!p.grap) {
+      const drop = 3 + 12 * (1 - k), sw = Math.sin(t * 0.035) * 4 * (1 - k);
+      ctx.strokeStyle = '#8a929c'; ctx.lineWidth = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(cx, y + h);
+      ctx.quadraticCurveTo(cx + sw * 0.6, y + h + drop * 0.6, cx + sw, y + h + drop);
+      ctx.stroke();
+      ctx.strokeStyle = '#c9ced6'; ctx.lineWidth = 1.8;
+      ctx.beginPath(); ctx.arc(cx + sw, y + h + drop + 2, 2.6, -1.9, Math.PI * 0.9); ctx.stroke();
+    }
     return;
   }
   // ⏲️ Balancier : caisse d'horloge en bois sombre, pivot de laiton, tige et masse pendues
