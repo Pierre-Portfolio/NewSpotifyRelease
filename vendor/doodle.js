@@ -370,7 +370,14 @@ function doodleVoidSurvive(s, h, H) {
 // `force` = les DEUX seules façons annoncées d'en venir à bout : le missile (via `doodleStrike`,
 // où les autres projectiles ne parviennent jamais) et le contact physique (écrasement, 🐏 bélier,
 // teintes 🔴 Soif de sang et 🟧 Colosse). Tout le reste ne fait que faire sonner le pavois.
-function doodleKillMonster(s, m, force) {
+// ⚠ 12.9.5 (demande utilisateur) — `annihilate` : la SEULE chose qui met vraiment fin à un
+// 🦴 squelette d'ossuaire. Deux effets en disposent, et deux seulement — la ☠️ Destructrice et
+// l'onde de la ✨ Création — parce que ce sont les deux qui promettent de NETTOYER l'écran :
+// laisser derrière elles un tas d'os qui se relève faisait mentir les deux à la fois.
+// ⚠ Le squelette annihilé ne lâche toujours AUCUN coffre (voir plus bas) : la règle d'origine
+// n'était pas là pour son immortalité, elle était là pour qu'une dalle d'ossuaire ne devienne
+// pas une machine à butin — un rebond de plus sur la Destructrice la relancerait à l'identique.
+function doodleKillMonster(s, m, force, annihilate) {
   if (!m.alive) return;
   if (m.shield && !force) { m.sh = D_SHLD_FLASH; return; }
   m.alive = false;
@@ -384,7 +391,10 @@ function doodleKillMonster(s, m, force) {
   // dalle d'ossuaire aurait été une machine à butin qu'il suffisait d'arroser.
   // ⚠ `alive = false` le rend inoffensif et le sort du tir ; le filtre de fin de frame l'épargne
   // tant que `bones > 0`, et c'est la boucle des monstres qui le relève.
-  if (m.revive) { m.bones = D_SKEL_DOWN + D_SKEL_REBUILD; m.vx = 0; m.vy = 0; return; }
+  if (m.revive && !annihilate) { m.bones = D_SKEL_DOWN + D_SKEL_REBUILD; m.vx = 0; m.vy = 0; return; }
+  // 🦴 Annihilé : il ne se reconstruit plus (`bones` reste nul, le filtre de fin de frame
+  // l'emporte) — mais il ne lâche pas de coffre pour autant, voir l'en-tête de la fonction.
+  if (m.revive) return;
   if (doodleClassic(s)) return;   // 🎮 Classique : pas de coffres, donc pas de butins
   // ⚠ L'étalement est DÉRIVÉ de `n` et centré, et non écrit en dur pour deux : c'est ce qui
   // le laisse juste si un jour une créature en lâche davantage.
@@ -2092,7 +2102,7 @@ const D_TILES = [
   { k: 'grapple',  icon:'🪝', name: 'Grappin',        txt: 'elle lance un grappin sur toi de temps en temps : s\'il t\'accroche, il te ramène sur la dalle, où tu repars d\'un saut' },
   { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : VERTE elle t\'offre 1 bonus (une seule fois par dalle), JAUNE on glisse, ROUGE elle te prend ' + D_LIGHT_TAKE + ' niveaux de bonus et ' + D_LIGHT_AMMO + ' balles' },
   { k: 'fog',      icon:'🌁', name: 'Brouillard',     txt: 'toutes les dalles disparaissent pour le saut qui suit — elles réapparaissent dès que tu en retouches une' },
-  { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre' },
+  { k: 'slayer',   icon:'☠️', name: 'Destructrice',    txt: 'le rebond pulvérise toutes les créatures à moins de ' + D_SLAYER_R + ' points d\'altitude de la dalle, au-dessus comme en dessous — et chacune lâche son coffre. Elle est, avec l\'onde de la ✨ Création, la seule à en finir DÉFINITIVEMENT avec un 🦴 squelette d\'ossuaire : il ne se reconstruit pas (mais ne lâche toujours rien)' },
   { k: 'lazer',    icon:'🔴', name: 'Laser',           txt: 'son canon te suit et elle tire un trait lent toutes les ' + Math.round(D_TLASER_GAP / 60) + ' secondes — pendant les ' + (D_TLASER_TEL / 60).toFixed(1).replace('.', ',') + ' s qui précèdent le coup, un rayon de visée en pointillés s\'allonge devant elle et deux anneaux se referment sur son œil : c\'est le moment de bouger. Se prendre le tir fait mal' },
   { k: 'tamagotchi', icon:'🥚', name: 'Tamagotchi',  txt: 'elle a faim : on la traverse tant qu\'elle n\'a rien mangé. 1 balle → repue et heureuse, elle devient une plateforme qui te propulse comme un ressort · 2 balles → fin d\'appétit, elle jaunit et ne rend plus qu\'un saut ordinaire · 3 balles → gavée, elle vire au rouge et te TIRE dessus toutes les ' + Math.round(D_TAMA_GAP / 60) + ' secondes' },
   { k: 'clay',     icon:'🧱', name: 'Fragile', txt: 'elle s\'enfonce un peu plus sous chaque rebond, et finit par se dérober' },
@@ -3069,7 +3079,7 @@ const D_BIOMES = [
   { k:'enfer',   name:'Enfer',    icon:'😈', paper:'#f0dad6', rule:'#d2a49c', marge:'#8f1d14',
     tiles:[
       { k:'chain',    icon:'⛓️', name:'Chaîne',   own:true, txt:'elles naissent PAR DEUX, à des hauteurs différentes, et une chaîne pend entre les deux. Te poser sur la dalle du BAS, c\'est la gravir jusqu\'à celle du haut, où tu repars d\'un saut' },
-      { k:'ossuary',  icon:'🦴', name:'Ossuaire', own:true, txt:'une seconde après son entrée à l\'écran elle crache un squelette, puis un autre toutes les ' + Math.round(D_SKEL_EVERY / 60) + ' s. Le squelette TOMBE — c\'est la seule créature du jeu soumise à la gravité — se pose où il peut et marche vers toi. L\'abattre ne rapporte AUCUN coffre : il s\'effondre en tas d\'os, attend ' + Math.round(D_SKEL_DOWN / 60) + ' s et se reconstruit en ' + Math.round(D_SKEL_REBUILD / 60) + ' s' },
+      { k:'ossuary',  icon:'🦴', name:'Ossuaire', own:true, txt:'une seconde après son entrée à l\'écran elle crache un squelette, puis un autre toutes les ' + Math.round(D_SKEL_EVERY / 60) + ' s. Le squelette TOMBE — c\'est la seule créature du jeu soumise à la gravité — se pose où il peut et marche vers toi. L\'abattre ne rapporte AUCUN coffre : il s\'effondre en tas d\'os, attend ' + Math.round(D_SKEL_DOWN / 60) + ' s et se reconstruit en ' + Math.round(D_SKEL_REBUILD / 60) + ' s. Deux effets seulement en viennent DÉFINITIVEMENT à bout — la ☠️ Destructrice et l\'onde de la ✨ Création — et même là, il ne lâche rien' },
       { k:'eflame',   icon:'🔥', name:'Flamme éternelle', own:true, w:D_BIOME_TILE_RARE, txt:'une coulée de magma à ciel ouvert : une créature qui la touche brûle, une balle tirée dedans est ABSORBÉE — et t\'y poser arme tes ' + D_FLAME_SHOTS + ' tirs suivants en LANCE-FLAMMES. Un jet qui rencontre une dalle en embrase le sommet pendant ' + Math.round(D_BURN_LIFE / 60) + ' s, et ce sommet détruit tout ce qu\'il touche — les créatures, et toi aussi. Te tenir sur la coulée, en revanche, ne risque rien' },
     ],
     mobs:[{ k:'skel',  icon:'💀', w:36, h:40, vx:1.15, drawn:true },
@@ -8761,7 +8771,8 @@ function doodleCreaStep(s, W, H, sf) {
     cr.r += D_CREA_WAVE_V * sf;
     for (const m of s.monsters) {
       if (!m.alive || m.y < -30 || m.y > H + 30) continue;   // « tous les monstres VISIBLES »
-      if (Math.hypot(m.x + m.w / 2 - cr.x, m.y + m.h / 2 - cr.y) <= cr.r) doodleKillMonster(s, m, true);
+      // ⚠ `annihilate` : le front de lumière ne laisse RIEN derrière lui, 🦴 squelettes compris.
+      if (Math.hypot(m.x + m.w / 2 - cr.x, m.y + m.h / 2 - cr.y) <= cr.r) doodleKillMonster(s, m, true, true);
     }
     // Sortie de carte : le front doit avoir dépassé le coin le plus éloigné.
     const far = Math.max(Math.hypot(cr.x, cr.y), Math.hypot(W - cr.x, cr.y),
@@ -9054,7 +9065,7 @@ function doodleRules() {
       { i:'⬜', n:'Blanche',      d:'un seul rebond, puis elle disparaît. Elle marque les sauts limites.' },
       { i:'🎁', n:'Tuile coffre', d:'au premier rebond, un coffre apparaît dessus ; elle s\'éteint ensuite. Le coffre se ramasse et se tire comme celui d\'un monstre.' },
       { i:'🌈', n:'Multicolore',  d:'se téléporte plus haut à chaque rebond et tient 3 à 5 passages. Les points sur elle comptent les passages restants. Tant qu\'elle est en vie, le reste du décor se raréfie de moitié.' },
-      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre. Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
+      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
