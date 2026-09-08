@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.5.7';
+const APP_VERSION = '13.5.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -43109,6 +43109,13 @@ function deltaAiNorm(s) {
   return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/^the\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
 }
+// Un champ « artiste » peut nommer PLUSIEURS personnes (« A, B », « A feat. B ») : on le
+// découpe pour pouvoir comparer chaque nom au fichier des abonnements. Un titre dont NE
+// SERAIT-CE QU'UN des artistes est déjà suivi n'est pas une découverte.
+function deltaAiArtistParts(n) {
+  return String(n || '').split(/,|&|\bfeat\.?\b|\bft\.?\b|\bavec\b|\bx\b/i)
+    .map(deltaAiNorm).filter(Boolean);
+}
 // Ce qu'on sait des goûts, tiré de l'analyse + de la base locale (genres).
 // ⚠ Repli pour une analyse d'avant 13.5.1 (pas de `likedTop`) : on recompte depuis les
 // titres likés, dont le champ `artist` est une chaîne « A, B » — un nom contenant une
@@ -43147,6 +43154,7 @@ function deltaAiPrompt(t) {
     `Propose EXACTEMENT ${DELTA_AI_WANT} artistes qu'il ne suit pas encore et ${DELTA_AI_WANT} titres précis qu'il pourrait aimer.`,
     'Règles :',
     `- aucun artiste de la liste « suit déjà », aucun artiste de la liste de ses artistes les plus likés ;`,
+    `- AUCUN TITRE d'un artiste qu'il suit déjà : les ${DELTA_AI_WANT} titres doivent eux aussi venir d'artistes nouveaux pour lui ;`,
     '- des artistes et des titres qui EXISTENT vraiment, orthographiés comme sur Spotify (pas de titre inventé) ;',
     '- varie : ne mets pas les 10 titres du même artiste ;',
     '- « pourquoi » = une phrase courte reliant la proposition à ses goûts ci-dessus, en français.',
@@ -43208,7 +43216,13 @@ async function deltaAiRun(data, artists) {
     if (!j) throw new Error('Réponse de l\'IA illisible.');
 
     // ── Filtre LOCAL : la promesse « que je ne suis pas » ne dépend pas du modèle ──
-    const banned = new Set(taste.followed.map(deltaAiNorm));
+    // ⚠ 13.5.8 — ELLE VAUT AUSSI POUR LES TITRES (demande utilisateur) : un titre d'un artiste
+    // déjà suivi n'est pas une découverte, même s'il n'est pas encore liké. D'où deux ensembles
+    // distincts — `followedSet` (les abonnements seuls) barre les TITRES, `banned` y ajoute les
+    // plus likés et barre les ARTISTES proposés. Le prompt le dit au modèle, ce filtre le
+    // garantit : le premier peut se tromper, le second non.
+    const followedSet = new Set(taste.followed.map(deltaAiNorm));
+    const banned = new Set(followedSet);
     taste.liked.forEach(a => banned.add(deltaAiNorm(a.name)));
     const likedKeys = new Set((data.likedAll || data.likedOnly || [])
       .map(t => deltaAiNorm(t.title) + '|' + deltaAiNorm(String(t.artist || '').split(',')[0])));
@@ -43229,6 +43243,7 @@ async function deltaAiRun(data, artists) {
       .filter(t => {
         const k = deltaAiNorm(t.title) + '|' + deltaAiNorm(t.artist);
         if (!t.title || !t.artist || seenT.has(k) || likedKeys.has(k)) return false;
+        if (deltaAiArtistParts(t.artist).some(n => followedSet.has(n))) return false;   // déjà abonné
         seenT.add(k); return true;
       })
       .slice(0, DELTA_AI_WANT);
