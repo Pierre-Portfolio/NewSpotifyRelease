@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.6.5';
+const APP_VERSION = '13.6.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30280,6 +30280,97 @@ const ACTIF_PYR_SERIES = [
 ];
 const ACTIF_PHYS_SERIES = actifChartSeries(ACTIFS_PHYSIQUES.map(([k, label]) => [k, label]));
 
+// Cascade mensuelle — la SEULE vue qui répond à « d'où vient la variation du mois ».
+// patrimoine net (n-1) + revenus − dépenses + performance = patrimoine net (n).
+// ⚠ Les achats de placement (`achat`) n'apparaissent PAS : déplacer 500 € du compte
+// courant vers le PEA ne change pas le patrimoine, ça le range ailleurs. La performance
+// est donc le RESTE — revalorisation des actifs, intérêts, plus-values latentes —,
+// calculée par différence et jamais lue dans une colonne : le classeur n'en a pas.
+function actifWaterfallSteps(months) {
+  const ok = months.filter(m => m.net != null && !isNaN(m.net)).slice().sort((a, b) => a.t - b.t);
+  if (ok.length < 2) return null;
+  const cur = ok[ok.length - 1], prev = ok[ok.length - 2];
+  const rev = cur.revenu || 0, dep = cur.depense || 0;
+  const perf = cur.net - prev.net - rev + dep;
+  return {
+    date: cur.t,
+    steps: [
+      { label:'Net précédent', v: prev.net, kind:'total' },
+      { label:'Revenus',       v: rev,      kind:'up' },
+      { label:'Dépenses',      v: -dep,     kind:'down' },
+      { label:'Performance',   v: perf,     kind: perf >= 0 ? 'up' : 'down' },
+      { label:'Net du mois',   v: cur.net,  kind:'total' },
+    ],
+  };
+}
+
+// SVG maison (aucune lib). Les barres « total » partent de zéro, les barres de flux
+// flottent entre le cumul d'avant et celui d'après — c'est ce décalage qui fait la cascade.
+function ActifWaterfall({ months }) {
+  const data = actifWaterfallSteps(months);
+  if (!data) return <div style={{ fontSize:10, color:C.muted, textAlign:'center', padding:'14px 0' }}>Pas assez de points relevés.</div>;
+  const { steps } = data;
+  // Niveau cumulé APRÈS chaque étape : c'est lui qui pose le bas/haut des barres de flux
+  // et la hauteur des connecteurs.
+  let run = 0;
+  const bars = steps.map(s => {
+    if (s.kind === 'total') { run = s.v; return { ...s, y0: s.v, y1: s.v, level: run }; }
+    const from = run; run += s.v;
+    return { ...s, y0: Math.min(from, run), y1: Math.max(from, run), level: run };
+  });
+  // ⚠ ÉCHELLE TRONQUÉE, et c'est volontaire : les totaux (≈ 57 000 €) écrasent les flux
+  // (≈ 2 500 €) d'un facteur 20. Sur un axe partant de zéro, les trois barres du milieu
+  // font 3 pixels et le graphique ne dit plus rien. On cadre donc sur la bande de
+  // variation — la note sous le graphique le signale, sans quoi ce serait trompeur.
+  const lo0 = Math.min(...bars.map(b => b.y0)), hi0 = Math.max(...bars.map(b => b.y1));
+  const pad = Math.max(1, (hi0 - lo0) * 0.18);
+  const lo = lo0 - pad, hi = hi0 + pad, span = (hi - lo) || 1;
+  const W = 400, H = 178, PT = 16, PB = 32, PL = 6, PR = 6;
+  const bw = (W - PL - PR) / bars.length;
+  const y = v => PT + (hi - v) * (H - PT - PB) / span;
+  const COL = { total:'#4ea3f5', up:'#45c552', down:'#f5545f' };
+  const bx = i => PL + i * bw + bw * 0.18, bwid = bw * 0.64;
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'auto', display:'block' }} role="img"
+        aria-label="Cascade du mois : patrimoine net précédent, revenus, dépenses, performance, patrimoine net">
+        {bars.map((b, i) => {
+          const isTot = b.kind === 'total';
+          const top = isTot ? y(b.v) : y(b.y1);
+          const h   = isTot ? Math.max(0, H - PB - top) : Math.max(2, y(b.y0) - y(b.y1));
+          const lbl = isTot ? fmtEur(b.v, 0) : (b.v >= 0 ? '+' : '−') + fmtEur(Math.abs(b.v), 0);
+          const w0 = b.label.split(' ')[0], w1 = b.label.split(' ').slice(1).join(' ');
+          return (
+            <g key={i}>
+              {i > 0 && (
+                <line x1={bx(i - 1) + bwid} y1={y(bars[i - 1].level)} x2={bx(i)} y2={y(bars[i - 1].level)}
+                  stroke={C.border} strokeWidth="1" strokeDasharray="2 2" />
+              )}
+              <rect x={bx(i)} y={top} width={bwid} height={h} rx="2" fill={COL[b.kind]}
+                opacity={isTot ? 0.55 : 0.9}>
+                <title>{`${b.label} : ${fmtEur(b.v, 0)}`}</title>
+              </rect>
+              <text x={bx(i) + bwid / 2} y={top - 4} fontSize="8" fill={isTot ? C.muted : COL[b.kind]}
+                textAnchor="middle" fontFamily="DM Mono,monospace" fontWeight="600">{lbl}</text>
+              <text x={bx(i) + bwid / 2} y={H - 18} fontSize="7" fill={C.dim} textAnchor="middle" fontFamily="DM Mono,monospace">{w0}</text>
+              <text x={bx(i) + bwid / 2} y={H - 9} fontSize="7" fill={C.dim} textAnchor="middle" fontFamily="DM Mono,monospace">{w1}</text>
+            </g>
+          );
+        })}
+      </svg>
+      <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.45 }}>
+        ⚠ Échelle tronquée : les deux barres bleues valent une vingtaine de fois les flux du
+        milieu, on cadre donc sur la bande de variation. Leur hauteur n'est pas à l'échelle
+        de leur montant, les chiffres au-dessus le sont.
+        <br />
+        La performance est le reste : ce que le patrimoine a gagné ou perdu tout seul, une
+        fois les revenus et les dépenses retirés. Les achats de placement n'y sont pas —
+        ils déplacent l'argent, ils ne le créent pas.
+      </div>
+    </div>
+  );
+}
+
 function ActifMultiChart({ months, series, fmt, mode, scale, height }) {
   const [hidden, setHidden] = React.useState(() => new Set());
   const [hover, setHover]   = React.useState(null);
@@ -30781,11 +30872,15 @@ function MesActifsPanel() {
             PROPOSÉ PAR L'IA
           </div>
           <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', lineHeight:1.45, marginTop:1 }}>
-            Les 4 graphiques ci-dessous viennent de l'audit du classeur. Garde ceux qui te
+            Les 5 graphiques ci-dessous viennent de l'audit du classeur. Garde ceux qui te
             servent, supprime les autres.
           </div>
         </div>
       </div>
+
+      <ActifSection title="🪜 CASCADE DU MOIS" right="d'où vient la variation · 🤖">
+        <ActifWaterfall months={months} />
+      </ActifSection>
 
       {/* Composition du patrimoine NET — et pas du brut : si le bien est vendu, c'est le
           net qui reste en poche, le brut disparaît avec la dette qu'il masquait. */}
