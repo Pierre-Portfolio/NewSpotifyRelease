@@ -2479,7 +2479,10 @@ function doodleSegDist(px, py, x1, y1, x2, y2) {
 // le voyage on n'est ni en saut, ni en chute, ni en vol, et les dangers ne mordent pas — la
 // tuile promet un SAUVETAGE, un monstre qui tuerait à travers la coque l'aurait démentie.
 // ⚠ Quatre phases, et un `p.tar` qui n'autorise qu'un embarquement par dalle : sans lui, se
-// reposer sur la même tuile relançait le voyage à l'infini.
+// reposer sur la même tuile relançait le voyage à l'infini. ⚠ 13.6.3 — `tar` est posé AUSSI sur
+// la dalle d'ARRIVÉE : le rebond de dépôt retombait dessus et rappelait aussitôt une cabine,
+// donc la même tuile servait à sortir puis à rentrer. Une dalle TARDIS ne sert qu'UNE fois,
+// à l'embarquement comme au débarquement.
 //   'come' la cabine glisse depuis un bord, à la hauteur de la dalle de départ
 //   'load' les portes s'ouvrent, le doodler entre (il n'est plus dessiné)
 //   'rise' la montée verticale, le temps de trouver une destination
@@ -3136,7 +3139,7 @@ const D_BIOMES = [
   // 🪐 Gravité.
   { k:'cosmos',  name:'Cosmos',   icon:'🌌', paper:'#e6e4f6', rule:'#c9c4ea', marge:'#8f7fd8',
     tiles:[
-      { k:'tardis',   icon:'🟦', name:'Sauvé par le TARDIS', own:true, w:D_BIOME_TILE_RARE, txt:'une cabine bleue arrive par un côté, s\'ouvre, te récupère à l\'intérieur et t\'emmène droit vers le haut — puis te dépose sur la PROCHAINE tuile TARDIS, aussi loin soit-elle. Si tu as quitté le biome avant d\'en croiser une, elle te pose sur la première dalle verte ou bleue venue. Tu n\'as plus la main pendant le voyage : elle navigue seule, et rien ne peut te toucher. Une cabine ne vient qu\'une fois par dalle' },
+      { k:'tardis',   icon:'🟦', name:'Sauvé par le TARDIS', own:true, w:D_BIOME_TILE_RARE, txt:'une cabine bleue arrive par un côté, s\'ouvre, te récupère à l\'intérieur et t\'emmène droit vers le haut — puis te dépose sur la PROCHAINE tuile TARDIS, aussi loin soit-elle. Si tu as quitté le biome avant d\'en croiser une, elle te pose sur la première dalle verte ou bleue venue. Tu n\'as plus la main pendant le voyage : elle navigue seule, et rien ne peut te toucher. Une cabine ne vient qu\'une fois par dalle : celle d\'où tu pars comme celle où elle te dépose sont ensuite épuisées' },
       { k:'bhole',    icon:'🕳️', name:'Trou noir', own:true, txt:'elle fait naître un trou noir ' + D_BHOLE_ABOVE + ' px au-dessus du haut de l\'écran — tu ne le vois qu\'en montant — et chaque nouveau passage double son volume' },
       { k:'gravity',  icon:'🪐', name:'Gravité',   own:true, txt:'tes sauts montent deux fois moins haut pendant ' + Math.round(D_GRAVITY_LIFE / 60) + ' secondes' },
     ],
