@@ -3547,6 +3547,16 @@ const D_HIGH_FROM = 10000, D_HIGH_P = 0.045;
 // orbes, cinq armes) et non en points de vie — sans ce diviseur, quinze points de vie
 // l'auraient laissé bloqué sur le même élément pendant dix tirs (voir doodlePrismLives).
 const D_SUPER_HP_MUL = 3;
+// 💪 13.6.1 — TROIS VIES POUR LES CINQ TRÈS RARES QUI TOMBAIENT AU PREMIER TIR (demande
+// utilisateur) : 👁 Rôdeur, 🦔 Hérissé, 🛡️ Réflecteur, 🪨 Caillasseur, 🏗️ Bâtisseur.
+// ⚠ Ces vies ne valent QUE contre les projectiles, comme celles du 🔮 Prisme : l'écrasement,
+// un souffle, la ☠️ Destructrice et le 🐏 bélier passent par `doodleKillMonster` et abattent
+// d'un coup — c'est ce qui garde une porte de sortie à qui n'a plus de munitions.
+// ⚠ Le 🏗️ Bâtisseur pose toujours sa plateforme, mais au TROISIÈME tir : `doodleStrike` traite
+// la jauge avant sa branche, puis retombe dessus une fois la dernière vie retirée.
+// ⚠ Le 🛡️ Réflecteur, lui, renvoie encore les balles ordinaires : sa jauge ne se voit qu'au
+// 🚀 missile, seul projectile qui traverse son pavois.
+const D_TOUGH_HP = 3;
 function doodleSuperHp(s, m) {
   if (!m || !(m.hp > 1) || (s.score || 0) < D_HIGH_FROM) return m;
   m.hp *= D_SUPER_HP_MUL;
@@ -3563,7 +3573,8 @@ const D_ROCK_GAP = 165, D_ROCK_T = 120, D_ROCK_G = 0.035, D_ROCK_VX_MAX = 2.2, D
 function doodleMakeRock(pl) {
   const w = 42, h = 34;
   return { x: Math.max(6, Math.min(DOODLE_W - w - 6, pl.x + pl.w / 2 - w / 2)), y: pl.y - h,
-           w, h, type: 1, alive: true, kind: 'rock', rare: true, perch: pl, throw: D_ROCK_GAP, vx: 0 };
+           w, h, type: 1, alive: true, kind: 'rock', rare: true, hp: D_TOUGH_HP, hpMax: D_TOUGH_HP,
+           perch: pl, throw: D_ROCK_GAP, vx: 0 };
 }
 // ═══ 🔮 LE PRISME — LA CRÉATURE DES CINQ ÉLÉMENTS (12.9.3, demande utilisateur) ═══
 // « À partir du moment où les biomes deviennent différents, fais apparaître un monstre qui a
@@ -3638,12 +3649,12 @@ function doodleMakePrism(ny) {
 function doodleMakeSpiky(ny) {
   const y = ny - 42;
   return { x: 10 + Math.random() * (DOODLE_W - 66), y, y0: y, w: 46, h: 40, type: 1, alive: true,
-           kind: 'spiky', rare: true, spiky: true, wave: 1, wt: Math.random() * 6.28,
+           kind: 'spiky', rare: true, spiky: true, hp: D_TOUGH_HP, hpMax: D_TOUGH_HP, wave: 1, wt: Math.random() * 6.28,
            vx: (Math.random() < 0.5 ? -1 : 1) * 0.85 };
 }
 function doodleMakeShield(ny) {
   return { x: 10 + Math.random() * (DOODLE_W - 68), y: ny - 42, w: 48, h: 42, type: 1, alive: true,
-           kind: 'shield', rare: true, shield: true, sh: 0, vx: (Math.random() < 0.5 ? -1 : 1) * 0.7 };
+           kind: 'shield', rare: true, shield: true, hp: D_TOUGH_HP, hpMax: D_TOUGH_HP, sh: 0, vx: (Math.random() < 0.5 ? -1 : 1) * 0.7 };
 }
 // ⚠ 9.5.3, 10.9.4 puis 10.9.5 — LE TAUX DES TUILES DE BIOME (demandes utilisateur) : 5 %, puis
 // 6 %, puis 24 % pour la bande entière, et enfin 20 % PAR TUILE.
@@ -3806,7 +3817,7 @@ function doodleMakeMob(s, ny, pl) {
   // grignotée par aucun autre tirage.
   if (s.score >= D_BUILDER_FROM && r < D_BUILDER_P) {
     return { x: 10 + Math.random() * (DOODLE_W - 66), y: ny - 42, w: 46, h: 40, type: 1, alive: true,
-             kind: 'builder', rare: true, builder: true, vx: (Math.random() < 0.5 ? -1 : 1) * 0.6 };
+             kind: 'builder', rare: true, builder: true, hp: D_TOUGH_HP, hpMax: D_TOUGH_HP, vx: (Math.random() < 0.5 ? -1 : 1) * 0.6 };
   }
   // 🔮 Prisme : sa bande est prise EN HAUT du tirage (`r >= 1 - D_PRISM_P`), donc DISJOINTE de
   // toutes les autres, qui vivent toutes en bas de `r`. Aucun seuil existant n'est déplacé.
@@ -3817,7 +3828,7 @@ function doodleMakeMob(s, ny, pl) {
   if (s.score >= D_ROAM_FROM && r < D_ROAM_P) {
     const y = ny - 44;
     return { x: 10 + Math.random() * (DOODLE_W - 66), y, y0: y, w: 46, h: 42, type: 1, alive: true,
-             kind: 'roamer', rare: true, vx: (Math.random() < 0.5 ? -1 : 1) * D_ROAM_VX,
+             kind: 'roamer', rare: true, hp: D_TOUGH_HP, hpMax: D_TOUGH_HP, vx: (Math.random() < 0.5 ? -1 : 1) * D_ROAM_VX,
              vy2: (Math.random() < 0.5 ? -1 : 1) * D_ROAM_VY, span: D_ROAM_SPAN };
   }
   // 🏔️ Haute altitude : trois bandes disjointes, à la suite de celle du rôdeur.
@@ -7659,6 +7670,20 @@ const D_MOB_DRAW = {
     for (let i = 0; i < hp; i++) { ctx.beginPath(); ctx.arc(cx + (i - (hp - 1) / 2) * 6, cy + 15 + bob, 2, 0, Math.PI * 2); ctx.fill(); }
   },
 };
+// Pastilles de vie d'une créature : pleines tant qu'il reste des tirs à encaisser, creuses
+// ensuite. ⚠ Posées au-dessus de la BOÎTE (`m.y`) et non du centre : une jauge dans la
+// bestiole se serait perdue dans son dessin.
+function doodleHpDots(ctx, m, cx, top) {
+  const n = m.hpMax || m.hp || 0;
+  if (n < 2) return;
+  const r = n > 6 ? 2.1 : 2.8, gap = r * 2.9;
+  for (let i = 0; i < n; i++) {
+    ctx.fillStyle = i < (m.hp || 0) ? '#ffd54a' : 'rgba(43,43,51,0.30)';
+    ctx.strokeStyle = '#171326'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(cx - (n - 1) * gap / 2 + i * gap, top - 8, r, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+  }
+}
 function doodleMonster(ctx, m, t) {
   const cx = m.x + m.w / 2, cy = m.y + m.h / 2;
   const draw = D_MOB_DRAW[m.kind];
@@ -7673,6 +7698,12 @@ function doodleMonster(ctx, m, t) {
     // fillStyle sans les remettre — sans ce garde-fou, la première bestiole dessinée
     // repeindrait toutes les suivantes.
     ctx.save(); draw(ctx, m, cx, cy, t); ctx.restore();
+    // 💪 13.6.1 — JAUGE DE VIE COMMUNE, au-dessus de la bestiole. Sans elle, tirer trois fois
+    // sur un 👁 Rôdeur ne se voyait qu'au bref éclair de `m.hurt` : on croyait tirer dans le
+    // vide. ⚠ Les deux créatures qui DISENT DÉJÀ leurs vies dans leur dessin en sont exclues —
+    // le 🔮 Prisme par ses orbes, le 🐉 Dragonneau par ses propres pastilles ; deux comptes
+    // superposés pour la même chose se contrediraient au premier coup d'œil.
+    if (m.hp > 1 && m.kind !== 'prism' && m.kind !== 'hatch') doodleHpDots(ctx, m, cx, m.y);
     return;
   }
   // ⚠ Repli ÉMOJI : plus aucune créature du jeu ne passe par là (les dix sont dessinées), mais
@@ -9314,10 +9345,10 @@ function doodleRules() {
       { i:'🌿', n:'Tuile de biome',    d:`${doodlePct(D_BIOME_TILE_EACH)} des rangées au tirage PAR TUILE du biome courant — soit ${doodlePct(D_BIOME_TILE_EACH * D_BIOME_TILE_SEEN)} réellement vues, le reste partant aux garde-fous : elles ne prennent qu'une rangée ordinaire, et jamais deux spéciales de suite. Une tuile par biome est volontairement RARE (🍄 Champignon, 𓂀 Égypte, 🧊 Stalactite, 🔥 Magma, 💫 Attraction, 🦑 Tentacule, ⚡ Électrifiée, ⛈️ Orage) : ${Math.round((1 - D_BIOME_TILE_RARE) * 100)} % de moins que ses deux voisines, sa rangée retombe en plateforme ordinaire ${Math.round((1 - D_BIOME_TILE_RARE) * 100)} fois sur 100, et ses deux voisines n'y gagnent rien. Au changement de biome, une seule tuile du précédent est tirée au sort et reste jouable ici — le « vestige » — pour ${doodlePct(D_RELIC_SHARE)} de cette bande, quel que soit son poids. Rien d'autre ne s'accumule d'un palier à l'autre.` },
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
-      { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
+      { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement. ${D_TOUGH_HP} vies.` },
       { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} d'ALTITUDE RÉELLE (un 📈 multiplicateur de score ne l'avance donc pas) — soit après ${D_PRISM_BIOMES} biomes DIFFÉRENTS (les 1000 premiers points se passent au 📄 Départ, qui n'en est pas un). ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche ${D_PRISM_LOOT_KINDS.length} coffres — un par élément — dont un 🟡 DORÉ et un ☠️ MAUDIT garantis, les trois autres ordinaires.` },
-      { i:'💪', n:'Super monstres', d:`au-delà de ${D_HIGH_FROM} d'altitude, toute créature qui a une jauge de vie en a ${D_SUPER_HP_MUL} fois plus : le 🔮 Prisme, le 🐉 Dragonneau et la créature de la 🌈 Multicolore. Le Prisme garde ses cinq éléments, mais chacun encaisse ${D_SUPER_HP_MUL} tirs au lieu d'un.` },
-      { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
+      { i:'💪', n:'Super monstres', d:`toutes les créatures très rares ont une jauge de vie, affichée en pastilles au-dessus d'elles : ${D_TOUGH_HP} vies pour le 👁 Rôdeur, le 🦔 Hérissé, le 🛡️ Réflecteur, le 🪨 Caillasseur et le 🏗️ Bâtisseur (qui pose sa plateforme au dernier tir), ${D_HATCH_HP} pour le 🐉 Dragonneau et la créature de la 🌈 Multicolore, ${D_PRISM_HP} pour le 🔮 Prisme. Ces vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier abattent d'un coup. Au-delà de ${D_HIGH_FROM} d'altitude, toutes en ont ${D_SUPER_HP_MUL} fois plus. Le Prisme garde ses cinq éléments, mais chacun encaisse ${D_SUPER_HP_MUL} tirs au lieu d'un.` },
+      { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout. Les trois ont ${D_TOUGH_HP} vies.` },
       { i:'🏆⚰️', n:'Coffre spécial', d:`une chance sur mille (${doodlePct(D_CHEST_SPECIAL_P)}) qu'un coffre soit doré, autant qu'il soit maudit — tiré coffre par coffre, qu'il vienne d'une créature ou de la 🎁 Tuile coffre. C'est la SEULE façon de les rencontrer.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
       { i:'🎩', n:'Chapeau, jetpack', d:`${doodlePct(0.03)} des plateformes vertes et bleues sans ressort. Ressort ${doodlePct(0.09)}, trampoline ${doodlePct(0.02)}.` },
