@@ -1468,12 +1468,13 @@ const D_ALIVE_V = 0.85, D_ALIVE_SPAN = 46;
 // ⚠ Les trois compteurs sont RELATIFS à l'instant du départ (`from`) : compter en absolu aurait
 // validé « 500 points de plus » à un joueur qui en était déjà à 3000.
 // 🔺 10.4.0 — FRACTALE (demande utilisateur) : elle disparaît au rebond et laisse DEUX dalles à
-// la même hauteur. ⚠ Les filles sont elles-mêmes des fractales — c'est ce que le nom promet —
-// mais elles rétrécissent et le nombre de générations est BORNÉ : sans les deux, une seule dalle
-// aurait fini par couvrir toute la rangée de 340 px de dalles minuscules, et la rangée serait
-// devenue un tapis continu au lieu d'un choix.
-// ⚠ La dernière génération naît VERTE : une fractale de largeur minimale qui se scinderait
-// encore aurait donné des dalles plus étroites que la boîte du doodler, donc inatteignables.
+// la même hauteur. Les filles sont elles-mêmes des fractales — c'est ce que le nom promet.
+// ⚠ 13.5.4 — LA SCISSION N'A PLUS DE FIN (demande utilisateur) : plus de dernière génération
+// verte, chaque fille se scindera encore. `D_FRACT_GEN` ne borne donc plus rien, il ne sert
+// plus qu'au DESSIN (le nombre de lobes du noyau, plancher à 1).
+// ⚠ Ce qui s'arrête, c'est le RÉTRÉCISSEMENT : `D_FRACT_MINW` est le plancher de largeur, et
+// il vaut plus que la boîte du doodler (±11 px) — en dessous, on fabriquerait des dalles sur
+// lesquelles on ne peut plus se poser.
 // 🌳 10.6.1 — ARBRE GÉANT, L'ASCENSEUR VÉGÉTAL (demande utilisateur) : on ne rebondit plus
 // dessus, on s'y PLANTE. Le doodler perd la main, un arbre pousse sous ses pieds et le soulève
 // doucement jusqu'à la hauteur de la rangée suivante ; là il est relâché et le jeu reprend.
@@ -2163,7 +2164,7 @@ const D_TILES = [
   { k: 'egg',      icon:'🪺', name: 'Œuf',            txt: 'pose-toi dessus avant ' + D_EGG_JUMPS + ' sauts ou il éclôt et lâche un 🐉 dragonneau — il patrouille en largeur ET en hauteur, crache un trait de feu visé et encaisse ' + D_HATCH_HP + ' tirs. Et l\'œuf change de place à chacun de tes sauts' },
   { k: 'negative', icon:'🎨', name: 'Inverseuse',      txt: 'toutes les couleurs du jeu s\'inversent pendant ' + Math.round(D_NEG_LIFE / 60) + ' secondes' },
   { k: 'mercy',    icon:'🕊️', name: 'Miséricordieuse', txt: 'elle met le jeu en pause, te montre les tuiles débloquées de la partie et t\'en laisse bannir une pour de bon ; à la reprise, elle t\'offre un bouclier. Quand il ne reste plus rien à bannir, elle se retire elle-même' },
-  { k: 'fractal',  icon:'🔺', name: 'Fractale',       txt: 'elle disparaît sous toi et se remplace par deux dalles plus petites à la même hauteur, qui feront de même — jusqu\'à ' + D_FRACT_GEN + ' générations' },
+  { k: 'fractal',  icon:'🔺', name: 'Fractale',       txt: 'elle disparaît sous toi et se remplace par deux dalles plus petites à la même hauteur, qui feront de même — sans fin, jusqu\'à la largeur minimale de ' + D_FRACT_MINW + ' px' },
   { k: 'quest',    icon:'🎯', name: 'Quête',          txt: 'elle te confie un défi tiré au sort parmi ceux qui ne tournent pas déjà ; le réussir fait tomber du ciel une PLUIE DE COFFRES — un par tranche de ' + D_QUEST_RAIN_PER + ' points d\'altitude, un au minimum. Ils se posent où ils tombent : à toi d\'aller les chercher. Les ' + D_QUESTS.length + ' défis peuvent courir de front, et les avoir tous les ' + D_QUESTS.length + ' en même temps rapporte ' + D_QUEST_TRIO + ' butins de plus, tout de suite. 🏅 Une fois les ' + D_QUESTS.length + ' RÉUSSIS, la QUÊTE ULTIME s\'ouvre d\'elle-même — abats ' + D_ULT_KILLS + ' créatures, rebondis sur ' + D_ULT_KINDS + ' sortes de tuiles et terrasse ' + D_ULT_BOSS + ' boss : elle débloque 100 % des tuiles d\'un coup et pousse toutes les améliorations et tous les bonus permanents à leur maximum' },
   { k: 'alive',    icon:'👀', name: 'Vivante',        txt: 'elle a des yeux, elle te regarde et elle se traîne vers toi — sans jamais s\'éloigner beaucoup de l\'endroit où elle est née' },
   { k: 'mimic',    icon:'🪞', name: 'Mimétique',      txt: 'elle prend l\'apparence ET l\'effet de la dernière dalle sur laquelle tu as rebondi — elle change donc au fil de la partie' },
