@@ -3535,6 +3535,25 @@ const D_ROAM_FROM = 1000, D_ROAM_P = 0.035, D_ROAM_SPAN = 58, D_ROAM_VY = 0.9, D
 //   🦔 Hérissé    — couvert de piques : lui sauter dessus ou le percuter ne le tue pas, ça tue.
 //   🛡️ Réflecteur — son bouclier RENVOIE les tirs ; seuls le missile et l'écrasement en viennent.
 const D_HIGH_FROM = 10000, D_HIGH_P = 0.045;
+// 🏔️ 13.6.0 — LES SUPER MONSTRES TRIPLENT LEUR VIE AU-DESSUS DE D_HIGH_FROM (demande
+// utilisateur). « Super monstre » = celui qui a une VIE À TRIPLER, c'est-à-dire une jauge de
+// points de vie : le 🔮 Prisme, le 🐉 Dragonneau et la créature de la 🌈 Multicolore. Les
+// autres très rares tombent au premier tir — leur donner trois points de vie serait une autre
+// demande, pas un triplement.
+// ⚠ MÊME seuil que les créatures de haute altitude, et lu sur le SCORE, celui qu'affiche
+// « Altitude » à l'écran : un seul palier à retenir, celui où le jeu change déjà de ton.
+// ⚠ `hpMax` suit `hp`, sinon la barre de vie afficherait 15 / 5 et resterait pleine dix tirs.
+// ⚠ `hpMul` est MÉMORISÉ sur la bestiole : le 🔮 Prisme compte ses vies EN ÉLÉMENTS (cinq
+// orbes, cinq armes) et non en points de vie — sans ce diviseur, quinze points de vie
+// l'auraient laissé bloqué sur le même élément pendant dix tirs (voir doodlePrismLives).
+const D_SUPER_HP_MUL = 3;
+function doodleSuperHp(s, m) {
+  if (!m || !(m.hp > 1) || (s.score || 0) < D_HIGH_FROM) return m;
+  m.hp *= D_SUPER_HP_MUL;
+  m.hpMax = m.hp;
+  m.hpMul = D_SUPER_HP_MUL;
+  return m;
+}
 // 🪨 Lancer en CLOCHE : durée de vol visée fixe, d'où la vitesse initiale se déduit — viser
 // tout droit aurait donné un caillou plat impossible à distinguer d'un tir de dalle.
 // ⚠ `D_ROCK_VX_MAX` borne la composante horizontale : sans elle, une cible à l'autre bout de
@@ -3600,8 +3619,13 @@ const D_PRISM_ORB_R = 30;                     // rayon de l'orbite des orbes
 const D_PRISM_SPIN = 0.02;                    // vitesse de rotation de l'orbite
 // L'élément courant = celui de la DERNIÈRE orbe encore en vie. Borné des deux côtés : un `hp`
 // abîmé (0, ou plus grand que la table) ne doit jamais faire lire hors du tableau.
+// Vies restantes EN ÉLÉMENTS (et non en points de vie) : c'est l'unité du Prisme — une orbe,
+// une arme. En haute altitude chaque élément encaisse `hpMul` tirs au lieu d'un seul.
+function doodlePrismLives(m) {
+  return Math.ceil((m.hp || 0) / (m.hpMul || 1));
+}
 function doodlePrismElem(m) {
-  return D_PRISM_ELEMS[Math.max(0, Math.min(D_PRISM_ELEMS.length - 1, (m.hp || 1) - 1))];
+  return D_PRISM_ELEMS[Math.max(0, Math.min(D_PRISM_ELEMS.length - 1, doodlePrismLives(m) - 1))];
 }
 function doodleMakePrism(ny) {
   const y = ny - 46;
@@ -7105,7 +7129,7 @@ const D_MOB_DRAW = {
   // c'est assumé — la zone dangereuse reste le corps, et une orbe touchée ne tue pas. Sans
   // ce débord, cinq orbes tenant dans 56 px seraient devenues cinq pixels indistincts.
   prism(ctx, m, cx, cy, t) {
-    const hp = Math.max(0, Math.min(D_PRISM_HP, m.hp || 0));
+    const hp = Math.max(0, Math.min(D_PRISM_HP, doodlePrismLives(m)));   // orbes = éléments restants, pas points de vie
     const cur = doodlePrismElem(m);
     const hit = m.hurt > 0;
     const ink = '#171326';
@@ -9256,7 +9280,7 @@ function doodleSpawnRow(s, ny, risky) {
   // prend sans pouvoir viser — un monstre juste au-dessus était une mort qu'on ne pouvait pas
   // éviter. Le trou noir suit la même règle, pour la même raison.
   } else if (!D_NOMOB.has(type) && !p.spring && !p.trampoline && s.score > 60 && Math.random() < (D_MOB_P0 + diff * D_MOB_P_RAMP) * calm * D_MOB_LESS * doodleMobMore(s.score) * (s.mobRate || 1)) {   // ☯️ `mobRate` : le prix des bonus de la Yin et Yang
-    s.monsters.push(doodleMakeMob(s, ny, p));   // 🪨 la dalle de la rangée : le Caillasseur s'y perche
+    s.monsters.push(doodleSuperHp(s, doodleMakeMob(s, ny, p)));   // 🪨 la dalle de la rangée : le Caillasseur s'y perche
   } else if (!D_NOMOB.has(type) && !p.spring && !p.trampoline && s.score > 350 && Math.random() < (0.015 + diff * 0.02) * calm) {
     s.holes.push({ x: 24 + Math.random() * (DOODLE_W - 48), y: ny - 22, r: 22 });
   }
@@ -9292,6 +9316,7 @@ function doodleRules() {
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
       { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} d'ALTITUDE RÉELLE (un 📈 multiplicateur de score ne l'avance donc pas) — soit après ${D_PRISM_BIOMES} biomes DIFFÉRENTS (les 1000 premiers points se passent au 📄 Départ, qui n'en est pas un). ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche ${D_PRISM_LOOT_KINDS.length} coffres — un par élément — dont un 🟡 DORÉ et un ☠️ MAUDIT garantis, les trois autres ordinaires.` },
+      { i:'💪', n:'Super monstres', d:`au-delà de ${D_HIGH_FROM} d'altitude, toute créature qui a une jauge de vie en a ${D_SUPER_HP_MUL} fois plus : le 🔮 Prisme, le 🐉 Dragonneau et la créature de la 🌈 Multicolore. Le Prisme garde ses cinq éléments, mais chacun encaisse ${D_SUPER_HP_MUL} tirs au lieu d'un.` },
       { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
       { i:'🏆⚰️', n:'Coffre spécial', d:`une chance sur mille (${doodlePct(D_CHEST_SPECIAL_P)}) qu'un coffre soit doré, autant qu'il soit maudit — tiré coffre par coffre, qu'il vienne d'une créature ou de la 🎁 Tuile coffre. C'est la SEULE façon de les rencontrer.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
