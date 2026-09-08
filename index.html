@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.5.6';
+const APP_VERSION = '13.5.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1920,6 +1920,10 @@ async function spotifyArtistsByIds(ids) {
 // SCOPES : un jeton plus ancien ne l'a pas (403) et seule une reconnexion l'accorde.
 const spotifyUnfollowArtists = ids =>
   apiDel(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
+// Abonnement. ⚠ MÊME scope `user-follow-modify` que le retrait (donc mêmes 403 sur un jeton
+// ancien) et, comme pour /me/library, les ids passent en QUERY STRING, sans corps.
+const spotifyFollowArtists = ids =>
+  apiPut(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
 
 // ── Se désabonner SANS rien perdre (13.4.7) ───────────────────────────────────
 // Demande utilisateur : « si je me désabonne d'un artiste, laisse-le dans la liste des
@@ -42556,15 +42560,11 @@ function deltaTrack(t) {
     image:  imgs.length ? (imgs[imgs.length - 1]?.url || '') : '',
   };
 }
-// Verse les ids d'artistes d'une piste BRUTE dans un Set. Les ids ne sont JAMAIS recopiés
-// dans les pistes gardées (donc pas dans le cache localStorage) : seul le Set vit le temps du
-// scan, et seule la liste finale des artistes orphelins est mémorisée.
-function deltaCollectArtists(raw, sink) {
-  if (!sink || !raw) return;
-  for (const a of (raw.artists || [])) if (a?.id) sink.add(a.id);
-}
-// Même chose côté LIKÉS, mais en COMPTANT (id → { id, name, count }) : le dernier bloc de
-// Delta Artiste affiche « pas suivi, mais N titres likés », et N est justement la question.
+// Verse les artistes d'une piste BRUTE dans une Map id → { id, name, count }. Les ids ne sont
+// JAMAIS recopiés dans les pistes gardées (donc pas dans le cache localStorage) : seule la Map
+// vit le temps du scan, et seules les listes finales sont mémorisées.
+// ⚠ On COMPTE, on ne collectionne plus : le dernier bloc de Delta Artiste affiche « pas suivi,
+// mais N titres likés et M en playlist », et ces nombres sont justement la question posée.
 // Un titre à deux artistes compte 1 pour chacun. ⚠ L'objet artiste d'une piste est la forme
 // SIMPLIFIÉE de l'API : un id et un nom, ni image ni genres — d'où la vignette à initiale et
 // l'URL reconstruite depuis l'id à l'affichage.
@@ -42713,7 +42713,7 @@ async function deltaFetchPlaylistTracks(pid, artistSink) {
         if (!sample) sample = deltaSample(it);
         const raw = deltaEntry(it);
         const t   = deltaTrack(raw);
-        if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); deltaCollectArtists(raw, artistSink); }
+        if (t && !seen.has(t.uri)) { seen.add(t.uri); out.push(t); deltaCountArtists(raw, artistSink); }
       }
       pages++;
       url = d.next || null;
@@ -42740,9 +42740,10 @@ async function deltaFetchPlaylistTracks(pid, artistSink) {
 async function deltaScan(onProgress) {
   // Sets d'IDS D'ARTISTES rencontrés (pas d'uris) : ils servent au dernier collapse,
   // « artistes suivis dont AUCUN titre n'est dans une playlist ».
-  const plArtists    = new Set();
-  // ⚠ Une Map (id → { id, name, count }) et non un Set : `.has()` sert toujours au drapeau ❤
-  // de la liste des suivis, et les valeurs portent en plus le compte de titres likés.
+  // ⚠ Deux Map (id → { id, name, count }) et non des Set : `.has()` sert toujours aux filtres,
+  // et les valeurs portent en plus le NOMBRE de titres — de quoi dire « 12 titres en playlist »
+  // sans repasser une seule requête.
+  const plArtists    = new Map();
   const likedArtists = new Map();
 
   onProgress('Lecture des titres likés…');
@@ -42782,12 +42783,22 @@ async function deltaScan(onProgress) {
     .sort((x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' }));
 
   // Le miroir de la question précédente (demande utilisateur) : les artistes que tu ne suis
-  // PAS mais dont des titres sont dans tes likés, du plus liké au moins liké. Aucune requête
-  // de plus — tout sort des pages de /me/tracks et /me/following déjà lues.
+  // PAS mais qui sont chez toi — dans tes titres likés ET/OU dans tes playlists (13.5.7), du
+  // plus présent au moins présent. Aucune requête de plus : tout sort des pages de /me/tracks,
+  // /playlists/{id}/items et /me/following déjà lues par ce scan.
   const followedSet = new Set(followed.map(a => a.id));
-  const likedGap = [...likedArtists.values()]
-    .filter(a => !followedSet.has(a.id))
-    .sort((x, y) => y.count - x.count || x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' }));
+  const gapMap = new Map();
+  const addGap = (a, key) => {
+    if (followedSet.has(a.id)) return;
+    let e = gapMap.get(a.id);
+    if (!e) { e = { id: a.id, name: a.name, liked: 0, pl: 0 }; gapMap.set(a.id, e); }
+    e[key] += a.count;
+    if (e.name === '(sans nom)' && a.name) e.name = a.name;
+  };
+  for (const a of likedArtists.values()) addGap(a, 'liked');
+  for (const a of plArtists.values())    addGap(a, 'pl');
+  const likedGap = [...gapMap.values()]
+    .sort((x, y) => (y.liked + y.pl) - (x.liked + x.pl) || x.name.localeCompare(y.name, 'fr', { sensitivity: 'base' }));
 
   return {
     at: Date.now(),
@@ -43006,27 +43017,66 @@ function DeltaArtistList({ artists, empty, onUnfollow }) {
 // ⚠ Rien ne doit relancer le scan depuis un sous-collapse : `StatsCollapse` DÉMONTE ses
 // enfants à la fermeture (piège 5) — un bouton logé là-dedans disparaîtrait avec son état.
 // C'est aussi pourquoi tout vit dans `_delta` (module-level) et non dans un `useState`.
-// Artistes NON suivis dont des titres sont likés, du plus liké au moins liké. Pas de bouton
-// ⊘ ici : on ne se désabonne pas de quelqu'un qu'on ne suit pas. ⚠ L'objet vient d'une piste
-// (forme simplifiée), donc ni image ni URL : le lien est reconstruit depuis l'id.
-function DeltaLikedArtistList({ artists, empty }) {
+// Une ligne d'artiste NON SUIVI (13.5.7) : il est chez toi — dans tes titres likés, dans tes
+// playlists, ou les deux — mais tu ne le suis pas. D'où le bouton ➕ : c'est la seule action
+// qui a du sens ici (l'inverse du ⊘ de la liste au-dessus).
+// ⚠ S'abonner ne crée AUCUNE ligne locale : c'est le prochain scan qui verra l'artiste dans
+// /me/following et lui prendra sa discographie complète. On se contente de relever un
+// `following = 0` laissé par un désabonnement passé, pour que le panneau Artistes ne le montre
+// pas archivé alors qu'on vient de se réabonner.
+// ⚠ L'objet vient d'une piste (forme simplifiée de l'API) : ni image ni URL, d'où la vignette
+// à initiale et le lien reconstruit depuis l'id.
+function DeltaGapArtistRow({ a, onFollow }) {
+  const [busy, setBusy] = React.useState(false);
+  const [msg,  setMsg]  = React.useState('');
+  const on = !!a.followed;
+  // ⚠ Compat d'un cache d'avant 13.5.7 : les entrées ne portaient que `count` (les likés).
+  const nl = a.liked != null ? a.liked : (a.count || 0);
+  const np = a.pl || 0;
+  const click = async () => {
+    if (busy || on) return;
+    setBusy(true); setMsg('');
+    const r = await onFollow(a);
+    setBusy(false);
+    if (r.refused)   setMsg('Spotify a refusé l\'abonnement (permission « user-follow-modify » manquante) : déconnecte-toi puis reconnecte-toi.');
+    else if (!r.ok)  setMsg('Spotify n\'a pas confirmé l\'abonnement — réessaie dans un instant.');
+  };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:3, padding:'7px 4px', opacity: on ? 0.6 : 1 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        <AlbumArt size={38} letter={(a.name || '?')[0].toUpperCase()} color={on ? C.accent : '#e05050'} />
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{a.name}</div>
+          <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+            {on ? '✓ abonné — le prochain scan prendra sa discographie'
+                : [nl ? `❤ ${nl} liké${nl > 1 ? 's' : ''}` : '', np ? `🔀 ${np} en playlist` : '']
+                    .filter(Boolean).join(' · ') + ' — tu ne le suis pas'}
+          </div>
+        </div>
+        {!on && (
+          <button onClick={click} disabled={busy} title="S'abonner à cet artiste sur Spotify (il sera scrapé au prochain scan)"
+            style={{ flexShrink:0, background: busy ? 'none' : `${C.accent}18`, border:`1px solid ${busy ? C.border : C.accent + '66'}`, borderRadius:6,
+              color: busy ? C.dim : C.accent, fontSize:10, fontWeight:700, padding:'4px 8px', cursor: busy ? 'default' : 'pointer', fontFamily:'inherit' }}>
+            {busy ? '⏳' : '➕'}
+          </button>
+        )}
+        <a href={safeHref('https://open.spotify.com/artist/' + a.id)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
+          style={{ fontSize:13, color:C.accent, textDecoration:'none', flexShrink:0, padding:'0 4px' }}>↗</a>
+      </div>
+      {msg && <div style={{ fontSize:9.5, color:'#e0a050', fontFamily:'DM Mono,monospace', lineHeight:1.45, paddingLeft:48 }}>{msg}</div>}
+    </div>
+  );
+}
+
+// Liste paginée des artistes non suivis.
+function DeltaLikedArtistList({ artists, empty, onFollow }) {
   const [max, setMax] = React.useState(DELTA_PAGE);
   if (!artists.length) {
     return <div style={{ fontSize:11, color:C.dim, fontFamily:'DM Mono,monospace', padding:'14px 0', textAlign:'center' }}>{empty}</div>;
   }
   return (
     <div style={{ display:'flex', flexDirection:'column' }}>
-      {artists.slice(0, max).map(a => (
-        <div key={a.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px' }}>
-          <AlbumArt size={38} letter={(a.name || '?')[0].toUpperCase()} color="#e05050" />
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{a.name}</div>
-            <div style={{ fontSize:10, color:C.muted }}>❤ {a.count} titre{a.count > 1 ? 's' : ''} liké{a.count > 1 ? 's' : ''} — tu ne le suis pas</div>
-          </div>
-          <a href={safeHref('https://open.spotify.com/artist/' + a.id)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Spotify"
-            style={{ fontSize:13, color:C.accent, textDecoration:'none', flexShrink:0, padding:'0 4px' }}>↗</a>
-        </div>
-      ))}
+      {artists.slice(0, max).map(a => <DeltaGapArtistRow key={a.id} a={a} onFollow={onFollow} />)}
       {artists.length > max && (
         <button onClick={() => setMax(m => m + DELTA_PAGE * 2)}
           style={{ marginTop:8, background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:'7px 12px', fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>
@@ -43202,7 +43252,7 @@ async function deltaAiRun(data, artists) {
     const m = String(e?.message || e || '');
     deltaAiSet({ state:'err', progress:'', err:
       m === 'NO_KEY'      ? 'Aucune clé d\'IA enregistrée — ouvre le module API pour en ajouter une.'
-      : m === AI_OFF_MSG  ? m
+      : m === 'AI_OFF'    ? AI_OFF_MSG
       : m === 'EMPTY_TASTE' ? 'L\'analyse n\'a trouvé ni titre liké ni abonnement : il n\'y a rien à partir de quoi suggérer.'
       : 'Suggestions impossibles : ' + (m || 'erreur') + '.' });
   }
@@ -43361,6 +43411,29 @@ function DeltaPanel() {
     return r;
   };
 
+  // ➕ Abonnement depuis la liste des non-suivis. Même parti pris que le ⊘ : la ligne est
+  // marquée sur place et le cache réécrit, elle ne disparaît pas sous les doigts.
+  const followArtist = async (a) => {
+    let ok = false, refused = false;
+    try {
+      const r = await spotifyFollowArtists([a.id]);
+      if (r && r.ok) ok = true;
+      else if (r && r.error === 'forbidden') refused = true;
+    } catch {}
+    if (ok) {
+      const row = (_delta.data?.likedGap || []).find(x => x.id === a.id);
+      if (row) row.followed = true;
+      // ⚠ UPDATE seul, jamais d'INSERT : un artiste jamais scrapé ne doit pas gagner une ligne
+      // ici (le scan la créera avec sa discographie). On ne fait que relever un `following = 0`
+      // laissé par un désabonnement passé.
+      try { dbRun("UPDATE artists_scraped SET following = 1 WHERE spotify_id = ?", [a.id]); await saveDB(); } catch {}
+      try { deltaCacheSave(_delta.data); } catch {}
+      deltaSet({});
+      reloadArtists();
+    }
+    return { ok, refused };
+  };
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
       {plScope !== true && (
@@ -43492,11 +43565,12 @@ function DeltaPanel() {
             ) : (
               <>
                 <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
-                  Artistes que tu <b>ne suis pas</b> mais dont tu as liké des titres — {data.likedGap.length} artiste(s),
-                  du plus liké au moins liké. Calculé sur les {data.likedTotal} titre(s) liké(s) lus par l'analyse.
+                  Artistes que tu <b>ne suis pas</b> mais qui sont chez toi — dans tes titres likés
+                  et/ou dans tes playlists : {data.likedGap.length} artiste(s), du plus présent au moins présent.
+                  Le <b>➕</b> t'y abonne sur Spotify ; le prochain scan prendra alors toute sa discographie.
                 </div>
-                <DeltaLikedArtistList artists={data.likedGap}
-                  empty="Tous les artistes de tes titres likés font partie de tes abonnements." />
+                <DeltaLikedArtistList artists={data.likedGap} onFollow={followArtist}
+                  empty="Tous les artistes de tes likés et de tes playlists font partie de tes abonnements." />
               </>
             )}
           </StatsCollapse>
