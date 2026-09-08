@@ -425,7 +425,20 @@ function doodleKillMonster(s, m, force, annihilate) {
   const n = m.loot || (m.rare ? 2 : 1);
   // ⚠ Le type est tiré COFFRE PAR COFFRE : une créature qui en lâche deux peut très bien
   // rendre un ordinaire et un doré — un tirage commun aurait fait des doublons systématiques.
-  for (let i = 0; i < n; i++) s.chests.push({ x: m.x + m.w / 2 - D_CHEST_W / 2 + (n > 1 ? (i - (n - 1) / 2) * 15 : 0), y: m.y + m.h / 2, w: D_CHEST_W, h: D_CHEST_H, vy: 0, landed: false, taken: false, plat: null, kind: doodleChestKind() });
+  // ⚠ `m.lootKinds` (facultatif) FIXE ces types au lieu de les tirer — c'est le 🔮 Prisme, dont
+  // le butin doit compter un doré et un maudit GARANTIS. La liste est MÉLANGÉE : figer l'ordre
+  // aurait mis le doré toujours au même bord, et le coffre qu'on vise se saurait d'avance.
+  const kinds = m.lootKinds ? m.lootKinds.slice(0, n) : null;
+  if (kinds) for (let i = kinds.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = kinds[i]; kinds[i] = kinds[j]; kinds[j] = t; }
+  // ⚠ L'écart entre deux coffres vaut leur LARGEUR (plus une marge) : à 15 px ils se
+  // chevauchaient déjà à deux, et à cinq le butin devenait un tas illisible.
+  // ⚠ Le bloc entier est recadré par son CENTRE (comme les filles de la 🔺 Fractale) : recadrer
+  // chaque coffre séparément les aurait empilés contre le bord.
+  const gap = D_CHEST_W + 4, half = (n - 1) / 2 * gap;
+  const lim = DOODLE_W - 2 - D_CHEST_W / 2 - half, low = 2 + D_CHEST_W / 2 + half;
+  const raw = m.x + m.w / 2;
+  const cx = low <= lim ? Math.max(low, Math.min(lim, raw)) : raw;   // bloc plus large que l'écran : on ne recadre pas
+  for (let i = 0; i < n; i++) s.chests.push({ x: cx - D_CHEST_W / 2 + (n > 1 ? (i - (n - 1) / 2) * gap : 0), y: m.y + m.h / 2, w: D_CHEST_W, h: D_CHEST_H, vy: 0, landed: false, taken: false, plat: null, kind: kinds ? kinds[i] : doodleChestKind() });
 }
 // ⚠ 9.1.5 — LE BOUCLIER EXPLOSE EN S'ÉTEIGNANT et tue les monstres proches (demande
 // utilisateur). C'est le pendant offensif du halo : au lieu de simplement redevenir
@@ -3563,6 +3576,12 @@ const D_PRISM_ELEMS = [
   { k:'foudre', ico:'⚡', c:'#ffd54a', d:'#b8860b', n:1, spread:0,    v:4.2, r:5 },
 ];
 const D_PRISM_HP = D_PRISM_ELEMS.length;      // 5 vies : une par élément, par construction
+// 🔮 13.5.6 — UN COFFRE PAR ÉLÉMENT (demande utilisateur) : cinq vies, cinq coffres, dont un
+// 🟡 doré et un ☠️ maudit GARANTIS — les trois autres sont des coffres ordinaires.
+// ⚠ Écrit comme une LISTE de types et non comme des probabilités : « garanti » veut dire
+// garanti, et `doodleChestKind` ne rend un doré qu'une fois sur mille.
+// ⚠ Le maudit est volontaire : le Prisme est le seul mini-boss du jeu, son butin doit se payer.
+const D_PRISM_LOOT_KINDS = ['gold', 'cursed', null, null, null];
 // ⚠ Le +1 est le 📄 Départ, qui n'est pas un biome : 5 biomes traversés ⇒ 6 paliers franchis.
 // Écrit comme un calcul et non « 6000 » en dur — le jour où D_BIOME_STEP bouge, le seuil suit.
 const D_PRISM_BIOMES = 5;                     // biomes DIFFÉRENTS à avoir traversés
@@ -3588,7 +3607,7 @@ function doodleMakePrism(ny) {
   const y = ny - 46;
   return { x: 10 + Math.random() * (DOODLE_W - 76), y, y0: y, w: 56, h: 48, type: 1, alive: true,
            kind: 'prism', rare: true, hp: D_PRISM_HP, hpMax: D_PRISM_HP, spit: D_PRISM_GAP, hurt: 0,
-           loot: 2,                                            // mini-boss : il vaut deux coffres
+           loot: D_PRISM_LOOT_KINDS.length, lootKinds: D_PRISM_LOOT_KINDS,   // mini-boss : un coffre par élément (voir D_PRISM_LOOT_KINDS)
            vx: (Math.random() < 0.5 ? -1 : 1) * 0.8,
            vy2: (Math.random() < 0.5 ? -1 : 1) * 0.55, span: 38, wt: Math.random() * 6.28 };
 }
@@ -9272,7 +9291,7 @@ function doodleRules() {
       { i:'👾', n:'Monstres',     d:`${doodlePct(D_MOB_P0 * D_MOB_LESS)} des rangées au départ, jusqu'à ${doodlePct((D_MOB_P0 + D_MOB_P_RAMP) * D_MOB_LESS * D_MOB_MORE_HI)} vers 700 points — et ${Math.round((D_MOB_MORE_LO - 1) * 100)} % de plus entre ${D_MOB_MORE_FROM} et ${D_MOB_MORE_TO} points. Trous noirs à partir de 350 points, ${doodlePct(0.015)} à ${doodlePct(0.035)}.` },
       { i:'🐝', n:'Créature du biome', d:`parmi les monstres : ${doodlePct(D_MOB_UNCOMMON)} pour la peu rare, ${doodlePct(D_MOB_RARE)} pour la très rare (qui lâche deux coffres).` },
       { i:'👁', n:'Rôdeur',       d:`${doodlePct(D_ROAM_P)} des monstres, à partir de ${D_ROAM_FROM} points seulement.` },
-      { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} d'ALTITUDE RÉELLE (un 📈 multiplicateur de score ne l'avance donc pas) — soit après ${D_PRISM_BIOMES} biomes DIFFÉRENTS (les 1000 premiers points se passent au 📄 Départ, qui n'en est pas un). ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche 2 coffres.` },
+      { i:'🔮', n:'Prisme',       d:`${doodlePct(D_PRISM_P)} des monstres, à partir de ${D_PRISM_FROM} d'ALTITUDE RÉELLE (un 📈 multiplicateur de score ne l'avance donc pas) — soit après ${D_PRISM_BIOMES} biomes DIFFÉRENTS (les 1000 premiers points se passent au 📄 Départ, qui n'en est pas un). ${D_PRISM_HP} vies, une par élément : ${D_PRISM_ELEMS.map(e => e.ico + ' ' + e.k).join(', ')}. Chaque tir encaissé fait éclater une orbe et lui fait changer d'arme — le noyau prend la couleur de l'élément suivant, et c'est lui qui dit ce qui va sortir : le 🔥 Feu tire droit, l'💧 Eau en éventail de 3, la 🪨 Terre lance une pierre qui retombe, l'🌪️ Air deux billes rapides, la ⚡ Foudre une bille très rapide. Il finit toujours au 🔥 Feu, sa dernière vie. Ses vies ne valent QUE contre les projectiles : l'écrasement, un souffle, la ☠️ Destructrice ou le 🐏 bélier l'abattent d'un coup. Il lâche ${D_PRISM_LOOT_KINDS.length} coffres — un par élément — dont un 🟡 DORÉ et un ☠️ MAUDIT garantis, les trois autres ordinaires.` },
       { i:'🏔️', n:'Haute altitude', d:`à partir de ${D_HIGH_FROM} points, trois créatures s'ajoutent au tirage, ${doodlePct(D_HIGH_P)} des monstres chacune. 🪨 Caillasseur : perché sur sa dalle, il lance une pierre en cloche toutes les ${Math.round(D_ROCK_GAP / 60)} s. 🦔 Hérissé : couvert de piques, ni l'écrasement ni le bélier ne l'entament — le toucher tue. 🛡️ Réflecteur : son bouclier renvoie tes tirs contre toi, et il tient aussi contre les souffles, la ☠️ Destructrice et la foudre ; seuls le 🚀 missile et le contact — lui sauter dessus ou le percuter au 🐏 bélier — en viennent à bout.` },
       { i:'🏆⚰️', n:'Coffre spécial', d:`une chance sur mille (${doodlePct(D_CHEST_SPECIAL_P)}) qu'un coffre soit doré, autant qu'il soit maudit — tiré coffre par coffre, qu'il vienne d'une créature ou de la 🎁 Tuile coffre. C'est la SEULE façon de les rencontrer.` },
       { i:'📦', n:'Coffre',       d:'100 % — chaque monstre tué en lâche un. Son contenu se tire ainsi : ' + odds.map(o => `${o.icon} ${doodlePct(o.p)}`).join(' · ') + '.' },
