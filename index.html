@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.7.9';
+const APP_VERSION = '13.8.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3136,7 +3136,11 @@ function StoreProvider({ children }) {
         // ⚠ Remplace l'appel `ytCheckNewVideos()` seul : `tvSyncDaily` le contient (et couvre en
         // plus les séries). Interrompue, elle repart au prochain passage DANS LA MÊME JOURNÉE et
         // saute ce qui a déjà été actualisé depuis minuit.
-        try { tvSyncDaily(); } catch {}
+        try { Promise.resolve(tvSyncDaily()).catch(() => {}).then(() => { try { syncTvEpisodeAlerts(); } catch {} }); } catch {}
+        // TV Time → To do / notifications : les séries suivies au 🔔 dont un épisode sort
+        // demain ou aujourd'hui. 100 % local (aucune requête) — d'où le double appel : une
+        // fois TOUT DE SUITE sur le cache, une fois quand la synchro a rafraîchi `nextEp`.
+        try { syncTvEpisodeAlerts(); } catch {}
 
         // Init local DB
         await initDB();
@@ -21691,6 +21695,7 @@ function mergeTvItem(a, b) {
   if (isFinite(added)) base.addedAt = added;
   base.manga = !!(a.manga || b.manga);
   base.cartoon = !!(a.cartoon || b.cartoon);
+  base.epAlert = !!(a.epAlert || b.epAlert);   // 🔔 suivi des sorties : union, comme les labels
   if (a.dropped || b.dropped) base.dropped = true;         // « ne plus suivre » conservé à la fusion
   if (a.unlimited || b.unlimited) base.unlimited = true;   // plafond 500 retiré : on garde le plus permissif
   if (a.keepShorts || b.keepShorts) base.keepShorts = true; // tag « garder les Shorts » : on garde le plus permissif
@@ -32908,6 +32913,75 @@ async function tvSyncRun(force) {
 // interrompue (onglet fermé, réseau coupé), elle repartira au prochain passage dans la
 // journée — et `force = minuit` fait sauter tout ce qui a DÉJÀ été actualisé aujourd'hui,
 // donc elle reprend où elle en était au lieu de tout refaire.
+// ⚠ 13.8.0 — SUIVRE LES SORTIES D'UNE SÉRIE (demande utilisateur) : le 🔔 de la fiche pose
+// `epAlert` sur la série ; la VEILLE de la diffusion d'un épisode, une tâche « Aujourd'hui »
+// est créée dans le To do, et une notification part la veille PUIS le jour même.
+//
+// ⚠ Rien de tout cela n'interroge TMDB : `nextEp` est déjà rafraîchi par `tvSyncDaily`
+// (1×/jour). Cette fonction est 100 % locale — elle peut donc tourner à chaque boot sans
+// coûter une requête, et hors ligne.
+//
+// ⚠ DEUX marqueurs, et pas un :
+//   · la TÂCHE est créée UNE SEULE FOIS par épisode (clé « id → épisode »), même si
+//     l'utilisateur la supprime — la recréer à chaque ouverture serait du harcèlement ;
+//   · la NOTIFICATION est throttlée PAR JOUR et par épisode, ce qui donne exactement les
+//     deux notifications promises : une la veille, une le jour J.
+// ⚠ Les deux vivent en localStorage HORS sauvegarde : ce sont des accusés de réception
+// locaux, pas des données (même choix que `spotifyplus_remember_todo_added`).
+const TV_EP_TODO_KEY  = 'spotifyplus_tv_ep_todo';       // { "<itemId>": "<clé épisode>" }
+const TV_EP_NOTIF_KEY = 'spotifyplus_tv_ep_notified';   // { "<itemId>|<clé épisode>": "YYYY-MM-DD" }
+// Clé d'un épisode : la DATE en fait partie, si bien qu'un report de diffusion rouvre une
+// occurrence (nouvelle tâche, nouvelles notifications) au lieu de rester muet.
+function tvEpKey(ep) { return `${ep.date}|S${ep.s || 0}E${ep.e || 0}`; }
+function tvEpLabel(ep) { return `S${ep.s || 0}E${ep.e || 0}${ep.name ? ' · ' + ep.name : ''}`; }
+function syncTvEpisodeAlerts() {
+  const items = loadTvItems();
+  // ⚠ `status !== 'done'` : une série finie ne réveille personne. Le 🔔 reste posé, il
+  // reprendra si un nouvel épisode la fait repasser « en cours ».
+  const due = [];
+  for (const it of items) {
+    if (it.type !== 'tv' || !it.epAlert || it.status === 'done') continue;
+    const ep = it.nextEp;
+    if (!ep || !ep.date) continue;
+    const d = tvDaysUntil(ep.date);
+    if (d == null || d < 0 || d > 1) continue;   // la veille (1) et le jour J (0), rien d'autre
+    due.push({ it, ep, d, key: tvEpKey(ep) });
+  }
+  if (!due.length) return false;
+  const today = todoTodayStr();   // jour LOCAL (piège 16)
+  let added = {}, notified = {};
+  try { added = JSON.parse(localStorage.getItem(TV_EP_TODO_KEY)) || {}; } catch {}
+  try { notified = JSON.parse(localStorage.getItem(TV_EP_NOTIF_KEY)) || {}; } catch {}
+  let todos = loadTodos(), todoChanged = false, markChanged = false;
+  const toNotify = [];
+  for (const x of due) {
+    if (added[x.it.id] !== x.key) {
+      todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2),
+        text: `📺 ${x.it.title} — ${tvEpLabel(x.ep)} ${x.d === 0 ? "sort aujourd'hui" : 'sort demain'}`,
+        bucket: 'today', fav: false, tvEpKey: x.it.id + '|' + x.key });
+      added[x.it.id] = x.key;
+      todoChanged = true; markChanged = true;
+    }
+    const nk = x.it.id + '|' + x.key;
+    if (notified[nk] !== today) { notified[nk] = today; toNotify.push(x); markChanged = true; }
+  }
+  if (todoChanged) saveTodos(todos);
+  if (markChanged) {
+    lsSet(TV_EP_TODO_KEY, JSON.stringify(added));
+    // Borne mémoire : on ne garde que les accusés du jour et de la veille — au-delà,
+    // l'épisode est diffusé depuis longtemps et sa clé ne resservira jamais.
+    const yday = localDayStr(new Date(Date.now() - 86400000));
+    const keep = {};
+    for (const k of Object.keys(notified)) if (notified[k] >= yday) keep[k] = notified[k];
+    lsSet(TV_EP_NOTIF_KEY, JSON.stringify(keep));
+  }
+  if (toNotify.length) {
+    const txt = toNotify.map(x => `${x.it.title} ${tvEpLabel(x.ep)} — ${x.d === 0 ? "aujourd'hui" : 'demain'}`).join(', ');
+    notify('Spotify+ — TV Time', toNotify.length === 1 ? `Nouvel épisode : ${txt}` : `${toNotify.length} épisodes : ${txt}`);
+  }
+  return todoChanged;
+}
+
 async function tvSyncDaily() {
   if (!tvSyncDailyDue() || _tvSync.running) return null;
   const r = await tvSyncRun(tvStartOfToday());
@@ -33028,7 +33102,7 @@ function tvTimeStats() {
 // saison (barre + x/y + coche verte). Les épisodes spéciaux (saison 0) sont SUIVABLES
 // (ligne dépliable + coches INDIVIDUELLES, liste specialsSeen) mais JAMAIS comptés dans
 // les 100 % ni requis pour que la série passe en « Vu ».
-function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUnignoreEp, onSetSpecials, onStatus, onManga, onCartoon }) {
+function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUnignoreEp, onSetSpecials, onStatus, onManga, onCartoon, onEpAlert }) {
   const isMovie = item.type === 'movie';
   const total   = item.totalEps || 0;
   const wset    = new Set(tvWatchedSet(item));   // épisodes vus (clés "S{n}E{e}") — cochage individuel
@@ -33127,6 +33201,20 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
             );
           })}
         </div>
+
+        {/* ⚠ 13.8.0 — SUIVRE LES SORTIES (demande utilisateur) : une ligne à part, SOUS les
+            labels, et SÉRIES SEULEMENT — un film n'a pas de « prochain épisode ». Le 🔔 ne
+            change rien à la fiche : il pose `epAlert`, que `syncTvEpisodeAlerts` relit au
+            démarrage pour créer la tâche To do de la veille et notifier les deux jours. */}
+        {!isMovie && onEpAlert && (
+          <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+            <button onClick={() => onEpAlert(!item.epAlert)}
+              title="M'alerter à la sortie d'un épisode : tâche « Aujourd'hui » dans le To do la veille, et notification la veille et le jour même"
+              style={{ flex:1, background: item.epAlert ? '#f5b81f22' : 'none', border:`1px solid ${item.epAlert ? '#f5b81faa' : C.border}`, borderRadius:6, color: item.epAlert ? '#f5b81f' : C.dim, fontSize:10, fontWeight:700, padding:'5px 0', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+              🔔 {item.epAlert ? 'Sorties suivies ✓' : 'Suivre cette série'}
+            </button>
+          </div>
+        )}
 
         {/* Labels Manga / Dessin animé (non affichés dans les listes, pas de stats pour l'instant) */}
         <div style={{ display:'flex', gap:8, marginBottom:12 }}>
@@ -35550,6 +35638,14 @@ function TvTimePanel() {
   // Label « dessin animé » (fiche) — non affiché dans les listes, pas de stats pour l'instant
   const setCartoon = (item, v) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
     { ...it, cartoon: !!v }));
+  // 🔔 « Suivre cette série » (13.8.0) : alerte To do la veille d'un épisode + notification
+  // la veille et le jour même. ⚠ On rejoue `syncTvEpisodeAlerts` juste après l'écriture :
+  // si l'épisode sort demain, l'utilisateur voit la tâche apparaître dans la foulée plutôt
+  // qu'au prochain démarrage — c'est-à-dire, une fois sur deux, trop tard.
+  const setEpAlert = (item, v) => {
+    update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it : { ...it, epAlert: !!v }));
+    if (v) setTimeout(() => { try { syncTvEpisodeAlerts(); } catch {} }, 0);
+  };
 
   // ── 📚 LIVRES (7.6.52) : recherche, ajout et progression de lecture ──────────────
   const toggleBooks = () => {
@@ -36257,6 +36353,7 @@ function TvTimePanel() {
         onSetSpecials={arr => setSpecials(detailItem, arr)}
         onManga={v => setManga(detailItem, v)}
         onCartoon={v => setCartoon(detailItem, v)}
+        onEpAlert={v => setEpAlert(detailItem, v)}
         onStatus={st => setStatus(detailItem, st)} />}
       {/* Fiche d'un résultat de recherche non enregistré — la 1re action l'ajoute à la liste */}
       {preview && (() => {
