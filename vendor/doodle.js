@@ -9208,9 +9208,15 @@ function doodleSpawnRow(s, ny, risky) {
     // 🎁 Coffre : MÊME taux que la multicolore, sur la bande juste en dessous de la sienne.
     // ⚠ Une bande de plus prise EN HAUT du tirage, donc sans toucher un seul des seuils
     // historiques (cassante/bleue/blanche et tuiles débloquées, tous sous 0,65).
+    // ⚠ 13.8.3 — `chestP > 0` EN TÊTE DU TEST (demande utilisateur : « en classique, retire la
+    // tuile coffre »). Le taux était bien mis à zéro en Classique, mais la borne du test le
+    // rendait inopérant : à 0, `r > 1 - rainbowP - chestP` redevient EXACTEMENT la bande de la
+    // multicolore. Chaque fois que celle-ci était écartée par ses propres garde-fous (jamais
+    // deux d'affilée, jamais pendant une accalmie), la rangée retombait sur la 🎁 Coffre — qui
+    // apparaissait donc en Classique, alors qu'il n'y a là ni coffre ni butin à en tirer.
     const chestP = doodleClassic(s) ? 0 : rainbowP * calm;
     if (r > 1 - rainbowP && s.lastType !== 'rainbow' && calm === 1) type = 'rainbow';
-    else if (r > 1 - rainbowP - chestP && !D_SPECIAL.has(s.lastType)) type = 'chest';
+    else if (chestP > 0 && r > 1 - rainbowP - chestP && !D_SPECIAL.has(s.lastType)) type = 'chest';
     else if (r < pB) type = 'break';
     else if (r < pB + pM) type = 'blue';
     else if (r < pB + pM + pV) type = 'white';
