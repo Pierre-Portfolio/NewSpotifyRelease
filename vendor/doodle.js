@@ -1453,14 +1453,17 @@ const D_TLASER_GAP = 300, D_TLASER_TEL = 45, D_TLASER_V = 1.55, D_TLASER_R = 5, 
 // dessus indéfiniment sans jamais quitter sa hauteur. Figée après le premier passage, elle rend
 // un second rebond ORDINAIRE MAIS PLUS HAUT (voir `p.hops` au calcul du rebond) : le seul moyen
 // d'en repartir vers le haut est justement d'y retomber — celui qu'on rate si on s'est déplacé.
-// ⚠ 13.3.1 — CE SECOND REBOND DOUBLE LA HAUTEUR (demande utilisateur) : D_GLUE_HOP est un
+// ⚠ 13.3.1 — CE SECOND REBOND AUGMENTE LA HAUTEUR (demande utilisateur) : D_GLUE_HOP est un
 // facteur de HAUTEUR, pas de vitesse (h ∝ v², le calcul du rebond en prend la racine). Le
 // 🚇 Tuyau, qui partageait ce gain, garde le +40 % de D_BOUNCE_BOOST — seule la colle change.
 // ⚠ 13.5.5 — et il MULTIPLIE la série de rebonds au lieu de concourir avec elle (voir le calcul
 // du rebond) : en `max`, deux retours de suite rendaient 2 puis 2, donc deux sauts au sommet
 // rigoureusement identique — ce que l'utilisateur a vu et signalé.
+// ⚠ 13.8.2 — LE GAIN PASSE DE ×2 À +50 % (demande utilisateur : « pour la tuile pot de colle,
+// augmente la hauteur du saut de 50 % »). Le libellé de la tuile est DÉRIVÉ de la constante —
+// il se met à jour tout seul, en pourcentage, et ne peut donc pas mentir.
 const D_GLUE_V = 1.6;
-const D_GLUE_HOP = 2;
+const D_GLUE_HOP = 1.5;
 // 🪞 10.3.7 — MIMÉTIQUE (demande utilisateur) : elle prend l'APPARENCE ET L'EFFET de la dernière
 // dalle sur laquelle le joueur a rebondi.
 // ⚠ Le modèle (`s.lastTileK`) est relu à chaque frame et recopié dans `p.mim`, que
@@ -1812,7 +1815,7 @@ function doodleMakeHall(s, W, H) {
 // par oublier le saut promis et laisser le doodler tomber comme une pierre.
 function doodleBubblePop(s) {
   s.fly = 0; s.flyType = null; s.flyVy = null; s.vy = D_JUMP; s.inv = Math.max(s.inv, D_INV);
-  s.lastPlat = null; s.bounceStreak = 0;
+  s.lastPlat = null; s.lastLine = null; s.bounceStreak = 0;
   for (let k = 0; k < 18; k++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 22, max: 22, sz: 2.5, c: k % 3 ? '#bfeaf8' : '#ffffff' }); }
   s.toast = { txt: '🫧 La bulle éclate !', life: D_TOAST_LIFE };
 }
@@ -1917,7 +1920,7 @@ function doodlePaintStart(s, k) {
   // ⚠ `flyVy` : la combustion emprunte le vol 'jet' du 🚀 Jetpack mais monte deux fois moins
   // vite. Poser la vitesse SUR L'ÉTAT plutôt que de tester la teinte dans la boucle garde le
   // Jetpack intact — un joueur teinté 🟠 qui ramasse un jetpack vole bien à la vitesse du jetpack.
-  if (k === 'ember') { s.fly = d.life; s.flyType = 'jet'; s.flyVy = D_EMBER_VY; s.vy = -6.4; s.lastPlat = null; s.bounceStreak = 0; }
+  if (k === 'ember') { s.fly = d.life; s.flyType = 'jet'; s.flyVy = D_EMBER_VY; s.vy = -6.4; s.lastPlat = null; s.lastLine = null; s.bounceStreak = 0; }
   if (k === 'chaos') s.slip = 0;
   s.toast = { txt: `${d.icon} ${d.name} · ${d.txt}`, life: D_TOAST_LIFE * 1.4 };
   for (let j = 0; j < 20; j++) { const a = Math.random() * Math.PI * 2, v = 1.5 + Math.random() * 3.5; s.parts.push({ x: s.px, y: s.py, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, life: 26, max: 26, sz: 3, c: j % 2 ? d.body : d.dark }); }
@@ -2184,7 +2187,7 @@ const D_TILES = [
   { k: 'quest',    icon:'🎯', name: 'Quête',          txt: 'elle te confie un défi tiré au sort parmi ceux qui ne tournent pas déjà ; le réussir fait tomber du ciel une PLUIE DE COFFRES — un par tranche de ' + D_QUEST_RAIN_PER + ' points d\'altitude, un au minimum. Ils se posent où ils tombent : à toi d\'aller les chercher. Les ' + D_QUESTS.length + ' défis peuvent courir de front, et les avoir tous les ' + D_QUESTS.length + ' en même temps rapporte ' + D_QUEST_TRIO + ' butins de plus, tout de suite. 🏅 Une fois les ' + D_QUESTS.length + ' RÉUSSIS, la QUÊTE ULTIME s\'ouvre d\'elle-même — abats ' + D_ULT_KILLS + ' créatures, rebondis sur ' + D_ULT_KINDS + ' sortes de tuiles et terrasse ' + D_ULT_BOSS + ' boss : elle débloque 100 % des tuiles d\'un coup et pousse toutes les améliorations et tous les bonus permanents à leur maximum' },
   { k: 'alive',    icon:'👀', name: 'Vivante',        txt: 'elle a des yeux, elle te regarde et elle se traîne vers toi — sans jamais s\'éloigner beaucoup de l\'endroit où elle est née' },
   { k: 'mimic',    icon:'🪞', name: 'Mimétique',      txt: 'elle prend l\'apparence ET l\'effet de la dernière dalle sur laquelle tu as rebondi — elle change donc au fil de la partie' },
-  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur et se déplace pour rester juste sous toi — jusqu\'à ton premier rebond dessus : le pot est vidé et elle se fige ; y retomber te renvoie ' + D_GLUE_HOP + ' fois plus haut que le saut du moment, et à chaque retour' },
+  { k: 'glue',     icon:'🩹', name: 'Pot de colle',   txt: 'elle garde sa hauteur et se déplace pour rester juste sous toi — jusqu\'à ton premier rebond dessus : le pot est vidé et elle se fige ; y retomber te renvoie ' + Math.round((D_GLUE_HOP - 1) * 100) + ' % plus haut que le saut du moment, et à chaque retour' },
   { k: 'chameleon', icon:'🦎', name: 'Caméléon',      txt: 'elle prend l\'apparence d\'une tuile DÉJÀ PRÉSENTE dans la partie — débloquée ou venue d\'un biome traversé — et n\'en a aucun des effets : c\'est une plateforme ordinaire. Sans rien à imiter, elle reste une dalle verte' },
   { k: 'grapple',  icon:'🪝', name: 'Grappin',        txt: 'elle lance un grappin sur toi de temps en temps : s\'il t\'accroche, il te ramène sur la dalle, où tu repars d\'un saut' },
   { k: 'light',    icon:'🚦', name: 'Feu tricolore',  txt: 'elle passe du vert au jaune puis au rouge toutes les ' + Math.round(D_LIGHT_STEP / 60) + ' secondes : VERTE elle t\'offre 1 bonus (une seule fois par dalle), JAUNE on glisse, ROUGE elle te prend ' + D_LIGHT_TAKE + ' niveaux de bonus et ' + D_LIGHT_AMMO + ' balles' },
@@ -3411,7 +3414,7 @@ function doodleBossStart(s, W, H) {
   s.monsters = []; s.mums = []; s.meteors = []; s.tshots = []; s.spirits = []; s.drops = []; s.slays = []; s.stals = []; s.pops = []; s.wrecks = [];
   s.fly = 0; s.flyType = null; s.flyVy = null; s.acc = null; s.vine = null; s.tride = null; s.grab = null; s.tardis = null; s.chainUp = null; s.barb = null; s.slip = 0; s.beltLeft = 0; s.tmag = 0;
   s.py = s.bossFloorY - D_FEET; s.vy = 0;
-  s.lastPlat = null; s.bounceStreak = 0;
+  s.lastPlat = null; s.lastLine = null; s.bounceStreak = 0;
   s.banner = { txt: `💀 ${kind.name}`, sub: `plus de saut — déplace-toi et tire · ${hp} points de vie · 🛡️ ${D_BOSS_SH} balles après chaque sort`, life: D_BANNER_LIFE * 1.6 };
 }
 // Déclenche l'attaque `k` du boss. Chaque forme est un simple semis d'objets : c'est la boucle
