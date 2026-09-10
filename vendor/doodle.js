@@ -371,7 +371,7 @@ function doodleVoidSurvive(s, h, H) {
     s.questKills = (s.questKills || 0) + 1;             // englouti reste tué : les quêtes de chasse comptent aussi ces créatures
     const mx = m.x + m.w / 2, my = m.y + m.h / 2;
     for (let k = 0; k < 10; k++) s.parts.push({ x: mx, y: my, vx: (h.x - mx) / 20, vy: (h.y - my) / 20, life: 26, max: 26, sz: 3, c: k % 2 ? '#c3b7f2' : '#ffffff' });   // traînée ASPIRÉE vers le trou : c'est elle qui montre qui a été avalé
-    if (!doodleClassic(s)) got.push(doodleLootGrant(s));
+    got.push(doodleLootGrant(s));
   }
   s.booms.push({ x: h.x, y: h.y, r: h.r * 2.2, life: D_BOOM_LIFE, max: D_BOOM_LIFE });   // onde purement DÉCORATIVE : elle ne passe pas par `doodleBoom`, qui tuerait une seconde fois
   s.toast = null;
@@ -415,7 +415,6 @@ function doodleKillMonster(s, m, force, annihilate) {
   // 🦴 Annihilé : il ne se reconstruit plus (`bones` reste nul, le filtre de fin de frame
   // l'emporte) — mais il ne lâche pas de coffre pour autant, voir l'en-tête de la fonction.
   if (m.revive) return;
-  if (doodleClassic(s)) return;   // 🎮 Classique : pas de coffres, donc pas de butins
   if (m.noLoot) return;           // 🚨 les gardiens d'une rafle, sauf le premier : voir D_RAID_GAP
   // ⚠ L'étalement est DÉRIVÉ de `n` et centré, et non écrit en dur pour deux : c'est ce qui
   // le laisse juste si un jour une créature en lâche davantage.
@@ -522,7 +521,7 @@ function doodleBiomeTilesAt(s, tier) {
 // palier-là qui prend sa place. Rien ne s'accumule.
 const D_RELIC_SHARE = 0.15;
 function doodleBiomeRelic(s, tier) {
-  if (tier <= 0 || doodleClassic(s)) return null;
+  if (tier <= 0) return null;
   if (!s.relics) s.relics = [];
   if (s.relics[tier] === undefined) {
     const prev = D_BIOMES[doodleBiomeAt(s, tier - 1)].tiles;
@@ -1065,7 +1064,7 @@ function doodleBg(ctx, W, H, climb, biome, s) {
   const b = biome || D_BIOMES[0];
   ctx.fillStyle = b.paper; ctx.fillRect(0, 0, W, H);                 // papier teinté par le biome
   let scened = 0;
-  if (s && !doodleClassic(s)) {                                      // 🎮 Classique : le carnet d'origine, jamais de décor
+  if (s) {
     const tier = doodleTier(s.score), reste = (tier + 1) * D_BIOME_STEP - s.score;
     const f = reste > D_BIOME_FADE ? 0 : Math.max(0, Math.min(1, 1 - reste / D_BIOME_FADE));
     const cur = D_BIOMES[doodleBiomeAt(s, tier)], nxt = D_BIOMES[doodleBiomeAt(s, tier + 1)];
@@ -1176,7 +1175,6 @@ function doodleRainbowHop(s, p) {
     // utilisateur : « quand la case multicolore apparaît sur une autre tuile, ça doit créer une
     // tuile fusion »). Elle l'EFFAÇAIT jusqu'ici — deux dalles qui se rencontrent, c'est
     // exactement la définition de la ✨ Création, et l'occasion la plus lisible du jeu.
-    // ⚠ Chaos SEULEMENT : `doodleCreaReady` refuse le Classique, où la Création n'existe pas.
     // ⚠ La multicolore est posée à sa nouvelle place AVANT la fusion : `doodleCreaBorn` se
     // recentre sur le point de contact, il lui faut la position d'arrivée, pas celle qu'elle quitte.
     // ⚠ `uses` (ses passages restants) est retiré par `doodleCreaBorn` : la dalle n'est plus
@@ -2415,7 +2413,6 @@ const D_BOOMER_DUR = 84, D_BOOMER_R = 70, D_BOOMER_H = 30;
 // 🎁 9.6.1 — TUILE COFFRE (demande utilisateur) : la SEULE des nouvelles à ne pas passer par
 // les paliers de 1000 points — elle tombe dès 0 point, au taux de la multicolore. Elle n'est
 // donc pas dans D_TILES (la table des tuiles à débloquer) et se tire comme la 🌈, en haut du
-// tirage. ⚠ Absente du mode Classique : il n'y a ni coffre ni butin là-bas.
 // 🃏 TYPE EFFECTIF d'une dalle : celui du casino est celui qu'il imite. ⚠ TOUT ce qui décide
 // d'un comportement doit passer par ici — létalité comprise. Un casino qui tire la 🌵 Pique
 // doit tuer ; tester `p.type` le laisserait inoffensif, et la dalle mentirait sur ce qu'elle est.
@@ -3819,7 +3816,7 @@ function doodleTier(score) { return Math.max(0, Math.floor(score / D_BIOME_STEP)
 // le recalculer à la volée le ferait clignoter d'une frame à l'autre. La tranche 0 est toujours
 // le décor normal, et deux tranches voisines ne tombent jamais sur le même biome.
 function doodleBiomeAt(s, tier) {
-  if (tier <= 0 || doodleClassic(s)) return 0;   // 🎮 Classique : le décor ne change jamais
+  if (tier <= 0) return 0;
   if (!s.biomes) s.biomes = [0];
   for (let k = 1; k <= tier; k++) {
     if (s.biomes[k] != null) continue;
@@ -3836,7 +3833,6 @@ function doodleBiome(s) { return D_BIOMES[s.biome || 0]; }
 // la densité de dangers reste exactement celle d'avant les biomes.
 function doodleMakeMob(s, ny, pl) {
   const b = doodleBiome(s), r = Math.random();
-  if (doodleClassic(s)) { const mt = Math.floor(Math.random() * 3); return { x: 10 + Math.random() * (DOODLE_W - 60), y: ny - 40, w: 44, h: 38, type: mt, alive: true, vx: mt === 1 ? (Math.random() < 0.5 ? -1 : 1) * 0.72 : 0 }; }
   // 🏗️ Bâtisseur : testé EN PREMIER, il est le plus rare de tous et sa part ne doit être
   // grignotée par aucun autre tirage.
   if (s.score >= D_BUILDER_FROM && r < D_BUILDER_P) {
@@ -3962,7 +3958,6 @@ function doodleShuffleTiles(s, H) {
   return vis.length;
 }
 function doodleTileUnlock(s) {
-  if (doodleClassic(s)) return null;   // 🎮 Classique : aucune tuile ne se débloque
   // ⚠ 🕊️ Les tuiles bannies par la miséricordieuse sont exclues du tirage : sans ce filtre, le
   // palier suivant aurait rendu à la partie ce que le joueur venait d'en retirer.
   const left = D_TILES.filter(t => s.tiles.indexOf(t.k) < 0 && (s.banned || []).indexOf(t.k) < 0);
@@ -9065,10 +9060,9 @@ function doodleCreaBorn(s, a, b, txt) {
   return low;
 }
 // Une ✨ Création peut-elle naître maintenant ? Une seule à l'écran, jamais pendant sa propre
-// séquence, jamais dans l'arène du boss — et JAMAIS en Classique (13.8.4, demande utilisateur :
-// « la tuile fusion ne doit pas exister dans le classique »), mode qui est le jeu d'origine.
+// séquence, jamais dans l'arène du boss.
 function doodleCreaReady(s) {
-  if (doodleClassic(s) || s.bossHide || s.crea) return false;
+  if (s.bossHide || s.crea) return false;
   for (const q of s.platforms) if (q.type === 'creation' && !q.dead) return false;
   return true;
 }
@@ -9241,13 +9235,10 @@ function doodleSpawnRow(s, ny, risky) {
     // 🎁 Coffre : MÊME taux que la multicolore, sur la bande juste en dessous de la sienne.
     // ⚠ Une bande de plus prise EN HAUT du tirage, donc sans toucher un seul des seuils
     // historiques (cassante/bleue/blanche et tuiles débloquées, tous sous 0,65).
-    // ⚠ 13.8.3 — `chestP > 0` EN TÊTE DU TEST (demande utilisateur : « en classique, retire la
-    // tuile coffre »). Le taux était bien mis à zéro en Classique, mais la borne du test le
-    // rendait inopérant : à 0, `r > 1 - rainbowP - chestP` redevient EXACTEMENT la bande de la
-    // multicolore. Chaque fois que celle-ci était écartée par ses propres garde-fous (jamais
-    // deux d'affilée, jamais pendant une accalmie), la rangée retombait sur la 🎁 Coffre — qui
-    // apparaissait donc en Classique, alors qu'il n'y a là ni coffre ni butin à en tirer.
-    const chestP = doodleClassic(s) ? 0 : rainbowP * calm;
+    // ⚠ `chestP > 0` en tête du test : à zéro, `r > 1 - rainbowP - chestP` redeviendrait
+    // EXACTEMENT la bande de la multicolore, et chaque rangée où celle-ci est écartée par ses
+    // garde-fous (jamais deux d'affilée, jamais pendant une accalmie) retomberait sur la Coffre.
+    const chestP = rainbowP * calm;
     if (r > 1 - rainbowP && s.lastType !== 'rainbow' && calm === 1) type = 'rainbow';
     else if (chestP > 0 && r > 1 - rainbowP - chestP && !D_SPECIAL.has(s.lastType)) type = 'chest';
     else if (r < pB) type = 'break';
@@ -9271,12 +9262,12 @@ function doodleSpawnRow(s, ny, risky) {
   // que ses deux garde-fous le permettent : 3 par partie, 500 points d'écart minimum.
   if (s.perkPending) { type = 'perk'; s.perkPending = false; }
   else if (s.slotPending) { type = 'slot'; s.slotPending = false; }   // 🎰 due, comme la case bonus : jamais repoussée de rangée en rangée par la malchance
-  else if (!doodleClassic(s) && s.luckyLeft > 0 && s.score >= s.luckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
+  else if (s.luckyLeft > 0 && s.score >= s.luckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'lucky'; s.luckyLeft--; s.luckyAt = s.score + D_LUCKY_GAP;
   }
   // ☠️ Case malchance : MÊME taux et MÊMES garde-fous que la case chance, mais des compteurs
   // à elle — sinon les deux cases se voleraient leurs apparitions et on n'en verrait qu'une.
-  else if (!doodleClassic(s) && s.unluckyLeft > 0 && s.score >= s.unluckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
+  else if (s.unluckyLeft > 0 && s.score >= s.unluckyAt && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'unlucky'; s.unluckyLeft--; s.unluckyAt = s.score + D_LUCKY_GAP;
   }
   // 💀 Case cauchemardesque : MÊME taux que la case chance, mais UNE SEULE fois par partie —
@@ -9285,7 +9276,7 @@ function doodleSpawnRow(s, ny, risky) {
   // ⚠ 🏅 SAUF pendant la quête ultime : elle EXIGE un boss, et le joueur qui avait déjà terrassé
   // le sien poursuivait un objectif que le jeu ne pouvait plus lui servir. La dalle redevient
   // donc possible tant que cet objectif-là n'est pas rempli, et pas une seconde de plus.
-  else if (!doodleClassic(s) && (!s.bossDone || (s.ultime && doodleUltDone(s).boss < D_ULT_BOSS && !s.boss && !s.bossHide)) && s.score >= D_BOSS_FROM && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
+  else if ((!s.bossDone || (s.ultime && doodleUltDone(s).boss < D_ULT_BOSS && !s.boss && !s.bossHide)) && s.score >= D_BOSS_FROM && !D_SPECIAL.has(s.lastType) && Math.random() < D_LUCKY_P) {
     type = 'nightmare';
   }
   // ⚠ 9.2.8 — La tuile du biome ne remplace qu'une plateforme ORDINAIRE : elle ne doit voler la
@@ -9405,7 +9396,7 @@ function doodleRules() {
       { i:'⬜', n:'Blanche',      d:'un seul rebond, puis elle disparaît. Elle marque les sauts limites.' },
       { i:'🎁', n:'Tuile coffre', d:'au premier rebond, un coffre apparaît dessus ; elle s\'éteint ensuite. Le coffre se ramasse et se tire comme celui d\'un monstre.' },
       { i:'🌈', n:'Multicolore',  d:'se téléporte plus haut à chaque rebond et tient 3 à 5 passages. Les points sur elle comptent les passages restants. Tant qu\'elle est en vie, le reste du décor se raréfie de moitié.' },
-      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. La 🌈 Multicolore qui, faute de place libre, se téléporte SUR une dalle fusionne avec elle de la même façon. N'existe pas en mode Classique. Ne fusionnent JAMAIS : la 🔺 Fractale et tout ce qu'elle engendre (elle se scinde en deux dalles voisines, ce serait une Création à chaque rebond), ni les dalles liées par paire (🌈 Arc-en-ciel, 🚇 Tuyaux, ⛓️ Chaînes). En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
+      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. La 🌈 Multicolore qui, faute de place libre, se téléporte SUR une dalle fusionne avec elle de la même façon. Ne fusionnent JAMAIS : la 🔺 Fractale et tout ce qu'elle engendre (elle se scinde en deux dalles voisines, ce serait une Création à chaque rebond), ni les dalles liées par paire (🌈 Arc-en-ciel, 🚇 Tuyaux, ⛓️ Chaînes). En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
@@ -9431,15 +9422,11 @@ function doodleRules() {
 // ⚠ Le bouton n'apparaît qu'une fois les trois arrêtés — sinon on reprend avant d'avoir vu ce
 // qu'on a gagné, et la tuile n'aurait servi qu'à interrompre la partie.
 const D_SLOT_STOPS = [560, 900, 1240];
-// ⚠ 9.4.6 — DEUX MODES (demande utilisateur). Le mode complet s'appelle « Chaos » (9.5.2) ;
-// sa clé de stockage reste `plus`, renommer une valeur déjà écrite chez l'utilisateur le
-// renverrait en Classique sans qu'il ait rien demandé. En « Classique », le jeu redevient celui d'avant
-// toutes les extensions : ni biome, ni créature de biome, ni rôdeur, ni case chance, ni coffre,
-// ni butin, ni bouclier, ni tuile débloquée. Restent les plateformes d'origine, les monstres
-// d'origine, les ressorts, le chapeau et le jetpack.
-// ⚠ Le mode est lu à CHAQUE fois depuis `s.mode` et jamais recopié dans une variable de module :
-// il doit pouvoir changer entre deux parties sans qu'aucun état ne traîne.
-const D_MODE_LS = 'spotifyplus_doodle_mode';
-function doodleModeLoad() { try { return localStorage.getItem(D_MODE_LS) === 'classic' ? 'classic' : 'plus'; } catch { return 'plus'; } }
-function doodleClassic(s) { return s && s.mode === 'classic'; }
+// ⚠ 13.8.7 — IL N'Y A PLUS QU'UN SEUL JEU (demande utilisateur : « supprime le mode normal et
+// le code associé, il ne doit rester que le Chaos »). Le mode « Classique » — le jeu d'avant les
+// extensions : ni biome, ni rôdeur, ni case chance, ni coffre, ni butin, ni tuile débloquée — a
+// été retiré, avec `doodleClassic`, `doodleModeLoad` et le bouton de bascule. Chaque garde-fou
+// `!doodleClassic(s)` a donc disparu, jamais son contenu : le Chaos est le comportement gardé.
+// ⚠ L'ancienne clé `spotifyplus_doodle_mode` n'est plus ni lue ni écrite ; elle traîne peut-être
+// encore chez l'utilisateur, mais plus rien ne s'en sert — ne pas la ressusciter.
 window.DOODLE_READY = true;
