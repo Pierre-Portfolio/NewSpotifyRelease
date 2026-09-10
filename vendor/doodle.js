@@ -1172,6 +1172,24 @@ function doodleRainbowHop(s, p) {
   // désormais cet emplacement, et surtout elle ne peut JAMAIS réapparaître sur un monstre ou
   // un trou : on la donne à suivre, la suivre ne doit pas pouvoir tuer.
   if (!placed) {
+    // ✨ 13.8.4 — LA MULTICOLORE QUI SE POSE SUR UNE AUTRE DALLE FUSIONNE AVEC ELLE (demande
+    // utilisateur : « quand la case multicolore apparaît sur une autre tuile, ça doit créer une
+    // tuile fusion »). Elle l'EFFAÇAIT jusqu'ici — deux dalles qui se rencontrent, c'est
+    // exactement la définition de la ✨ Création, et l'occasion la plus lisible du jeu.
+    // ⚠ Chaos SEULEMENT : `doodleCreaReady` refuse le Classique, où la Création n'existe pas.
+    // ⚠ La multicolore est posée à sa nouvelle place AVANT la fusion : `doodleCreaBorn` se
+    // recentre sur le point de contact, il lui faut la position d'arrivée, pas celle qu'elle quitte.
+    // ⚠ `uses` (ses passages restants) est retiré par `doodleCreaBorn` : la dalle n'est plus
+    // une multicolore, un compteur orphelin se serait affiché en points sur la Création.
+    if (doodleCreaReady(s)) {
+      const hit = s.platforms.find(q => q !== p && !q.dead && doodleCreaCan(q)
+        && nx < q.x + q.w && nx + p.w > q.x && ny < q.y + q.h + D_RAINBOW_PAD && ny + p.h + D_RAINBOW_PAD > q.y);
+      if (hit) {
+        p.x = nx; p.y = ny;
+        doodleCreaBorn(s, p, hit, '✨ La multicolore s\'est posée sur une dalle — La Création !');
+        return;
+      }
+    }
     for (const q of s.platforms) {
       if (q === p || q.dead) continue;
       if (nx < q.x + q.w && nx + p.w > q.x && ny < q.y + q.h + D_RAINBOW_PAD && ny + p.h + D_RAINBOW_PAD > q.y) q.dead = true;
@@ -9024,31 +9042,46 @@ function doodleCreaTouch(a, b) {
 }
 // Cherche un contact et fait naître la Création. ⚠ UNE SEULE à l'écran à la fois : deux
 // séquences qui se chevauchent se voleraient le doodler à chaque frame.
+// La FUSION proprement dite : deux dalles n'en font plus qu'une, la ✨ Création.
+// ⚠ Sortie de `doodleCreaFuse` en 13.8.4 pour être rejouée depuis `doodleRainbowHop` : la
+// 🌈 multicolore qui se téléporte SUR une autre dalle fusionne désormais avec elle, au lieu de
+// l'effacer. Deux copies du même bloc auraient fini par diverger.
+// La plus BASSE des deux devient la Création, recentrée sur le point de contact et ramenée à
+// la largeur ordinaire ; l'autre est absorbée (`dead`, la voie que le jeu utilise déjà partout
+// — rien ne pointe une dalle morte sans le tester).
+function doodleCreaBorn(s, a, b, txt) {
+  const low = a.y >= b.y ? a : b, gone = low === a ? b : a;
+  const mid = (Math.max(a.x, b.x) + Math.min(a.x + a.w, b.x + b.w)) / 2;
+  for (const k of ['spring', 'trampoline', 'egg', 'roll', 'mim', 'hops', 'armed', 'used', 'shown', 'lit', 'ori', 'meals', 'glued', 'uses']) delete low[k];
+  low.type = 'creation'; low.w = D_PLAT_W; low.used = false;
+  low.x = Math.max(2, Math.min(DOODLE_W - D_PLAT_W - 2, mid - D_PLAT_W / 2));
+  gone.dead = true;
+  for (let k = 0; k < 22; k++) {
+    const ang = Math.random() * Math.PI * 2, v = 1 + Math.random() * 3;
+    s.parts.push({ x: mid, y: low.y + D_PLAT_H / 2, vx: Math.cos(ang) * v, vy: Math.sin(ang) * v - 0.6,
+      life: 30, max: 30, sz: 3, c: k % 3 === 0 ? '#ffffff' : k % 3 === 1 ? '#ffd54a' : '#f7ddb8' });
+  }
+  s.toast = { txt: txt || '✨ Deux dalles se sont touchées — La Création !', life: D_TOAST_LIFE };
+  return low;
+}
+// Une ✨ Création peut-elle naître maintenant ? Une seule à l'écran, jamais pendant sa propre
+// séquence, jamais dans l'arène du boss — et JAMAIS en Classique (13.8.4, demande utilisateur :
+// « la tuile fusion ne doit pas exister dans le classique »), mode qui est le jeu d'origine.
+function doodleCreaReady(s) {
+  if (doodleClassic(s) || s.bossHide || s.crea) return false;
+  for (const q of s.platforms) if (q.type === 'creation' && !q.dead) return false;
+  return true;
+}
 function doodleCreaFuse(s) {
-  if (s.bossHide || s.crea) return;
+  if (!doodleCreaReady(s)) return;
   const ps = s.platforms;
-  for (const q of ps) if (q.type === 'creation' && !q.dead) return;
   for (let i = 0; i < ps.length; i++) {
     const a = ps[i];
     if (!doodleCreaCan(a) || a.y < -20 || a.y > DOODLE_H + 20) continue;
     for (let j = i + 1; j < ps.length; j++) {
       const b = ps[j];
       if (!doodleCreaCan(b) || !doodleCreaTouch(a, b)) continue;
-      // La plus BASSE des deux devient la Création, recentrée sur le point de contact et
-      // ramenée à la largeur ordinaire ; l'autre est absorbée (`dead`, la voie que le jeu
-      // utilise déjà partout — rien ne pointe une dalle morte sans le tester).
-      const low = a.y >= b.y ? a : b, gone = low === a ? b : a;
-      const mid = (Math.max(a.x, b.x) + Math.min(a.x + a.w, b.x + b.w)) / 2;
-      for (const k of ['spring', 'trampoline', 'egg', 'roll', 'mim', 'hops', 'armed', 'used', 'shown', 'lit', 'ori', 'meals', 'glued']) delete low[k];
-      low.type = 'creation'; low.w = D_PLAT_W; low.used = false;
-      low.x = Math.max(2, Math.min(DOODLE_W - D_PLAT_W - 2, mid - D_PLAT_W / 2));
-      gone.dead = true;
-      for (let k = 0; k < 22; k++) {
-        const ang = Math.random() * Math.PI * 2, v = 1 + Math.random() * 3;
-        s.parts.push({ x: mid, y: low.y + D_PLAT_H / 2, vx: Math.cos(ang) * v, vy: Math.sin(ang) * v - 0.6,
-          life: 30, max: 30, sz: 3, c: k % 3 === 0 ? '#ffffff' : k % 3 === 1 ? '#ffd54a' : '#f7ddb8' });
-      }
-      s.toast = { txt: '✨ Deux dalles se sont touchées — La Création !', life: D_TOAST_LIFE };
+      doodleCreaBorn(s, a, b);
       return;
     }
   }
@@ -9372,7 +9405,7 @@ function doodleRules() {
       { i:'⬜', n:'Blanche',      d:'un seul rebond, puis elle disparaît. Elle marque les sauts limites.' },
       { i:'🎁', n:'Tuile coffre', d:'au premier rebond, un coffre apparaît dessus ; elle s\'éteint ensuite. Le coffre se ramasse et se tire comme celui d\'un monstre.' },
       { i:'🌈', n:'Multicolore',  d:'se téléporte plus haut à chaque rebond et tient 3 à 5 passages. Les points sur elle comptent les passages restants. Tant qu\'elle est en vie, le reste du décor se raréfie de moitié.' },
-      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. Ne fusionnent JAMAIS : la 🔺 Fractale et tout ce qu'elle engendre (elle se scinde en deux dalles voisines, ce serait une Création à chaque rebond), ni les dalles liées par paire (🌈 Arc-en-ciel, 🚇 Tuyaux, ⛓️ Chaînes). En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
+      { i:'✨', n:'La Création',  d:`elle ne se débloque pas et ne se tire jamais : elle NAÎT quand deux dalles finissent par se toucher — elles fusionnent alors en une seule Création, de taille ordinaire. La 🌈 Multicolore qui, faute de place libre, se téléporte SUR une dalle fusionne avec elle de la même façon. N'existe pas en mode Classique. Ne fusionnent JAMAIS : la 🔺 Fractale et tout ce qu'elle engendre (elle se scinde en deux dalles voisines, ce serait une Création à chaque rebond), ni les dalles liées par paire (🌈 Arc-en-ciel, 🚇 Tuyaux, ⛓️ Chaînes). En te posant dessus, une onde de lumière part de son centre et grandit jusqu'à sortir de la carte : tout monstre visible qu'elle rattrape meurt et lâche son coffre — 🦴 squelettes compris, qui eux ne se reconstruisent pas (et ne lâchent rien). Puis tu es téléporté de dalle en dalle — du plus BAS au plus HAUT, une dalle toutes les ${D_CREA_TP_STEP} frames, sans en louper aucune — et l'effet de CHACUNE s'applique au passage. Le voyage dure ${D_CREA_TP_HOPS} dalles, puis l'effet est fini. Tu es invulnérable pendant tout le voyage et ${Math.round(D_CREA_INV_TAIL / 60)} secondes de plus.` },
     ] },
     { t:'Cases', c:'#e0a13a', rows:[
       { i:'❓', n:'Case bonus',   d:'une par palier de 1000 points. Elle donne un bonus permanent au hasard parmi les cinq ci-dessous, puis redevient une plateforme verte.' },
