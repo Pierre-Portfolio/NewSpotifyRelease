@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.7.4';
+const APP_VERSION = '13.7.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -36430,6 +36430,18 @@ function saveFoodSport(s) {
   return lsSet(FOOD_SPORT_KEY, JSON.stringify(out)) ? out : null;
 }
 function foodSportBurn(list) { return (list || []).reduce((n, s) => n + (Number(s.kcal) || 0), 0); }
+// ⚠ 13.7.5 — QUANTITÉ D'UN REPAS DÉJÀ ENREGISTRÉ (demande utilisateur : « laisse-moi éditer
+// le nombre de grammes aussi, et fais un produit en croix »). La quantité est désormais
+// PERSISTÉE (`g`) sur l'entrée ; pour les repas saisis AVANT, elle se relit dans le libellé,
+// où `addFromResult` l'écrit depuis toujours sous la forme « Nom (120 g) ».
+// ⚠ Renvoie 0 quand on ne sait pas : sans quantité de référence, il n'y a pas de produit en
+// croix à faire — le champ reste vide et kcal/macros ne bougent pas toutes seules.
+function foodMealGrams(m) {
+  const g = Number(m && m.g);
+  if (g > 0) return g;
+  const mm = /\((\d+(?:[.,]\d+)?)\s*g\)\s*$/.exec((m && m.name) || '');
+  return mm ? parseFloat(mm[1].replace(',', '.')) : 0;
+}
 function foodSportLabel(s) {
   const d = foodSportDef(s.sport);
   const i = FOOD_INTENS.find(x => x[0] === s.intens) || FOOD_INTENS[1];
@@ -37006,15 +37018,53 @@ function NourriturePanel() {
   // corriger une estimation de l'IA (photo du plat, suggestion) qui tombe à côté.
   // ⚠ `commitMeals` recalcule le total du jour depuis la composition : il n'y a rien
   // d'autre à mettre à jour, `spotifyplus_food_days` suit tout seul.
-  const startMealEdit = (m) => setMealEdit({
-    id: m.id, name: m.name || '', cat: m.cat || 'breakfast', kcal: String(m.kcal || ''),
-    ...Object.fromEntries(FOOD_MACROS.map(x => [x.key, m[x.key] == null ? '' : String(m[x.key])])),
+  // `base` = le couple (quantité, valeurs) de référence du PRODUIT EN CROIX. Il est figé à
+  // l'ouverture du formulaire, et REDÉFINI dès qu'une valeur est corrigée à la main — sans lui,
+  // en enchaînant les frappes (120 → 12 → 1 → 15), chaque touche multiplierait le résultat de
+  // la précédente et les arrondis dériveraient jusqu'à l'absurde.
+  const mealBase = (g, kcal, get) => ({ g: Number(g) || 0, kcal: Number(kcal) || 0,
+    ...Object.fromEntries(FOOD_MACROS.map(x => [x.key, get(x.key)])) });
+  const startMealEdit = (m) => {
+    const g = foodMealGrams(m);
+    setMealEdit({
+      id: m.id, name: m.name || '', cat: m.cat || 'breakfast', kcal: String(m.kcal || ''), g: g ? String(g) : '',
+      ...Object.fromEntries(FOOD_MACROS.map(x => [x.key, m[x.key] == null ? '' : String(m[x.key])])),
+      base: mealBase(g, m.kcal, k => (m[k] == null ? null : Number(m[k]))),
+    });
+  };
+  // Quantité modifiée → kcal et macros suivent au prorata. Sans quantité de référence
+  // (repas saisi à la main, jamais pesé) on n'invente rien : seule la quantité est notée.
+  const setMealGrams = v => setMealEdit(f => {
+    const next = { ...f, g: v };
+    const ng = parseFloat(String(v).replace(',', '.'));
+    const b = f.base;
+    if (!b || !(b.g > 0) || !isFinite(ng) || ng <= 0) return next;
+    const k = ng / b.g;
+    next.kcal = String(Math.round(b.kcal * k));
+    FOOD_MACROS.forEach(x => { next[x.key] = b[x.key] == null ? '' : String(Math.round(b[x.key] * k * 10) / 10); });
+    return next;
+  });
+  // kcal ou macro corrigée à la main : c'est la nouvelle référence pour la quantité affichée.
+  const setMealVal = (key, v) => setMealEdit(f => {
+    const n = { ...f, [key]: v };
+    const ng = parseFloat(String(n.g).replace(',', '.'));
+    if (isFinite(ng) && ng > 0) n.base = mealBase(ng, parseInt(n.kcal, 10), k => {
+      const q = parseFloat(String(n[k]).replace(',', '.'));
+      return isFinite(q) && q >= 0 ? q : null;
+    });
+    return n;
   });
   const saveMealEdit = () => {
     if (!mealEdit) return;
     const v = parseInt(mealEdit.kcal, 10);
     if (!v || v <= 0) return;
-    const patch = { name: mealEdit.name.trim() || 'Repas', cat: mealEdit.cat, kcal: v };
+    // ⚠ La quantité est reportée dans le LIBELLÉ quand il en portait déjà une : c'est là que
+    // la liste l'affiche, et un « Pâtes (120 g) » resté à 120 après un passage à 200 mentirait.
+    const ng = parseFloat(String(mealEdit.g).replace(',', '.'));
+    const gOk = isFinite(ng) && ng > 0;
+    let nm = mealEdit.name.trim() || 'Repas';
+    if (gOk && /\(\d+(?:[.,]\d+)?\s*g\)\s*$/.test(nm)) nm = nm.replace(/\(\d+(?:[.,]\d+)?\s*g\)\s*$/, `(${Math.round(ng * 10) / 10} g)`);
+    const patch = { name: nm, cat: mealEdit.cat, kcal: v, g: gOk ? Math.round(ng * 10) / 10 : undefined };
     // Champ vidé ⇒ la macro est SUPPRIMÉE de l'entrée (elle redevient inconnue), sinon
     // `foodMacroTotals` compterait un 0 comme une valeur mesurée.
     FOOD_MACROS.forEach(x => {
@@ -37025,6 +37075,7 @@ function NourriturePanel() {
       if (m.id !== mealEdit.id) return m;
       const o = { ...m, ...patch };
       FOOD_MACROS.forEach(x => { if (o[x.key] === undefined) delete o[x.key]; });
+      if (o.g === undefined) delete o.g;   // champ vidé ⇒ la quantité redevient inconnue
       return o;
     });
     commitMeals({ ...meals, [selDay]: next });
@@ -37100,6 +37151,7 @@ function NourriturePanel() {
   const addFromResult = (r, grams, kcalVal, macros) => {
     const label = grams && grams !== 100 ? `${r.name} (${grams} g)` : r.name;
     const entry = { id: Date.now() + '_' + Math.random().toString(36).slice(2), name: label, kcal: kcalVal, cat };
+    if (grams > 0) entry.g = grams;   // ⚠ la quantité est GARDÉE : c'est la référence du produit en croix à l'édition
     FOOD_MACROS.forEach(m => { const v = macros && macros[m.key]; if (v != null) entry[m.key] = v; });
     if (r.ai) entry.ai = r.ai;   // trace : valeurs estimées par une IA, pas mesurées
     commitMeals({ ...meals, [selDay]: [...dayMeals, entry] });
@@ -37443,8 +37495,16 @@ function NourriturePanel() {
                         </button>
                       ))}
                     </div>
+                    {/* ⚠ 13.7.5 — LA QUANTITÉ S'ÉDITE (demande utilisateur) et entraîne kcal et
+                        macros par PRODUIT EN CROIX. Elle est posée AVANT les kcal : c'est elle
+                        qu'on corrige d'abord (« finalement j'en ai mangé 200 »), les calories
+                        n'étant que sa conséquence. */}
                     <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-                      <input type="number" value={mealEdit.kcal} placeholder="kcal" onChange={e => setMealEdit(f => ({ ...f, kcal:e.target.value }))}
+                      <input type="number" value={mealEdit.g} placeholder="quantité" onChange={e => setMealGrams(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') saveMealEdit(); }}
+                        style={{ ...inputSt, flex:1, width:'auto', minWidth:0 }} />
+                      <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>g</span>
+                      <input type="number" value={mealEdit.kcal} placeholder="kcal" onChange={e => setMealVal('kcal', e.target.value)}
                         onKeyDown={e => { if (e.key === 'Enter') saveMealEdit(); }}
                         style={{ ...inputSt, flex:1, width:'auto', minWidth:0 }} />
                       <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>kcal</span>
@@ -37452,9 +37512,14 @@ function NourriturePanel() {
                     <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:6 }}>
                       {FOOD_MACROS.map(x => (
                         <label key={x.key} style={{ fontSize:9, color:x.color }}>{x.short} (g)
-                          <input type="number" value={mealEdit[x.key]} placeholder="—" onChange={e => setMealEdit(f => ({ ...f, [x.key]:e.target.value }))}
+                          <input type="number" value={mealEdit[x.key]} placeholder="—" onChange={e => setMealVal(x.key, e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter') saveMealEdit(); }} style={inputSt} /></label>
                       ))}
+                    </div>
+                    <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                      {mealEdit.base && mealEdit.base.g > 0
+                        ? `changer la quantité recalcule kcal et macros au prorata (référence : ${mealEdit.base.kcal} kcal pour ${mealEdit.base.g} g)`
+                        : 'quantité inconnue pour ce repas — la saisir ne recalcule rien, corrige les kcal à la main'}
                     </div>
                     <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>champ de macro laissé vide = « non renseignée »</div>
                     <div style={{ display:'flex', gap:6 }}>
