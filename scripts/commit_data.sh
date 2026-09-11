@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Commit des données pré-fetchées (data/actu.json, data/indices.json) — UN SEUL
-# commit par jour (date UTC).
+# Commit des données pré-fetchées (data/actu.json, data/indices.json,
+# data/macrocal.json) — UN SEUL commit par jour (date UTC).
 #
 # Les deux fichiers portent un `updated_at` réécrit à chaque run : un run = toujours
 # un diff, donc un commit. À 12 runs/jour l'historique du dépôt était noyé. Ici le
@@ -13,7 +13,7 @@
 # créé au lieu d'écraser quoi que ce soit.
 set -euo pipefail
 
-FILES=(data/actu.json data/indices.json)
+FILES=(data/actu.json data/indices.json data/macrocal.json)
 BOT_NAME="github-actions[bot]"
 BOT_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
 BRANCH="${GITHUB_REF_NAME:-main}"

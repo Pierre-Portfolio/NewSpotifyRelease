@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.11.7';
+const APP_VERSION = '13.11.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32235,6 +32235,15 @@ function BullrunMacro() {
 // soir basculeraient au lendemain.
 // ⚠ Un événement « toute la journée » (jour férié, sommet) n'a pas d'heure utile : il est
 // rangé en tête de journée et affiché « journée », jamais « 00:00 » qui serait faux.
+// ⚠ 13.11.8 — LA SOURCE EST MAINTENANT SAME-ORIGIN. La version précédente interrogeait
+// le flux depuis la PAGE : l'hôte n'ouvre pas le CORS, il fallait donc passer par des
+// proxies publics, lents et souvent HS — le calendrier restait vide. Le fetch a été déplacé
+// dans la GitHub Action (`scripts/fetch_macrocal.py`), qui n'a aucune contrainte de CORS et
+// écrit `data/macrocal.json` : même doctrine que `data/actu.json` et `data/indices.json`.
+// L'app lit donc d'abord SON PROPRE fichier — rien ne peut le bloquer — et ne retombe sur
+// l'appel direct que s'il manque ou a dépassé `MACROCAL_STALE` (workflow en panne).
+const MACROCAL_LOCAL = './data/macrocal.json';
+const MACROCAL_STALE = 4 * 864e5;   // 4 jours : le flux ne couvre qu'une semaine
 const MACROCAL_URL  = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 const MACROCAL_STARS = { high:3, medium:2, low:1 };   // ⇒ ★★★ / ★★ / ★
 // Drapeau de la zone concernée (le flux donne un code pays / une devise).
@@ -32244,22 +32253,24 @@ function macroCalStars(impact) {
   const k = String(impact || '').toLowerCase();
   return MACROCAL_STARS[k] || 0;   // 0 = « Holiday » / non classé
 }
-// Parsing volontairement TOLÉRANT : le flux est public, un champ peut manquer ou changer de
-// casse. Une entrée sans titre ni date lisible est jetée, pas devinée.
+// Parsing volontairement TOLÉRANT, et il accepte les DEUX formes d'entrée : celle du
+// fichier pré-fetché (`ts` en SECONDES + `stars` déjà calculées par le script Python) et
+// celle du flux brut (`date` ISO + `impact` en texte). Une entrée sans titre ni date
+// lisible est jetée, pas devinée.
 function macroCalParse(raw) {
-  const list = Array.isArray(raw) ? raw : [];
+  const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.events) ? raw.events : []);
   const out = [];
   for (const e of list) {
     const title = String((e && e.title) || '').trim();
-    const t = e && e.date ? new Date(e.date).getTime() : NaN;
-    if (!title || isNaN(t)) continue;
+    const t = e && e.ts ? Number(e.ts) * 1000 : (e && e.date ? new Date(e.date).getTime() : NaN);
+    if (!title || !isFinite(t) || !t) continue;
     const d = new Date(t);
     // Une heure à 00:00 pile, sur ce flux, signale un événement sans horaire précis.
     const allDay = d.getHours() === 0 && d.getMinutes() === 0;
     out.push({
       t, day: localDayStr(d), allDay, title: title.slice(0, 140),
-      cur: String((e && e.country) || (e && e.currency) || '').toUpperCase().slice(0, 4),
-      stars: macroCalStars(e && e.impact),
+      cur: String((e && e.cur) || (e && e.country) || (e && e.currency) || '').toUpperCase().slice(0, 4),
+      stars: typeof (e && e.stars) === 'number' ? Math.max(0, Math.min(3, e.stars)) : macroCalStars(e && e.impact),
       forecast: e && e.forecast ? String(e.forecast).slice(0, 20) : '',
       previous: e && e.previous ? String(e.previous).slice(0, 20) : '',
     });
@@ -32268,14 +32279,30 @@ function macroCalParse(raw) {
   return out;
 }
 async function bullrunFetchMacroCal() {
-  let raw = null;
-  try { raw = await fetchTimeout(MACROCAL_URL, 12000, undefined, r => (r.ok ? r.json() : null)); } catch {}
-  if (!Array.isArray(raw)) {
-    const txt = await corsFetchText(MACROCAL_URL);
-    try { raw = JSON.parse(txt); } catch { raw = null; }
+  let events = [], from = '', at = 0;
+  // 1) Le fichier du dépôt, rafraîchi toutes les 2 h par l'Action. Same-origin : ni CORS,
+  //    ni relais, et il est déjà dans le cache du service worker (donc lisible hors ligne).
+  try {
+    const j = await fetchTimeout(MACROCAL_LOCAL, 8000, { cache:'no-cache' }, r => (r.ok ? r.json() : null));
+    const ts = j && j.updated_at ? new Date(j.updated_at).getTime() : 0;
+    if (isFinite(ts) && ts > 0 && Date.now() - ts < MACROCAL_STALE) {
+      events = macroCalParse(j);
+      if (events.length) { from = 'dépôt'; at = ts; }
+    }
+  } catch {}
+  // 2) Repli seulement si le fichier manque ou est périmé (workflow en panne) : l'appel
+  //    direct, puis les relais. C'est le chemin qui échouait tout le temps — il ne sert
+  //    plus que de secours, et son échec n'est plus la situation normale.
+  if (!events.length) {
+    let raw = null;
+    try { raw = await fetchTimeout(MACROCAL_URL, 12000, undefined, r => (r.ok ? r.json() : null)); } catch {}
+    if (!Array.isArray(raw)) {
+      try { raw = JSON.parse(await corsFetchText(MACROCAL_URL)); } catch { raw = null; }
+    }
+    events = macroCalParse(raw);
+    if (events.length) from = 'flux direct';
   }
-  const events = macroCalParse(raw);
-  if (!events.length) throw new Error('Calendrier de la semaine indisponible (flux et relais muets).');
+  if (!events.length) throw new Error('Calendrier de la semaine indisponible (data/macrocal.json absent ou périmé, flux et relais muets).');
   // Regroupement par jour, dans l'ordre du flux (déjà trié) — clés LOCALES.
   const days = [];
   for (const e of events) {
@@ -32283,7 +32310,7 @@ async function bullrunFetchMacroCal() {
     if (last && last.day === e.day) last.items.push(e);
     else days.push({ day: e.day, items: [e] });
   }
-  return { days, n: events.length };
+  return { days, n: events.length, from, at };
 }
 // Libellé « lundi 15 septembre », première lettre en capitale.
 function macroCalDayLabel(day) {
@@ -32302,7 +32329,9 @@ function BullrunMacroCal() {
   const today = localDayStr();
   return (
     <BullrunSumCard title="ÉVÉNEMENTS DE LA SEMAINE" st={st} onReload={load}
-      note={<>Publications macro de la semaine en cours (inflation, emploi, taux, banques centrales), rangées par jour et données en <b>heure locale</b>. Les ★ sont l'importance attendue : ★★★ bouge les marchés, ★ passe souvent inaperçu. « prév. » est le consensus, « préc. » le relevé précédent.</>}>
+      note={<>Publications macro de la semaine en cours (inflation, emploi, taux, banques centrales), rangées par jour et données en <b>heure locale</b>. Les ★ sont l'importance attendue : ★★★ bouge les marchés, ★ passe souvent inaperçu. « prév. » est le consensus, « préc. » le relevé précédent.
+        {d && d.from === 'dépôt' ? <> Pré-chargé côté serveur toutes les 2 h{d.at ? ` (relevé ${actuAgo(new Date(d.at).toISOString())})` : ''} : aucun relais public dans le chemin.</> : null}
+        {d && d.from === 'flux direct' ? <> ⚠ Lu en direct chez la source : le fichier pré-chargé du dépôt manquait ou était périmé.</> : null}</>}>
       {d && d.days.map(g => (
         <div key={g.day} style={{ padding:'7px 0 0', borderTop:`1px solid ${C.border}`, marginTop:6 }}>
           <div style={{ fontSize:10, fontWeight:800, letterSpacing:'0.04em',

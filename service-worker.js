@@ -189,7 +189,7 @@
 // (essai direct en en-tête d'abord, case à cocher ensuite) ; cours boursiers relayés
 // contrôlés et leur provenance affichée ; redirections bornées à http/https côté Action ;
 // origine vérifiée sur les messages du lecteur YouTube.
-const CACHE  = 'spotifyplus-v557';          // app shell — bumpé à chaque déploiement
+const CACHE  = 'spotifyplus-v558';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
@@ -344,7 +344,7 @@ self.addEventListener('fetch', e => {
       return cached;
     })());
   } else if (url.origin === location.origin && url.pathname.includes('/data/')) {
-    // data/*.json (Actu, indices) : STALE-WHILE-REVALIDATE. On répond tout de suite avec la
+    // data/*.json (Actu, indices, calendrier macro) : STALE-WHILE-REVALIDATE. On répond tout de suite avec la
     // copie en cache s'il y en a une (Actu et Finance s'affichent hors ligne et sans attendre
     // le réseau), et le téléchargement met le cache à jour pour la prochaine fois. Rangé dans
     // CACHE (purgé à chaque déploiement, c'est sans importance : il se remplit au 1er usage).
