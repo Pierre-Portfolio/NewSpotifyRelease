@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.9.9';
+const APP_VERSION = '13.10.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -31846,6 +31846,282 @@ function BullrunTrends() {
   );
 }
 
+// ── Résumés recalculés des trois autres vues (13.10.0, demande utilisateur : « le même
+// concept que le collapse Altcoin Season pour Rainbow Chart, Macroéconomie et Crypto
+// Bubbles ⇒ BTC ETH XRP PEPE ») ──
+// Même forme que `BullrunAltseason` : d'abord un résumé CALCULÉ ICI à partir de CoinGecko
+// (seule source crypto keyless déjà autorisée par la CSP), puis la page de référence repliée
+// dans « 🌐 Affichage site web ». Aucune nouvelle origine, aucun appel IA.
+// ⚠ Rien ne part tant que le collapse est replié (StatsCollapse ne monte pas ses enfants) —
+// c'est pour ça que le cache vit AU NIVEAU MODULE (piège 5) : replier/déplier ne redemande
+// rien pendant BULLRUN_SUM_TTL.
+const BULLRUN_COINS = [
+  { id:'bitcoin',  sym:'BTC',  color:'#f7931a' },
+  { id:'ethereum', sym:'ETH',  color:'#8f9fe8' },
+  { id:'ripple',   sym:'XRP',  color:'#4ea3f5' },
+  { id:'pepe',     sym:'PEPE', color:'#45c552' },
+];
+const BULLRUN_IDS     = BULLRUN_COINS.map(c => c.id).join('%2C');
+const BULLRUN_SUM_TTL = 10 * 60 * 1000;
+const _bullrunSum     = {};   // { clé: { at, d } } — survit au repli du collapse
+
+function useBullrunSummary(key, fetcher) {
+  const [st, setSt] = React.useState(() => {
+    const c = _bullrunSum[key];
+    return (c && Date.now() - c.at < BULLRUN_SUM_TTL)
+      ? { loading:false, data:c.d, err:'' } : { loading:true, data:null, err:'' };
+  });
+  const load = React.useCallback(async (force) => {
+    const c = _bullrunSum[key];
+    if (!force && c && Date.now() - c.at < BULLRUN_SUM_TTL) { setSt({ loading:false, data:c.d, err:'' }); return; }
+    setSt({ loading:true, data:null, err:'' });
+    try {
+      const d = await fetcher();
+      _bullrunSum[key] = { at: Date.now(), d };
+      setSt({ loading:false, data:d, err:'' });
+    } catch (e) { setSt({ loading:false, data:null, err:(e && e.message) || 'CoinGecko injoignable.' }); }
+  }, []);
+  React.useEffect(() => { if (!st.data) load(false); }, []);
+  return [st, load];
+}
+
+// Coquille commune aux trois résumés : titre, bouton ↻, états de chargement et d'erreur.
+function BullrunSumCard({ title, st, onReload, note, children }) {
+  return (
+    <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 12px 11px' }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, marginBottom:6 }}>
+        <span style={{ fontSize:11, fontWeight:700, color:BULLRUN_COLOR, letterSpacing:'0.05em' }}>{title}</span>
+        <button onClick={() => !st.loading && onReload(true)} disabled={st.loading}
+          style={{ fontSize:10, fontWeight:600, color: st.loading ? C.dim : BULLRUN_COLOR, background:'none',
+            border:`1px solid ${st.loading ? C.border : BULLRUN_COLOR + '66'}`, borderRadius:6, padding:'3px 9px',
+            cursor: st.loading ? 'default' : 'pointer' }}>{st.loading ? '…' : '↻'}</button>
+      </div>
+      {st.loading && <div style={{ fontSize:11, color:BULLRUN_COLOR, fontStyle:'italic' }}>Lecture de CoinGecko…</div>}
+      {st.err && <div style={{ fontSize:11, color:'#e05050' }}>⚠ {st.err}</div>}
+      {st.data ? children : null}
+      {note && <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, marginTop:8, borderTop:`1px solid ${C.border}`, paddingTop:5 }}>{note}</div>}
+    </div>
+  );
+}
+
+// Nom + prix à gauche, contenu libre à droite — même gabarit pour les trois résumés.
+function BullrunCoinRow({ c, right, sub }) {
+  return (
+    <div style={{ padding:'6px 0 0', borderTop:`1px solid ${C.border}`, marginTop:6 }}>
+      <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:8 }}>
+        <span style={{ fontSize:11, fontWeight:700, color:c.color, fontFamily:'DM Mono,monospace' }}>{c.sym}</span>
+        <span style={{ textAlign:'right', minWidth:0 }}>{right}</span>
+      </div>
+      {sub}
+    </div>
+  );
+}
+
+// ── 🫧 Crypto Bubbles : la performance des 4 cryptos sur les mêmes fenêtres que les bulles ──
+const BULLRUN_PERF_WINS = [
+  { f:'price_change_percentage_24h_in_currency', label:'24 h' },
+  { f:'price_change_percentage_7d_in_currency',  label:'7 j'  },
+  { f:'price_change_percentage_30d_in_currency', label:'30 j' },
+  { f:'price_change_percentage_1y_in_currency',  label:'1 an' },
+];
+async function bullrunFetchMarkets(windows) {
+  const r = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=' + BULLRUN_IDS
+    + '&sparkline=false&price_change_percentage=' + windows);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const list = await r.json();
+  if (!Array.isArray(list) || !list.length) throw new Error('Réponse CoinGecko illisible.');
+  const by = {};
+  for (const m of list) if (m && m.id) by[m.id] = m;
+  return by;
+}
+async function bullrunFetchPerf() {
+  const by = await bullrunFetchMarkets('24h%2C7d%2C30d%2C1y');
+  return { coins: BULLRUN_COINS.map(c => ({ ...c, m: by[c.id] || null })) };
+}
+function BullrunPerf() {
+  const [st, load] = useBullrunSummary('perf', bullrunFetchPerf);
+  const d = st.data;
+  return (
+    <BullrunSumCard title="PERFORMANCE RECALCULÉE EN DIRECT" st={st} onReload={load}
+      note={<>La taille d'une bulle, sur le site, n'est rien d'autre que cette variation. Fenêtres servies par CoinGecko sans clé ; une case « — » est une fenêtre que l'API ne renvoie pas pour cette crypto (jeton trop récent).</>}>
+      {d && d.coins.map(c => (
+        <BullrunCoinRow key={c.id} c={c}
+          right={<span style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text }}>
+            {fmtPrice(c.m && c.m.current_price)}</span>}
+          sub={<div style={{ display:'flex', gap:6, marginTop:4, flexWrap:'wrap' }}>
+            {BULLRUN_PERF_WINS.map(w => {
+              const v = c.m && typeof c.m[w.f] === 'number' ? c.m[w.f] : null;
+              const col = v == null ? C.dim : v >= 0 ? FIN_UP : FIN_DOWN;
+              return (
+                <span key={w.f} style={{ flex:'1 1 60px', minWidth:60, textAlign:'center', borderRadius:6,
+                  background:`${col}18`, border:`1px solid ${col}44`, padding:'3px 4px' }}>
+                  <span style={{ display:'block', fontSize:8.5, color:C.dim, letterSpacing:'0.04em' }}>{w.label}</span>
+                  <span style={{ fontSize:11, fontWeight:700, fontFamily:'DM Mono,monospace', color:col }}>
+                    {v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%'}
+                  </span>
+                </span>
+              );
+            })}
+          </div>} />
+      ))}
+    </BullrunSumCard>
+  );
+}
+
+// ── 🏛️ Macroéconomie : le marché crypto vu de haut (le calendrier du site, lui, est macro
+// « monde réel » — ce résumé dit sur quel marché ses publications tombent) ──
+async function bullrunFetchMacro() {
+  const [g, by] = await Promise.all([
+    fetch('https://api.coingecko.com/api/v3/global').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+    bullrunFetchMarkets('24h'),
+  ]);
+  const g2 = (g && g.data) || {};
+  const cap = (g2.total_market_cap && g2.total_market_cap.usd) || null;
+  return {
+    cap, vol: (g2.total_volume && g2.total_volume.usd) || null,
+    capPct: typeof g2.market_cap_change_percentage_24h_usd === 'number' ? g2.market_cap_change_percentage_24h_usd : null,
+    coins: BULLRUN_COINS.map(c => {
+      const m = by[c.id] || null;
+      const mc = m && typeof m.market_cap === 'number' ? m.market_cap : null;
+      return { ...c, m, mc, dom: (mc && cap) ? (mc / cap) * 100 : null };
+    }),
+  };
+}
+// Capitalisations : en milliards, sinon la ligne devient illisible.
+function fmtBn(v) {
+  if (v == null || isNaN(v)) return '—';
+  const n = Number(v);
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + ' T$';
+  if (n >= 1e9)  return (n / 1e9).toFixed(1)  + ' Md$';
+  if (n >= 1e6)  return (n / 1e6).toFixed(1)  + ' M$';
+  return fmtPrice(n);
+}
+function BullrunMacro() {
+  const [st, load] = useBullrunSummary('macro', bullrunFetchMacro);
+  const d = st.data;
+  const kv = (k, v, col) => (
+    <div key={k} style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:10, padding:'3px 0' }}>
+      <span style={{ fontSize:10.5, color:C.muted }}>{k}</span>
+      <span style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color: col || C.text }}>{v}</span>
+    </div>
+  );
+  return (
+    <BullrunSumCard title="MARCHÉ CRYPTO EN UN COUP D'ŒIL" st={st} onReload={load}
+      note={<>Le calendrier ci-dessous liste les publications macro du monde réel (inflation, emploi, taux) ; ces chiffres disent sur quel marché elles vont tomber. Dominance = part de la capitalisation totale.</>}>
+      {d && <>
+        {kv('Capitalisation totale', fmtBn(d.cap))}
+        {kv('Volume 24 h', fmtBn(d.vol))}
+        {kv('Variation 24 h', d.capPct == null ? '—' : (d.capPct >= 0 ? '+' : '') + d.capPct.toFixed(2) + '%',
+          d.capPct == null ? C.dim : d.capPct >= 0 ? FIN_UP : FIN_DOWN)}
+        {d.coins.map(c => (
+          <BullrunCoinRow key={c.id} c={c}
+            right={<>
+              <span style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text }}>{fmtBn(c.mc)}</span>
+              <span style={{ fontSize:9, color:C.dim, marginLeft:6 }}>{c.dom == null ? '—' : c.dom.toFixed(c.dom >= 1 ? 1 : 3) + ' % du marché'}</span>
+            </>}
+            sub={<div style={{ marginTop:4, height:6, borderRadius:3, background:C.surfaceHigh, overflow:'hidden' }}>
+              <div style={{ width:`${Math.max(1, Math.min(100, c.dom || 0))}%`, height:'100%', background:c.color }} />
+            </div>} />
+        ))}
+      </>}
+    </BullrunSumCard>
+  );
+}
+
+// ── 🌈 Rainbow Chart : la MÉTHODE du rainbow (régression logarithmique du prix sur tout
+// l'historique) appliquée aux 4 cryptos, pas les bandes officielles du site (qui ne
+// concernent que le Bitcoin) ──
+// ln(prix) ≈ a + b·ln(jours) ; l'écart-type des résidus donne l'échelle des bandes, et la
+// position du prix du jour (en σ) désigne la bande. ⚠ Un historique trop court ne donne
+// aucune bande fiable : on le DIT au lieu d'inventer une couleur.
+const RAINBOW_MIN_PTS = 180;
+const RAINBOW_BANDS = [
+  { z:-1.5, label:'Occasion en or',    color:'#3b7ddd' },
+  { z:-0.9, label:'Accumuler',         color:'#2eb872' },
+  { z:-0.3, label:'Encore bon marché', color:'#7fc24a' },
+  { z: 0.3, label:'Juste prix',        color:'#e0c060' },
+  { z: 0.9, label:'Ça chauffe',        color:'#f0a93c' },
+  { z: 1.5, label:'Euphorie',          color:'#f5714f' },
+  { z: Infinity, label:'Bulle maximale', color:'#f5545f' },
+];
+const rainbowBand = z => RAINBOW_BANDS.find(b => z < b.z) || RAINBOW_BANDS[RAINBOW_BANDS.length - 1];
+function rainbowFit(prices) {
+  const pts = (prices || []).filter(p => Array.isArray(p) && p[0] > 0 && p[1] > 0);
+  if (pts.length < RAINBOW_MIN_PTS) return { err:'historique trop court' };
+  const t0 = pts[0][0], DAY = 86400000;
+  let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const [ts, v] of pts) {
+    const x = Math.log((ts - t0) / DAY + 2), y = Math.log(v);
+    n++; sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  const den = n * sxx - sx * sx;
+  if (!den) return { err:'régression impossible' };
+  const b = (n * sxy - sx * sy) / den, a = (sy - b * sx) / n;
+  let ss = 0;
+  for (const [ts, v] of pts) {
+    const x = Math.log((ts - t0) / DAY + 2);
+    ss += Math.pow(Math.log(v) - (a + b * x), 2);
+  }
+  const sigma = Math.sqrt(ss / n);
+  if (!sigma || !isFinite(sigma)) return { err:'régression impossible' };
+  const last = pts[pts.length - 1];
+  const xN = Math.log((last[0] - t0) / DAY + 2);
+  return { price: last[1], z: (Math.log(last[1]) - (a + b * xN)) / sigma, since: pts[0][0], n };
+}
+async function bullrunFetchRainbow() {
+  const coins = [];
+  // Séquentiel : 4 historiques complets d'affilée, CoinGecko sans clé n'aime pas la salve.
+  for (const c of BULLRUN_COINS) {
+    try {
+      const r = await fetch('https://api.coingecko.com/api/v3/coins/' + c.id + '/market_chart?vs_currency=usd&days=max');
+      if (!r.ok) { coins.push({ ...c, err:'HTTP ' + r.status }); continue; }
+      const j = await r.json();
+      coins.push({ ...c, ...rainbowFit(j && j.prices) });
+    } catch { coins.push({ ...c, err:'réseau' }); }
+  }
+  if (coins.every(c => c.err)) throw new Error('CoinGecko injoignable.');
+  return { coins };
+}
+// Position du prix sur l'échelle −2σ … +2σ, avec les bandes en fond.
+function RainbowBar({ z, color }) {
+  const p = Math.max(0, Math.min(100, ((z + 2) / 4) * 100));
+  return (
+    <div style={{ position:'relative', height:10, borderRadius:5, overflow:'hidden', display:'flex' }}>
+      {RAINBOW_BANDS.map((b, i) => (
+        <div key={i} style={{ flex: i === RAINBOW_BANDS.length - 1 ? 1.25 : (i === 0 ? 1.25 : 1), background:`${b.color}33` }} />
+      ))}
+      <div style={{ position:'absolute', left:`calc(${p}% - 2px)`, top:0, bottom:0, width:4, background:color, borderRadius:2 }} />
+    </div>
+  );
+}
+function BullrunRainbow() {
+  const [st, load] = useBullrunSummary('rainbow', bullrunFetchRainbow);
+  const d = st.data;
+  return (
+    <BullrunSumCard title="BANDES RECALCULÉES EN DIRECT" st={st} onReload={load}
+      note={<>Méthode du Rainbow Chart — régression logarithmique du prix sur <b>tout</b> l'historique CoinGecko — appliquée aux quatre cryptos. La bande dit l'écart au trend (en σ), pas une prédiction. ⚠ Ce ne sont <b>pas</b> les bandes officielles de blockchaincenter, qui ne couvrent que le Bitcoin et ont leurs propres paramètres.</>}>
+      {d && d.coins.map(c => {
+        const bd = c.err ? null : rainbowBand(c.z);
+        return (
+          <BullrunCoinRow key={c.id} c={c}
+            right={c.err
+              ? <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>{c.err}</span>
+              : <>
+                  <span style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text }}>{fmtPrice(c.price)}</span>
+                  <span style={{ fontSize:9, color:bd.color, marginLeft:6, fontWeight:700 }}>{bd.label}</span>
+                </>}
+            sub={c.err ? null : <>
+              <div style={{ marginTop:4 }}><RainbowBar z={c.z} color={bd.color} /></div>
+              <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:3 }}>
+                {(c.z >= 0 ? '+' : '') + c.z.toFixed(2)}σ au-dessus du trend · {c.n} jours depuis {new Date(c.since).getFullYear()}
+              </div>
+            </>} />
+        );
+      })}
+    </BullrunSumCard>
+  );
+}
+
 function BullRunPanel() {
   // ⚠ 7.8.1 — PLUS DE SOUS-ONGLETS : chaque vue est un COLLAPSE, tous REPLIÉS au départ
   // (demande utilisateur). Ce n'est pas cosmétique : `StatsCollapse` ne monte ses enfants
@@ -31855,22 +32131,37 @@ function BullRunPanel() {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <StatsCollapse title="🫧 CRYPTO BUBBLES" color={BULLRUN_COLOR} defaultOpen={false}>
-        <MapFrame src={BULLRUN_BUBBLES_URL} title="Crypto Bubbles" color={BULLRUN_COLOR}
-          note="Bulles proportionnelles à la performance ; l'échelle de temps se règle dans la page embarquée."
-          credit="cryptobubbles.net" />
+        <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+          <BullrunPerf />
+          <StatsCollapse title="🌐 AFFICHAGE SITE WEB" color={BULLRUN_COLOR} defaultOpen={false}>
+            <MapFrame src={BULLRUN_BUBBLES_URL} title="Crypto Bubbles" color={BULLRUN_COLOR}
+              note="Bulles proportionnelles à la performance ; l'échelle de temps se règle dans la page embarquée."
+              credit="cryptobubbles.net" />
+          </StatsCollapse>
+        </div>
       </StatsCollapse>
       <StatsCollapse title="🏛️ MACROÉCONOMIE" color={BULLRUN_COLOR} defaultOpen={false}>
-        <MapFrame src={BULLRUN_MACRO_URL} title="Calendrier macroéconomique" color={BULLRUN_COLOR}
-          note="Calendrier des publications (inflation, emploi, taux) — les filtres de la page fonctionnent dans le cadre."
-          credit="boursedirect.fr" />
+        <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+          <BullrunMacro />
+          <StatsCollapse title="🌐 AFFICHAGE SITE WEB" color={BULLRUN_COLOR} defaultOpen={false}>
+            <MapFrame src={BULLRUN_MACRO_URL} title="Calendrier macroéconomique" color={BULLRUN_COLOR}
+              note="Calendrier des publications (inflation, emploi, taux) — les filtres de la page fonctionnent dans le cadre."
+              credit="boursedirect.fr" />
+          </StatsCollapse>
+        </div>
       </StatsCollapse>
       <StatsCollapse title="📈 TRENDS" color={BULLRUN_COLOR} defaultOpen={false}>
         <BullrunTrends />
       </StatsCollapse>
       <StatsCollapse title="🌈 RAINBOW CHART" color={BULLRUN_COLOR} defaultOpen={false}>
-        <MapFrame src={BULLRUN_RAINBOW_URL} title="Bitcoin Rainbow Chart" color={BULLRUN_COLOR}
-          note="Bandes de régression logarithmique du prix du Bitcoin depuis 2010."
-          credit="blockchaincenter.net" />
+        <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+          <BullrunRainbow />
+          <StatsCollapse title="🌐 AFFICHAGE SITE WEB" color={BULLRUN_COLOR} defaultOpen={false}>
+            <MapFrame src={BULLRUN_RAINBOW_URL} title="Bitcoin Rainbow Chart" color={BULLRUN_COLOR}
+              note="Bandes de régression logarithmique du prix du Bitcoin depuis 2010."
+              credit="blockchaincenter.net" />
+          </StatsCollapse>
+        </div>
       </StatsCollapse>
       <StatsCollapse title="🌊 ALTCOINS SEASON" color={BULLRUN_COLOR} defaultOpen={false}>
         <BullrunAltseason />
