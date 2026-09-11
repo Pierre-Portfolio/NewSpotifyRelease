@@ -610,13 +610,33 @@ function doodleRidge(ctx, W, H, off, span, fill, wave, depth) {
     ctx.lineTo(W, base + depth); ctx.lineTo(0, base + depth); ctx.closePath(); ctx.fill();
   }
 }
+// ── ⚡ GRADIENTS MÉMORISÉS (13.12.2) ──────────────────────────────────────────────
+// Créer un CanvasGradient coûte cher, et le décor en refabriquait à CHAQUE frame des
+// dégradés rigoureusement identiques : le ciel du biome, le halo du gouffre de l'Enfer, le
+// soleil des Nuages. Pire, pendant un fondu de biome `doodleScene` tourne DEUX fois, donc
+// tout était payé au double. On les mémorise par clé.
+// ⚠ Un gradient appartient au contexte qui l'a créé : si le canvas est remonté (nouveau
+// `ctx`), le cache est vidé plutôt que de servir des objets d'un contexte mort.
+// ⚠ La clé doit contenir TOUT ce dont le dégradé dépend (dimensions ET couleurs), sinon un
+// changement de biome réutiliserait le ciel du précédent.
+let _dGradCtx = null, _dGradMap = new Map();
+function doodleGrad(ctx, key, make) {
+  if (_dGradCtx !== ctx) { _dGradCtx = ctx; _dGradMap = new Map(); }
+  let g = _dGradMap.get(key);
+  if (g === undefined) { g = make(); _dGradMap.set(key, g); }
+  return g;
+}
+
 // Décor complet d'un biome. `a` = opacité, ce qui permet de FONDRE un palier dans le suivant.
 function doodleScene(ctx, W, H, climb, k, a) {
   const sc = D_SCENE[k];
   if (!sc || a <= 0.004) return;
   ctx.save(); ctx.globalAlpha = Math.min(1, a);
-  const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, sc.sky[0]); g.addColorStop(1, sc.sky[1]);
+  const g = doodleGrad(ctx, `sky|${H}|${sc.sky[0]}|${sc.sky[1]}`, () => {
+    const gg = ctx.createLinearGradient(0, 0, 0, H);
+    gg.addColorStop(0, sc.sky[0]); gg.addColorStop(1, sc.sky[1]);
+    return gg;
+  });
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
   if (k === 'foret') {
     // Collines en deux plans, futaie de sapins sur le plan lointain, herbe et fleurs sur le
@@ -715,8 +735,11 @@ function doodleScene(ctx, W, H, climb, k, a) {
     // Deux plans de roche dentelée, des fissures incandescentes qui les parcourent, et des
     // braises qui MONTENT (parallaxe inversée, comme au Volcan). ⚠ Le halo du gouffre est peint
     // AVANT les reliefs : posé après, il aurait blanchi la roche et tout le contraste serait parti.
-    const glow = ctx.createRadialGradient(W * 0.5, H * 1.02, 10, W * 0.5, H * 1.02, H * 0.85);
-    glow.addColorStop(0, 'rgba(255,90,42,0.55)'); glow.addColorStop(1, 'rgba(255,90,42,0)');
+    const glow = doodleGrad(ctx, `enfer|${W}|${H}`, () => {
+      const gg = ctx.createRadialGradient(W * 0.5, H * 1.02, 10, W * 0.5, H * 1.02, H * 0.85);
+      gg.addColorStop(0, 'rgba(255,90,42,0.55)'); gg.addColorStop(1, 'rgba(255,90,42,0)');
+      return gg;
+    });
     ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
     const offFar = doodleParallax(climb, 0.06, 260);
     doodleRidge(ctx, W, H, offFar, 260, sc.far, fx => 18 + Math.abs(Math.sin(fx * 9.1)) * 46, 42);
@@ -758,6 +781,10 @@ function doodleScene(ctx, W, H, climb, k, a) {
     for (let base = off - 190; base < H + 190; base += 190) {
       const crete = base - 22;
       // les rouleaux de barbelés sur la crête
+      // ⚠ 13.12.2 — NE PAS les regrouper en un seul chemin. C'était tentant (65 `stroke()`
+      // par frame), mais mesuré en isolation ce biome coûte 0,08 ms : le regroupement ne
+      // gagnait RIEN (0,91× — donc un peu pire) et déplaçait 348 pixels d'antialiasing sur
+      // le bord des cercles. Un banc mal isolé l'avait d'abord annoncé 33× plus rapide.
       ctx.strokeStyle = '#7d8492'; ctx.lineWidth = 1.4;
       for (let bx = 6; bx < W; bx += 26) { ctx.beginPath(); ctx.arc(bx, crete - 5, 5.5, 0, Math.PI * 2); ctx.stroke(); }
       // le mirador, une bande sur deux, avec sa cabine éclairée
@@ -771,20 +798,39 @@ function doodleScene(ctx, W, H, climb, k, a) {
       // le faisceau, qui balaie lentement — c'est lui qui fait la prison, pas le mur
       const bal = Math.sin(climb * 0.011 + base * 0.03) * 0.55;
       ctx.save(); ctx.translate(mx, crete - 63); ctx.rotate(bal);
-      const gb = ctx.createLinearGradient(0, 0, 0, 120);
-      gb.addColorStop(0, 'rgba(255,224,138,0.30)'); gb.addColorStop(1, 'rgba(255,224,138,0)');
-      ctx.fillStyle = gb;
+      // ⚠ Créé dans l'espace TRANSLATÉ du mirador, donc toujours de (0,0) à (0,120) : c'est
+      // le même dégradé pour tous les miradors et à toutes les frames.
+      ctx.fillStyle = doodleGrad(ctx, 'prisonBeam', () => {
+        const gg = ctx.createLinearGradient(0, 0, 0, 120);
+        gg.addColorStop(0, 'rgba(255,224,138,0.30)'); gg.addColorStop(1, 'rgba(255,224,138,0)');
+        return gg;
+      });
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-34, 120); ctx.lineTo(34, 120); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
     ctx.globalAlpha = Math.min(1, a);
   } else if (k === 'cosmos') {
     // Nébuleuses, deux champs d'étoiles à des parallaxes différentes, une planète annelée.
+    // ⚠ 13.12.2 — Chaque nébuleuse remplissait TOUTE la toile (163 000 pixels) d'un dégradé
+    // radial pour une tache de 96 px de rayon, deux fois par frame — et le double pendant un
+    // fondu de biome. ⚠ Mesuré en isolation le gain est nul (ce biome coûte 0,06 ms) : on le
+    // garde parce que peindre 163 000 pixels strictement transparents est un gaspillage en
+    // soi, pas sur la foi d'un chiffre. Le seul décor réellement cher est la Ville.
+    // Deux corrections qui ne changent RIEN à l'image :
+    //   · le dégradé est créé à l'ORIGINE et déplacé par `translate` — centré sur la nébuleuse
+    //     il bougeait à chaque frame (elle défile) et n'était donc jamais mémorisable ;
+    //   · on ne peint QUE le carré du disque : au-delà de `r` le dégradé vaut
+    //     `rgba(0,0,0,0)`, donc tout ce qui était peint dehors était strictement transparent.
     [[0.28, 0.3, 96, 'rgba(160,90,220,0.28)'], [0.74, 0.66, 120, 'rgba(70,150,230,0.22)']].forEach(([fx, fy, r, col]) => {
       const ny = doodleParallax(climb, 0.05, H + 260, fy * H);
-      const rg = ctx.createRadialGradient(fx * W, ny, 4, fx * W, ny, r);
-      rg.addColorStop(0, col); rg.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+      const rg = doodleGrad(ctx, `neb|${r}|${col}`, () => {
+        const gg = ctx.createRadialGradient(0, 0, 4, 0, 0, r);
+        gg.addColorStop(0, col); gg.addColorStop(1, 'rgba(0,0,0,0)');
+        return gg;
+      });
+      ctx.save(); ctx.translate(fx * W, ny);
+      ctx.fillStyle = rg; ctx.fillRect(-r, -r, r * 2, r * 2);
+      ctx.restore();
     });
     for (let i = 0; i < 46; i++) {
       const px = doodleRnd(i) * W;
@@ -847,6 +893,8 @@ function doodleScene(ctx, W, H, climb, k, a) {
     // ⚠ Les façades restent presque NOIRES et c'est le néon qui éclaire : une ville lumineuse
     // avalait les dalles, qui sont le seul élément qu'on doit lire à coup sûr.
     const neons = ['#ff3fa8', '#3fe8ff', '#b3ff3f', '#ffb03f'];
+    // Opacité du décor, calculée une fois : elle était recalculée à chaque fenêtre allumée.
+    const aScene = Math.min(1, a);
     // Une tour : corps à retraits, arête néon, grille de fenêtres, panneau holo, mât à balise.
     const tower = (bx, base, bw, bh, seed, lit) => {
       const col = neons[Math.floor(doodleRnd(seed + 3) * neons.length)];
@@ -857,25 +905,31 @@ function doodleScene(ctx, W, H, climb, k, a) {
         ctx.fillStyle = sc.near;
         ctx.fillRect(cx2 - cw / 2, top - sh, cw, sh + (sI === 0 ? 30 : 2));
         // L'arête néon : un filet vertical sur un bord, un liseré au sommet du retrait.
-        ctx.save();
-        ctx.globalAlpha = Math.min(1, a) * 0.85;
+        // ⚠ 13.12.2 — Plus de save/restore ici : la ville compte une trentaine de tours de
+        // 1 à 3 retraits, donc autant de couples posés pour ne changer que l'opacité et la
+        // couleur. On les réassigne, et on remet l'opacité du décor à la sortie.
+        ctx.globalAlpha = aScene * 0.85;
         ctx.fillStyle = col;
         ctx.fillRect(cx2 - cw / 2, top - sh, 1.6, sh);
         ctx.fillRect(cx2 - cw / 2, top - sh, cw, 1.4);
-        ctx.globalAlpha = Math.min(1, a) * 0.16;                 // la diffusion du néon
+        ctx.globalAlpha = aScene * 0.16;                 // la diffusion du néon
         ctx.fillRect(cx2 - cw / 2 - 3, top - sh - 2, cw + 6, sh + 4);
-        ctx.restore();
+        ctx.globalAlpha = aScene;
         if (lit) {                                               // les fenêtres allumées
+          // ⚠ 13.12.2 — UN SEUL save/restore pour toute la grille, et non un par fenêtre.
+          // Une tour éclairée peut compter plusieurs dizaines de fenêtres, et la ville en
+          // aligne une trentaine : on posait ainsi des CENTAINES de save/restore par frame
+          // pour ne changer que deux propriétés, alors que les réassigner coûte une bricole
+          // et que rien d'autre n'est touché dans la boucle.
           const cols2 = Math.max(1, Math.floor(cw / 6)), rows2 = Math.max(1, Math.floor(sh / 8));
           for (let ci = 0; ci < cols2; ci++) for (let ri = 0; ri < rows2; ri++) {
             const r0 = doodleRnd(seed * 13 + ci * 7 + ri * 3 + sI * 61);
             if (r0 < 0.70) continue;
-            ctx.save();
-            ctx.globalAlpha = Math.min(1, a) * (0.26 + r0 * 0.42);
+            ctx.globalAlpha = aScene * (0.26 + r0 * 0.42);
             ctx.fillStyle = r0 > 0.94 ? col : r0 > 0.8 ? '#3fe8ff' : '#ffd54a';
             ctx.fillRect(cx2 - cw / 2 + 2.5 + ci * 6, top - sh + 3.5 + ri * 8, 2.6, 3.4);
-            ctx.restore();
           }
+          ctx.globalAlpha = aScene;
         }
         top -= sh; cw *= 0.66 + doodleRnd(seed + sI + 21) * 0.16;
       }
@@ -885,24 +939,22 @@ function doodleScene(ctx, W, H, climb, k, a) {
       if (lit && doodleRnd(seed + 31) > 0.42) {
         const pw = Math.min(bw - 6, 15), ph = 22;
         const px2 = bx + bw / 2 - pw / 2, py2 = base - bh * 0.34;
-        ctx.save();
-        ctx.globalAlpha = Math.min(1, a) * (0.5 + Math.sin(climb * 0.04 + seed) * 0.2);
+        ctx.globalAlpha = aScene * (0.5 + Math.sin(climb * 0.04 + seed) * 0.2);
         ctx.fillStyle = col; ctx.fillRect(px2, py2, pw, ph);
-        ctx.globalAlpha = Math.min(1, a) * 0.75;
+        ctx.globalAlpha = aScene * 0.75;
         ctx.fillStyle = 'rgba(10,6,26,0.85)';
         for (let li = 0; li < 5; li++) ctx.fillRect(px2, py2 + 2 + li * 4.4, pw, 1.6);
-        ctx.restore();
+        ctx.globalAlpha = aScene;
       }
       // Le mât et sa balise, qui bat. ⚠ Toutes les tours ne battent pas en même temps : la
       // phase vient de la graine, sinon la ville clignerait d'un seul œil.
       const mh = 8 + doodleRnd(seed + 41) * 14;
       ctx.fillStyle = sc.near; ctx.fillRect(cx2 - 1, top - mh, 2, mh);
       const on = (Math.floor(climb * 0.05 + seed * 7) % 6) < 3;
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, a) * (on ? 0.95 : 0.2);
+      ctx.globalAlpha = aScene * (on ? 0.95 : 0.2);
       ctx.fillStyle = '#e2564a';
       ctx.beginPath(); ctx.arc(cx2, top - mh - 2, 2, 0, Math.PI * 2); ctx.fill();
-      ctx.restore();
+      ctx.globalAlpha = aScene;
       return { cx: cx2, top, col };
     };
     // Plan LOINTAIN : des blocs sourds, sans fenêtre — ils ne servent qu'à donner de la
@@ -939,9 +991,16 @@ function doodleScene(ctx, W, H, climb, k, a) {
         px += bw + 3 + doodleRnd(520 + i) * 10; i++;
       }
       // Brume au pied des tours : elle assied la rangée et masque la coupure entre deux bandes.
-      const hg = ctx.createLinearGradient(0, base - 26, 0, base + 22);
-      hg.addColorStop(0, 'rgba(120,40,140,0)'); hg.addColorStop(1, 'rgba(150,50,160,0.34)');
-      ctx.fillStyle = hg; ctx.fillRect(0, base - 26, W, 48);
+      // ⚠ Dégradé créé à l'ORIGINE puis translaté : lié à `base` il changeait à chaque bande
+      // ET à chaque frame, alors que c'est toujours le même sur 48 px de haut.
+      const hg = doodleGrad(ctx, 'cityMist', () => {
+        const gg = ctx.createLinearGradient(0, 0, 0, 48);
+        gg.addColorStop(0, 'rgba(120,40,140,0)'); gg.addColorStop(1, 'rgba(150,50,160,0.34)');
+        return gg;
+      });
+      ctx.save(); ctx.translate(0, base - 26);
+      ctx.fillStyle = hg; ctx.fillRect(0, 0, W, 48);
+      ctx.restore();
     }
     // Véhicules volants : un trait lumineux et sa traînée, à deux profondeurs. ⚠ Ils passent
     // DEVANT les tours : c'est ce qui donne l'échelle de la ville.
@@ -997,9 +1056,14 @@ function doodleScene(ctx, W, H, climb, k, a) {
     // lentement avec la montée, puis le disque.
     const sx = W - 68, sy = 76;
     ctx.save();
-    const sg = ctx.createRadialGradient(sx, sy, 6, sx, sy, 110);
-    sg.addColorStop(0, 'rgba(255,246,198,0.80)'); sg.addColorStop(1, 'rgba(255,246,198,0)');
-    ctx.fillStyle = sg; ctx.fillRect(0, 0, W, H);
+    // ⚠ Même traitement que les nébuleuses : le soleil est FIXE (il est à l'infini), son halo
+    // s'arrête à 110 px, et il repeignait pourtant toute la toile à chaque frame.
+    const sg = doodleGrad(ctx, `sun|${sx}|${sy}`, () => {
+      const gg = ctx.createRadialGradient(sx, sy, 6, sx, sy, 110);
+      gg.addColorStop(0, 'rgba(255,246,198,0.80)'); gg.addColorStop(1, 'rgba(255,246,198,0)');
+      return gg;
+    });
+    ctx.fillStyle = sg; ctx.fillRect(sx - 110, sy - 110, 220, 220);
     ctx.translate(sx, sy); ctx.rotate(climb * 0.0009);
     ctx.globalAlpha = Math.min(1, a) * 0.22; ctx.fillStyle = '#fff8d0';
     for (let i = 0; i < 10; i++) {
