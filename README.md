@@ -32,6 +32,7 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 - **Quota de 100 artistes / 24 h glissantes** avec compte à rebours, réinitialisable dans À propos
 - **🤖 Scraping automatique** : au lancement, s'il reste du quota le scan part tout seul et continue même si tu navigues ailleurs. Une passe par jour, reprise là où il s'était arrêté. Interrupteur dans **À propos → 🤖 Lancement automatique**
 - **🎵 Masquer le bandeau de lecture** (**À propos → ⚙️ Paramétrage**) : seuls les boutons du bas disparaissent, la lecture et le marquage continuent
+- **⌄ Replier le lecteur** (bouton à droite de la boucle, sur mobile) : il ne reste qu'une ligne — pochette, titre et lecture/pause — et le ⌃ le redéploie ; le repli est mémorisé
 - **👻 Artistes inconnus** : dans 🎤 Artistes suivis, « Identifier » demande à Spotify qui sont les lignes sans nom ; celles dont la page n'existe plus se suppriment de la liste **et de tes abonnements Spotify** (nouvelle permission : reconnecte-toi une fois)
 - Notification navigateur en fin de session
 
