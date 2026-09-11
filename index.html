@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.11.9';
+const APP_VERSION = '13.12.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1364,20 +1364,67 @@ async function actifsFindFile(token) {
   return file;
 }
 
+// ── ⚠ 13.12.0 — « CLASSEUR INTROUVABLE » ALORS QU'IL EST BIEN LÀ ─────────────────
+// `actifsFindFile` ne cherche QUE des Google Sheets natifs, et c'est obligatoire : l'API
+// Sheets ne sait lire qu'eux. Un classeur **déposé** dans le Drive (un .xlsx sorti d'Excel,
+// un .ods, un .csv) reste un fichier opaque pour elle — il est donc introuvable ICI tout en
+// étant parfaitement visible dans le Drive de l'utilisateur, qui n'a aucune raison de
+// deviner la différence.
+// D'où cette sonde, jouée SEULEMENT quand la recherche native a échoué : elle nomme le
+// fichier trouvé et son format, pour que le message dise quoi faire (l'ouvrir dans Google
+// Sheets, qui le convertit) au lieu d'un « aucun classeur trouvé » sans issue.
+// ⚠ Elle ne renvoie JAMAIS un fichier à lire : un non-natif ferait échouer l'appel Sheets
+// plus loin, avec une erreur encore plus obscure. Elle ne sert qu'au diagnostic.
+const ACTIFS_FOREIGN = [
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Excel (.xlsx)'],
+  ['application/vnd.ms-excel',                                         'Excel (.xls)'],
+  ['application/vnd.oasis.opendocument.spreadsheet',                   'OpenDocument (.ods)'],
+  ['text/csv',                                                         'CSV'],
+];
+async function actifsFindForeign(token) {
+  for (const [mime, label] of ACTIFS_FOREIGN) {
+    let found = [];
+    try {
+      found = await actifsDriveQuery(token,
+        `name contains 'Finance' and mimeType='${mime}' and trashed=false`, 'files(id,name)');
+    } catch { continue; }
+    const f = found.find(x => /finance/i.test(x.name)) || found[0];
+    if (f) return { name: f.name, label };
+  }
+  return null;
+}
+// Erreur à lever quand aucun Google Sheets n'a été trouvé : `NOTNATIVE:<format>:<nom>` si un
+// tableur déposé porte le nom, `NOTFOUND` sinon. Le `:` sépare, donc le nom passe en dernier
+// (il peut lui-même en contenir).
+async function actifsNoFileError(token) {
+  let foreign = null;
+  try { foreign = await actifsFindForeign(token); } catch {}
+  return new Error(foreign ? `NOTNATIVE:${foreign.label}:${foreign.name}` : 'NOTFOUND');
+}
+
+// Rend lisible `NOTNATIVE:<format>:<nom>` ; renvoie '' pour toute autre erreur.
+function actifsNotNativeMsg(code) {
+  const m = /^NOTNATIVE:([^:]*):([\s\S]*)$/.exec(String(code || ''));
+  if (!m) return '';
+  return `« ${m[2]} » a bien été trouvé dans ton Drive, mais c'est un fichier ${m[1]} : `
+    + `Google ne le lit pas comme un classeur. Ouvre-le dans Google Sheets puis `
+    + `« Fichier → Enregistrer au format Google Sheets » — la copie convertie sera lue tout de suite.`;
+}
+
 // Fetch complet : trouve le fichier, exporte la 1re feuille en CSV, parse, met en cache.
 async function actifsFetch(force) {
   const token = gdriveToken();
   if (!token) throw new Error('AUTH');
   if (force) try { localStorage.removeItem(ACTIFS_FILE_LS); } catch {}
   let file = await actifsFindFile(token);
-  if (!file) throw new Error('NOTFOUND');
+  if (!file) throw await actifsNoFileError(token);
   const dl = id => fetch(`https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=${encodeURIComponent('text/csv')}`,
     { headers: { Authorization: `Bearer ${token}` } });
   let res = await dl(file.id);
   if (res.status === 404) {            // id caché périmé (fichier déplacé/supprimé) → re-recherche
     try { localStorage.removeItem(ACTIFS_FILE_LS); } catch {}
     file = await actifsFindFile(token);
-    if (!file) throw new Error('NOTFOUND');
+    if (!file) throw await actifsNoFileError(token);
     res = await dl(file.id);
   }
   if (res.status === 401) { gdriveLogout(); throw new Error('AUTH'); }
@@ -1558,7 +1605,7 @@ async function actifsSheetRead(sheetRe, force) {
   if (!token) throw new Error('AUTH');
   if (force) try { localStorage.removeItem(ACTIFS_FILE_LS); } catch {}
   const file = await actifsFindFile(token);      // MÊME classeur que Mes Actifs
-  if (!file) throw new Error('NOTFOUND');
+  if (!file) throw await actifsNoFileError(token);
   const get = async url => {
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (res.status === 401) { gdriveLogout(); throw new Error('AUTH'); }
@@ -1684,6 +1731,9 @@ const CRYPTO_ERRS = {
   AUTH:     'Google Drive non connecté (À propos → Google Drive).',
   SCOPE:    'Lecture du Drive non autorisée (Finance → Mes Actifs → « Autoriser la lecture du Drive »).',
   NOTFOUND: 'Classeur « Finance » introuvable dans le Drive.',
+  // ⚠ `NOTNATIVE:...` ne se range pas dans cette table (il porte le nom du fichier) :
+  // les appelants passent d'abord par `actifsNotNativeMsg`.
+  NOTNATIVE: 'Le fichier trouvé n\'est pas un Google Sheets natif.',
   NOSHEET:  'Aucun onglet « crypto » ni « Binance » dans le classeur.',
   EMPTY:    'Aucune colonne de crypto reconnue dans la feuille.',
 };
@@ -1691,7 +1741,7 @@ const CRYPTO_ERRS = {
 // part en BTC par crypto). Sans lui, un total faux serait impossible à expliquer.
 function cryptoHoldTip(d, px, err) {
   const L = ['Portefeuille crypto du classeur « Mes Actifs », converti en BTC'];
-  if (err) L.push('⚠ ' + (CRYPTO_ERRS[err] || err));
+  if (err) L.push('⚠ ' + (actifsNotNativeMsg(err) || CRYPTO_ERRS[err] || err));
   if (d) {
     const mois = new Date(d.month).toLocaleDateString('fr-FR', { month: '2-digit', year: 'numeric' });
     L.push(`Onglet « ${d.sheet} » · mois ${mois} · relevé du ${new Date(d.fetched_at).toLocaleDateString('fr-FR')}`);
@@ -17812,7 +17862,8 @@ function CollFinanceImport({ sub, onMerge }) {
       setRes({ ...d, ...r });
     } catch (e) {
       const m = String((e && e.message) || e);
-      setErr(COLL_FIN_ERR[m] || (/^HTTP /.test(m) ? `${COLL_FIN_ERR.NET} (${m})` : COLL_FIN_ERR.NET));
+      setErr(actifsNotNativeMsg(m) || COLL_FIN_ERR[m]
+        || (/^HTTP /.test(m) ? `${COLL_FIN_ERR.NET} (${m})` : COLL_FIN_ERR.NET));
     }
     setBusy(false);
   };
@@ -31071,6 +31122,7 @@ function MesActifsPanel() {
   if (err) {
     const msg = err === 'SCOPE'    ? "Accès lecture Drive pas encore accordé — reconnecte Google Drive pour autoriser la lecture du tableur (nouveau consentement)."
              : err === 'AUTH'      ? 'Session Google expirée — reconnecte-toi.'
+             : actifsNotNativeMsg(err) ? actifsNotNativeMsg(err)
              : err === 'NOTFOUND'  ? 'Aucun tableur trouvé : ni dossier « finance » contenant un Google Sheets, ni tableur nommé « Finance » dans le Drive.'
              : err === 'EMPTY'     ? "Le tableur a été trouvé mais sa 1re feuille ne ressemble pas à la feuille « Actif » attendue (colonnes Date / Patrimoine…)."
              : `Erreur de synchronisation (${err}).`;
