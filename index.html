@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.11.8';
+const APP_VERSION = '13.11.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1845,7 +1845,20 @@ async function apiDel(url, _retried = false) {
     if (ok) return apiDel(url, true);
   }
   if (res.status === 429) { _rlSet(_parseRetryAfterMs(res.headers.get('Retry-After'), 30000)); return { error:'rate_limited', rate_limited: true }; }
-  if (res.status === 403) return { error: 'forbidden' };
+  // ⚠ 13.11.9 — On GARDE le corps du 403, exactement comme `apiPut` : sans lui, toutes les
+  // causes possibles se ressemblaient et l'app en était réduite à DEVINER laquelle annoncer.
+  // C'est précisément ce qui a masqué la disparition de /me/following pendant des mois : le
+  // message « permission manquante » était une hypothèse de l'app, pas les mots de Spotify.
+  if (res.status === 403) {
+    const body = await res.json().catch(() => null);
+    const e    = body && typeof body.error === 'object' ? body.error : null;
+    return {
+      error  : 'forbidden',
+      status : 403,
+      message: (e?.message || (typeof body?.error === 'string' ? body.error : '') || '').trim(),
+      reason : e?.reason || '',
+    };
+  }
   // Ne PAS renvoyer { ok:true } aveuglément : un 404/5xx (ou tout statut non-ok) signifie que
   // l'action (ex. libraryRemove) a échoué côté Spotify. Sans ça, l'app passait liked=0 en DB
   // locale alors que Spotify gardait le like → au prochain syncInitialLikes (Spotify fait foi)
@@ -1875,6 +1888,7 @@ async function fetchTimeout(url, ms, init, read) {
 // qui acceptent des URIs Spotify (max 40 par requête), en query string même pour PUT.
 // Scopes requis : user-library-read (contains) / user-library-modify (save/remove).
 // ════════════════════════════════════════════════
+const LIBRARY_URIS_MAX = 40;   // ⚠ plafond de /me/library — PAS le 50 de /v1/artists?ids=
 const _uriQS = uris => uris.map(encodeURIComponent).join(',');
 async function libraryContains(uris) {
   const data = await apiGet(`https://api.spotify.com/v1/me/library/contains?uris=${_uriQS(uris)}`);
@@ -1916,14 +1930,22 @@ async function spotifyArtistsByIds(ids) {
   if (data?.rate_limited) return { rateLimited: true };
   return { list: Array.isArray(data?.artists) ? data.artists : null };
 }
-// Retrait d'abonnement. ⚠ Demande le scope `user-follow-modify`, ajouté APRÈS coup à
-// SCOPES : un jeton plus ancien ne l'a pas (403) et seule une reconnexion l'accorde.
+// ⚠ 13.11.9 — S'ABONNER / SE DÉSABONNER PASSE PAR /me/library, PLUS PAR /me/following.
+// `PUT` et `DELETE /me/following` ont été SUPPRIMÉS par la migration de février 2026 — la
+// même qui avait déjà emporté `/me/tracks` (voir le bloc LIBRARY plus haut) : le suivi
+// d'artistes a rejoint le `/me/library` générique, qui prend des URIs en QUERY STRING.
+// ⚠ Un endpoint retiré répond 403, comme une permission manquante : c'est ce qui a fait
+// croire pendant des mois que le scope `user-follow-modify` était en cause (il l'a été, une
+// fois, en 13.5.9 — il ne l'est plus forcément). D'où le corps du 403 désormais remonté
+// jusqu'à l'utilisateur au lieu d'une cause devinée.
+// ⚠ Le GET /me/following, lui, n'a pas bougé : la boucle de scan continue de le lire.
+// Scope : toujours `user-follow-modify`, ajouté à SCOPES après coup ⇒ un jeton plus ancien
+// ne l'a pas et seule une RECONNEXION l'accorde (jamais un rafraîchissement).
+const _artistURIs = ids => _uriQS(ids.map(i => 'spotify:artist:' + i));
 const spotifyUnfollowArtists = ids =>
-  apiDel(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
-// Abonnement. ⚠ MÊME scope `user-follow-modify` que le retrait (donc mêmes 403 sur un jeton
-// ancien) et, comme pour /me/library, les ids passent en QUERY STRING, sans corps.
+  apiDel(`https://api.spotify.com/v1/me/library?uris=${_artistURIs(ids)}`);
 const spotifyFollowArtists = ids =>
-  apiPut(`https://api.spotify.com/v1/me/following?type=artist&ids=${ids.join(',')}`);
+  apiPut(`https://api.spotify.com/v1/me/library?uris=${_artistURIs(ids)}`);
 
 // ── Se désabonner SANS rien perdre (13.4.7) ───────────────────────────────────
 // Demande utilisateur : « si je me désabonne d'un artiste, laisse-le dans la liste des
@@ -1943,11 +1965,11 @@ const spotifyFollowArtists = ids =>
 // comme pour « 🗑 Supprimer », l'écriture LOCALE se fait quand même — l'utilisateur voit
 // alors le message qui lui dit de se reconnecter.
 async function artistUnfollowKeepData(a) {
-  let refused = false, sent = false;
+  let refused = false, sent = false, why = '';
   try {
     const r = await spotifyUnfollowArtists([a.id]);
     if (r && r.ok) sent = true;
-    else if (r && r.error === 'forbidden') refused = true;
+    else if (r && r.error === 'forbidden') { refused = true; why = r.message || ''; }
   } catch {}
   try {
     dbRun(
@@ -1961,8 +1983,8 @@ async function artistUnfollowKeepData(a) {
       [a.id, FULL_SCRAPE_FROM, a.name || null, a.image || null, a.url || null]
     );
     await saveDB();
-  } catch { return { ok:false, refused, sent }; }
-  return { ok:true, refused, sent };
+  } catch { return { ok:false, refused, sent, why }; }
+  return { ok:true, refused, sent, why };
 }
 // ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
@@ -3711,7 +3733,7 @@ function StoreProvider({ children }) {
       if (uriRows.length === 0) return;
       const uris = uriRows.map(r => r.spotify_uri).filter(Boolean);
       let answered = 0;
-      for (let i = 0; i < uris.length; i += 40) { // /me/library/contains : max 40 URIs par requête
+      for (let i = 0; i < uris.length; i += LIBRARY_URIS_MAX) { // /me/library/contains : max 40 URIs
         if (i > 0) await sleep(400); // lisse le burst d'appels au login (jusqu'à 8 batchs)
         const batch = uris.slice(i, i + 40);
         const data = await libraryContains(batch);
@@ -44428,10 +44450,13 @@ function ArtistsPanel() {
     if (!confirm(`Supprimer ${ids.length} artiste(s) introuvable(s) ?\n\nIls disparaissent de cette liste (et donc des artistes à scraper) et sont retirés de tes abonnements Spotify.\nLes titres déjà enregistrés en base ne bougent pas.`)) return;
     setBusy('purge'); setMsg('');
     let refused = false, sent = 0;
-    for (let i = 0; i < ids.length; i += SPOTIFY_IDS_MAX) {
+    // ⚠ 13.11.9 — Lot de LIBRARY_URIS_MAX et non SPOTIFY_IDS_MAX : depuis le passage à
+    // /me/library, le plafond est 40 URIs, pas les 50 ids que tolérait /me/following.
+    // Le 50 reste juste au-dessus, pour /v1/artists?ids= (bouton « 🔍 Identifier »).
+    for (let i = 0; i < ids.length; i += LIBRARY_URIS_MAX) {
       let r = null;
-      try { r = await spotifyUnfollowArtists(ids.slice(i, i + SPOTIFY_IDS_MAX)); } catch {}
-      if (r && r.ok) sent += Math.min(SPOTIFY_IDS_MAX, ids.length - i);
+      try { r = await spotifyUnfollowArtists(ids.slice(i, i + LIBRARY_URIS_MAX)); } catch {}
+      if (r && r.ok) sent += Math.min(LIBRARY_URIS_MAX, ids.length - i);
       else if (r && r.error === 'forbidden') refused = true;
     }
     try {
@@ -44441,7 +44466,7 @@ function ArtistsPanel() {
     reloadArtists();
     setBusy('');
     setMsg(refused
-      ? `${ids.length} ligne(s) supprimée(s) localement. Spotify a refusé le désabonnement : déconnecte-toi puis reconnecte-toi pour accorder la nouvelle permission.`
+      ? `${ids.length} ligne(s) supprimée(s) localement. Spotify a refusé le désabonnement (403) — si tu viens de te reconnecter, ce n'est pas la permission « user-follow-modify ».`
       : `${ids.length} artiste(s) supprimé(s) · ${sent} désabonnement(s) envoyé(s) à Spotify.`);
   };
   const actBtn = (color, on = true) => ({
@@ -45142,6 +45167,19 @@ function DeltaTrackList({ tracks, empty }) {
 // ⚠ Si Spotify refuse (jeton sans `user-follow-modify`), la ligne est quand même archivée
 // localement : ce n'est pas un mensonge durable, le prochain scan complet reverra l'artiste
 // dans /me/following et lui reposera `following = 1` tout seul.
+// ⚠ 13.11.9 — NE PLUS AFFIRMER UNE CAUSE QU'ON N'A PAS VÉRIFIÉE. Un 403 de Spotify peut
+// venir d'un scope manquant OU d'un endpoint retiré (c'est ce qui est arrivé à
+// /me/following en février 2026), et les deux se ressemblent trait pour trait. On dit donc
+// ce qu'on SAIT — `canFollow` vient des scopes mémorisés, il tranche le premier cas — et on
+// CITE Spotify quand il donne une raison, au lieu de la remplacer par une hypothèse.
+function deltaRefusedMsg(quoi, why, canFollow) {
+  const dit = why ? ` Spotify dit : « ${why} ».` : '';
+  // ⚠ `canFollow` = `followScope === true` : son `false` couvre le scope ABSENT comme le
+  // scope INCONNU (jeton antérieur à la mémoire des scopes) — « probablement » le dit.
+  return canFollow
+    ? `Spotify a refusé ${quoi} alors que ton jeton a bien la permission « user-follow-modify ».${dit} Ce n'est donc pas un problème de permission.`
+    : `Spotify a refusé ${quoi}.${dit} Ton jeton n'a probablement pas la permission « user-follow-modify » : déconnecte-toi puis reconnecte-toi.`;
+}
 function DeltaArtistRow({ a, onUnfollow, canFollow }) {
   const [busy, setBusy] = React.useState(false);
   const [msg,  setMsg]  = React.useState('');
@@ -45153,7 +45191,7 @@ function DeltaArtistRow({ a, onUnfollow, canFollow }) {
     const r = await onUnfollow(a);
     setBusy(false);
     if (!r.ok)          setMsg('Désabonnement non enregistré localement — la base n\'a pas pu être écrite.');
-    else if (r.refused) setMsg('Spotify a refusé le désabonnement (permission « user-follow-modify » manquante) : déconnecte-toi puis reconnecte-toi.');
+    else if (r.refused) setMsg(deltaRefusedMsg('le désabonnement', r.why, canFollow));
     else if (!r.sent)   setMsg('Spotify n\'a pas confirmé le désabonnement — vérifie dans l\'app Spotify.');
   };
   return (
@@ -45236,7 +45274,7 @@ function DeltaGapArtistRow({ a, onFollow, canFollow }) {
     setBusy(true); setMsg('');
     const r = await onFollow(a);
     setBusy(false);
-    if (r.refused)   setMsg('Spotify a refusé l\'abonnement (permission « user-follow-modify » manquante) : déconnecte-toi puis reconnecte-toi.');
+    if (r.refused)   setMsg(deltaRefusedMsg('l\'abonnement', r.why, canFollow));
     else if (!r.ok)  setMsg('Spotify n\'a pas confirmé l\'abonnement — réessaie dans un instant.');
   };
   return (
@@ -45638,11 +45676,11 @@ function DeltaPanel() {
   // ➕ Abonnement depuis la liste des non-suivis. Même parti pris que le ⊘ : la ligne est
   // marquée sur place et le cache réécrit, elle ne disparaît pas sous les doigts.
   const followArtist = async (a) => {
-    let ok = false, refused = false;
+    let ok = false, refused = false, why = '';
     try {
       const r = await spotifyFollowArtists([a.id]);
       if (r && r.ok) ok = true;
-      else if (r && r.error === 'forbidden') refused = true;
+      else if (r && r.error === 'forbidden') { refused = true; why = r.message || ''; }
     } catch {}
     if (ok) {
       const row = (_delta.data?.likedGap || []).find(x => x.id === a.id);
@@ -45655,7 +45693,7 @@ function DeltaPanel() {
       deltaSet({});
       reloadArtists();
     }
-    return { ok, refused };
+    return { ok, refused, why };
   };
 
   return (
