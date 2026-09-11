@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.10.9';
+const APP_VERSION = '13.11.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5582,11 +5582,14 @@ function GameSimon() {
 // 13.10.1 — Le 🧱 Tetris est remplacé par le 🟪 Plox (demande utilisateur, règles fournies) :
 // tout le code du Tetris part, l'entrée du catalogue est renommée, et son record est purgé
 // comme celui de n'importe quel jeu retiré (voir REMOVED_GAMES / HI_PURGE_LS).
-// Grille 6 × 12, paires de blocs collés, 4 couleurs, alignement de 3 dans les 4 directions
+// Grille 6 × 12, LIGNES DE 3 blocs collés, 4 couleurs, alignement de 3 dans les 4 directions
 // (horizontale, verticale et les DEUX diagonales), gravité et combos.
-// ⚠ La paire TOURNE (`p.o`, cf. PLOX_OFF) : elle sort verticale mais se pose aussi à
-// l'horizontale. Tout ce qui la teste ou la dessine passe par `ploxFits(…, o)` et
-// `ploxPairCells` — jamais par « r et r+1 », qui ne vaut plus que pour o = 0.
+// ⚠ La pièce est une ligne de PLOX_LEN blocs (3, demande utilisateur — plus une paire), et
+// elle TOURNE (`p.o`, cf. PLOX_OFF) : elle sort verticale mais se pose aussi à l'horizontale,
+// et les deux orientations « retournées » (haut / gauche) inversent l'ordre des couleurs —
+// c'est avec ça que le joueur choisit laquelle des trois touche la pile en premier.
+// Tout ce qui la teste ou la dessine passe par `ploxFits(…, o)` et `ploxPieceCells` — jamais
+// par « r, r+1 » ni par un nombre de blocs écrit en dur.
 // ⚠ Ce n'est PAS un Tetris : on n'efface pas des LIGNES PLEINES mais des ALIGNEMENTS de 3
 // blocs de même couleur — d'où `ploxMatches`, qui balaie les 4 directions et marque les cases,
 // au lieu de chercher des rangées complètes.
@@ -5597,7 +5600,8 @@ function GameSimon() {
 // la boucle de chaîne (`s.chain`), et c'est elle qui rapporte les gros scores.
 // ⚠ L'effacement passe par un état d'ANIMATION (`s.clear`) qui suspend la chute, sinon on ne
 // verrait jamais ce que l'on vient de réussir (même parti pris que l'ancien Tetris).
-// ⚠ La pièce naît AU-DESSUS de la grille (`r` négatif) : `ploxFits` ne teste donc les
+// ⚠ La pièce naît ENTIÈREMENT AU-DESSUS de la grille (`r = -(PLOX_LEN - 1)`, donc négatif) :
+// `ploxFits` ne teste donc les
 // collisions que pour les lignes ≥ 0, et la partie s'arrête quand un bloc se pose en dehors
 // (« la partie se termine dès qu'un bloc dépasse la ligne supérieure »).
 const PLOX_HI = 'plox';
@@ -5613,6 +5617,9 @@ const PLOX_W = PLOX_BW + PLOX_PANEL * 2, PLOX_H = PLOX_ROWS * PLOX_CELL;
 const PLOX_CLEAR_T = 15;                                 // frames de l'éclair sur les blocs alignés
 const PLOX_FONT = 'system-ui, sans-serif';
 const PLOX_MIN = 3;                                      // longueur minimale d'un alignement
+// Blocs par pièce. ⚠ Rien ne suppose 2 ni 3 ailleurs : la pièce est décrite par sa seule
+// couleur de départ et son orientation, et `ploxPieceCells` / `ploxFits` déroulent la ligne.
+const PLOX_LEN = 3;                                      // la pièce est une LIGNE de 3 blocs
 const PLOX_PER_LEVEL = 30;                               // blocs détruits par niveau
 const PLOX_DANGER = 2;                                   // lignes du haut : zone de danger
 // Les 4 couleurs. Aucun motif : elles se distinguent à la teinte, et rien d'autre.
@@ -5630,31 +5637,35 @@ const ploxChainMul = n => PLOX_CHAIN[Math.min(n, PLOX_CHAIN.length - 1)];
 const ploxLevel = destroyed => Math.floor(destroyed / PLOX_PER_LEVEL);
 const ploxDrop  = destroyed => Math.max(110, 700 - ploxLevel(destroyed) * 55);
 const ploxRand  = () => 1 + ((Math.random() * PLOX_COLORS.length) | 0);
-const ploxPair  = () => [ploxRand(), ploxRand()];
+const ploxPiece = () => Array.from({ length: PLOX_LEN }, ploxRand);
 const ploxAt    = (g, c, r) => (c < 0 || c >= PLOX_COLS || r < 0 || r >= PLOX_ROWS) ? -1 : g[r * PLOX_COLS + c];
 
-// ORIENTATION de la paire : position du 2e bloc (`b`) RELATIVE au premier (`a`, en (c, r)).
-// 0 = b dessous (paire verticale, celle qui sort à chaque fois), 1 = à droite, 2 = dessus,
-// 3 = à gauche. Une rotation = `o + 1`, d'où l'ordre bas → droite → haut → gauche.
+// ORIENTATION de la ligne : direction dans laquelle les blocs SUIVANTS se rangent à partir
+// du premier (`p.v[0]`, en (c, r)). 0 = vers le bas (ligne verticale, celle qui sort à chaque
+// fois), 1 = vers la droite, 2 = vers le haut, 3 = vers la gauche. Une rotation = `o + 1`,
+// d'où l'ordre bas → droite → haut → gauche.
 const PLOX_OFF = [[0, 1], [1, 0], [0, -1], [-1, 0]];
 // Une case est-elle libre ? ⚠ Les lignes négatives le sont par construction : c'est
-// au-dessus de la grille, là où la paire naît.
+// au-dessus de la grille, là où la ligne naît.
 function ploxCellFree(g, c, r) {
   if (c < 0 || c >= PLOX_COLS || r >= PLOX_ROWS) return false;
   return r < 0 || !g[r * PLOX_COLS + c];
 }
-// La paire tient-elle à (c, r) dans l'orientation `o` ?
+// La ligne tient-elle à (c, r) dans l'orientation `o` ?
 function ploxFits(g, c, r, o) {
   const d = PLOX_OFF[o || 0];
-  return ploxCellFree(g, c, r) && ploxCellFree(g, c + d[0], r + d[1]);
+  for (let i = 0; i < PLOX_LEN; i++) if (!ploxCellFree(g, c + d[0] * i, r + d[1] * i)) return false;
+  return true;
 }
 function ploxDropTo(g, c, r, o) { let y = r; while (ploxFits(g, c, y + 1, o)) y++; return y; }
-// Rotation d'un quart de tour. ⚠ Contre un mur ou une pile, on DÉCALE la paire d'une case
-// (« kick ») au lieu de refuser : sans ça une paire collée au bord droit ne tournerait
-// plus jamais, et le joueur se retrouverait coincé dans la colonne.
+// Rotation d'un quart de tour. ⚠ Contre un mur ou une pile, on DÉCALE la ligne (« kick »)
+// au lieu de refuser : sans ça une ligne collée au bord droit ne tournerait plus jamais, et
+// le joueur se retrouverait coincé dans la colonne. ⚠ Le décalage va jusqu'à PLOX_LEN - 1
+// cases : une ligne de 3 qui passe à l'horizontale depuis la colonne du bord déborde de DEUX
+// colonnes, un kick d'une seule case ne suffisait plus (il suffisait à la paire).
 function ploxRotate(g, p) {
   const o = (p.o + 1) % 4;
-  for (const [dc, dr] of [[0, 0], [-1, 0], [1, 0], [0, -1]]) {
+  for (const [dc, dr] of [[0, 0], [-1, 0], [1, 0], [-2, 0], [2, 0], [0, -1], [0, -2]]) {
     if (ploxFits(g, p.c + dc, p.r + dr, o)) { p.c += dc; p.r += dr; p.o = o; return true; }
   }
   return false;
@@ -5711,11 +5722,12 @@ function ploxJunk(g) {
   }
 }
 
-// Les deux cases occupées par une paire : [[colonne, ligne, couleur], …]. Un seul endroit
-// lit PLOX_OFF pour le rendu ET pour la pose, les deux ne peuvent donc pas diverger.
-function ploxPairCells(p) {
+// Les cases occupées par la ligne : [[colonne, ligne, couleur], …], dans l'ordre des
+// couleurs (`p.v`). Un seul endroit lit PLOX_OFF pour le rendu ET pour la pose, les deux ne
+// peuvent donc pas diverger.
+function ploxPieceCells(p) {
   const d = PLOX_OFF[p.o || 0];
-  return [[p.c, p.r, p.a], [p.c + d[0], p.r + d[1], p.b]];
+  return p.v.map((v, i) => [p.c + d[0] * i, p.r + d[1] * i, v]);
 }
 function ploxRound(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -5767,10 +5779,10 @@ function ploxDraw(ctx, s, t) {
     ctx.strokeStyle = '#ff3b5c'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(X0, PLOX_CELL * PLOX_DANGER); ctx.lineTo(X0 + PLOX_BW, PLOX_CELL * PLOX_DANGER); ctx.stroke();
   }
-  // Fantôme : là où la paire va se poser (les deux cases, orientation comprise)
+  // Fantôme : là où la ligne va se poser (toutes ses cases, orientation comprise)
   if (s.p && !s.clear) {
     const gr = ploxDropTo(s.g, s.p.c, s.p.r, s.p.o);
-    if (gr !== s.p.r) ploxPairCells({ ...s.p, r: gr }).forEach(([c, r, v]) => {
+    if (gr !== s.p.r) ploxPieceCells({ ...s.p, r: gr }).forEach(([c, r, v]) => {
       if (r >= 0) ploxBlock(ctx, X0 + c * PLOX_CELL, r * PLOX_CELL, PLOX_CELL, v, 0.22);
     });
   }
@@ -5789,8 +5801,8 @@ function ploxDraw(ctx, s, t) {
     }
     ctx.restore();
   }
-  // La paire en cours
-  if (s.p && !s.clear) ploxPairCells(s.p).forEach(([c, r, v]) => {
+  // La ligne en cours
+  if (s.p && !s.clear) ploxPieceCells(s.p).forEach(([c, r, v]) => {
     if (r >= 0) ploxBlock(ctx, X0 + c * PLOX_CELL, r * PLOX_CELL, PLOX_CELL, v);
   });
   // Panneau GAUCHE : score, niveau (vitesse), blocs détruits.
@@ -5816,13 +5828,12 @@ function ploxDraw(ctx, s, t) {
     let left = 0; for (let i = 0; i < s.g.length; i++) if (s.g[i]) left++;
     val(String(left), 188, '#2ce86f');
   }
-  // Panneau DROIT : la paire suivante
+  // Panneau DROIT : la ligne suivante, empilée telle qu'elle sortira (verticale)
   const px = X0 + PLOX_BW + 6;
   ctx.fillStyle = '#8b93a3'; ctx.font = '700 8px ' + PLOX_FONT; ctx.fillText('SUIVANT', px, 20);
   if (s.next) {
     const cs = 26, ox = px + (PLOX_PANEL - 12 - cs) / 2;
-    ploxBlock(ctx, ox, 30, cs, s.next[0]);
-    ploxBlock(ctx, ox, 30 + cs, cs, s.next[1]);
+    s.next.forEach((v, i) => ploxBlock(ctx, ox, 30 + i * cs, cs, v));
   }
   // Le dernier combo, annoncé le temps qu'on le lise. ⚠ AU CENTRE DU PLATEAU, plus dans le
   // panneau : « COMBO ×12 ! » y déborderait largement, et c'est là que le joueur regarde.
@@ -5849,45 +5860,48 @@ function GamePlox() {
     const md = m || mode;
     const s = blank(md);
     if (md === 'puzzle') ploxJunk(s.g);
-    s.p = { c: (PLOX_COLS / 2 - 1) | 0, r: -1, o: 0, a: ploxRand(), b: ploxRand() };
-    s.next = ploxPair();
+    s.p = { c: (PLOX_COLS / 2 - 1) | 0, r: 1 - PLOX_LEN, o: 0, v: ploxPiece() };
+    s.next = ploxPiece();
     g.current = s; setMode(md); setScore(0); setPhase('playing');
   };
   const paint = () => { const ctx = canvasRef.current && canvasRef.current.getContext('2d'); if (ctx && g.current) ploxDraw(ctx, g.current, performance.now()); };
   React.useEffect(() => { if (!g.current) g.current = blank(mode); paint(); }, [phase]);
   const overRef = React.useRef(null);   // (gagné ?) → fin de partie
-  // Sort la paire suivante. ⚠ Elle peut ne pas tenir : c'est la fin de partie « la pile a
+  // Sort la ligne suivante. ⚠ Elle peut ne pas tenir : c'est la fin de partie « la pile a
   // atteint le plafond », sans qu'aucun bloc n'ait eu à déborder en se posant.
-  const nextPair = s => {
-    const p = { c: (PLOX_COLS / 2 - 1) | 0, r: -1, o: 0, a: s.next[0], b: s.next[1] };
-    s.next = ploxPair();
+  // ⚠ `r = 1 - PLOX_LEN` : la ligne naît TOUT ENTIÈRE au-dessus de la grille, sa dernière
+  // case arrivant sur la ligne 0 — sinon une ligne de 3 apparaîtrait déjà enfoncée de deux
+  // cases dans la pile.
+  const nextPiece = s => {
+    const p = { c: (PLOX_COLS / 2 - 1) | 0, r: 1 - PLOX_LEN, o: 0, v: s.next };
+    s.next = ploxPiece();
     if (!ploxFits(s.g, p.c, p.r, p.o)) { overRef.current && overRef.current(false); return; }
     s.p = p;
   };
-  // Pose la paire puis ARME la résolution (`s.clear`), consommée par la boucle après
+  // Pose la ligne puis ARME la résolution (`s.clear`), consommée par la boucle après
   // l'animation — sinon on ne verrait jamais l'alignement que l'on vient de réussir.
   const lock = React.useCallback(s => {
     const p = s.p;
     s.p = null;
     // ⚠ Fin de partie AVANT tout le reste : un bloc posé au-dessus de la ligne supérieure,
     // c'est que la grille a débordé (règle du jeu).
-    const cells = ploxPairCells(p);
+    const cells = ploxPieceCells(p);
     const deborde = cells.some(([, r]) => r < 0);
     for (const [c, r, v] of cells) if (r >= 0) s.g[r * PLOX_COLS + c] = v;
     if (deborde) { overRef.current && overRef.current(false); return; }
-    // ⚠ Gravité AVANT la résolution : une paire posée à l'HORIZONTALE peut avoir un bloc
-    // au-dessus d'un trou (l'autre s'est appuyé sur la pile), il doit tomber d'abord.
+    // ⚠ Gravité AVANT la résolution : une ligne posée à l'HORIZONTALE peut avoir des blocs
+    // au-dessus d'un trou (un seul s'est appuyé sur la pile), ils doivent tomber d'abord.
     ploxGravity(s.g);
     s.chain = 0;
     resolve(s);
   }, []);
-  // Arme l'effacement des alignements présents ; rien à effacer ⇒ paire suivante (ou
+  // Arme l'effacement des alignements présents ; rien à effacer ⇒ ligne suivante (ou
   // victoire en mode Puzzle, grille vidée).
   const resolve = s => {
     const cells = ploxMatches(s.g);
     if (!cells.length) {
       if (s.mode === 'puzzle' && ploxEmpty(s.g)) { overRef.current && overRef.current(true); return; }
-      nextPair(s);
+      nextPiece(s);
       return;
     }
     s.chain++;
@@ -5909,7 +5923,8 @@ function GamePlox() {
     const p = s.p;
     if (kind === 'left'  && ploxFits(s.g, p.c - 1, p.r, p.o)) p.c--;
     if (kind === 'right' && ploxFits(s.g, p.c + 1, p.r, p.o)) p.c++;
-    // Rotation d'un quart de tour : la paire passe de VERTICALE à HORIZONTALE et retour.
+    // Rotation d'un quart de tour : la ligne passe de VERTICALE à HORIZONTALE et retour, en
+    // repassant par les deux orientations retournées (ordre des couleurs inversé).
     if (kind === 'rot') ploxRotate(s.g, p);
     // ⚠ La descente rapide RAPPORTE (1 point par case) et le lâcher DEUX fois plus : c'est
     // ce qui rend le jeu nerveux plutôt qu'attentiste.
@@ -5964,11 +5979,11 @@ function GamePlox() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [phase, act]);
-  // Gestes : taper = faire tourner la paire, glisser latéralement = changer de colonne,
+  // Gestes : taper = faire tourner la ligne, glisser latéralement = changer de colonne,
   // glisser vers le bas = chute rapide. ⚠ Garde `moved` : un glissement se termine TOUJOURS
-  // par un click synthétique, qui ferait tourner la paire en plus (piège n°12).
+  // par un click synthétique, qui ferait tourner la ligne en plus (piège n°12).
   // ⚠ Le geste se TERMINE au lâcher (`drag.current = null`) : sans ça, un doigt qui continue
-  // de descendre lâcherait aussi la paire suivante, et celle d'après.
+  // de descendre lâcherait aussi la ligne suivante, et celle d'après.
   const drag = React.useRef(null);
   const onDown = e => {
     if (phase !== 'playing') { start(); return; }
@@ -5985,7 +6000,7 @@ function GamePlox() {
   const title = phase === 'dead' ? '💥 La grille déborde !' : phase === 'won' ? '🎉 Grille vidée !' : '🟪 Plox';
   return (
     <GameWrap
-      hint="Aligne 3 blocs de même couleur — horizontalement, verticalement ou en diagonale. Glisse pour changer de colonne, touche pour faire tourner la paire (verticale ↔ horizontale), glisse vers le bas pour lâcher. Au clavier : ← → pour déplacer, ↑ pour tourner, ↓ pour accélérer, espace pour lâcher."
+      hint="Les blocs tombent par LIGNES DE 3. Aligne 3 blocs de même couleur — horizontalement, verticalement ou en diagonale. Glisse pour changer de colonne, touche pour faire tourner la ligne (verticale ↔ horizontale, l'ordre des couleurs s'inverse un tour sur deux), glisse vers le bas pour lâcher. Au clavier : ← → pour déplacer, ↑ pour tourner, ↓ pour accélérer, espace pour lâcher."
       bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b> · <b style={{ color:C.text }}>{mode === 'puzzle' ? 'Puzzle' : 'Marathon'}</b></span>}>
       <div style={{ position:'relative', width:'100%', maxWidth:PLOX_W }}>
         <canvas ref={canvasRef} width={PLOX_W} height={PLOX_H}
