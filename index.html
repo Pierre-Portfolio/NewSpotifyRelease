@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.9.4';
+const APP_VERSION = '13.9.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -27357,6 +27357,11 @@ function ActuPanel() {
     if (!c || Date.now() - c.fetched_at > ACTU_TTL) refresh();
   }, [refresh]);
 
+  // Fuite de données concernant un site du coffre → tâche « Aujourd'hui » dans le To do.
+  // No-op tant que le coffre est verrouillé (rien à lire) : c'est le déverrouillage qui
+  // rejoue alors le croisement.
+  React.useEffect(() => { try { syncLeakVaultTodos(); } catch {} }, [data]);
+
   const card = { background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'12px 14px', marginBottom:12 };
   // ⚠ Les liens viennent de flux RSS/HTML relayés par des PROXIES CORS publics
   // (codetabs, cors.eu.org, allorigins) : un proxy compromis peut injecter un href
@@ -40012,6 +40017,75 @@ function mdpBumpActivity() {
   _mdpIdleTimer = setTimeout(_mdpAutoLock, MDP_IDLE_MS);
 }
 
+// ── Fuites de données ↔ coffre (13.9.5, demande utilisateur) ──
+// Une des « 🔓 Dernières fuites de données » d'Actu concerne un site présent dans le coffre
+// ⇒ tâche « Aujourd'hui » dans le To do : « 🔒 Site hacker vérifie ton compte : X ».
+// ⚠ Le coffre est CHIFFRÉ : le croisement n'est possible QUE déverrouillé — d'où l'appel au
+// déverrouillage ET à chaque ouverture d'Actu (no-op si verrouillé, aucune requête). Rien du
+// coffre ne sort : seul le NOM du site part dans le libellé de la tâche, jamais un identifiant.
+// ⚠ Marqueur `spotifyplus_leak_todo` (hors sauvegarde, re-dérivable) = { site|date : jour } :
+// UNE tâche par fuite et par site, même si elle a été supprimée — sans lui, chaque ouverture
+// d'Actu recréerait la même tâche. Purgé au-delà de LEAK_TODO_MAX_DAYS.
+const LEAK_TODO_KEY = 'spotifyplus_leak_todo';
+const LEAK_TODO_MAX_DAYS = 90;
+// Normalisation commune : minuscules, sans accents, sans rien d'autre que [a-z0-9]
+// (« Air France » et « airfrance.fr » doivent tomber sur la même clé).
+const leakNorm = v => String(v || '').toLowerCase().normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+const leakHostKey = h => leakNorm(String(h || '').toLowerCase().replace(/^www\./, '').split('.')[0]);
+function leakKeysOf(l) {
+  const out = new Set();
+  if (l.domain) out.add(leakHostKey(l.domain));
+  if (l.slug)   out.add(leakNorm(l.slug));
+  out.add(leakNorm(String(l.text || '').split(/[—–|:]/)[0]));
+  out.delete('');
+  return out;
+}
+function leakVaultKeys(e) {
+  const out = new Set();
+  out.add(leakNorm(e.titre));
+  const u = safeHref(e.url);
+  if (u) { try { out.add(leakHostKey(new URL(u).hostname)); } catch {} }
+  out.delete('');
+  return out;
+}
+function syncLeakVaultTodos() {
+  const entries = _mdpSession && _mdpSession.unlocked ? _mdpSession.entries : null;
+  if (!Array.isArray(entries) || !entries.length) return false;
+  const cache = loadActu();
+  const leaks = (cache && cache.leaks && cache.leaks.items) || [];
+  if (!leaks.length) return false;
+  let mark = {}; try { mark = JSON.parse(lsGet(LEAK_TODO_KEY)) || {}; } catch {}
+  const today = localDayStr();
+  let todos = null, changed = false;
+  for (const l of leaks) {
+    const lk = leakKeysOf(l), full = leakNorm(l.text);
+    for (const e of entries) {
+      // Égalité de clé, ou nom du site (≥ 5 caractères) retrouvé DANS le libellé de la fuite
+      // — « Fuite de données chez Air France » ne tombe pas sur une clé exacte.
+      const hit = [...leakVaultKeys(e)].some(k => k.length >= 3 && (lk.has(k) || (k.length >= 5 && full.includes(k))));
+      if (!hit) continue;
+      const site = String(e.titre || '').trim() || String(l.text || '').split(/[—–|:]/)[0].trim();
+      const key = leakNorm(site) + '|' + (l.date || '');
+      if (!site || mark[key]) continue;
+      if (!todos) todos = loadTodos();
+      todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2),
+        text: `🔒 Site hacker vérifie ton compte : ${site}`, bucket:'today', fav:false });
+      mark[key] = today;
+      changed = true;
+      break;   // une seule tâche par fuite
+    }
+  }
+  if (changed) {
+    saveTodos(todos);
+    const oldest = localDayStr(new Date(Date.now() - LEAK_TODO_MAX_DAYS * 86400000));
+    const keep = {};
+    for (const k of Object.keys(mark)) if (mark[k] >= oldest) keep[k] = mark[k];
+    lsSet(LEAK_TODO_KEY, JSON.stringify(keep));
+  }
+  return changed;
+}
+
 // Copie d'un mot de passe : le presse-papiers est PURGÉ 10 minutes après la copie
 // (sinon le mot de passe y reste indéfiniment — presse-papiers parfois synchronisé
 // cross-device par l'OS). L'écriture peut échouer si l'onglet n'a plus le focus → best-effort.
@@ -40424,7 +40498,7 @@ function GestionMdpPanel() {
       setMsg('🔒 Coffre verrouillé automatiquement (inactivité).');
     };
     _mdpLockSubs.add(onAutoLock);
-    if (_mdpSession.unlocked) mdpBumpActivity();
+    if (_mdpSession.unlocked) { mdpBumpActivity(); try { syncLeakVaultTodos(); } catch {} }
     return () => _mdpLockSubs.delete(onAutoLock);
   }, []);
 
@@ -40465,6 +40539,8 @@ function GestionMdpPanel() {
       if ((blob.v || 1) < MDP_VAULT_V || Array.isArray(data)) { try { saveVaultBlob(await mdpEncrypt(pw, vault)); } catch {} }
       masterRef.current = pw; _mdpSession = { unlocked:true, pw, entries:vault.entries, tags:vault.tags };
       setEntries(vault.entries); setTags(vault.tags); setPhase('unlocked'); setPw(''); mdpBumpActivity();
+      // Coffre lisible → croisement avec les dernières fuites de données (tâche To do).
+      try { syncLeakVaultTodos(); } catch {}
     } catch { setErr('Mot de passe maître incorrect'); }
     setBusy(false);
   };
