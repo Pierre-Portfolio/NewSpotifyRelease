@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.11.0';
+const APP_VERSION = '13.11.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5082,10 +5082,14 @@ const D_HI_RESET_LS = 'spotifyplus_doodle_hi_reset';
 // ⚠ `plox` y RESTE aussi alors que Plox est revenu (13.10.1), et c'est VOULU : la purge tourne
 // au chargement du module, donc avant la première partie, et elle efface le record de l'ANCIEN
 // Plox (retiré en 12.6.2, tout autres règles) — le nouveau repart de zéro, comme il se doit.
+// ⚠ La vague `_v9` (13.11.1) ne sert QU'À ÇA, une deuxième fois : le barème de Plox est devenu
+// le barème simple (cf. PLOX_PT_*), et un record d'avant — des dizaines de milliers de points —
+// ne serait plus jamais battu. Renommer le drapeau est le SEUL moyen de remettre un record à
+// zéro sur tous les appareils, le record lui-même n'étant jamais réécrit à la baisse.
 const REMOVED_GAMES = ['flipper', 'snake', 'bounce', 'sudoku', 'flip7', 'solitaire', 'blackjack', 'poker', 'plox', 'bataille', 'tetris'];   // jeux retirés du Hub
 // Réglages laissés par un jeu retiré, hors préfixe `spotifyplus_game_hi_` (niveau choisi…).
 const REMOVED_GAME_KEYS = ['spotifyplus_game_sudoku_level', 'spotifyplus_game_sol_draw'];
-const HI_PURGE_LS = 'spotifyplus_hi_purged_v8';
+const HI_PURGE_LS = 'spotifyplus_hi_purged_v9';
 (function purgeRemovedGameHiOnce() {
   try {
     if (localStorage.getItem(HI_PURGE_LS)) return;
@@ -5096,6 +5100,7 @@ const HI_PURGE_LS = 'spotifyplus_hi_purged_v8';
     localStorage.removeItem('spotifyplus_hi_purged_v5');
     localStorage.removeItem('spotifyplus_hi_purged_v6');
     localStorage.removeItem('spotifyplus_hi_purged_v7');
+    localStorage.removeItem('spotifyplus_hi_purged_v8');
     // ⚠ La liste est CUMULATIVE : un appareil qui n'a jamais vu une vague précédente doit
     // encore nettoyer ses clés, un seul drapeau suffit donc — mais il faut un NOUVEAU nom
     // à chaque vague, sinon la nouvelle purge ne partirait pas là où l'ancienne a tourné.
@@ -5597,7 +5602,7 @@ function GameSimon() {
 // n'y a plus qu'un signe à l'écran, et c'est la COULEUR SEULE qui distingue les pièces —
 // d'où une palette franchement fluo, quatre teintes prises aux quatre coins du cercle.
 // ⚠ La gravité est PAR COLONNE et se rejoue tant qu'elle crée de nouveaux alignements : c'est
-// la boucle de chaîne (`s.chain`), et c'est elle qui rapporte les gros scores.
+// la boucle de chaîne (`s.chain`) — elle offre des alignements, mais ne multiplie plus rien.
 // ⚠ L'effacement passe par un état d'ANIMATION (`s.clear`) qui suspend la chute, sinon on ne
 // verrait jamais ce que l'on vient de réussir (même parti pris que l'ancien Tetris).
 // ⚠ La pièce naît ENTIÈREMENT AU-DESSUS de la grille (`r = -(PLOX_LEN - 1)`, donc négatif) :
@@ -5629,11 +5634,15 @@ const PLOX_COLORS = [
   { c:'#2ce86f' },   // vert acide
   { c:'#ffd12e' },   // jaune vif
 ];
-// Points : 10 par bloc × (niveau + 1) × multiplicateur de chaîne. La chaîne est TOUT
-// l'intérêt du jeu, d'où une courbe franchement croissante (plafonnée, sinon un combo
-// heureux écrase n'importe quelle partie jouée proprement).
-const PLOX_CHAIN = [1, 1, 2, 4, 6, 8, 10, 12];
-const ploxChainMul = n => PLOX_CHAIN[Math.min(n, PLOX_CHAIN.length - 1)];
+// Points — barème SIMPLE (demande utilisateur) : le score ne compte QUE les blocs dégommés.
+// Un bloc vaut 1, 2 s'il part dans un alignement DIAGONAL (plus dur à monter), et chaque bloc
+// AU-DELÀ des PLOX_MIN d'un même alignement vaut 3 (un alignement de 5 = 3 + 2 blocs bonus).
+// ⚠ Plus AUCUN multiplicateur : ni niveau, ni chaîne, et la descente rapide ne rapporte plus
+// rien — un score se lit maintenant comme un nombre de blocs, et les records d'avant (des
+// dizaines de milliers de points) sont donc purgés avec la vague HI_PURGE_LS.
+// ⚠ Le compte se fait PAR ALIGNEMENT, pas par case : une case au croisement de deux
+// alignements est détruite une seule fois mais rapporte dans les deux.
+const PLOX_PT_BLOC = 1, PLOX_PT_DIAG = 2, PLOX_PT_BONUS = 3;
 const ploxLevel = destroyed => Math.floor(destroyed / PLOX_PER_LEVEL);
 const ploxDrop  = destroyed => Math.max(110, 700 - ploxLevel(destroyed) * 55);
 const ploxRand  = () => 1 + ((Math.random() * PLOX_COLORS.length) | 0);
@@ -5672,11 +5681,15 @@ function ploxRotate(g, p) {
 }
 
 // Tous les alignements d'au moins PLOX_MIN blocs de même couleur, dans les 4 directions.
-// Renvoie la liste des INDEX de cases à détruire (dédoublonnés : une case peut appartenir à
-// deux alignements qui se croisent, elle ne doit être comptée qu'une fois).
+// Renvoie `{ cells, points }` : les INDEX des cases à détruire (dédoublonnés — une case peut
+// appartenir à deux alignements qui se croisent, elle ne doit être EFFACÉE qu'une fois) et le
+// score du coup, lui compté PAR ALIGNEMENT (cf. PLOX_PT_*).
+// ⚠ Les deux dernières directions sont les DIAGONALES : c'est `dc && dr` qui les reconnaît,
+// pas leur rang dans la liste.
 const PLOX_DIRS = [[1, 0], [0, 1], [1, 1], [1, -1]];
 function ploxMatches(g) {
   const hit = new Set();
+  let points = 0;
   for (let r = 0; r < PLOX_ROWS; r++) for (let c = 0; c < PLOX_COLS; c++) {
     const v = g[r * PLOX_COLS + c];
     if (!v) continue;
@@ -5686,10 +5699,12 @@ function ploxMatches(g) {
       if (ploxAt(g, c - dc, r - dr) === v) continue;
       let n = 1;
       while (ploxAt(g, c + dc * n, r + dr * n) === v) n++;
-      if (n >= PLOX_MIN) for (let i = 0; i < n; i++) hit.add((r + dr * i) * PLOX_COLS + (c + dc * i));
+      if (n < PLOX_MIN) continue;
+      for (let i = 0; i < n; i++) hit.add((r + dr * i) * PLOX_COLS + (c + dc * i));
+      points += PLOX_MIN * (dc && dr ? PLOX_PT_DIAG : PLOX_PT_BLOC) + (n - PLOX_MIN) * PLOX_PT_BONUS;
     }
   }
-  return [...hit];
+  return { cells: [...hit], points };
 }
 // Gravité : dans chaque colonne, tout ce qui flotte retombe au plus bas.
 function ploxGravity(g) {
@@ -5716,7 +5731,7 @@ function ploxJunk(g) {
   for (let r = PLOX_ROWS / 2; r < PLOX_ROWS; r++)
     for (let c = 0; c < PLOX_COLS; c++) g[r * PLOX_COLS + c] = ploxRand();
   for (let pass = 0; pass < 24; pass++) {
-    const m = ploxMatches(g);
+    const m = ploxMatches(g).cells;
     if (!m.length) break;
     for (const i of m) g[i] = ploxRand();   // on RECOLORE au lieu de vider : la grille reste pleine à moitié
   }
@@ -5898,19 +5913,20 @@ function GamePlox() {
   // Arme l'effacement des alignements présents ; rien à effacer ⇒ ligne suivante (ou
   // victoire en mode Puzzle, grille vidée).
   const resolve = s => {
-    const cells = ploxMatches(s.g);
+    const { cells, points } = ploxMatches(s.g);
     if (!cells.length) {
       if (s.mode === 'puzzle' && ploxEmpty(s.g)) { overRef.current && overRef.current(true); return; }
       nextPiece(s);
       return;
     }
     s.chain++;
-    const mul = ploxChainMul(s.chain);
     s.destroyed += cells.length;
-    s.score += cells.length * 10 * (ploxLevel(s.destroyed) + 1) * mul;
+    s.score += points;
     setScore(s.score);
     s.flash = 60;
-    s.flashTxt = s.chain > 1 ? `COMBO ×${mul} !` : cells.length + ' BLOCS';
+    // ⚠ La chaîne ne MULTIPLIE plus rien : elle n'est plus qu'un fait à annoncer, les points
+    // du coup étant les mêmes qu'il soit joué ou offert par la gravité.
+    s.flashTxt = (s.chain > 1 ? 'COMBO ! ' : '') + '+' + points;
     s.clear = { cells, t: 0 };
   };
   const step = React.useCallback(() => {
@@ -5926,14 +5942,13 @@ function GamePlox() {
     // Rotation d'un quart de tour : la ligne passe de VERTICALE à HORIZONTALE et retour, en
     // repassant par les deux orientations retournées (ordre des couleurs inversé).
     if (kind === 'rot') ploxRotate(s.g, p);
-    // ⚠ La descente rapide RAPPORTE (1 point par case) et le lâcher DEUX fois plus : c'est
-    // ce qui rend le jeu nerveux plutôt qu'attentiste.
-    if (kind === 'down' && ploxFits(s.g, p.c, p.r + 1, p.o)) { p.r++; s.score++; setScore(s.score); }
+    // ⚠ Ni la descente rapide ni le lâcher ne RAPPORTENT quoi que ce soit : le score ne
+    // compte que les blocs dégommés (barème PLOX_PT_*), sinon un lâcher depuis le haut
+    // pèserait plus lourd qu'un alignement.
+    if (kind === 'down' && ploxFits(s.g, p.c, p.r + 1, p.o)) p.r++;
     else if (kind === 'down') { lock(s); }
     if (kind === 'drop') {
-      const to = ploxDropTo(s.g, p.c, p.r, p.o);
-      s.score += Math.max(0, to - p.r) * 2; setScore(s.score);
-      p.r = to; s.last = 0; lock(s);
+      p.r = ploxDropTo(s.g, p.c, p.r, p.o); s.last = 0; lock(s);
     }
     paint();
   }, [lock]);
@@ -6000,7 +6015,7 @@ function GamePlox() {
   const title = phase === 'dead' ? '💥 La grille déborde !' : phase === 'won' ? '🎉 Grille vidée !' : '🟪 Plox';
   return (
     <GameWrap
-      hint="Les blocs tombent par LIGNES DE 3. Aligne 3 blocs de même couleur — horizontalement, verticalement ou en diagonale. Glisse pour changer de colonne, touche pour faire tourner la ligne (verticale ↔ horizontale, l'ordre des couleurs s'inverse un tour sur deux), glisse vers le bas pour lâcher. Au clavier : ← → pour déplacer, ↑ pour tourner, ↓ pour accélérer, espace pour lâcher."
+      hint="Les blocs tombent par LIGNES DE 3. Aligne 3 blocs de même couleur — horizontalement, verticalement ou en diagonale. Glisse pour changer de colonne, touche pour faire tourner la ligne (verticale ↔ horizontale, l'ordre des couleurs s'inverse un tour sur deux), glisse vers le bas pour lâcher. Au clavier : ← → pour déplacer, ↑ pour tourner, ↓ pour accélérer, espace pour lâcher. Points : 1 par bloc dégommé, 2 s'il part en diagonale, et 3 pour chaque bloc au-delà des 3 d'un même alignement."
       bar={<span style={{ fontSize:12, color:C.muted }}>Score <b style={{ color:C.text }}>{score}</b> · Record <b style={{ color:GAMES_COLOR }}>{best}</b> · <b style={{ color:C.text }}>{mode === 'puzzle' ? 'Puzzle' : 'Marathon'}</b></span>}>
       <div style={{ position:'relative', width:'100%', maxWidth:PLOX_W }}>
         <canvas ref={canvasRef} width={PLOX_W} height={PLOX_H}
