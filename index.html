@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.11.3';
+const APP_VERSION = '13.11.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -37538,6 +37538,57 @@ async function foodPhotoAnalyze(img) {
   };
 }
 
+// ── 🖼️ CAPTURE D'UNE SÉANCE (Strava & co) → CALORIES BRÛLÉES (13.11.4) ──────────
+// Demande utilisateur : « une photo de ma séance, et l'IA calcule les calories au vu de la
+// course ET de mon physique renseigné dans Santé ». L'IA LIT les chiffres de la capture
+// (durée, distance, allure, dénivelé, fréquence cardiaque) puis les traduit en calories POUR
+// CE CORPS-LÀ : la même course ne coûte pas la même chose à 60 et à 95 kg, et c'est
+// précisément ce que le chiffre affiché par l'application de sport ignore le plus souvent.
+// ⚠ Le `sport` renvoyé DOIT être un id de `FOOD_SPORTS` : la liste part dans le prompt et
+// toute autre valeur retombe sur 'autre', sinon la séance serait inajoutable (et son libellé
+// vide). Idem pour l'intensité, contrainte aux ids de `FOOD_INTENS`.
+// ⚠ Rien n'est conservé : l'image n'est référencée que par la promesse en vol, l'aperçu est
+// un object URL révoqué à la fermeture (aucun stockage, aucune sauvegarde — piège 15).
+function foodStravaPrompt(p) {
+  const phys = [
+    p && p.weight ? `poids ${p.weight} kg` : '',
+    p && p.height ? `taille ${p.height} cm` : '',
+    p && p.age    ? `${p.age} ans` : '',
+    p && p.sex    ? (p.sex === 'f' ? 'femme' : 'homme') : '',
+  ].filter(Boolean).join(', ');
+  return `Tu es un coach sportif. Voici la capture d'écran d'une séance de sport (Strava, Garmin, Nike Run, Apple Fitness ou équivalent).
+1) LIS sur l'image tout ce qui y est écrit : type d'activité, durée, distance, allure ou vitesse, dénivelé, fréquence cardiaque moyenne.
+2) ESTIME les calories réellement brûlées par CETTE personne pour CETTE séance${phys ? ` — son physique : ${phys}` : " (physique non renseigné : prends 70 kg)"}.
+Les calories dépendent du poids, de l'intensité (allure, fréquence cardiaque) et du dénivelé. Si l'application affiche déjà un nombre de calories, ne le recopie pas : recalcule-le pour ce physique, et dis dans "note" ce que tu as lu sur l'image.
+Choisis le sport parmi ces identifiants EXACTS : ${FOOD_SPORTS.map(x => x[0]).join(', ')}.
+Choisis l'intensité parmi : low (léger), mod (modéré), high (intense).
+Réponds UNIQUEMENT en JSON, sans texte autour :
+{"sport":"identifiant de la liste","intensite":"low|mod|high","minutes":durée en minutes,"kcal":calories brûlées,"distance_km":distance en km ou null,"note":"ce que tu as lu (allure, dénivelé, FC…) en moins de 90 caractères"}
+Nombres seuls, sans unité. Si l'image ne montre aucune séance de sport, renvoie {"sport":""}.`;
+}
+// img = { mimeType, data(base64) } tel que produit par frigoPhotoData.
+// Renvoie { sport, intens, min, kcal, km, note, ai, fb } ou null (rien de lisible).
+async function foodStravaAnalyze(img, profile) {
+  const raw = await aiGenerate('food', [{ text: foodStravaPrompt(profile) }, { inline_data: { mime_type: img.mimeType, data: img.data } }]);
+  const j = geminiExtract(raw, '{', '}');
+  if (!j || !j.sport) return null;
+  const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : null; };
+  const min = Math.round(num(j.minutes) || 0);
+  if (min <= 0) return null;
+  const sport  = FOOD_SPORTS.some(x => x[0] === j.sport)     ? j.sport     : 'autre';
+  const intens = FOOD_INTENS.some(x => x[0] === j.intensite) ? j.intensite : 'mod';
+  // ⚠ Le chiffre de l'IA est BORNÉ par la formule MET (×0,4 à ×2,5) : une durée mal lue ou
+  // un « 2 500 kcal » halluciné passerait sinon tel quel dans le total du jour, qui pilote
+  // l'objectif calorique. kcal absentes ⇒ la formule MET seule (jamais 0 : la séance
+  // existe, elle a été lue).
+  const met = foodSportKcal(sport, intens, min, profile && profile.weight);
+  const kc  = Math.round(num(j.kcal) || 0);
+  const kcal = kc > 0 ? (met > 0 ? Math.min(Math.max(kc, Math.round(met * 0.4)), Math.round(met * 2.5)) : kc) : met;
+  if (kcal <= 0) return null;
+  const km = num(j.distance_km);
+  return { sport, intens, min, kcal, km: km > 0 ? km : null, ...aiMeta(), note: String(j.note || '').slice(0, 140) };
+}
+
 // Une ligne de résultat : portion en grammes ajustable → calcule les kcal ET les macros en
 // direct, bouton + ajoute le repas dans la catégorie sélectionnée.
 // `defaultGrams` : portion pré-remplie (photo de plat → poids estimé par l'IA ; défaut 100 g).
@@ -37593,11 +37644,18 @@ function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav }) {
 // aucun : les deux cartes doivent toujours parler de la même journée.
 // ⚠ `onChange` reçoit la liste COMPLÈTE du jour ; c'est le parent qui persiste (une seule
 // écriture localStorage, et lui seul sait si le quota l'a refusée).
-function FoodSportSection({ day, dayLabel, isToday, weight, list, onChange }) {
+function FoodSportSection({ day, dayLabel, isToday, weight, profile, list, onChange }) {
   const [open, setOpen]     = React.useState(false);   // repliée à l'arrivée, comme les autres cartes de Santé
   const [sport, setSport]   = React.useState('course');
   const [intens, setIntens] = React.useState('mod');
   const [min, setMin]       = React.useState('30');
+  // 🖼️ Capture d'une séance (Strava & co) → l'IA lit les chiffres et estime les calories
+  // pour le physique du profil Santé. `shot` = { state, data, err, prov, prev } ; `prev` est un
+  // object URL d'APERÇU, révoqué par `setShotPrev` (une seule URL vivante à la fois) et au
+  // démontage — rien n'est stocké ni sauvegardé.
+  const shotRef    = React.useRef(null);
+  const shotUrlRef = React.useRef('');
+  const [shot, setShot] = React.useState(null);
   // Séance en cours d'édition : `ef` = brouillon { sport, intens, min, kcal, manual }.
   // `manual` passe à true dès qu'on touche au champ kcal → la valeur saisie n'est plus
   // écrasée par le recalcul MET (une montre connectée est plus juste que la formule).
@@ -37606,6 +37664,42 @@ function FoodSportSection({ day, dayLabel, isToday, weight, list, onChange }) {
   // Changer de journée abandonne l'édition en cours : le brouillon vise un id qui n'est
   // plus dans la liste affichée.
   React.useEffect(() => { setEditId(''); setEf(null); }, [day]);
+
+  const setShotPrev = (url) => {
+    if (shotUrlRef.current) URL.revokeObjectURL(shotUrlRef.current);
+    shotUrlRef.current = url;
+  };
+  React.useEffect(() => () => { if (shotUrlRef.current) URL.revokeObjectURL(shotUrlRef.current); }, []);
+  const dropShot = () => { setShotPrev(''); setShot(null); };
+  const analyzeShot = async (file) => {
+    if (!file) return;
+    // ⚠ Vision obligatoire : une capture envoyée à un fournisseur sans vision se ferait
+    // inventer une séance (piège de la chaîne IA). `aiAnyKey(true,…)` tranche avant l'appel.
+    if (!aiAnyKey(true, 'food')) {
+      setShotPrev('');
+      return setShot({ state:'err', err:'aucune clé IA avec vision (Gemini ou Groq) — module API.' });
+    }
+    const url = URL.createObjectURL(file);
+    setShotPrev(url);
+    setShot({ state:'loading', prev:url });
+    const img = await frigoPhotoData(file);   // redimensionnée ~900 px, en mémoire seulement
+    if (!img) return setShot({ state:'err', err:'image illisible.', prev:url });
+    try {
+      const d = await foodStravaAnalyze(img, profile);
+      setShot({ state: d ? 'ok' : 'none', data:d, prov: aiLastProvider(), prev:url });
+    } catch (e) {
+      setShot({ state:'err', err: String((e && e.message) || e).slice(0, 90), prev:url });
+    }
+  };
+  // Enregistre la séance proposée par la capture. Les kcal viennent de l'IA (qui a vu
+  // l'allure et le dénivelé) : `manual:true` pour que corriger le sport ou la durée ne les
+  // remplace JAMAIS par la formule MET, et `ai` garde la trace du fournisseur (✨ sur la ligne).
+  const addFromShot = (d) => {
+    if (!d || d.min <= 0 || d.kcal <= 0) return;
+    onChange([...(list || []), { id: Date.now() + '_' + Math.random().toString(36).slice(2),
+      sport:d.sport, intens:d.intens, min:d.min, kcal:d.kcal, manual:true, ai:d.ai }]);
+    dropShot();
+  };
 
   const burn  = foodSportBurn(list);
   const mins  = (list || []).reduce((n, s) => n + (parseInt(s.min, 10) || 0), 0);
@@ -37657,10 +37751,18 @@ function FoodSportSection({ day, dayLabel, isToday, weight, list, onChange }) {
             {FOOD_SPORTS.map(([id, emo, lbl]) => <option key={id} value={id}>{emo} {lbl}</option>)}
           </select>
         </label>
-        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
           {FOOD_INTENS.map(([v, emo, lbl, hint]) => (
             <button key={v} onClick={() => setIntens(v)} title={hint} style={btnSt(intens === v)}>{emo} {lbl}</button>
           ))}
+          {/* 🖼️ À DROITE d'« Intense » (demande utilisateur) : une capture de séance
+              (Strava, Garmin, Nike Run…) prise dans la GALERIE — `accept="image/*"` sans
+              `capture`, donc jamais l'appareil photo : une séance se relit sur un écran. */}
+          <button onClick={() => shotRef.current && shotRef.current.click()}
+            title="Choisir une capture de séance (Strava…) dans la galerie : l'IA y lit la course et calcule les calories pour ton physique"
+            style={{ ...btnSt(false), fontSize:13, padding:'2px 8px', marginLeft:'auto' }}>🖼️</button>
+          <input ref={shotRef} type="file" accept="image/*" style={{ display:'none' }}
+            onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; analyzeShot(f); }} />
         </div>
         <div style={{ display:'flex', gap:6, alignItems:'center' }}>
           <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>durée</span>
@@ -37675,6 +37777,47 @@ function FoodSportSection({ day, dayLabel, isToday, weight, list, onChange }) {
         <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>
           MET {foodSportMet(sport, intens)} × {Number(weight) > 0 ? `${weight} kg` : `${FOOD_SPORT_KG} kg (poids par défaut — remplis ton profil)`} × durée
         </div>
+        {/* Résultat de la capture : une séance PROPOSÉE, ajoutée au + comme une saisie
+            normale — jamais enregistrée d'office (l'IA a pu mal lire une allure). */}
+        {shot && (
+          <div style={{ display:'flex', flexDirection:'column', gap:4, background:C.surface, border:`1px solid ${FOOD_COLOR}44`, borderRadius:8, padding:'6px 8px' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              {shot.prev && <img src={shot.prev} alt="" style={{ width:44, height:44, objectFit:'cover', borderRadius:6, flexShrink:0 }} />}
+              <div style={{ flex:1, minWidth:0, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.35 }}>
+                🖼️ Capture de séance — l'image n'est pas conservée.
+              </div>
+              <button onClick={dropShot} title="Retirer la capture"
+                style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:'#e05050', fontSize:12, lineHeight:1, padding:'2px 7px', cursor:'pointer', flexShrink:0 }}>×</button>
+            </div>
+            {shot.state === 'ok' && shot.data ? (() => {
+              const d = shot.data, def = foodSportDef(d.sport);
+              const it = FOOD_INTENS.find(x => x[0] === d.intens) || FOOD_INTENS[1];
+              return (
+                <div style={{ display:'flex', flexDirection:'column', gap:5, background:C.surfaceHigh, border:`1px solid ${FOOD_COLOR}55`, borderRadius:8, padding:'6px 8px' }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                    <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>
+                      {def[1]} {def[2]} · {d.min} min{d.km ? ` · ${d.km} km` : ''} · {it[1]} {it[2]}
+                    </div>
+                    <span style={{ fontSize:11, color:'#e07b54', fontFamily:'DM Mono,monospace', flexShrink:0 }}>🔥 {d.kcal} kcal</span>
+                    <button onClick={() => addFromShot(d)} title="Enregistrer cette séance"
+                      style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:16, lineHeight:1, padding:'0 11px', cursor:'pointer', flexShrink:0 }}>+</button>
+                  </div>
+                  <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.45 }}>
+                    ✨ {aiLabel(shot.prov)} · calories estimées pour ton physique{Number(weight) > 0 ? ` (${weight} kg)` : ' (poids non renseigné — remplis ton profil)'}
+                    {d.note ? ` · ${d.note}` : ''} <AiFallbackBadge fb={d.fb} />
+                  </div>
+                </div>
+              );
+            })() : (
+              <div style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: shot.state === 'err' ? C.dim : '#8b7bf5',
+                background:C.surfaceHigh, border:`1px solid ${shot.state === 'err' ? C.border : '#8b7bf544'}`, borderRadius:8, padding:'5px 8px' }}>
+                {shot.state === 'loading' ? "⏳ L'IA lit la capture de ta séance…"
+                  : shot.state === 'none' ? '✨ Aucune séance de sport reconnue sur cette image.'
+                  : `✨ Analyse impossible — ${shot.err || 'erreur'}`}
+              </div>
+            )}
+          </div>
+        )}
         {/* Séances du jour */}
         {(list || []).length === 0 ? (
           <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'4px 0', fontFamily:'DM Mono,monospace' }}>
@@ -37718,7 +37861,9 @@ function FoodSportSection({ day, dayLabel, isToday, weight, list, onChange }) {
             ) : (
               <div key={s.id} style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'5px 8px' }}>
                 <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>
-                  {foodSportLabel(s)}{s.manual && <span style={{ color:C.dim }} title="calories corrigées à la main"> ✎</span>}
+                  {foodSportLabel(s)}
+                  {s.ai ? <span style={{ color:C.dim }} title={`calories estimées par ${aiLabel(s.ai)} depuis une capture de séance`}> ✨</span>
+                    : s.manual ? <span style={{ color:C.dim }} title="calories corrigées à la main"> ✎</span> : null}
                 </div>
                 <span style={{ fontSize:10, color:'#e07b54', fontFamily:'DM Mono,monospace', flexShrink:0 }}>🔥 {s.kcal} kcal</span>
                 <button onClick={() => startEdit(s)} title="Modifier la séance"
@@ -38146,7 +38291,7 @@ function NourriturePanel() {
 
       {/* ── 🏃 Séances de sport : type + durée + intensité → calories brûlées (MET) ── */}
       <FoodSportSection day={selDay} dayLabel={selDayLabel} isToday={selDay === today}
-        weight={profile && profile.weight} list={daySport} onChange={commitSport} />
+        weight={profile && profile.weight} profile={profile} list={daySport} onChange={commitSport} />
 
       {/* ── Nourriture : jauge du jour édité + saisie des repas ── */}
       <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
