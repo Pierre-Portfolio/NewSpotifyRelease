@@ -29,7 +29,7 @@ PWA **sans backend** sur GitHub Pages, données 100 % locales (sql.js SQLite WAS
 | `vendor/leaflet.js` / `.css` | Leaflet 1.9.4, **lazy** (`loadLeaflet()`) |
 | `vendor/motus-words.js` / `motus-dico.js` | Données Motus (~1,1 Mo), **lazy** (`loadMotusData()`), IIFE → `window.MOTUS_WORDS` / `MOTUS_DICO` |
 | `data/actu.json` | Sources Actu pré-fetchées par `update-data.yml` (cron 2 h) via `scripts/fetch_actu.py`. Lu same-origin ; > 24 h → repli fetchers client (proxies CORS). Clé `via` = les relais publics empruntés par section (vide = direct) → bandeau `ActuViaNotice` |
-| `data/indices.json` | Indices boursiers via `scripts/fetch_indices.py` (Stooq→Yahoo), **même workflow**, séance seulement (06–22 UTC, lun–ven). La valeur vient d'un **relais public** : `check_quote` refuse un non-nombre ou un écart > 25 % avec le relevé précédent, et la clé `via` de chaque cours nomme le relais → bandeau `IndicesViaNotice` |
+| `data/indices.json` | Indices boursiers via `scripts/fetch_indices.py` (Stooq→Yahoo), **même workflow**, séance seulement (06–22 UTC, lun–ven). La valeur vient d'un **relais public** : `check_quote` refuse un non-nombre ou un écart > 25 % avec le relevé précédent, et la clé `via` de chaque cours nomme le relais (écrite dans le JSON, **plus affichée** : le bandeau a été retiré en 13.9.8) |
 | `scripts/commit_data.sh` | Commit des deux JSON. Chacun réécrit son `updated_at` ⇒ **un run = un diff** : le commit du jour est **amendé + force-push** tant qu'il est en tête ⇒ **1 seul commit/jour** (jamais d'amende par-dessus un commit humain ; `--force-with-lease`). ⚠ Côté local, `git pull` sur `main` peut diverger → `git pull --rebase` |
 
 ## Stack & sécurité
