@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.12.3';
+const APP_VERSION = '13.12.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32484,6 +32484,19 @@ function BullrunMacroCal() {
 // position du prix du jour (en σ) désigne la bande. ⚠ Un historique trop court ne donne
 // aucune bande fiable : on le DIT au lieu d'inventer une couleur.
 const RAINBOW_MIN_PTS = 180;
+const RAINBOW_DRAW_PTS = 700;   // points gardés pour le TRACÉ (la régression, elle, voit tout)
+// Décimation régulière (1 point sur k) pour le dessin : 6 000 points quotidiens depuis 2009
+// ne donnent pas une courbe plus juste sur 300 px de large, seulement un SVG illisible et un
+// cache module-level obèse. ⚠ Le DERNIER point est réinjecté d'office : c'est le prix du
+// jour, celui que la bande et le curseur annoncent — le perdre décalerait les deux.
+function rainbowThin(pts, max) {
+  if (pts.length <= max) return pts;
+  const k = Math.ceil(pts.length / max), out = [];
+  for (let i = 0; i < pts.length; i += k) out.push(pts[i]);
+  const last = pts[pts.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
 const RAINBOW_BANDS = [
   { z:-1.5, label:'Occasion en or',    color:'#3b7ddd' },
   { z:-0.9, label:'Accumuler',         color:'#2eb872' },
@@ -32515,8 +32528,12 @@ function rainbowFit(prices) {
   if (!sigma || !isFinite(sigma)) return { err:'régression impossible' };
   const last = pts[pts.length - 1];
   const xN = Math.log((last[0] - t0) / DAY + 2);
+  // ⚠ On REMONTE la régression elle-même (a, b, sigma, t0) et la série allégée : sans elles,
+  // seul le σ du jour serait affichable — or le vrai rainbow, c'est la COURBE du prix posée
+  // sur les bandes, pas un curseur sur une échelle.
   return { price: last[1], z: (Math.log(last[1]) - (a + b * xN)) / sigma, since: pts[0][0],
-    until: last[0], years: (last[0] - t0) / DAY / 365, n };
+    until: last[0], years: (last[0] - t0) / DAY / 365, n,
+    a, b, sigma, t0, series: rainbowThin(pts, RAINBOW_DRAW_PTS) };
 }
 // ⚠ 13.11.7 — LE RAINBOW NE PORTE QUE LE BITCOIN, ET NE DOIT PLUS RIEN À COINGECKO
 // (demande utilisateur). Deux raisons qui se rejoignent :
@@ -32578,15 +32595,102 @@ async function bullrunFetchRainbow() {
   // panne du module alors que c'est une source tierce qui n'a pas répondu.
   throw new Error('Aucun historique bitcoin accessible — ' + tries.join(' · '));
 }
-// Position du prix sur l'échelle −2σ … +2σ, avec les bandes en fond.
-function RainbowBar({ z, color }) {
-  const p = Math.max(0, Math.min(100, ((z + 2) / 4) * 100));
+// ── LE VRAI RAINBOW CHART (13.12.4, demande utilisateur) ──────────────────────
+// La version précédente ne montrait qu'un CURSEUR sur une échelle −2σ…+2σ : la bande du jour,
+// et rien d'autre. Un rainbow chart, c'est l'inverse — toute l'HISTOIRE du prix posée sur les
+// bandes, en échelle log, où l'on voit les cycles entrer et sortir du rouge.
+// Les bandes sont les zones entre deux écarts-types de la régression ln(prix) = a + b·ln(jours) :
+// tracées contre le TEMPS (et non contre ln(jours)), elles s'incurvent et s'évasent, exactement
+// comme sur blockchaincenter — mais avec NOS paramètres, recalculés en direct, pas les leurs.
+// ⚠ Aucune dimension en pixels : viewBox + width:100% pour rester lisible à 400 px de large.
+// ⚠ Les données viennent de Blockchain.com puis Stooq — JAMAIS de CoinGecko, qui plafonne
+// l'historique public à 365 j (voir le commentaire de `bullrunFetchRainbow`).
+// Arêtes des 7 bandes : RAINBOW_BANDS[i].z est la BORNE HAUTE de la bande i, d'où les deux
+// extrémités ajoutées à la main (±2.2σ) pour fermer la première et la dernière.
+const RAINBOW_EDGES = [-2.2].concat(RAINBOW_BANDS.slice(0, -1).map(b => b.z), [2.2]);
+const RAINBOW_VB  = { w:340, h:190, l:31, r:6, t:6, b:15 };
+const RAINBOW_COLS = 96;   // échantillons de temps pour tracer les arêtes
+// Étiquette d'une graduation log10 : … 0.1 · 1 · 10 · 1k · 100k · 1M
+function rainbowTickLabel(k) {
+  if (k >= 6) return Math.pow(10, k - 6) + 'M';
+  if (k >= 3) return Math.pow(10, k - 3) + 'k';
+  if (k >= 0) return String(Math.pow(10, k));
+  return Math.pow(10, k).toFixed(-k);
+}
+function RainbowChart({ fit, color }) {
+  const { a, b, sigma, t0, series } = fit;
+  const V = RAINBOW_VB, DAY = 86400000, L10 = Math.LN10;
+  const t1 = series[series.length - 1][0];
+  const span = Math.max(1, t1 - t0);
+  // La régression vit en ln(jours) : on repasse par le même x pour chaque date échantillonnée.
+  const xf = t => Math.log((t - t0) / DAY + 2);
+  const cols = [];
+  for (let i = 0; i <= RAINBOW_COLS; i++) cols.push(t0 + span * (i / RAINBOW_COLS));
+  const edgeY = RAINBOW_EDGES.map(z => cols.map(t => (a + b * xf(t) + z * sigma) / L10));
+  // ⚠ L'échelle se cale sur le PRIX (plus les deux arêtes extrêmes d'AUJOURD'HUI, pour qu'on
+  // voie où on en est dans l'arc-en-ciel), pas sur toute l'étendue des bandes : à l'origine
+  // les arêtes divergent vers des prix qui n'ont jamais existé, et les prendre en compte
+  // écrasait toute la courbe dans le quart haut du cadre. Les rubans sont donc DÉTOURÉS.
+  let lo = Infinity, hi = -Infinity;
+  for (const pt of series) { const y = Math.log(pt[1]) / L10; if (y < lo) lo = y; if (y > hi) hi = y; }
+  lo = Math.min(lo, edgeY[0][RAINBOW_COLS]);
+  hi = Math.max(hi, edgeY[edgeY.length - 1][RAINBOW_COLS]);
+  const marge = (hi - lo) * 0.03 || 0.1;
+  lo -= marge; hi += marge;
+  const IW = V.w - V.l - V.r, IH = V.h - V.t - V.b;
+  const px = t => V.l + ((t - t0) / span) * IW;
+  const py = y => V.t + (1 - (y - lo) / (hi - lo)) * IH;
+  // Un ruban par bande : arête haute de gauche à droite, puis arête basse en sens inverse.
+  const bands = RAINBOW_BANDS.map((bd, i) => {
+    const top = edgeY[i + 1], bot = edgeY[i];
+    let d = '';
+    for (let k = 0; k <= RAINBOW_COLS; k++) d += (k ? 'L' : 'M') + px(cols[k]).toFixed(1) + ' ' + py(top[k]).toFixed(1) + ' ';
+    for (let k = RAINBOW_COLS; k >= 0; k--) d += 'L' + px(cols[k]).toFixed(1) + ' ' + py(bot[k]).toFixed(1) + ' ';
+    return d + 'Z';
+  });
+  const line = series.map((pt, i) => (i ? 'L' : 'M') + px(pt[0]).toFixed(1) + ' ' + py(Math.log(pt[1]) / L10).toFixed(1)).join(' ');
+  // Graduations : les puissances de 10 comprises dans la fenêtre, éclairées si elles se marchent dessus.
+  const decades = [];
+  for (let k = Math.ceil(lo); k <= Math.floor(hi); k++) decades.push(k);
+  const kStep = Math.ceil(decades.length / 7) || 1;
+  const yA = new Date(t0).getFullYear(), yB = new Date(t1).getFullYear();
+  const yStep = Math.ceil((yB - yA) / 6) || 1;
+  const years = [];
+  for (let y = yA + 1; y <= yB; y += yStep) years.push(y);
   return (
-    <div style={{ position:'relative', height:10, borderRadius:5, overflow:'hidden', display:'flex' }}>
-      {RAINBOW_BANDS.map((b, i) => (
-        <div key={i} style={{ flex: i === RAINBOW_BANDS.length - 1 ? 1.25 : (i === 0 ? 1.25 : 1), background:`${b.color}33` }} />
+    <svg viewBox={`0 0 ${V.w} ${V.h}`} style={{ width:'100%', height:'auto', display:'block' }}
+      role="img" aria-label="Rainbow chart du bitcoin : prix en échelle logarithmique sur les bandes de régression">
+      <defs><clipPath id="rainbow-clip"><rect x={V.l} y={V.t} width={IW} height={IH} /></clipPath></defs>
+      <rect x={V.l} y={V.t} width={IW} height={IH} fill={C.surfaceHigh} />
+      <g clipPath="url(#rainbow-clip)">
+        {bands.map((d, i) => <path key={i} d={d} fill={RAINBOW_BANDS[i].color} opacity={0.82} />)}
+      </g>
+      {decades.filter((_, i) => i % kStep === 0).map(k => (
+        <g key={k}>
+          <line x1={V.l} x2={V.w - V.r} y1={py(k)} y2={py(k)} stroke={C.border} strokeWidth={0.4} opacity={0.55} />
+          <text x={V.l - 3} y={py(k) + 2.4} textAnchor="end" fontSize={6.5} fill={C.dim} fontFamily="DM Mono,monospace">{rainbowTickLabel(k)}</text>
+        </g>
       ))}
-      <div style={{ position:'absolute', left:`calc(${p}% - 2px)`, top:0, bottom:0, width:4, background:color, borderRadius:2 }} />
+      {years.map(y => {
+        const t = new Date(y, 0, 1).getTime();
+        if (t <= t0 || t >= t1) return null;
+        return <text key={y} x={px(t)} y={V.h - 4} textAnchor="middle" fontSize={6.5} fill={C.dim} fontFamily="DM Mono,monospace">{y}</text>;
+      })}
+      <path d={line} fill="none" stroke={C.text} strokeWidth={1.1} strokeLinejoin="round" strokeLinecap="round" clipPath="url(#rainbow-clip)" />
+      <circle cx={px(t1)} cy={py(Math.log(fit.price) / L10)} r={2.6} fill={color} stroke={C.text} strokeWidth={0.8} />
+    </svg>
+  );
+}
+// Légende des 7 bandes, celle du jour en gras : sans elle, le graphique est joli mais muet.
+function RainbowLegend({ active }) {
+  return (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:'2px 7px', marginTop:5 }}>
+      {RAINBOW_BANDS.map(b => (
+        <span key={b.label} style={{ display:'inline-flex', alignItems:'center', gap:3, fontSize:8.5,
+          color: b.label === active ? C.text : C.dim, fontWeight: b.label === active ? 800 : 400 }}>
+          <span style={{ width:7, height:7, borderRadius:2, background:b.color, flexShrink:0 }} />{b.label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -32596,7 +32700,7 @@ function BullrunRainbow() {
   const bd = c && !c.err ? rainbowBand(c.z) : null;
   return (
     <BullrunSumCard title="BANDES RECALCULÉES EN DIRECT" st={st} onReload={load}
-      note={<>Méthode du Rainbow Chart — régression logarithmique du prix sur tout l'historique disponible — appliquée au <b>seul bitcoin</b> : les bandes ne veulent rien dire sur un jeton qui n'a pas traversé plusieurs cycles. La bande dit l'écart au trend (en σ), pas une prédiction. La ligne nomme sa source (Blockchain.com remonte à 2009, Stooq à 2010) et le nombre de points qui ont servi. Ce ne sont <b>pas</b> les bandes officielles de blockchaincenter, qui ont leurs propres paramètres.</>}>
+      note={<>Le vrai rainbow : <b>tout l'historique du prix</b> (échelle logarithmique) posé sur les bandes de la régression ln(prix) = a + b·ln(jours), recalculée en direct sur le <b>seul bitcoin</b> — les bandes ne veulent rien dire sur un jeton qui n'a pas traversé plusieurs cycles. Le point de couleur est aujourd'hui. La bande dit l'écart au trend (en σ), pas une prédiction. La ligne nomme sa source (Blockchain.com remonte à 2009, Stooq à 2010) et le nombre de points qui ont servi — <b>jamais CoinGecko</b>, qui plafonne l'historique public à 365 jours. Ce ne sont <b>pas</b> les bandes officielles de blockchaincenter, qui ont leurs propres paramètres.</>}>
       {c && (
         <BullrunCoinRow c={c}
           right={c.err
@@ -32606,7 +32710,10 @@ function BullrunRainbow() {
                 <span style={{ fontSize:9, color:bd.color, marginLeft:6, fontWeight:700 }}>{bd.label}</span>
               </>}
           sub={c.err ? null : <>
-            <div style={{ marginTop:4 }}><RainbowBar z={c.z} color={bd.color} /></div>
+            {c.series && c.series.length > 1 && isFinite(c.sigma) && c.sigma > 0 && (
+              <div style={{ marginTop:5 }}><RainbowChart fit={c} color={bd.color} /></div>
+            )}
+            <RainbowLegend active={bd.label} />
             <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:3 }}>
               {(c.z >= 0 ? '+' : '') + c.z.toFixed(2)}σ au-dessus du trend · {c.n} points depuis {new Date(c.since).getFullYear()}
               {c.src ? ` · ${c.src}` : ''}
