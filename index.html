@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.13.0';
+const APP_VERSION = '13.13.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3202,6 +3202,12 @@ function StoreProvider({ children }) {
         // Remember : notification à l'ouverture de l'app pour tout rappel échu (1×/jour)
         try { notifyDueReminders(); } catch {}
 
+        // ⚠ TV Time vit dans sa PROPRE base IndexedDB depuis 13.13.1 : la précharger AVANT
+        // tout ce qui la lit (synchro quotidienne, alertes d'épisode, accueil, sauvegarde).
+        // Tant qu'elle n'a pas répondu, `loadTvItems` rend une liste vide et `saveTvItems`
+        // refuse d'écrire — attendre ici, c'est ce qui garde les deux honnêtes.
+        try { await tvItemsPreload(); } catch {}
+
         // TV Time : SYNCHRO QUOTIDIENNE dès la connexion (8.9.2) — nouvelles vidéos/Shorts de
         // chaque chaîne YouTube puis nouvelles saisons des séries suivies, 1× par jour civil.
         // Fire-and-forget (ne bloque pas l'init) — écrit directement en localStorage.
@@ -4491,6 +4497,14 @@ function StoreProvider({ children }) {
     // traverse sans rien demander — les anciens fichiers restent restaurables.
     data = await backupOpen(data);
     const res = applyBackup(data);
+    // ⚠ TV Time s'écrit dans sa base en ASYNCHRONE (13.13.1) : sans cette confirmation, un
+    // échec d'écriture passerait pour une restauration réussie — exactement le mensonge que
+    // le booléen de `saveTvItems` avait été posé pour empêcher.
+    try {
+      if (Array.isArray(data && data.tvtime) && !(await tvFlushDone()) && !res.failed.includes('spotifyplus_tvtime')) {
+        res.failed.push('spotifyplus_tvtime');
+      }
+    } catch {}
     // ⚠ 9.0.1 — Médias des notes : hors d'`applyBackup`, qui est SYNCHRONE alors qu'IndexedDB
     // ne l'est pas. Fusion par id, LE LOCAL GAGNE — réimporter deux fois la même sauvegarde
     // ne duplique rien et n'écrase jamais un enregistrement présent sur cet appareil.
@@ -21669,7 +21683,7 @@ function buildBackup() {
     rappels_notes: lsJson('spotifyplus_rappels_notes') || {},
     remembers: lsJson('spotifyplus_remember_custom') || [],
     // TV Time : suivi séries/films (métadonnées TMDB en cache comprises)
-    tvtime: lsJson('spotifyplus_tvtime') || [],
+    tvtime: loadTvItems(),   // ⚠ plus en localStorage depuis 13.13.1 : la base TV Time fait foi
     // Clé API TMDB (chaîne brute, requise par TV Time) — restaurée telle quelle
     tmdb_key: tmdbKey() || null,
     // Clé API YouTube Data v3 (chaîne brute, pour les chaînes/playlists TV Time)
@@ -22123,7 +22137,7 @@ function applyBackup(data) {
     // a gardé l'ancienne liste, et l'utilisateur ne découvre la perte qu'au rechargement.
     let ok = false;
     try { ok = saveTvItems(mergeTvImport(loadTvItems(), data.tvtime)); } catch {}
-    if (!ok) { _tvItemsCache = null; failed.push('spotifyplus_tvtime'); }
+    if (!ok) { tvCacheReload(); failed.push('spotifyplus_tvtime'); }
   }
   // Clé API TMDB : chaîne brute (PAS de JSON.stringify — tmdbKey() la lit telle quelle)
   if (typeof data.tmdb_key === 'string' && data.tmdb_key.trim()) {
@@ -24987,8 +25001,14 @@ function lsuScan() {
 // de renvoyer l'utilisateur vers un « IndexedDB » opaque de plusieurs centaines de Mo.
 // ⚠ Curseur et non `getAll()` sur les médias : un seul enregistrement en RAM à la fois.
 async function lsuIdbScan() {
-  const out = { db:0, media:0, mediaN:0 };
+  const out = { db:0, media:0, mediaN:0, tv:0 };
   try { const raw = await idbGet(IDB_KEY); out.db = (raw && (raw.byteLength || raw.length)) || 0; } catch {}
+  // TV Time : sa base ne range pas une chaîne mais des OBJETS (clonage structuré), dont la
+  // taille sur disque n'est exposée par aucune API — on la mesure à sa sérialisation JSON,
+  // seul ordre de grandeur honnête disponible.
+  // ⚠ `* 2` comme partout ailleurs ici : l'octet UTF-16, sinon la ventilation par famille
+  // (mesurée, elle, en UTF-16) pèserait DEUX FOIS le total de sa propre ligne.
+  try { const l = await tvIdbGet(); if (Array.isArray(l)) out.tv = JSON.stringify(l).length * 2; } catch {}
   try {
     const st = await _noteMediaTx('readonly');
     await new Promise(res => {
@@ -25040,8 +25060,10 @@ function lsuTvSplit(keys) {
     const r = LSU_TV_KEY_BUCKET.find(x => x[0].test(k));
     out[r ? r[1] : 'other'].bytes += b;
   }
+  // ⚠ La liste vient du cache mémoire (base TV Time), plus du localStorage : depuis
+  // 13.13.1 la clé `spotifyplus_tvtime` n'existe plus.
   let items = null;
-  try { items = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)); } catch {}
+  try { items = loadTvItems(); } catch {}
   for (const it of (Array.isArray(items) ? items : [])) {
     let size = 0;
     try { size = JSON.stringify(it).length * 2; } catch {}
@@ -25097,8 +25119,7 @@ function DataLimitPanel() {
   React.useEffect(() => {
     if (!scan) return;
     const keys = (scan.rows.find(r => r.id === 'tvtime') || {}).keys;
-    if (!keys || !keys.length) { setTvSplit(null); return; }
-    const t = setTimeout(() => setTvSplit(lsuTvSplit(keys)), 0);
+    const t = setTimeout(() => setTvSplit(lsuTvSplit(keys || [])), 0);
     return () => clearTimeout(t);
   }, [scan]);
   if (!scan) return (
@@ -25122,8 +25143,8 @@ function DataLimitPanel() {
   // Ventilation finale : le localStorage de chaque module + sa part de base IndexedDB.
   const rows = scan.rows.map(r => ({
     ...r,
-    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : 0,
-    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : '',
+    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : 0,
+    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : '',
   })).map(r => ({ ...r, tot: r.ls + r.idb }))
      .filter(r => r.tot > 0)
      .sort((a, b) => b.tot - a.tot);
@@ -25136,7 +25157,7 @@ function DataLimitPanel() {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
       <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>
-        Le Hub écrit dans <strong>deux</strong> réserves. Le <strong>stockage local</strong> (petit, partagé par TOUS les modules) porte les réglages, les listes et les caches — c'est lui qui déclenche l'alerte « stockage local saturé ». La <strong>réserve navigateur</strong> (large) porte la base musicale SQLite et les pièces jointes des notes. Le plafond est <strong>mesuré sur ce navigateur</strong>, pas supposé.
+        Le Hub écrit dans <strong>deux</strong> réserves. Le <strong>stockage local</strong> (petit, partagé par TOUS les modules) porte les réglages, les listes et les caches — c'est lui qui déclenche l'alerte « stockage local saturé ». La <strong>réserve navigateur</strong> (large) porte la base musicale SQLite, la liste TV Time et les pièces jointes des notes. Le plafond est <strong>mesuré sur ce navigateur</strong>, pas supposé.
       </div>
       {/* ── Stockage local : le seul plafond qui sature vraiment ── */}
       <div style={{ background:'#ffffff06', border:`1px solid ${C.border}`, borderRadius:10, padding:'11px 12px', display:'flex', flexDirection:'column', gap:8 }}>
@@ -25159,7 +25180,7 @@ function DataLimitPanel() {
       </div>
       {/* ── Ventilation par module : 📦 = stockage local, 🗄️ = base IndexedDB ── */}
       <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>
-        Poids de chaque module — <b style={{ color:C.text }}>📦 stockage local</b> et <b style={{ color:C.text }}>🗄️ base</b> (SQLite de Musique, pièces jointes de Note). Touche une ligne pour voir ses clés une par une.
+        Poids de chaque module — <b style={{ color:C.text }}>📦 stockage local</b> et <b style={{ color:C.text }}>🗄️ base</b> (SQLite de Musique, liste de TV Time, pièces jointes de Note). Touche une ligne pour voir ses clés une par une.
       </div>
       <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
         {rows.map(r => {
@@ -25202,7 +25223,7 @@ function DataLimitPanel() {
               {isOpen && (
                 <div style={{ display:'flex', flexDirection:'column', gap:2, padding:'4px 0 4px 20px' }}>
                   {r.id === 'tvtime' && tvSplit && tvSplit.map(t => {
-                    const tp = r.ls ? Math.round(t.bytes / r.ls * 100) : 0;
+                    const tp = r.tot ? Math.round(t.bytes / r.tot * 100) : 0;
                     return (
                       <div key={t.id} style={{ display:'flex', flexDirection:'column', gap:2, marginBottom:3 }}>
                         <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:10.5 }}>
@@ -33444,16 +33465,121 @@ const ytIsUnsaved = it => !!it && it.type === 'youtube' && it.id === YT_UNSAVED_
 // chargée — le vrai critère est `ytInTab`, qui regarde ce qu'il RESTE à voir.
 const ytIsShortsChan = it => !!(it && it.shortsOnly);
 
+// ── 📦 TV TIME EN INDEXEDDB (13.13.1) ──────────────────────────────────────────
+// La liste TV Time pesait 9 Mo À ELLE SEULE sur un quota localStorage de 10 Mo partagé
+// par TOUT le Hub : c'est elle qui saturait, et avec elle les trajets Maps, les tâches et
+// le coffre. Elle vit maintenant dans une base IndexedDB DÉDIÉE — plafond de l'origine
+// (des centaines de Mo) au lieu de 10, et objets rangés par CLONAGE STRUCTURÉ : cocher un
+// épisode ne re-sérialise plus 9 Mo de JSON en chaîne UTF-16.
+// ⚠ Base SÉPARÉE et non un store de plus dans `spotifyplus` (piège 20) : y ajouter un
+// store impose un changement de version, qu'un onglet resté ouvert bloque — et cette
+// base-là porte le SQLite, cœur de l'app.
+// ⚠ Les 43 appelants ne changent pas : `loadTvItems`/`saveTvItems` restent SYNCHRONES sur
+// le cache mémoire, seule la persistance devient asynchrone.
+const TVDB_NAME = 'spotifyplus_tvtime_db', TVDB_STORE = 'items', TVDB_KEY = 'list';
+let _tvIdb = null;
+function tvIdbOpen() {
+  if (_tvIdb) return _tvIdb;
+  _tvIdb = new Promise((res, rej) => {
+    const req = indexedDB.open(TVDB_NAME, 1);
+    req.onupgradeneeded = e => { const db = e.target.result; if (!db.objectStoreNames.contains(TVDB_STORE)) db.createObjectStore(TVDB_STORE); };
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = e => { _tvIdb = null; rej(e); };
+  });
+  return _tvIdb;
+}
+function tvIdbGet() {
+  return tvIdbOpen().then(db => new Promise((res, rej) => {
+    const r = db.transaction(TVDB_STORE, 'readonly').objectStore(TVDB_STORE).get(TVDB_KEY);
+    r.onsuccess = () => res(r.result);
+    r.onerror   = () => rej(r.error);
+  }));
+}
+function tvIdbPut(list) {
+  return tvIdbOpen().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(TVDB_STORE, 'readwrite');
+    tx.objectStore(TVDB_STORE).put(list, TVDB_KEY);
+    tx.oncomplete = () => res(true);
+    tx.onerror    = () => rej(tx.error);
+    tx.onabort    = () => rej(tx.error);
+  }));
+}
+// ⚠ `_tvReady` est le VERROU ANTI-PERTE : tant que la base n'a pas répondu, `loadTvItems`
+// peut légitimement rendre une liste vide — et une écriture de cette liste vide effacerait
+// tout. `saveTvItems` REFUSE donc d'écrire avant, et le dit à son appelant.
+let _tvReady = false, _tvSavePromise = null, _tvSaveQueued = false, _tvWriteErr = false;
+// Précharge la liste (et la déménage du localStorage au tout premier passage).
+// Appelée par `bootLocal`, AVANT tout ce qui touche à TV Time.
+async function tvItemsPreload() {
+  if (_tvReady) return _tvItemsCache || [];
+  let list = null, fromIdb = true;
+  try { list = await tvIdbGet(); } catch {}
+  if (!Array.isArray(list)) {
+    // Première fois : la liste est encore dans le localStorage → on la déménage.
+    fromIdb = false;
+    let old = null;
+    try { old = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)); } catch {}
+    list = Array.isArray(old) ? old : [];
+  }
+  const norm = tvNormalizeItems(list);
+  _tvItemsCache = norm.items;
+  if (!fromIdb) {
+    // ⚠ La copie localStorage n'est effacée qu'APRÈS une écriture CONFIRMÉE dans la base :
+    // une base indisponible (mode privé, éviction) ne doit jamais faire disparaître la liste.
+    // Tant que l'écriture ne passe pas, `_tvReady` reste faux — donc aucune écriture non
+    // plus, et la liste reste lisible depuis le localStorage au prochain démarrage.
+    try { await tvIdbPut(norm.items); } catch { return _tvItemsCache; }
+    try { localStorage.removeItem(TVTIME_LS_KEY); } catch {}
+  }
+  _tvReady = true;
+  if (fromIdb && norm.changed) saveTvItems(norm.items);   // normalisations à reposer sur le disque
+  return _tvItemsCache;
+}
+// Normalisations appliquées à toute liste qui arrive du disque.
+function tvNormalizeItems(list) {
+  let changed = false;
+  // Titre de la pseudo-chaîne aligné sur la constante (il a été stocké avec l'item)
+  let items = (Array.isArray(list) ? list : []).map(it => {
+    if (ytIsUnsaved(it) && it.title !== YT_UNSAVED_TITLE) { changed = true; return { ...it, title: YT_UNSAVED_TITLE }; }
+    return it;
+  });
+  // Purge des vignettes stockées (cf. ytStill), une fois pour toutes.
+  const strip = tvStripStills(items);
+  if (strip.n) { items = strip.items; changed = true; }
+  return { items, changed };
+}
+// Écriture sérialisée : deux enregistrements rapprochés ne se doublent pas, et le dernier
+// état du cache est toujours celui qui part (même pattern que `saveDB`).
+function tvPersist() {
+  if (_tvSavePromise) { _tvSaveQueued = true; return _tvSavePromise; }
+  _tvSavePromise = (async () => {
+    try {
+      do { _tvSaveQueued = false; await tvIdbPut(_tvItemsCache || []); } while (_tvSaveQueued);
+      _tvWriteErr = false;
+    } catch (e) {
+      _tvWriteErr = true;
+      console.warn('[Spotify+] TV Time : écriture IndexedDB échouée —', (e && e.name) || e);
+    } finally { _tvSavePromise = null; }
+  })();
+  return _tvSavePromise;
+}
+// Attend l'écriture en vol et dit si elle est passée — utilisé par la restauration, qui
+// doit pouvoir annoncer un échec plutôt qu'un « ✓ restauré » mensonger (piège 14).
+async function tvFlushDone() { try { await _tvSavePromise; } catch {} return !_tvWriteErr; }
+// Purge le cache et le reprécharge depuis la base (après une restauration ratée : l'écran
+// ne doit pas garder une fusion que le disque n'a pas).
+function tvCacheReload() {
+  _tvItemsCache = null; _tvReady = false;
+  try { tvItemsPreload(); } catch {}
+}
 function loadTvItems() {
   if (_tvItemsCache) return _tvItemsCache;
-  try { _tvItemsCache = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)) || []; } catch { _tvItemsCache = []; }
-  // Titre de la pseudo-chaîne aligné sur la constante (il a été stocké avec l'item)
-  _tvItemsCache = _tvItemsCache.map(it => (ytIsUnsaved(it) && it.title !== YT_UNSAVED_TITLE) ? { ...it, title: YT_UNSAVED_TITLE } : it);
-  // Purge des vignettes stockées (cf. ytStill) : une fois, au premier chargement qui en
-  // trouve. ⚠ Réécrit tout de suite — sur un stockage saturé c'est la seule écriture qui
-  // passe encore, puisqu'elle RÉDUIT la valeur existante.
-  const strip = tvStripStills(_tvItemsCache);
-  if (strip.n) { _tvItemsCache = strip.items; try { saveTvItems(strip.items); } catch {} }
+  // Pas encore préchargé : repli synchrone sur la copie localStorage tant qu'elle existe
+  // (c'est-à-dire avant le déménagement). Après, liste vide — mais `_tvReady` est faux,
+  // donc AUCUNE écriture ne peut figer ce vide.
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)); } catch {}
+  _tvItemsCache = tvNormalizeItems(raw).items;
   return _tvItemsCache;
 }
 // Retire le champ `still` de toutes les vidéos — rendu redondant par `ytStill`.
@@ -33473,11 +33599,21 @@ function tvStripStills(items) {
   });
   return { items: out, n };
 }
-// ⚠ RENVOIE le booléen de `lsSet` (piège n°14) : sur un localStorage plein rien n'est
-// écrit et `lsSet` ne LÈVE PAS d'erreur. Sans ce retour, `applyBackup` annonçait
-// « ✓ restauré » alors que le cache mémoire seul avait bougé — TV Time repartait à zéro
-// au rechargement (les Shorts d'un import qui avait pourtant l'air d'avoir marché).
-function saveTvItems(items) { _tvItemsCache = items; return lsSet(TVTIME_LS_KEY, JSON.stringify(items)); }
+// ⚠ RENVOIE un booléen (piège n°14) : sans lui, `applyBackup` annonçait « ✓ restauré »
+// alors que le cache mémoire seul avait bougé — TV Time repartait à zéro au rechargement
+// (les Shorts d'un import qui avait pourtant l'air d'avoir marché). `false` = REFUSÉ :
+// base pas encore prête, ou dernière écriture en erreur. L'écriture elle-même étant
+// asynchrone, la restauration confirme en plus avec `tvFlushDone()`.
+function saveTvItems(items) {
+  // ⚠ Le cache n'est PAS touché quand l'écriture est refusée : sinon un refus laissait la
+  // liste refusée en mémoire — l'écran affichait un TV Time vide alors que le disque était
+  // intact, et ce vide risquait de partir en base à l'écriture suivante. Refusé = rien
+  // n'a bougé, ni sur le disque ni à l'écran.
+  if (!_tvReady) { console.warn('[Spotify+] TV Time : écriture refusée, la base n\'a pas encore répondu'); return false; }
+  _tvItemsCache = items;
+  tvPersist();
+  return !_tvWriteErr;
+}
 
 // GET https://api.themoviedb.org/3{path} — retourne le JSON ou null (erreur / clé absente)
 async function tmdbGet(path, params = {}) {
