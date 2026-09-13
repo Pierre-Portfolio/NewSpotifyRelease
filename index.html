@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.12.9';
+const APP_VERSION = '13.13.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -26460,8 +26460,7 @@ function ytVideoListWith(item, v) {
   if (cur.some(x => x.id === v.id)) return null;
   const entry = { id: v.id, title: v.title || 'Vidéo',
     date: String(v.pubDate || v.date || '').slice(0, 10),
-    still: v.thumb || v.still || ('https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg'),
-    dur: v.dur || 0 };
+    dur: v.dur || 0 };   // pas de `still` : déduite de l'id par `ytStill`
   // Ordre chronologique CROISSANT (celui de `ytBuildItem`) : la fiche regroupe par année.
   const videos = [...cur, entry].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   const byYear = {};
@@ -33330,6 +33329,16 @@ const YT_COLOR = '#ff4d4d';               // rouge YouTube (filtre + accents de 
 const YT_MAX_VIDEOS = 500;                // plafond de vidéos récupérées par chaîne/playlist (quota + localStorage)
 const YT_MIN_MINUTES = 3;                 // durée minimale d'une vidéo (min) pour être ajoutée à la liste — les vidéos < 3 min (Shorts/clips courts) sont ignorées
 const YT_NEW_CHECK_TTL = 6 * 3600 * 1000; // 6h — TTL du check auto « nouvelles vidéos » au login (économie de quota)
+// ⚠ VIGNETTE D'UNE VIDÉO — JAMAIS STOCKÉE (13.13.0). L'URL est ENTIÈREMENT déductible de
+// l'`id` : `https://i.ytimg.com/vi/<id>/mqdefault.jpg` est exactement ce que l'API renvoie
+// comme miniature `medium`. La garder coûtait ~118 octets par vidéo — plusieurs Mo de
+// localStorage à 25 000 vidéos — pour zéro information, et les constructeurs de vidéo
+// faisaient DÉJÀ ce repli quand elle manquait. `ytStill` est le seul lecteur : passer par
+// lui plutôt que par `v.still` est ce qui rend la purge invisible à l'affichage.
+function ytStill(v) {
+  if (!v) return '';
+  return v.still || v.thumb || (v.id ? 'https://i.ytimg.com/vi/' + v.id + '/mqdefault.jpg' : '');
+}
 const TV_IGNORED_COLOR = '#3fa0d0';       // bleu du 🙈 « Ignorer les non vus » (7.8.0) — épisodes/vidéos barrés
 // ── 📚 LIVRES (7.6.52) ─────────────────────────────────────────────────────────────
 // Même concept que les films / séries / YouTube, mais pour la lecture : on suit un livre
@@ -33440,7 +33449,29 @@ function loadTvItems() {
   try { _tvItemsCache = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)) || []; } catch { _tvItemsCache = []; }
   // Titre de la pseudo-chaîne aligné sur la constante (il a été stocké avec l'item)
   _tvItemsCache = _tvItemsCache.map(it => (ytIsUnsaved(it) && it.title !== YT_UNSAVED_TITLE) ? { ...it, title: YT_UNSAVED_TITLE } : it);
+  // Purge des vignettes stockées (cf. ytStill) : une fois, au premier chargement qui en
+  // trouve. ⚠ Réécrit tout de suite — sur un stockage saturé c'est la seule écriture qui
+  // passe encore, puisqu'elle RÉDUIT la valeur existante.
+  const strip = tvStripStills(_tvItemsCache);
+  if (strip.n) { _tvItemsCache = strip.items; try { saveTvItems(strip.items); } catch {} }
   return _tvItemsCache;
+}
+// Retire le champ `still` de toutes les vidéos — rendu redondant par `ytStill`.
+// ⚠ Uniquement dans `videos[]` : le `thumb` de la CHAÎNE est son avatar, non déductible.
+function tvStripStills(items) {
+  let n = 0;
+  const out = (items || []).map(it => {
+    if (!Array.isArray(it && it.videos)) return it;
+    let hit = false;
+    const videos = it.videos.map(v => {
+      if (!v || v.still === undefined) return v;
+      hit = true; n++;
+      const { still, ...rest } = v;
+      return rest;
+    });
+    return hit ? { ...it, videos } : it;
+  });
+  return { items: out, n };
 }
 // ⚠ RENVOIE le booléen de `lsSet` (piège n°14) : sur un localStorage plein rien n'est
 // écrit et `lsSet` ne LÈVE PAS d'erreur. Sans ce retour, `applyBackup` annonçait
@@ -33531,7 +33562,7 @@ async function ytResolveChannel(parsed) {
   };
 }
 
-// Pagine une playlist → [{ id, title, date:'YYYY-MM-DD', still }] (plafonné à YT_MAX_VIDEOS,
+// Pagine une playlist → [{ id, title, date:'YYYY-MM-DD' }] (plafonné à YT_MAX_VIDEOS,
 // ou SANS limite si max = Infinity — bouton « récupérer toutes les vidéos » d'une chaîne).
 async function ytFetchPlaylistVideos(playlistId, max = YT_MAX_VIDEOS) {
   const out = [];
@@ -33545,12 +33576,11 @@ async function ytFetchPlaylistVideos(playlistId, max = YT_MAX_VIDEOS) {
       const vid = e.contentDetails && e.contentDetails.videoId;
       if (!vid) continue;
       const sn = e.snippet || {};
-      const th = sn.thumbnails || {};
       out.push({
         id: vid,
         title: sn.title || '(sans titre)',
         date: (((e.contentDetails && e.contentDetails.videoPublishedAt) || sn.publishedAt) || '').slice(0, 10),
-        still: (th.medium || th.default || {}).url || null,
+        // pas de `still` : c'est `i.ytimg.com/vi/<id>/mqdefault.jpg`, que `ytStill` déduit
       });
     }
     pageToken = d.nextPageToken || '';
@@ -33655,9 +33685,9 @@ function ytUnsavedAdd(items, v, when = Date.now()) {
   // Date LOCALE (jamais toISOString : le fuseau ferait basculer d'un jour, donc d'année le 31/12)
   const d = new Date(when);
   const seenDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  // pas de `still` : déduite de l'id par `ytStill`
   const entry = { id: v.id, title: v.title || 'Vidéo', date: seenDate, watchedAt: when,
-    pubDate: v.pubDate || v.date || '', dur: v.dur || 0, channel: v.channel || '',
-    still: v.thumb || v.still || `https://i.ytimg.com/vi/${v.id}/mqdefault.jpg` };
+    pubDate: v.pubDate || v.date || '', dur: v.dur || 0, channel: v.channel || '' };
   // Trié par DATE DE VISIONNAGE décroissante — la fiche conserve l'ordre du tableau à
   // l'intérieur d'une année, et les années sont déjà affichées de la plus récente à la plus ancienne.
   const videos = [entry, ...(cur.videos || [])].sort((a, b) => (b.watchedAt || 0) - (a.watchedAt || 0));
@@ -35097,8 +35127,8 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
                         <div key={v.id} style={{ display:'flex', alignItems:'center', gap:10, background:'#111', borderRadius:8, padding:6, minHeight:52, opacity: vign ? 0.55 : 1 }}>
                           <button onClick={() => playFrom(v)} title="Lire en plein écran ici (marquée vue automatiquement)"
                             style={{ position:'relative', width:82, height:46, borderRadius:6, flexShrink:0, display:'block', overflow:'hidden', background:'#1a1a1a', cursor:'pointer', padding:0, border:'none' }}>
-                            {v.still
-                              ? <img src={v.still} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', display:'block', background:'#1a1a1a' }} />
+                            {ytStill(v)
+                              ? <img src={ytStill(v)} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', display:'block', background:'#1a1a1a' }} />
                               : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16 }}>▶️</div>}
                             <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', background:'rgba(0,0,0,0.28)', color:'#fff', fontSize:16, textShadow:'0 1px 3px rgba(0,0,0,0.8)' }}>▶</div>
                           </button>
@@ -36845,7 +36875,7 @@ function TvTimePanel() {
   // `ytMarkVideoSeen` sur CETTE chaîne. `null` = suivie nulle part → « Hub Pierre ».
   const wlQueueEntry = v => {
     const owner = itemsRef.current.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id));
-    return { id: v.id, title: v.title, date: v.date, dur: v.dur, thumb: v.thumb || v.still || '',
+    return { id: v.id, title: v.title, date: v.date, dur: v.dur, thumb: ytStill(v),
       itemId: owner ? owner.id : null, channel: v.channel || (owner ? owner.title : ''), fromWl: true };
   };
   const playWl = (list, i, opts) => { openPlayer(list.map(wlQueueEntry), i, opts); };
