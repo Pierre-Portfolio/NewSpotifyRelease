@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.12.7';
+const APP_VERSION = '13.12.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -25006,6 +25006,52 @@ async function lsuIdbScan() {
   } catch {}
   return out;
 }
+// Ventilation INTERNE de TV Time — le seul module dont UNE clé porte des milliers de
+// fiches de nature différente : dire « TV Time : 9 Mo » n'aide pas, « les Shorts pèsent
+// 6 Mo » si. Chaque fiche est pesée à sa propre sérialisation, et les clés satellites
+// (épisodes, progression YouTube…) rejoignent la famille qu'elles servent.
+// ⚠ « Shorts » n'est PAS un type d'item : c'est le tag `shortsOnly` d'une chaîne 100 %
+// Shorts. Le reste du Hub range un vidéaste par `ytInTab`, qui parle de ce qu'il RESTE à
+// voir — un POIDS ne peut pas dépendre de ce qui a été regardé.
+// ⚠ Un item sans `type` est une série (le type n'existait pas avant les films).
+// ⚠ FONCTION et non const (piège 2) : TVTIME_COLOR / YT_COLOR / BOOK_COLOR sont déclarés
+// des milliers de lignes PLUS BAS. Les lire au niveau module ici, c'est une TDZ — donc un
+// écran noir. Appelée au rendu, l'évaluation du fichier est terminée depuis longtemps.
+function lsuTvBuckets() {
+  return [
+    { id:'tv',      icon:'📺', label:'Séries',            color:TVTIME_COLOR },
+    { id:'movie',   icon:'🎬', label:'Films',             color:'#f5813c' },
+    { id:'youtube', icon:'▶️', label:'YouTube',           color:YT_COLOR },
+    { id:'short',   icon:'🩳', label:'Shorts',            color:'#ff8a8a' },
+    { id:'book',    icon:'📚', label:'Livres',            color:BOOK_COLOR },
+    { id:'other',   icon:'⚙️', label:'Suivi & réglages',  color:C.dim },
+  ];
+}
+const LSU_TV_KEY_BUCKET = [
+  [/^spotifyplus_(tvtime_eps|tv_ep_)/, 'tv'],
+  [/^spotifyplus_yt_/,                 'youtube'],
+  [/^spotifyplus_tvtime_books$/,       'book'],
+];
+function lsuTvSplit(keys) {
+  const buckets = lsuTvBuckets(), out = {};
+  for (const b of buckets) out[b.id] = { ...b, bytes:0, n:0 };
+  for (const { k, b } of (keys || [])) {
+    if (k === TVTIME_LS_KEY) continue;   // pesée fiche par fiche juste en dessous
+    const r = LSU_TV_KEY_BUCKET.find(x => x[0].test(k));
+    out[r ? r[1] : 'other'].bytes += b;
+  }
+  let items = null;
+  try { items = JSON.parse(localStorage.getItem(TVTIME_LS_KEY)); } catch {}
+  for (const it of (Array.isArray(items) ? items : [])) {
+    let size = 0;
+    try { size = JSON.stringify(it).length * 2; } catch {}
+    const t = it && it.type;
+    const id = t === 'youtube' ? (it.shortsOnly ? 'short' : 'youtube')
+             : (t === 'movie' || t === 'book') ? t : 'tv';
+    out[id].bytes += size; out[id].n++;
+  }
+  return buckets.map(b => out[b.id]).filter(b => b.bytes > 0);
+}
 // Plafond restant, mesuré : dichotomie sur la taille d'une clé jetable, à 64 Ko près.
 // ⚠ La clé sonde est retirée dans un `finally` — une sonde réussie qu'on oublie squatterait
 // plusieurs Mo, soit exactement le problème qu'on cherche à diagnostiquer.
@@ -25043,6 +25089,10 @@ function DataLimitPanel() {
     try { navigator.storage?.estimate?.().then(r => { if (alive && r) setEst(r); }, () => {}); } catch {}
     return () => { alive = false; };
   }, [run]);
+  // Ventilation de TV Time : calculée SEULEMENT quand sa ligne est dépliée — parser une
+  // clé de plusieurs Mo à chaque mesure coûterait cher pour un détail rarement ouvert.
+  const tvKeys = scan && (scan.rows.find(r => r.id === 'tvtime') || {}).keys;
+  const tvSplit = React.useMemo(() => (open === 'tvtime' && tvKeys ? lsuTvSplit(tvKeys) : null), [open, tvKeys]);
   if (!scan) return (
     <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>
       Le stockage local est inaccessible (navigation privée ou données de site bloquées) : rien ne peut être mesuré, et rien ne peut être enregistré non plus.
@@ -25122,6 +25172,22 @@ function DataLimitPanel() {
               {bar(p, r.color)}
               {isOpen && (
                 <div style={{ display:'flex', flexDirection:'column', gap:2, padding:'4px 0 4px 20px' }}>
+                  {r.id === 'tvtime' && tvSplit && tvSplit.map(t => {
+                    const tp = r.ls ? Math.round(t.bytes / r.ls * 100) : 0;
+                    return (
+                      <div key={t.id} style={{ display:'flex', flexDirection:'column', gap:2, marginBottom:3 }}>
+                        <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:10.5 }}>
+                          <span>{t.icon}</span>
+                          <span style={{ flex:1, minWidth:0, color:C.text, fontWeight:600 }}>{t.label}</span>
+                          {t.n > 0 && <span style={{ color:C.dim, fontSize:9.5 }}>{t.n} fiche{t.n > 1 ? 's' : ''}</span>}
+                          <span style={{ color:t.color, fontWeight:700, fontVariantNumeric:'tabular-nums' }}>{lsuFmt(t.bytes)}</span>
+                        </div>
+                        <div style={{ height:5, borderRadius:3, background:'#ffffff10', overflow:'hidden' }}>
+                          <div style={{ width:Math.max(tp, tp > 0 ? 2 : 0) + '%', height:'100%', background:t.color, borderRadius:3 }} />
+                        </div>
+                      </div>
+                    );
+                  })}
                   {r.idb > 0 && (
                     <div style={{ display:'flex', gap:8, fontSize:10, color:C.muted }}>
                       <span style={{ flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis' }}>🗄️ {r.idbNote}</span>
