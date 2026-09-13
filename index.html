@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.12.8';
+const APP_VERSION = '13.12.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -25089,10 +25089,18 @@ function DataLimitPanel() {
     try { navigator.storage?.estimate?.().then(r => { if (alive && r) setEst(r); }, () => {}); } catch {}
     return () => { alive = false; };
   }, [run]);
-  // Ventilation de TV Time : calculée SEULEMENT quand sa ligne est dépliée — parser une
-  // clé de plusieurs Mo à chaque mesure coûterait cher pour un détail rarement ouvert.
-  const tvKeys = scan && (scan.rows.find(r => r.id === 'tvtime') || {}).keys;
-  const tvSplit = React.useMemo(() => (open === 'tvtime' && tvKeys ? lsuTvSplit(tvKeys) : null), [open, tvKeys]);
+  // Ventilation de TV Time. ⚠ Calculée APRÈS le premier rendu (`setTimeout` 0) et non
+  // pendant : reparcourir une clé de plusieurs Mo est le seul coût lourd du panneau, il ne
+  // doit pas retarder l'affichage du reste. Le trait segmenté se colore une fraction de
+  // seconde plus tard, personne ne voit la différence.
+  const [tvSplit, setTvSplit] = React.useState(null);
+  React.useEffect(() => {
+    if (!scan) return;
+    const keys = (scan.rows.find(r => r.id === 'tvtime') || {}).keys;
+    if (!keys || !keys.length) { setTvSplit(null); return; }
+    const t = setTimeout(() => setTvSplit(lsuTvSplit(keys)), 0);
+    return () => clearTimeout(t);
+  }, [scan]);
   if (!scan) return (
     <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>
       Le stockage local est inaccessible (navigation privée ou données de site bloquées) : rien ne peut être mesuré, et rien ne peut être enregistré non plus.
@@ -25157,6 +25165,9 @@ function DataLimitPanel() {
         {rows.map(r => {
           const p = grand ? Math.round(r.tot / grand * 100) : 0;
           const isOpen = open === r.id;
+          // Seul TV Time a une ventilation interne (cf. lsuTvSplit) : ailleurs, trait uni.
+          const seg = (r.id === 'tvtime' && tvSplit && tvSplit.length) ? tvSplit : null;
+          const segTot = seg ? seg.reduce((n, t) => n + t.bytes, 0) : 0;
           return (
             <div key={r.id} style={{ display:'flex', flexDirection:'column', gap:3 }}>
               <button onClick={() => setOpen(o => (o === r.id ? null : r.id))}
@@ -25169,7 +25180,25 @@ function DataLimitPanel() {
                 <span style={{ color:r.color, fontWeight:700, fontVariantNumeric:'tabular-nums', minWidth:60, textAlign:'right' }}>{lsuFmt(r.tot)}</span>
                 <span style={{ color:C.dim, fontSize:9, transform: isOpen ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
               </button>
-              {bar(p, r.color)}
+              {seg ? (
+                // Trait SEGMENTÉ : une part par famille, dans sa couleur. La largeur totale
+                // reste la part du module dans le total mesuré — seule sa composition change.
+                <div style={{ height:8, borderRadius:4, background:'#ffffff10', overflow:'hidden' }}>
+                  <div style={{ width:Math.max(p, 2) + '%', height:'100%', display:'flex', borderRadius:4, overflow:'hidden' }}>
+                    {seg.map(t => (
+                      <div key={t.id} title={`${t.label} — ${lsuFmt(t.bytes)}`}
+                        style={{ width:(segTot ? t.bytes / segTot * 100 : 0) + '%', height:'100%', background:t.color }} />
+                    ))}
+                  </div>
+                </div>
+              ) : bar(p, r.color)}
+              {seg && !isOpen && (
+                <div style={{ display:'flex', flexWrap:'wrap', gap:'2px 8px', fontSize:9.5, paddingLeft:20 }}>
+                  {seg.map(t => (
+                    <span key={t.id} style={{ color:t.color, fontVariantNumeric:'tabular-nums' }}>{t.icon} {lsuFmt(t.bytes)}</span>
+                  ))}
+                </div>
+              )}
               {isOpen && (
                 <div style={{ display:'flex', flexDirection:'column', gap:2, padding:'4px 0 4px 20px' }}>
                   {r.id === 'tvtime' && tvSplit && tvSplit.map(t => {
