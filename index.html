@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.13.3';
+const APP_VERSION = '13.13.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32916,10 +32916,22 @@ const RAINBOW_BANDS = [
   { z: Infinity, label:'Bulle maximale', color:'#f5545f' },
 ];
 const rainbowBand = z => RAINBOW_BANDS.find(b => z < b.z) || RAINBOW_BANDS[RAINBOW_BANDS.length - 1];
+// ⚠ 13.13.4 — L'ORIGINE DES JOURS EST LA GENÈSE DU BITCOIN, PAS LE 1er POINT REÇU.
+// C'était LE défaut du rainbow : `t0 = pts[0][0]` mettait x = ln(2) sur le tout premier
+// point, un levier énorme au bout d'un axe qui va jusqu'à ln(6000) — la droite s'y accrochait,
+// sortait une pente de 3,3 au lieu de ~5,4, et posait le trend du jour autour de 50 k$ quand
+// il est vers 130 k$. Conséquence directe : le prix du jour se lisait « Ça chauffe » ou
+// « Euphorie » alors qu'il est dans le bleu. Reconstitution hors ligne de l'historique :
+//   origine = 1er point → pente 3,28 · trend 52 931 $ · +0,68σ → « Ça chauffe »
+//   origine = genèse    → pente 5,45 · trend 131 269 $ · −0,25σ → bandes froides
+// Deuxième raison, aussi importante : la source n'est pas toujours la même (Blockchain.com
+// commence en 2009, Stooq en 2010). Avec l'ancienne origine, LE MÊME PRIX tombait dans deux
+// bandes différentes selon le relais qui avait répondu. Une constante règle les deux.
+const RAINBOW_GENESIS = Date.UTC(2009, 0, 3);   // bloc de genèse — l'origine du rainbow
 function rainbowFit(prices) {
-  const pts = (prices || []).filter(p => Array.isArray(p) && p[0] > 0 && p[1] > 0);
+  const pts = (prices || []).filter(p => Array.isArray(p) && p[0] > RAINBOW_GENESIS && p[1] > 0);
   if (pts.length < RAINBOW_MIN_PTS) return { err:'historique trop court' };
-  const t0 = pts[0][0], DAY = 86400000;
+  const t0 = RAINBOW_GENESIS, DAY = 86400000;
   let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
   for (const [ts, v] of pts) {
     const x = Math.log((ts - t0) / DAY + 2), y = Math.log(v);
@@ -32940,8 +32952,11 @@ function rainbowFit(prices) {
   // ⚠ On REMONTE la régression elle-même (a, b, sigma, t0) et la série allégée : sans elles,
   // seul le σ du jour serait affichable — or le vrai rainbow, c'est la COURBE du prix posée
   // sur les bandes, pas un curseur sur une échelle.
+  // ⚠ `t0` (origine de la RÉGRESSION) et `since` (1er prix connu) sont deux dates
+  // différentes depuis 13.13.4 : `years` et le tracé se calent sur `since`, jamais sur `t0`,
+  // sinon le graphique s'ouvrirait sur un an de vide et la fenêtre annoncée serait fausse.
   return { price: last[1], z: (Math.log(last[1]) - (a + b * xN)) / sigma, since: pts[0][0],
-    until: last[0], years: (last[0] - t0) / DAY / 365, n,
+    until: last[0], years: (last[0] - pts[0][0]) / DAY / 365, n,
     a, b, sigma, t0, series: rainbowThin(pts, RAINBOW_DRAW_PTS) };
 }
 // ⚠ 13.11.7 — LE RAINBOW NE PORTE QUE LE BITCOIN, ET NE DOIT PLUS RIEN À COINGECKO
@@ -33029,12 +33044,16 @@ function rainbowTickLabel(k) {
 function RainbowChart({ fit, color }) {
   const { a, b, sigma, t0, series } = fit;
   const V = RAINBOW_VB, DAY = 86400000, L10 = Math.LN10;
+  // ⚠ DEUX dates distinctes : `t0` est l'origine de la régression (la genèse, 2009-01-03) et
+  // ne sert QU'À `xf` ; l'axe du temps, lui, part du premier prix réellement connu — sinon le
+  // graphique s'ouvrirait sur les mois où aucune source ne cote encore le bitcoin.
+  const tA = series[0][0];
   const t1 = series[series.length - 1][0];
-  const span = Math.max(1, t1 - t0);
+  const span = Math.max(1, t1 - tA);
   // La régression vit en ln(jours) : on repasse par le même x pour chaque date échantillonnée.
   const xf = t => Math.log((t - t0) / DAY + 2);
   const cols = [];
-  for (let i = 0; i <= RAINBOW_COLS; i++) cols.push(t0 + span * (i / RAINBOW_COLS));
+  for (let i = 0; i <= RAINBOW_COLS; i++) cols.push(tA + span * (i / RAINBOW_COLS));
   const edgeY = RAINBOW_EDGES.map(z => cols.map(t => (a + b * xf(t) + z * sigma) / L10));
   // ⚠ L'échelle se cale sur le PRIX (plus les deux arêtes extrêmes d'AUJOURD'HUI, pour qu'on
   // voie où on en est dans l'arc-en-ciel), pas sur toute l'étendue des bandes : à l'origine
@@ -33047,7 +33066,7 @@ function RainbowChart({ fit, color }) {
   const marge = (hi - lo) * 0.03 || 0.1;
   lo -= marge; hi += marge;
   const IW = V.w - V.l - V.r, IH = V.h - V.t - V.b;
-  const px = t => V.l + ((t - t0) / span) * IW;
+  const px = t => V.l + ((t - tA) / span) * IW;
   const py = y => V.t + (1 - (y - lo) / (hi - lo)) * IH;
   // Un ruban par bande : arête haute de gauche à droite, puis arête basse en sens inverse.
   const bands = RAINBOW_BANDS.map((bd, i) => {
@@ -33062,7 +33081,7 @@ function RainbowChart({ fit, color }) {
   const decades = [];
   for (let k = Math.ceil(lo); k <= Math.floor(hi); k++) decades.push(k);
   const kStep = Math.ceil(decades.length / 7) || 1;
-  const yA = new Date(t0).getFullYear(), yB = new Date(t1).getFullYear();
+  const yA = new Date(tA).getFullYear(), yB = new Date(t1).getFullYear();
   const yStep = Math.ceil((yB - yA) / 6) || 1;
   const years = [];
   for (let y = yA + 1; y <= yB; y += yStep) years.push(y);
@@ -33082,7 +33101,7 @@ function RainbowChart({ fit, color }) {
       ))}
       {years.map(y => {
         const t = new Date(y, 0, 1).getTime();
-        if (t <= t0 || t >= t1) return null;
+        if (t <= tA || t >= t1) return null;
         return <text key={y} x={px(t)} y={V.h - 4} textAnchor="middle" fontSize={6.5} fill={C.dim} fontFamily="DM Mono,monospace">{y}</text>;
       })}
       <path d={line} fill="none" stroke={C.text} strokeWidth={1.1} strokeLinejoin="round" strokeLinecap="round" clipPath="url(#rainbow-clip)" />
