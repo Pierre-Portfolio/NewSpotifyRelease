@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.14.0';
+const APP_VERSION = '13.14.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28041,7 +28041,11 @@ const DD_SERVICES = [
   { id:'chatgpt',   name:'ChatGPT (OpenAI)',slug:'chatgpt',           domain:'openai.com',       cat:'ia',      status:API_STATUS_HOSTS.chatgpt },
   { id:'claude',    name:'Claude (Anthropic)',slug:'claude',          domain:'claude.ai',        cat:'ia',      status:API_STATUS_HOSTS.claude },
   { id:'gemini',    name:'Gemini (Google)', slug:'google-gemini',     domain:'gemini.google.com',cat:'ia',      status:null },
+  { id:'bouygues',  name:'Bouygues Télécom', slug:'bouygues-telecom', domain:'bouyguestelecom.fr',cat:'fai',    status:null },
   { id:'free',      name:'Free',            slug:'free',              domain:'free.fr',          cat:'fai',     status:null },
+  { id:'orange',    name:'Orange',          slug:'orange',            domain:'orange.fr',        cat:'fai',     status:null },
+  { id:'sfr',       name:'SFR',             slug:'sfr',               domain:'sfr.fr',           cat:'fai',     status:null },
+  { id:'sosh',      name:'Sosh',            slug:'sosh',              domain:'sosh.fr',          cat:'fai',     status:null },
   { id:'eneba',     name:'Eneba',           slug:'eneba',             domain:'eneba.com',        cat:'jeux',    status:null },
   { id:'epic',      name:'Epic Games Store',slug:'epic-games',        domain:'epicgames.com',    cat:'jeux',    status:API_STATUS_HOSTS.epic },
   { id:'lol',       name:'League of Legends',slug:'league-of-legends',domain:'leagueoflegends.com', cat:'jeux', status:null },
@@ -28058,14 +28062,23 @@ const DD_SERVICES = [
 ];
 
 // Vocabulaire Statuspage → libellé FR + couleur. `rank` sert au tri (panne en tête).
+// ⚠ Les trois `report_*` ne viennent PAS d'un éditeur mais de la courbe de signalements
+// (voir `ddFromReports`) : libellés distincts, et `rank` intercalé JUSTE APRÈS l'équivalent
+// officiel — c'est une présomption d'utilisateurs, pas un constat de l'éditeur.
+// `down:true` = « ce service ne va pas » ; c'est ce drapeau, et pas `ind !== 'none'`, qui
+// décide du compteur en tête (sinon un `report_ok` compterait comme une panne).
 const DD_IND = {
-  critical: { label:'Panne majeure',   color:'#e05050', rank:0 },
-  major:    { label:'Panne partielle', color:'#e0803a', rank:1 },
-  minor:    { label:'Perturbé',        color:'#d9a441', rank:2 },
-  none:     { label:'OK',              color:'#3fb950', rank:4 },
+  critical:  { label:'Panne majeure',      color:'#e05050', rank:0,   down:true },
+  major:     { label:'Panne partielle',    color:'#e0803a', rank:1,   down:true },
+  report_hi: { label:'Pic de signalements',color:'#e0803a', rank:1.5, down:true, reported:true },
+  minor:     { label:'Perturbé',           color:'#d9a441', rank:2,   down:true },
+  report_lo: { label:'Signalements↑',      color:'#d9a441', rank:2.5, down:true, reported:true },
+  none:      { label:'OK',                 color:'#3fb950', rank:4 },
+  report_ok: { label:'Rien signalé',       color:'#3fb950', rank:4.5, reported:true },
 };
 const DD_UNKNOWN = { label:'—', color:null, rank:3 };
 const ddInd = ind => DD_IND[ind] || DD_UNKNOWN;
+const ddIsDown = ind => !!(DD_IND[ind] && DD_IND[ind].down);
 
 function ddLoad() { try { const r = lsGet(DD_LS); return r ? JSON.parse(r) : null; } catch { return null; } }
 function ddSave(o) { lsSet(DD_LS, JSON.stringify(o)); }
@@ -28197,6 +28210,46 @@ function ddParseReports(html) {
     .map(v => (Number.isFinite(v) && v >= 0 ? Math.round(v) : 0));
   return pts.length >= 4 ? pts : null;
 }
+// ── ÉTAT DÉDUIT DE LA COURBE (13.14.1, demande utilisateur : « Free est bien sur
+// downdetector, trouve une solution ») ────────────────────────────────────────────
+// Oui, Downdetector affiche Free, Orange, SFR, Bouygues, Sosh… mais ce qu'il affiche n'est
+// PAS un statut d'éditeur : c'est un VOLUME DE SIGNALEMENTS d'utilisateurs, et son verdict
+// (« problèmes détectés ») n'est rien d'autre qu'un dépassement du niveau habituel. On
+// applique exactement la même règle — sur la série QU'ON EXTRAIT DÉJÀ pour la vignette.
+// ⚠ ZÉRO requête de plus : `ddFetchGraphs` téléchargeait déjà la fiche de chaque service,
+// on ne faisait qu'en jeter le sens. Rescraper la phrase « Problèmes détectés chez Free »
+// serait plus direct MAIS bien plus fragile : ce texte change sans préavis, la série de
+// nombres, elle, est déjà éprouvée (c'est elle qui dessine les courbes affichées).
+// ⚠ CE N'EST PAS UNE PANNE CONFIRMÉE, et l'UI ne doit jamais le dire : libellés et
+// `reported:true` séparés, et la sous-ligne CITE les chiffres (« 58 signalements · ×4,7 »)
+// pour qu'on juge sur pièces. Une page officielle, quand elle existe, garde la priorité.
+// ⚠ Deux garde-fous contre le faux positif : un PLANCHER absolu (`DD_REPORT_FLOOR`) — sur un
+// service peu suivi, 2 signalements contre 0 font un ratio infini qui ne veut rien dire — et
+// une médiane calculée SANS les derniers points, sinon le pic se noierait dans sa propre
+// référence.
+const DD_REPORT_FLOOR = 12;   // sous ce volume, un « pic » n'est que du bruit de fond
+const DD_REPORT_HI    = 5;    // ×5 le niveau habituel ⇒ pic franc
+const DD_REPORT_LO    = 2.5;  // ×2,5 ⇒ hausse notable
+const DD_REPORT_TAIL  = 3;    // points « récents » comparés au reste
+function ddFromReports(pts) {
+  if (!Array.isArray(pts) || pts.length < 8) return null;
+  const tail = pts.slice(-DD_REPORT_TAIL).filter(Number.isFinite);
+  const head = pts.slice(0, -DD_REPORT_TAIL).filter(Number.isFinite);
+  if (!tail.length || head.length < 4) return null;
+  const now = Math.max(...tail);
+  const sorted = head.slice().sort((a, b) => a - b);
+  const med = sorted[Math.floor(sorted.length / 2)];
+  const ratio = now / Math.max(med, 1);
+  const fr = n => Math.round(n).toLocaleString('fr-FR');
+  const x  = ratio.toLocaleString('fr-FR', { maximumFractionDigits: 1 });
+  const ind = (now >= DD_REPORT_FLOOR && ratio >= DD_REPORT_HI) ? 'report_hi'
+            : (now >= DD_REPORT_FLOOR && ratio >= DD_REPORT_LO) ? 'report_lo'
+            : 'report_ok';
+  return { ind, desc: ind === 'report_ok'
+    ? `${fr(now)} signalements · niveau habituel (${fr(med)})`
+    : `${fr(now)} signalements · ×${x} le niveau habituel (${fr(med)})` };
+}
+
 // Files d'attente à DD_GRAPH_PAR téléchargements : 24 fiches lancées d'un coup feraient
 // tomber les proxies publics (et la page entière transite par eux).
 async function ddFetchGraphs() {
@@ -28228,10 +28281,19 @@ async function ddFetchAll(force) {
     corsFetchText(DD_HOME).catch(() => null),
     needG ? ddFetchGraphs().catch(() => null) : Promise.resolve(null),
   ]);
+  // Une fiche muette garde sa courbe précédente plutôt que de la faire disparaître.
+  const allG = graphs ? { ...oldG, ...graphs } : oldG;
+  // ⚠ La page officielle n'est JAMAIS écrasée : elle dit ce que l'éditeur CONSTATE, la
+  // courbe ce que les utilisateurs RESSENTENT. La seconde prend le relais là où la première
+  // n'existe pas (opérateurs français et tous les `status:null`) ET là où elle n'a pas
+  // répondu ce coup-ci — un « — » n'apprend rien, un volume de signalements si.
+  for (const s of DD_SERVICES) {
+    if (states[s.id]) continue;
+    const v = ddFromReports(allG[s.id]);
+    if (v) states[s.id] = v;
+  }
   const out = { fetched_at: Date.now(), states, reports: html ? ddParseHome(html) : [],
-    // Une fiche muette garde sa courbe précédente plutôt que de la faire disparaître.
-    graphs: graphs ? { ...oldG, ...graphs } : oldG,
-    graphs_at: graphs ? Date.now() : ((cached && cached.graphs_at) || 0) };
+    graphs: allG, graphs_at: graphs ? Date.now() : ((cached && cached.graphs_at) || 0) };
   ddSave(out);
   return out;
 }
@@ -28257,7 +28319,10 @@ function DdSpark({ pts, color }) {
 function DdRow({ s, st, pts }) {
   const inf = ddInd(st && st.ind);
   const col = inf.color || C.dim;
-  const sub = st && st.desc && st.ind !== 'none' ? st.desc : (s.status ? null : 'pas de page de statut publique');
+  // ⚠ Un état DÉDUIT montre toujours ses chiffres : c'est ce qui empêche de le lire comme
+  // un constat d'éditeur. Sans état du tout, on dit pourquoi plutôt que de laisser un vide.
+  const sub = st && st.desc && (inf.reported || st.ind !== 'none') ? st.desc
+            : (s.status ? null : 'pas de page officielle · aucun signalement lisible');
   const fav = safeHref(actuFavicon('https://' + s.domain));
   return (
     <a href={ddUrl(s.slug)} target="_blank" rel="noopener noreferrer"
@@ -28294,7 +28359,7 @@ function ActuBugSection({ row }) {
   const states = (d && d.states) || {};
   const graphs = (d && d.graphs) || {};
   const checked = Object.keys(states).length;
-  const down = DD_SERVICES.filter(s => { const i = states[s.id] && states[s.id].ind; return i && i !== 'none'; });
+  const down = DD_SERVICES.filter(s => ddIsDown(states[s.id] && states[s.id].ind));
   // ⚠ 13.8.6 — GROUPÉ PAR CATÉGORIE (demande utilisateur). Le tri « panne d'abord » n'est pas
   // perdu, il joue DANS chaque rubrique (`sort` est stable, DD_SERVICES est déjà alphabétique
   // rubrique par rubrique) — et le compteur en tête dit déjà combien de services sont touchés.
@@ -28339,7 +28404,7 @@ function ActuBugSection({ row }) {
         <a href={DD_HOME} target="_blank" rel="noopener noreferrer" style={{ fontSize:11, color:ACTU_COLOR, textDecoration:'none' }}>→ Voir les pannes signalées sur downdetector.fr</a>
       </div>
       <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
-        La pastille de droite vient de la <b>page de statut officielle</b> de l'éditeur (Statuspage ou Instatus, sans clé) — seuls {DD_SERVICES.filter(s => s.status).length} services sur {DD_SERVICES.length} en publient une — Gmail et Drive passent par le tableau de bord Google Workspace, relayé faute d'en-têtes CORS chez Google. Les autres (Steam, Netflix, Spotify, YouTube, Instagram, WhatsApp, League of Legends, Leboncoin, Free…) n'exposent AUCUN état lisible par une machine : ils affichent « — » et renvoient sur leur fiche Downdetector. La <b>courbe grise à droite</b> est le graphique « rapports de panne » de la fiche Downdetector, relayé et redessiné ici : <b>Downdetector n'a pas d'API publique</b> et protège ses pages, donc une courbe peut manquer — elle ne fait jamais passer une pastille au vert. Chaque ligne mène à la fiche complète.
+        La pastille de droite a <b>deux origines</b>, et elles ne disent pas la même chose. Quand l'éditeur publie une page de statut (Statuspage ou Instatus, sans clé) — {DD_SERVICES.filter(s => s.status).length} services sur {DD_SERVICES.length} — c'est <b>son constat</b> qui s'affiche ; Gmail et Drive passent par le tableau de bord Google Workspace, relayé faute d'en-têtes CORS chez Google. Pour tous les autres (Free, Orange, SFR, Bouygues, Sosh, Steam, Netflix, Spotify, YouTube, Instagram…) aucun état lisible par une machine n'existe : la pastille est alors <b>déduite de la courbe des signalements</b>, exactement comme le fait Downdetector — un volume d'utilisateurs qui dépasse nettement son niveau habituel. Ce sont des <b>signalements, pas une panne confirmée</b> : la ligne cite toujours ses chiffres pour que tu juges sur pièces. La <b>courbe grise</b> est ce même graphique « rapports de panne », relayé et redessiné ici : <b>Downdetector n'a pas d'API publique</b> et protège ses pages, donc une fiche muette laisse « — » plutôt qu'un faux vert. Chaque ligne mène à la fiche complète.
       </div>
     </div>
   );
