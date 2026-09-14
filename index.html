@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.14.6';
+const APP_VERSION = '13.14.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -27781,8 +27781,26 @@ function CartoInsee() {
 // origine). Hub'Eau publie EXACTEMENT la même donnée en API ouverte : les résultats du
 // contrôle sanitaire de l'eau distribuée, prélèvement par prélèvement.
 const HUBEAU_DIS = 'https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/resultats_dis';
-async function cartoFetchWater(q) {
-  const { list } = await cartoSearchCommunes(q);
+// ⚠ 13.14.7 — LA CARTE PARLE DÉSORMAIS DE MES LIEUX, PLUS D'UNE COMMUNE CHERCHÉE (demande
+// utilisateur : « fais comme la qualité de l'air »). Le champ de recherche a donc disparu
+// d'ici : une ligne par lieu de `METEO_LOCS`, avec la SEULE conclusion sanitaire, et le
+// détail (date, réseau, phrase officielle, paramètres mesurés) sous un dépli par ligne.
+// ⚠ Hub'Eau s'interroge par CODE INSEE, que `METEO_LOCS` ne porte pas — et en mettre un en
+// dur est proscrit. On le résout donc par `cartoSearchCommunes(nom)` : d'où DEUX requêtes par
+// lieu (résolution + prélèvements), toutes lancées en parallèle.
+// ⚠ Un lieu qui échoue n'emporte PAS la carte : il garde sa ligne et son motif. On ne lève
+// que si les trois sont muets — sinon un réseau lent ferait disparaître les deux qui répondent.
+const WATER_STATES = [
+  { test: c => /non\s+conforme/i.test(c),                                    label:'✕ Non conforme', color:'#e05050' },
+  { test: c => /conforme/i.test(c) && /(référence|reference|dépassement|depassement)/i.test(c), label:'⚠ Peu conforme', color:'#f0a93c' },
+  { test: c => /conforme/i.test(c),                                          label:'✓ Conforme',     color:'#5fd35f' },
+];
+// ⚠ L'ORDRE COMPTE : « non conforme » CONTIENT « conforme ». Tester le cas négatif d'abord,
+// sinon une eau non conforme s'afficherait en vert.
+const waterState = c => WATER_STATES.find(s => s.test(String(c || ''))) || { label:'—', color:C.muted };
+
+async function cartoFetchWaterOne(loc) {
+  const { list } = await cartoSearchCommunes(loc.name);
   const com = list[0];
   // ⚠ Aucun tri ni filtre de champs passé à Hub'Eau : chaque paramètre en trop est un 400
   // possible. On prend un lot large et on trie ICI par date de prélèvement.
@@ -27790,7 +27808,7 @@ async function cartoFetchWater(q) {
   if (!r.ok) throw new Error("Hub'Eau a répondu " + r.status + '.');
   const j = await r.json();
   const rows = Array.isArray(j && j.data) ? j.data : [];
-  if (!rows.length) throw new Error(`Aucun prélèvement publié pour ${com.nom}.`);
+  if (!rows.length) throw new Error(`aucun prélèvement publié pour ${com.nom}`);
   let day = '';
   for (const x of rows) { const dt = String((x && x.date_prelevement) || ''); if (dt > day) day = dt; }
   const last = rows.filter(x => String((x && x.date_prelevement) || '') === day);
@@ -27800,37 +27818,63 @@ async function cartoFetchWater(q) {
     val: (x && (x.resultat_alphanumerique != null ? String(x.resultat_alphanumerique)
         : x.resultat_numerique != null ? String(x.resultat_numerique) : '')) || '',
     unite: String((x && x.libelle_unite) || ''),
-  })).filter(p => p.val !== '').slice(0, 10);
+  })).filter(p => p.val !== '').slice(0, 14);
   return { com, day, concl, params, nbTotal: last.length,
-    reseau: String((last[0] && (last[0].nom_reseau || last[0].nom_distributeur)) || ''), at: Date.now() };
+           reseau: String((last[0] && (last[0].nom_reseau || last[0].nom_distributeur)) || '') };
+}
+async function cartoFetchWater() {
+  const list = await Promise.all(METEO_LOCS.map(async loc => {
+    try { return { key: loc.key, name: loc.name, d: await cartoFetchWaterOne(loc), err: '' }; }
+    catch (e) { return { key: loc.key, name: loc.name, d: null, err: cartoErr(e) }; }
+  }));
+  if (!list.some(x => x.d)) throw new Error(list[0] && list[0].err ? list[0].err : "Hub'Eau injoignable.");
+  return { list, at: Date.now() };
+}
+// Une ligne = un lieu. Repliée elle ne montre QUE la conclusion ; dépliée, tout ce que le
+// dernier prélèvement publié contient. L'état d'ouverture est local et volontairement NON
+// mémorisé : c'est un geste de lecture, pas un réglage.
+function CartoWaterRow({ x, first }) {
+  const [open, setOpen] = React.useState(false);
+  const st = x.d ? waterState(x.d.concl) : { label:'⚠ non lu', color:'#e0a040' };
+  return (
+    <div style={{ padding:'6px 0 0', borderTop: first ? 'none' : `1px solid ${C.border}`, marginTop: first ? 0 : 6 }}>
+      <button onClick={() => x.d && setOpen(o => !o)} type="button"
+        style={{ width:'100%', background:'none', border:'none', padding:0, cursor: x.d ? 'pointer' : 'default',
+          display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:8, color:C.text, fontFamily:'inherit', textAlign:'left' }}>
+        <span style={{ fontSize:11, fontWeight:600, minWidth:0, wordBreak:'break-word' }}>
+          {x.d && <span style={{ color:C.dim, marginRight:4, fontSize:9 }}>{open ? '▾' : '▸'}</span>}{x.name}
+        </span>
+        <span style={{ textAlign:'right', flexShrink:0, fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:st.color }}>{st.label}</span>
+      </button>
+      {!x.d && <div style={{ fontSize:9, color:C.dim, marginTop:2 }}>{x.err}</div>}
+      {x.d && open && (
+        <div style={{ marginTop:5, paddingLeft:11, borderLeft:`1px solid ${C.border}` }}>
+          <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+            {[x.d.day ? 'prélèvement du ' + x.d.day.split('-').reverse().join('/') : null,
+              x.d.nbTotal + ' paramètre(s) mesuré(s)', x.d.reseau || null].filter(Boolean).join(' · ')}
+          </div>
+          {x.d.concl && <div style={{ fontSize:10, color:C.muted, lineHeight:1.5, marginTop:4 }}>{x.d.concl}</div>}
+          {x.d.params.length > 0 && (
+            <div style={{ display:'flex', flexWrap:'wrap', gap:'3px 8px', marginTop:5 }}>
+              {x.d.params.map((p, i) => (
+                <span key={p.nom + i} style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+                  {p.nom} <b style={{ color:C.text }}>{p.val}{p.unite ? ' ' + p.unite : ''}</b>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 function CartoWater() {
-  const [st, load] = useCartoSummary('water', cartoFetchWater, CARTO_COMMUNE_DEFAUT);
-  const [q, setQ] = React.useState(() => (_cartoSum.water && _cartoSum.water.d && _cartoSum.water.d.com.nom) || CARTO_COMMUNE_DEFAUT);
+  const [st, load] = useCartoSummary('water', cartoFetchWater);
   const d = st.data;
-  // Hub'Eau écrit une phrase, pas un code : « Eau d'alimentation conforme aux exigences… »
-  const ok = d && /conforme/i.test(d.concl) && !/non conforme/i.test(d.concl);
   return (
-    <CartoCard title="💧 QUALITÉ DE L'EAU" site={CARTO_SITES_BY.water} st={st}
-      onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}
-      note="Résultats officiels du contrôle sanitaire de l'eau distribuée (Hub'Eau, ministère de la Santé). Le dernier prélèvement publié peut dater de plusieurs semaines : c'est le rythme des campagnes, pas un défaut de lecture.">
-      <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
-      {d && <>
-        <CartoRow first label={d.com.nom} value={ok ? '✓ conforme' : d.concl ? '⚠ à lire' : '—'}
-          color={ok ? '#5fd35f' : d.concl ? '#f0a93c' : C.muted}
-          sub={[d.day ? 'prélèvement du ' + (d.day.split('-').reverse().join('/')) : null,
-                d.nbTotal + ' paramètre(s) mesuré(s)', d.reseau || null].filter(Boolean).join(' · ')} />
-        {d.concl && <div style={{ fontSize:10, color:C.muted, lineHeight:1.5, marginTop:6 }}>{d.concl}</div>}
-        {d.params.length > 0 && (
-          <div style={{ display:'flex', flexWrap:'wrap', gap:'3px 8px', marginTop:7 }}>
-            {d.params.map((p, i) => (
-              <span key={p.nom + i} style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
-                {p.nom} <b style={{ color:C.text }}>{p.val}{p.unite ? ' ' + p.unite : ''}</b>
-              </span>
-            ))}
-          </div>
-        )}
-      </>}
+    <CartoCard title="💧 QUALITÉ DE L'EAU" site={CARTO_SITES_BY.water} st={st} onReload={load}
+      note="Résultats officiels du contrôle sanitaire de l'eau distribuée (Hub'Eau, ministère de la Santé), sur les lieux du module Météo. Touche une ligne pour voir le détail du dernier prélèvement. Il peut dater de plusieurs semaines : c'est le rythme des campagnes, pas un défaut de lecture.">
+      {d && d.list.map((x, i) => <CartoWaterRow key={x.key} x={x} first={i === 0} />)}
     </CartoCard>
   );
 }
@@ -30930,13 +30974,18 @@ function ComparePanel() {
 // ════════════════════════════════════════════════
 const METEO_BLUE = '#35c5a8';   // cyan-vert de l'arc-en-ciel (entre Maps et Mot de Passe)
 // ⚠ 8.8.5 — `fullOnly` : le lieu n'existe QU'EN MODE FULL (demande utilisateur pour
-// Courbevoie, entre Massy et Boulogne). Ce n'est pas qu'un filtre d'affichage — le lieu
-// n'est PAS chargé en mode Light, donc aucune requête Open-Meteo ne part pour rien.
+// Courbevoie, juste après Massy). Ce n'est pas qu'un filtre d'affichage — le lieu n'est PAS
+// chargé en mode Light, donc aucune requête Open-Meteo ne part pour rien.
+// ⚠ Cette liste est lue par TROIS cartes : Météo, 🌫️ Qualité de l'air et 💧 Qualité de l'eau
+// (et 🏥 Santé pour les pollens) — y retirer un lieu le retire des quatre d'un coup. C'est
+// voulu : « mes lieux » doit vouloir dire la même chose partout.
+// ⚠ Ne pas confondre avec `FR_CITIES`, plus bas : celle-là est le repli HORS-LIGNE du
+// reverse-geocoding (quelle ville est la plus proche de mes coordonnées) et doit rester
+// dense, Boulogne-Billancourt comprise.
 const METEO_LOCS = [
   { key:'voisins',    name:'Voisins-le-Bretonneux', lat:48.7625, lon:2.0497 },
   { key:'massy',      name:'Massy',                 lat:48.7309, lon:2.2713 },
   { key:'courbevoie', name:'Courbevoie',            lat:48.8969, lon:2.2564, fullOnly:true },
-  { key:'boulogne',   name:'Boulogne-Billancourt',  lat:48.8356, lon:2.2410 },
 ];
 
 // Codes météo WMO → emoji + libellé FR
@@ -31485,7 +31534,6 @@ function MeteoPanel() {
           du `fullOnly` du chargement — repasser en Light laisse la donnée déjà chargée dans
           `data`, elle serait sinon toujours affichée. */}
       {full && <MeteoLoc loc={data.courbevoie} full={full} />}
-      <MeteoLoc loc={data.boulogne} full={full} />
       <MeteoLoc loc={data.me} full={full} />
     </div>
   );
