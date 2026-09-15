@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.15.5';
+const APP_VERSION = '13.15.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18543,6 +18543,11 @@ function mtgImgUrl(it) {
 // recherche par nom y mène en un clic, et vaut mieux qu'un lien mort.
 const mtgBuyUrl = name => 'https://www.cardmarket.com/fr/Magic/Products/Search?searchString=' + encodeURIComponent(String(name || ''));
 // Une ligne de CSV → un item de collection (ou `null` si elle n'a même pas de nom).
+// ⚠ Id ALIGNÉ sur `magicSearch` (`mtg:<id Scryfall>`) quand ManaBox le donne : c'est ce qui
+// fait que l'import, la recherche et le « déjà possédée » de l'Analyse Cardmarket parlent de
+// la même carte, sans aucun rapprochement par nom. À défaut (Delver Lens n'a pas cette
+// colonne), un id de repli STABLE — extension + numéro + finition + langue — que la cotation
+// complétera ensuite par un vrai id Scryfall dans `meta.scry`.
 function mtgCsvRow(col, r) {
   const at = k => (col[k] >= 0 ? String(r[col[k]] == null ? '' : r[col[k]]).trim() : '');
   const name = at('name');
@@ -18554,26 +18559,6 @@ function mtgCsvRow(col, r) {
   const lang = at('lang'), cond = at('cond');
   const qty = Math.max(1, Math.min(9999, Math.round(actifsNum(at('qty')) || 1)));
   const price = actifsNum(at('price'));
-  return mtgMakeRow({ name, code, set, num, foil, lang, cond, qty, price, scry });
-}
-// Fabrique PARTAGÉE par les deux imports (CSV ManaBox/Delver Lens, base Delver Lens) :
-// la même carte doit donner exactement la même fiche quel que soit le chemin, l'id étant
-// la clé de dédoublonnage.
-// ⚠ Id ALIGNÉ sur `magicSearch` (`mtg:<id Scryfall>`) dès que la source le donne : c'est ce
-// qui fait que l'import, la recherche et le « déjà possédée » de l'Analyse Cardmarket
-// parlent de la même carte, sans aucun rapprochement par nom. À défaut, un id de repli
-// STABLE — extension + numéro + finition + langue — que la cotation complétera ensuite par
-// un vrai id Scryfall dans `meta.scry`.
-function mtgMakeRow(o) {
-  const name = String(o.name || '').trim();
-  if (!name) return null;
-  const code = String(o.code || '').trim().toLowerCase();
-  const set  = String(o.set || '').trim();
-  const num  = String(o.num || '').trim();
-  const lang = String(o.lang || '').trim();
-  const scry = String(o.scry || '').trim().toLowerCase();
-  const foil = !!o.foil;
-  const price = o.price;
   const id = MTG_UUID.test(scry) ? 'mtg:' + scry
     : 'mtg:csv:' + (mtgNorm([code || set, num, foil ? 'foil' : '', lang].filter(Boolean).join('-')).replace(/[^a-z0-9-]+/g, '-')
        || mtgNorm(name).replace(/[^a-z0-9]+/g, '-')).slice(0, 90);
@@ -18581,9 +18566,8 @@ function mtgMakeRow(o) {
     id, name: name.slice(0, 120),
     sub: [set || code.toUpperCase(), num && ('n°' + num), foil ? 'foil' : '', lang && lang.toUpperCase()].filter(Boolean).join(' · '),
     img: '', price: (typeof price === 'number' && price > 0) ? price : null,
-    url: mtgBuyUrl(name), qty: Math.max(1, Math.min(9999, Math.round(Number(o.qty) || 1))),
-    meta: { set: set || code.toUpperCase(), code, num, foil, lang, cond: String(o.cond || ''), csv: true,
-            scry: MTG_UUID.test(scry) ? scry : '' },
+    url: mtgBuyUrl(name), qty,
+    meta: { set: set || code.toUpperCase(), code, num, foil, lang, cond, csv: true, scry: MTG_UUID.test(scry) ? scry : '' },
   };
 }
 // CSV → lignes fusionnées (un même id listé deux fois = ses quantités ADDITIONNÉES : c'est
@@ -18605,134 +18589,6 @@ function mtgCsvParse(text) {
   }
   return { rows: out, col, header: rows[0], skipped };
 }
-// ── 🗄️ SAUVEGARDE DELVER LENS : ON LIT LE FICHIER LUI-MÊME ──────────────────────
-// La sauvegarde de Delver Lens est une BASE SQLITE (`.dlens`, parfois `.bin` selon par où
-// elle sort du téléphone). Ce n'est donc pas un CSV — mais pas un mur non plus : le Hub
-// embarque déjà sql.js pour sa propre base, il sait l'ouvrir.
-// ⚠ ON NE SE FIE PAS À L'EXTENSION, mais aux 16 premiers octets (`SQLite format 3`) : le
-//   même fichier sort tantôt en `.dlens`, tantôt en `.bin`, tantôt renommé — et à l'inverse
-//   un `.backup` ManaBox rebaptisé `.csv` doit être reconnu pour ce qu'il est.
-// ⚠ Le schéma n'est PAS documenté et bouge d'une version à l'autre : rien n'est codé en
-//   dur, tables et colonnes sont DEVINÉES (même parti pris que les colonnes du CSV), et
-//   quand ça échoue on DIT ce qui a été trouvé plutôt que de rendre un « format invalide »
-//   muet, qui ne laisserait rien à raconter pour corriger le tir.
-// ⚠ Les versions récentes chiffrent peut-être leur sauvegarde (les outils communautaires
-//   réclament l'APK pour en extraire la clé) : ce cas-là n'a plus d'en-tête SQLite et
-//   retombe sur le message « fichier chiffré », comme ManaBox.
-const SQLITE_MAGIC = 'SQLite format 3';
-function isSqliteBuf(buf) {
-  const b = new Uint8Array(buf, 0, Math.min(15, buf.byteLength));
-  let s = '';
-  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
-  return s === SQLITE_MAGIC;
-}
-// Rôles de colonnes, du plus sûr (en-tête exact) au plus lâche (mot contenu) — cf. `mtgCsvPickCols`.
-const DLENS_ROLES = [
-  ['name', ['name', 'card_name', 'cardname', 'title'],                          ['name', 'titre']],
-  ['num',  ['number', 'collector_number', 'collectornumber', 'card_number'],    ['number', 'numero']],
-  ['set',  ['edition', 'set', 'expansion', 'set_code', 'setcode'],              ['edition', 'expansion', 'set']],
-  ['qty',  ['quantity', 'count', 'qty', 'amount'],                              ['quantit', 'count', 'qty', 'amount']],
-  ['foil', ['foil', 'is_foil', 'finish', 'premium'],                            ['foil', 'finish', 'premium']],
-  ['lang', ['language', 'lang'],                                                ['lang']],
-  ['scry', ['scryfall_id', 'scryfallid', 'scryfall'],                           ['scryfall']],
-];
-function dlensRoles(cols) {
-  const lc = cols.map(mtgNorm), used = new Set(), out = {};
-  for (const [role, exact, loose] of DLENS_ROLES) {
-    let at = -1;
-    for (const e of exact) { const i = lc.indexOf(e); if (i >= 0 && !used.has(i)) { at = i; break; } }
-    if (at < 0) for (let i = 0; i < lc.length; i++) { if (used.has(i) || !lc[i]) continue; if (loose.some(w => lc[i].includes(w))) { at = i; break; } }
-    if (at >= 0) { out[role] = cols[at]; used.add(at); }
-  }
-  return out;
-}
-const dlensQ = s => '"' + String(s).replace(/"/g, '""') + '"';
-// Lit la base et rend { rows, report } — `report` nomme ce qui a été pris pour quoi.
-async function dlensRead(buf) {
-  const SQL = await initSqlJs({ locateFile: f => `./vendor/${f}` });
-  const db = new SQL.Database(new Uint8Array(buf));
-  try {
-    const all = sql => {
-      const r = db.exec(sql);
-      if (!r || !r[0]) return [];
-      return r[0].values.map(v => { const o = {}; r[0].columns.forEach((c, i) => { o[c] = v[i]; }); return o; });
-    };
-    const tables = all("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").map(r => String(r.name));
-    if (!tables.length) throw new Error('Base SQLite sans aucune table.');
-    const info = {};
-    for (const t of tables) info[t] = all(`PRAGMA table_info(${dlensQ(t)})`).map(c => String(c.name));
-    // ── Table des CARTES : celle qui porte le plus de rôles nom / numéro / extension
-    let cardT = '', cardR = null, best = -1;
-    for (const t of tables) {
-      const r = dlensRoles(info[t]);
-      const score = (r.name ? 2 : 0) + (r.num ? 1 : 0) + (r.set ? 1 : 0);
-      if (r.name && score > best) { best = score; cardT = t; cardR = r; }
-    }
-    if (!cardT) throw new Error('Aucune table de cartes reconnue. Tables trouvées : ' + tables.join(', ') + '.');
-    const cardId = info[cardT].find(c => mtgNorm(c) === 'id' || mtgNorm(c) === '_id') || info[cardT][0];
-    // ── Table des EXEMPLAIRES : elle porte la quantité et POINTE la fiche de carte.
-    // ⚠ Sans elle, on importerait le CATALOGUE de l'appli (toutes les cartes qu'elle
-    // connaît) au lieu de la collection — des dizaines de milliers de fiches jamais possédées.
-    let ownT = '', ownR = null, refCol = '';
-    const short = mtgNorm(cardT).replace(/^data_/, '');
-    for (const t of tables) {
-      if (t === cardT) continue;
-      const r = dlensRoles(info[t]);
-      if (!r.qty) continue;
-      const ref = info[t].find(c => { const nn = mtgNorm(c); return nn === 'card' || nn === 'card_id' || nn === 'cardid' || nn === short || nn === mtgNorm(cardT); });
-      if (ref) { ownT = t; ownR = r; refCol = ref; break; }
-    }
-    // ── Libellés normalisés (`data_names`, `data_editions`) : une colonne « name » qui
-    // contient un ENTIER est une RÉFÉRENCE, pas un nom. Sans cette résolution, la
-    // collection s'importait en « 417 », « 418 »…
-    const lookups = {};
-    for (const t of tables) {
-      const cols = info[t];
-      if (cols.length > 4) continue;
-      const idc = cols.find(c => mtgNorm(c) === 'id' || mtgNorm(c) === '_id');
-      const txt = cols.find(c => c !== idc);
-      if (idc && txt) lookups[t] = { id: idc, txt, map: null };
-    }
-    const resolve = (role, val) => {
-      if (val == null) return '';
-      if (typeof val !== 'number') return String(val);
-      const want = role === 'set' ? ['edition', 'set', 'expansion'] : ['name', 'title'];
-      for (const t of Object.keys(lookups)) {
-        if (!want.some(w => mtgNorm(t).includes(w))) continue;
-        const L = lookups[t];
-        if (!L.map) { L.map = new Map(); for (const r of all(`SELECT ${dlensQ(L.id)}, ${dlensQ(L.txt)} FROM ${dlensQ(t)}`)) L.map.set(r[L.id], r[L.txt]); }
-        const hit = L.map.get(val);
-        if (hit != null && String(hit).trim()) return String(hit);
-      }
-      return '';                                   // non résolu : on ne rend pas un numéro comme nom
-    };
-    const byId = new Map();
-    for (const r of all(`SELECT * FROM ${dlensQ(cardT)}`)) byId.set(r[cardId], r);
-    const src = ownT ? all(`SELECT * FROM ${dlensQ(ownT)}`) : [...byId.values()];
-    const rows = [];
-    let unresolved = 0;
-    for (const row of src) {
-      const c = ownT ? byId.get(row[refCol]) : row;
-      if (!c) continue;
-      const name = resolve('name', c[cardR.name]);
-      if (!name) { unresolved++; continue; }        // ⚠ jamais de fiche au nom inventé
-      const foilRaw = ownT && ownR.foil ? row[ownR.foil] : (cardR.foil ? c[cardR.foil] : 0);
-      const qtyRaw  = ownT ? row[ownR.qty] : (cardR.qty ? c[cardR.qty] : 1);
-      rows.push(mtgMakeRow({
-        name,
-        set:  cardR.set ? resolve('set', c[cardR.set]) : '',
-        num:  cardR.num != null && c[cardR.num] != null ? String(c[cardR.num]) : '',
-        foil: !!foilRaw && String(foilRaw) !== '0' && !/^(normal|non|no|false)$/i.test(String(foilRaw)),
-        lang: cardR.lang ? String(c[cardR.lang] || '') : '',
-        qty:  Math.max(1, Math.min(9999, Math.round(Number(qtyRaw) || 1))),
-        scry: cardR.scry ? String(c[cardR.scry] || '').toLowerCase() : '',
-      }));
-    }
-    if (!rows.length) throw new Error(`Table « ${cardT} » lue, mais aucune carte exploitable. Tables trouvées : ${tables.join(', ')}.`);
-    return { rows, report: { cardT, ownT, cols: cardR, unresolved, tables: tables.length } };
-  } finally { try { db.close(); } catch {} }
-}
-
 // ⚠ Un `.backup` (ou tout autre binaire) ne doit pas être présenté comme un CSV cassé :
 // les octets nuls et les caractères de remplacement le trahissent dès les premiers kilos.
 function mtgLooksBinary(text) {
@@ -18852,33 +18708,21 @@ function MtgCsvImport({ list, onCards, onList }) {
     setBusy(true); setErr(''); setRep(null);
     const fr = new FileReader();
     fr.onerror = () => { setBusy(false); setErr('Fichier illisible.'); };
-    // ⚠ Lu en OCTETS et non en texte : c'est l'EN-TÊTE du fichier qui décide de quoi il
-    // s'agit — base SQLite, texte, ou binaire chiffré — jamais son extension. Le même
-    // export Delver Lens sort en `.dlens` ou en `.bin` selon par où il quitte le téléphone.
-    fr.onload = async () => {
-      const buf = fr.result;
-      if (!buf || !buf.byteLength) { setBusy(false); setErr('Fichier vide.'); return; }
-      // ── Sauvegarde Delver Lens : une vraie base SQLite, qu'on sait ouvrir
-      if (isSqliteBuf(buf)) {
-        try {
-          const d = await dlensRead(buf);
-          const r = onCards(d.rows);
-          setBusy(false);
-          setRep({ ...r, read: d.rows.length, skipped: d.report.unresolved, db: d.report, file: f.name });
-        } catch (e2) {
-          setBusy(false);
-          setErr('Base SQLite ouverte, mais pas exploitable : ' + String((e2 && e2.message) || e2));
-        }
-        return;
-      }
+    // ⚠ UN SEUL FORMAT IMPORTABLE : le CSV. Un binaire n'est pas lu, il est NOMMÉ — la
+    // sauvegarde ManaBox est chiffrée, et celle de Delver Lens peut l'être aussi selon la
+    // version : plutôt qu'un lecteur qui devinerait un schéma non documenté et rendrait une
+    // collection à moitié fausse, on renvoie vers l'export CSV, que les deux applis savent
+    // produire et qui, lui, dit ce qu'il contient.
+    fr.onload = () => {
       setBusy(false);
-      const text = new TextDecoder('utf-8').decode(buf);
-      // ⚠ Ni texte ni SQLite ⇒ chiffré. Le `.backup` de ManaBox est le cas connu : on le
-      // NOMME, on ne le « rate » pas.
+      const text = String(fr.result || '');
+      if (!text) { setErr('Fichier vide.'); return; }
+      // ⚠ Reconnu par son CONTENU et pas par son extension : un `.backup` rebaptisé `.csv`
+      // ne doit pas être présenté comme un CSV cassé.
       if (mtgLooksBinary(text)) {
         setErr(/\.backup$/i.test(f.name)
           ? "Ce fichier est la sauvegarde CHIFFRÉE de ManaBox (sa base interne) : seule ManaBox peut la rouvrir, aucune application ne sait la lire. Depuis ManaBox, choisis l'EXPORT CSV de ta collection — c'est ce fichier-là qu'il faut ici."
-          : "Ce fichier n'est ni du texte ni une base SQLite lisible : il est chiffré, ou dans un format propriétaire. " + MTG_CSV_HELP);
+          : "Ce fichier n'est pas du texte : seul l'export CSV est importable. " + MTG_CSV_HELP);
         return;
       }
       let p = null;
@@ -18888,7 +18732,7 @@ function MtgCsvImport({ list, onCards, onList }) {
       const r = onCards(p.rows);
       setRep({ ...r, read: p.rows.length, skipped: p.skipped, col: p.col, header: p.header, file: f.name });
     };
-    fr.readAsArrayBuffer(f);
+    fr.readAsText(f, 'utf-8');
   };
   // Cotation : lots de 75, publication tous les 10 lots (≈750 cartes) pour qu'un arrêt en
   // cours de route ne perde pas ce qui a déjà été coté.
@@ -18926,34 +18770,30 @@ function MtgCsvImport({ list, onCards, onList }) {
   const btn = on => ({ background: on ? `${col}22` : 'none', border:`1px solid ${on ? col + '88' : C.border}`,
     borderRadius:6, color: on ? col : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
     cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
-  // Ce qui a été pris pour quoi — colonnes du CSV, ou tables et colonnes de la base.
-  const named = !rep ? []
-    : rep.db ? [`table « ${rep.db.cardT} »${rep.db.ownT ? ` × « ${rep.db.ownT} »` : ''}`]
-        .concat(Object.keys(rep.db.cols).map(k => `${k} → « ${rep.db.cols[k]} »`))
-    : rep.col ? Object.keys(rep.col).filter(k => rep.col[k] >= 0).map(k => `${k} → « ${rep.header[rep.col[k]]} »`)
-    : [];
+  // Ce qui a été pris pour quoi — les colonnes du CSV étant devinées, elles s'affichent.
+  const named = rep ? Object.keys(rep.col).filter(k => rep.col[k] >= 0).map(k => `${k} → « ${rep.header[rep.col[k]]} »`) : [];
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
       background:`${col}10`, border:`1px solid ${col}44`, borderRadius:8 }}>
       <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
         <span style={{ fontSize:11, fontWeight:800, color:col }}>📥 Importer ManaBox / Delver Lens</span>
-        <button onClick={pick} disabled={busy} style={btn(!busy)}>{busy ? '⏳ Lecture…' : 'Choisir un fichier'}</button>
+        <button onClick={pick} disabled={busy} style={btn(!busy)}>{busy ? '⏳ Lecture…' : 'Choisir un CSV'}</button>
         <button onClick={() => (q && q.busy) ? (stopRef.current = true) : quote()} disabled={!list.length}
           title="Prix Cardmarket en euros, par lots de 75 cartes"
           style={btn(!!list.length)}>{q && q.busy ? '⏹ Arrêter' : '💰 Mettre à jour la cote'}</button>
       </div>
-      {/* ⚠ Les extensions « illisibles » sont acceptées EXPRÈS : sans elles le sélecteur
-          grisait le `.backup` de ManaBox, et le message qui explique pourquoi il ne peut pas
-          être lu devenait inatteignable — on restait devant un fichier impossible à choisir,
-          sans la moindre explication. */}
-      <input ref={fileRef} type="file" accept=".csv,.txt,.dlens,.bin,.db,.sqlite,.backup,text/csv,text/plain,application/octet-stream"
+      {/* ⚠ Seul le CSV est IMPORTABLE, mais les sauvegardes restent CHOISISSABLES : sans
+          elles dans la liste, le sélecteur grisait le `.backup` de ManaBox et le message qui
+          explique pourquoi il ne peut pas être lu devenait inatteignable — on restait devant
+          un fichier impossible à choisir, sans la moindre explication. */}
+      <input ref={fileRef} type="file" accept=".csv,.txt,.dlens,.bin,.backup,text/csv,text/plain"
         onChange={onFile} style={{ display:'none' }} />
       {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
       {rep && (
         <div style={{ fontSize:10, color:col, fontWeight:600, lineHeight:1.5 }}>
           ✓ {rep.file} — {rep.read} ligne{rep.read > 1 ? 's' : ''} lue{rep.read > 1 ? 's' : ''} ·{' '}
           {rep.added} ajoutée{rep.added > 1 ? 's' : ''} · {rep.updated} mise{rep.updated > 1 ? 's' : ''} à jour
-          {rep.skipped ? ` · ${rep.skipped} ${rep.db ? 'au libellé non résolu' : 'ligne' + (rep.skipped > 1 ? 's' : '') + ' sans nom'} ignorée${rep.skipped > 1 ? 's' : ''}` : ''}
+          {rep.skipped ? ` · ${rep.skipped} ligne${rep.skipped > 1 ? 's' : ''} sans nom ignorée${rep.skipped > 1 ? 's' : ''}` : ''}
           {rep.full ? ` · ⚠ plafond de ${CARDS_MAX} cartes atteint` : ''}
           {rep.saveErr ? ' · ⚠ ENREGISTREMENT REFUSÉ' : ''}
           <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', fontWeight:400, marginTop:2 }}>
@@ -18969,10 +18809,10 @@ function MtgCsvImport({ list, onCards, onList }) {
       )}
       <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
         {MTG_CSV_HELP} Les colonnes sont reconnues par leur NOM, dans n'importe quel ordre.
-        <b>La sauvegarde Delver Lens s'ouvre aussi directement</b> (<code>.dlens</code>, <code>.bin</code>) : c'est une base
-        SQLite, et c'est son EN-TÊTE qui est lu, pas son extension — un fichier renommé passe donc quand même.
         Réimporter le même export MET À JOUR les quantités (le fichier fait autorité), il ne double rien.
-        ⚠ <b>Le fichier <code>.backup</code> de ManaBox ne peut pas être lu</b> : c'est sa base interne chiffrée.
+        ⚠ <b>Seul le CSV est importable</b> : les fichiers de SAUVEGARDE des deux applis
+        (<code>.backup</code> de ManaBox, <code>.dlens</code>/<code>.bin</code> de Delver Lens) sont leurs bases
+        internes — celle de ManaBox est chiffrée, celle de Delver Lens l'est selon la version.
         Les cartes sont rangées dans <b>leur propre base</b> (IndexedDB), pas dans le stockage local du Hub :
         des dizaines de milliers de lignes n'y saturent rien. Les images ne sont jamais stockées, elles se
         déduisent de l'identifiant Scryfall. « Mettre à jour la cote » interroge Scryfall par lots de 75 (prix Cardmarket en €).
