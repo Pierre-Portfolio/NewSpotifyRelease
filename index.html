@@ -65,18 +65,18 @@
   .feed-row  { counter-increment: feedrow; }
   .feed-num::before { content: counter(feedrow); }
 
-  /* ── Grille DENSE des cartes (Collection → Pokémon / Magic) ─────────────────────
-     Une vignette de 96 px ne tenait qu'à DEUX par ligne sur un téléphone : pour une
-     collection qui compte des centaines de cartes, ça fait une page de défilement par
-     extension. Cinq par ligne sur mobile, et la largeur d'avant sur un écran large.
+  /* ── Grille « Fiches » (Collection → cartes) ────────────────────────────────────
+     Chaque carte est posée sur une fiche — fond, filet, rayon — plutôt que collée à ses
+     voisines : 4 par ligne sur téléphone, `auto-fill` au-dessus.
      ⚠ Colonnes portées par le CSS et non par du JS : la mesure est celle du CONTENEUR
      (pas de la fenêtre), et une rotation ne provoque aucun re-rendu React.
-     ⚠ En dessous de ~60 px de colonne, la ligne « − ×N + × » ne tient plus sous la
-     vignette : en mode dense la quantité devient une PASTILLE, et tout se modifie dans
-     la fiche (un clic sur la carte), qui sait déjà le faire. */
-  .coll-grid-dense { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
+     ⚠ À cette largeur, la ligne « − ×N + × » ne tient pas sous la vignette : la quantité
+     devient une PASTILLE, et tout se modifie dans la fiche (un clic sur la carte). */
+  .coll-grid { display: grid; gap: 7px; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
+  .coll-grid-wide { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
   @media (max-width: 560px) {
-    .coll-grid-dense { gap: 5px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .coll-grid { gap: 6px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .coll-grid-wide { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   }
 
   /* ── Écran d'attente (avant le montage de React) ────────────────────────────────
@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.15.6';
+const APP_VERSION = '13.15.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16836,6 +16836,27 @@ function collStats(list) {
   return { qty, uniq: list.length, value, priced };
 }
 function collEur(v) { return v == null ? '—' : v.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'; }
+// Cote COURTE, pour la ligne sous une vignette : « 1 531 € » tient là où « 1 531,00 € »
+// passait à la ligne. Le centime ne se lit pas à 8,5 px et n'aide personne — il reste
+// lisible en entier dans la fiche.
+function collEurShort(v) {
+  if (v == null) return '— €';
+  return v >= 100 ? Math.round(v).toLocaleString('fr-FR') + ' €'
+                  : v.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+}
+// Anneau de progression d'une extension. ⚠ En `viewBox` et non en px : il suit la taille
+// demandée sans qu'aucune coordonnée ne soit à recalculer.
+function CollRing({ pct }) {
+  const r = 10, c = 2 * Math.PI * r;
+  const p = Math.max(0, Math.min(1, pct || 0));
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink:0, display:'block' }}>
+      <circle cx="12" cy="12" r={r} fill="none" stroke={C.border} strokeWidth="3" />
+      <circle cx="12" cy="12" r={r} fill="none" stroke={COLLECTION_COLOR} strokeWidth="3" strokeLinecap="round"
+        strokeDasharray={c} strokeDashoffset={c * (1 - p)} transform="rotate(-90 12 12)" />
+    </svg>
+  );
+}
 
 // ── Sources de recherche ─────────────────────────────────────────────────────────
 // ⚠ Toutes keyless et à CORS ouvert. Chaque fonction renvoie un TABLEAU de résultats
@@ -17077,23 +17098,18 @@ function CollEditModal({ sub, item, onSave, onDelete, onClose }) {
 // lieu de tout faire disparaître, et un élément validé rejoint « ma collection » — il ne
 // reste plus collé sous les résultats de recherche.
 function CollectionSub({ sub, data, onData }) {
-  // ⚠ 13.12.1 — LA COLLECTION S'AFFICHE DÈS QU'ELLE EXISTE (demande utilisateur :
-  // « l'affichage des objets doit se faire en permanence, mais initialement avec la synchro
-  // Finance »). `open` partait à `false` : après un import depuis le classeur, la bannière
-  // annonçait « 21 figurines · 306 € » et le contenu restait replié — on avait importé sans
-  // rien voir, et ça ressemblait à un import qui n'avait rien fait.
-  // ⚠ Un simple `useState(list.length > 0)` NE SUFFIT PAS : la valeur initiale est figée au
-  // montage, or l'import remplit une collection VIDE — exactement le cas qui échouait. D'où
-  // le suivi ci-dessous, qui ouvre au passage de vide à non-vide.
-  // ⚠ `userShut` retient un repli VOLONTAIRE : sans lui, replier une collection pleine se
-  // ferait rouvrir au prochain changement de liste, dans le dos de l'utilisateur.
-  const [open, setOpen] = React.useState(false);     // bannière cliquée = visuel de ma collection
-  const userShut = React.useRef(false);
-  const toggleOpen = () => setOpen(o => { userShut.current = o; return !o; });
+  // ⚠ 13.15.7 — TOUT EST REPLIÉ À L'ARRIVÉE, sans exception (demande utilisateur). Les deux
+  // effets qui ouvraient la sous-collection — au montage si elle était pleine, et au passage
+  // de vide à non-vide après un import — ont été RETIRÉS : ouvrir Collection déroulait une
+  // page de plusieurs écrans avant même qu'on ait choisi quoi regarder.
+  // ⚠ Conséquence assumée : après un import, il faut un clic pour voir ce qui est arrivé —
+  // c'est pour ça que le bilan de l'import s'affiche en toutes lettres sous la barre.
+  const [open, setOpen] = React.useState(false);     // bannière cliquée = ma collection + les outils
+  const toggleOpen = () => setOpen(o => !o);
   const [edit, setEdit] = React.useState(null);      // id de la référence en cours d'édition
   useCollPhotos();                                   // re-rend quand l'index Drive change
   const [q, setQ] = React.useState('');
-  const [st, setSt] = React.useState({ busy: false, results: null, err: '' });
+  const [st, setSt] = React.useState({ busy: false, cards: null, sets: null, err: '' });
   const [mName, setMName] = React.useState('');    // ajout manuel (sub.manual)
   const [mPrice, setMPrice] = React.useState('');
   const list = collList(data, sub.id);
@@ -17105,30 +17121,26 @@ function CollectionSub({ sub, data, onData }) {
   // ⚠ Déclaré APRÈS `list` (piège 2) : un hook à tableau de deps placé au-dessus des
   // variables qu'il liste les figerait à `undefined`.
   const bulkView = isCardSub(sub.id);
-  const [fq, setFq] = React.useState('');
   const [openSets, setOpenSets] = React.useState({});   // extension dépliée (clé = code)
   const [shownBy, setShownBy] = React.useState({});     // pagination, PAR extension
-  React.useEffect(() => { setShownBy({}); }, [fq]);
+  const [showNote, setShowNote] = React.useState(false);
+  const [impMsg, setImpMsg] = React.useState('');       // bilan d'un ajout d'extension
+  const [setRun, setSetRun] = React.useState(null);     // extension en cours de versement
+  React.useEffect(() => { setShownBy({}); }, [q]);
+  // ⚠ UNE SEULE BARRE, DEUX MÉTIERS : ce qu'on tape FILTRE la collection en direct (local,
+  // instantané), et ⏎ va chercher au CATALOGUE (distant). Deux champs côte à côte — « filtrer »
+  // et « chercher » — se confondaient à l'usage : on tapait dans l'un en attendant l'autre.
   const viewList = React.useMemo(() => {
-    const t = bulkView ? fq.trim().toLowerCase() : '';
+    const t = q.trim().toLowerCase();
     if (!t) return list;
-    return list.filter(x => x && (String(x.name || '').toLowerCase().includes(t) || String(x.sub || '').toLowerCase().includes(t)));
-  }, [list, fq, bulkView]);
+    return list.filter(x => x && (String(x.name || '').toLowerCase().includes(t)
+      || String(x.sub || '').toLowerCase().includes(t)));
+  }, [list, q]);
   // ⚠ Le catalogue n'est demandé QUE si la collection est ouverte ET qu'il s'agit de cartes.
   const cardSets = useCardSets(sub.id, bulkView && open);
   const setsIdx  = cardSets.idx[sub.id];
   const groups = React.useMemo(() => bulkView ? cardGroups(sub.id, viewList, setsIdx) : [],
     [bulkView, sub.id, viewList, setsIdx]);
-  // ⚠ Déclaré ICI et pas plus haut : un hook à tableau de deps doit venir APRÈS les
-  // variables qu'il liste, sinon Babel figerait `[undefined]` (piège 2).
-  const hadItems = React.useRef(list.length > 0);
-  React.useEffect(() => {
-    const has = list.length > 0;
-    if (has && !hadItems.current && !userShut.current) setOpen(true);
-    hadItems.current = has;
-  }, [list.length]);
-  // Au MONTAGE, une collection déjà remplie s'ouvre elle aussi (l'affichage est permanent).
-  React.useEffect(() => { if (list.length > 0) setOpen(true); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
   const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
     padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
   const unit = sub.unit || 'élément';
@@ -17146,19 +17158,28 @@ function CollectionSub({ sub, data, onData }) {
     if (next && next !== cur) onData({ ...dataRef.current, [sub.id]: next });
   };
   React.useEffect(() => { hydrate(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+  // ⚠ Les deux requêtes partent ENSEMBLE (`Promise.all`) : une seule barre doit donner un
+  // seul temps d'attente. Le catalogue d'extensions est OPTIONNEL — s'il tombe, les cartes
+  // s'affichent quand même (`catch` local), parce qu'une recherche de carte n'a aucune
+  // raison d'échouer parce qu'une extension n'a pas été trouvée.
   const run = async () => {
     const term = q.trim();
     if (!term || st.busy || !sub.search) return;
-    setSt({ busy: true, results: null, err: '' });
+    setSt({ busy: true, cards: null, sets: null, err: '' });
+    setImpMsg('');
     try {
-      const r = await sub.search(term);
-      setSt({ busy: false, results: r || [], err: '' });
+      const [cards, sets] = await Promise.all([
+        sub.search(term),
+        sub.searchSets ? sub.searchSets(term).catch(() => []) : Promise.resolve([]),
+      ]);
+      setSt({ busy: false, cards: cards || [], sets: sets || [], err: '' });
       hydrate();                                // le catalogue vient d'être chargé
     } catch (e) {
       const msg = String((e && e.message) || e);
-      setSt({ busy: false, results: null, err: /abort/i.test(msg) ? 'Source injoignable (délai dépassé).' : msg });
+      setSt({ busy: false, cards: null, sets: null, err: /abort/i.test(msg) ? 'Source injoignable (délai dépassé).' : msg });
     }
   };
+  const clearQ = () => { setQ(''); setSt({ busy:false, cards:null, sets:null, err:'' }); setImpMsg(''); };
   // Ajout à la main : le prix accepte la virgule décimale (clavier FR) via actifsNum.
   const addManual = () => {
     const name = mName.trim();
@@ -17192,6 +17213,25 @@ function CollectionSub({ sub, data, onData }) {
   };
   // Réécriture de la liste entière (cotation Scryfall d'un import).
   const setList = next => onData({ ...dataRef.current, [sub.id]: next });
+  // Versement d'une EXTENSION entière, déclenché depuis les résultats de la barre.
+  // ⚠ `addMany` ignore un id déjà possédé au lieu d'incrémenter sa quantité : ajouter une
+  // extension qu'on collectionne déjà à l'unité ne doit pas transformer la moitié des
+  // fiches en « ×2 ». Le bilan dit toujours combien étaient déjà là, sinon « 120 ajoutées »
+  // sur 250 ressemblait à un import à moitié raté.
+  const addSet = async setRow => {
+    if (setRun || !sub.addSet) return;
+    setSetRun({ id: setRow.id, step: 'lecture…' }); setImpMsg('');
+    try {
+      const rows = await sub.addSet(setRow.id, (got, tot) =>
+        setSetRun({ id: setRow.id, step: `${got}${tot ? ' / ' + tot : ''}` }));
+      const r = addMany(rows, { pokeSet: setRow.id, setAt: Date.now() });
+      setSetRun(null);
+      setImpMsg(`✓ ${setRow.name} — ${r.added} carte${r.added > 1 ? 's' : ''} ajoutée${r.added > 1 ? 's' : ''} sur ${rows.length} lue${rows.length > 1 ? 's' : ''}`
+        + (r.skipped ? ` · ${r.skipped} déjà dans ta collection` : '')
+        + (r.full ? ` · ⚠ plafond de ${CARDS_MAX} atteint` : ''));
+      setOpen(true);
+    } catch (e) { setSetRun(null); setImpMsg('⚠ ' + String((e && e.message) || e)); }
+  };
   const add = r0 => {
     // Copie : `onAdd` peut retoucher l'item avant enregistrement (les jeux vidéo y posent
     // la plateforme choisie) sans altérer la liste de résultats affichée.
@@ -17208,161 +17248,288 @@ function CollectionSub({ sub, data, onData }) {
   };
   // `onEdit` n'est passé QUE par « ma collection » : un résultat de recherche n'est pas
   // encore une référence, il n'y a rien à éditer tant qu'il n'est pas ajouté.
-  // Ligne sous la vignette. Pour une CARTE, c'est « n°4 - Base » : le numéro et l'extension
-  // sont ce qui identifie une carte chez un collectionneur, et ça tient sur 58 px — là où le
-  // sous-titre stocké (« Base · n°4 · Rare Holo · EN ») était tronqué à « Base · n°… ».
-  // ⚠ Recalculé à l'AFFICHAGE, jamais réécrit dans la fiche : `it.sub` garde sa valeur
-  // d'origine (import, recherche, saisie à la main) et sert de repli quand le numéro et
-  // l'extension sont tous deux introuvables.
-  const cardLine = it => {
-    if (!bulkView) return it.sub || '';
-    const num = cardNum(sub.id, it), set = cardSetName(sub.id, it, setsIdx);
-    return [num && ('n°' + num), set].filter(Boolean).join(' - ') || it.sub || '';
-  };
-  // ⚠ `dense` = la vignette ne porte plus sa largeur (96 px fixes) : c'est la COLONNE de
-  // `.coll-grid-dense` qui la donne, et le ratio 96/134 — celui d'une carte à jouer — tient
-  // la hauteur. Sans ce ratio, une largeur fluide avec une hauteur figée déformait l'image.
-  const card = (it, actions, onEdit, dense) => {
-   const line = cardLine(it);
+  // Vignette : TOUJOURS une fiche — fond, filet, rayon — la référence est un objet qu'on
+  // prend, pas une image collée à ses voisines. La largeur vient de la COLONNE de
+  // `.coll-grid`, et le ratio 96/134 (celui d'une carte à jouer) tient la hauteur : sous une
+  // hauteur figée, une largeur fluide déformait l'image.
+  // ⚠ Plus de ✏️ sur chaque vignette : posé cent fois, il faisait tout le bruit de l'écran.
+  //   La fiche s'ouvre au clic comme avant — la marque n'apprenait rien à personne.
+  // ⚠ Sous une CARTE on n'écrit ni son nom (il est sur l'illustration) ni son extension
+  //   quand celle-ci est déjà le titre du groupe qui la contient : il reste le numéro et la
+  //   cote. Un RÉSULTAT de recherche (`onEdit` absent) n'a pas de groupe au-dessus de lui —
+  //   lui seul porte son extension, sinon on ignore laquelle on s'apprête à ajouter.
+  const card = (it, actions, onEdit) => {
+   const qty = it.qty || 1;
+   const num = bulkView ? cardNum(sub.id, it) : '';
+   const setName = (bulkView && !onEdit) ? cardSetName(sub.id, it, setsIdx) : '';
+   const money = (
+     <span style={{ color:COLLECTION_COLOR, fontWeight:700, flexShrink:0 }}>{collEurShort(it.price)}</span>
+   );
    return (
-    <div key={it.id} style={dense ? { minWidth:0 } : { width:96, flexShrink:0 }}>
+    <div key={it.id} style={{ minWidth:0, display:'flex', flexDirection:'column', gap:4, padding:5,
+      background:C.surface, border:`1px solid ${C.border}`, borderRadius:10 }}>
       <div onClick={onEdit} title={onEdit ? 'Modifier cette référence' : undefined}
-        style={{ width:'100%', aspectRatio:'96 / 134', borderRadius:8, overflow:'hidden', background:'#111', position:'relative',
-        display:'flex', alignItems:'center', justifyContent:'center', border:`1px solid ${C.border}`,
-        cursor: onEdit ? 'pointer' : 'default' }}>
+        style={{ width:'100%', aspectRatio:'96 / 134', borderRadius:6, overflow:'hidden', background:'#111',
+          position:'relative', display:'flex', alignItems:'center', justifyContent:'center',
+          cursor: onEdit ? 'pointer' : 'default' }}>
         <CollImg src={it.img || (sub.img ? sub.img(it) : '')} fileId={collPhotoFileId(it.id)} icon={sub.icon} />
-        {/* Quantité en PASTILLE : en dense, la ligne − ×N + × ne tient pas sous la vignette
-            (cf. le commentaire de `.coll-grid-dense`). Elle reste modifiable dans la fiche. */}
-        {dense && (it.qty || 1) > 1 && (
-          <span title={`${it.qty} exemplaires`} style={{ position:'absolute', left:3, bottom:3, background:'rgba(0,0,0,0.72)',
+        {/* Quantité en PASTILLE : la ligne « − ×N + × » ne tient pas sous une fiche de cette
+            largeur. Elle reste modifiable dans la fiche, qui s'ouvre au clic. */}
+        {qty > 1 && (
+          <span title={`${qty} exemplaires`} style={{ position:'absolute', left:3, bottom:3, background:'rgba(0,0,0,0.72)',
             border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:5, fontSize:8.5, fontWeight:800, color:COLLECTION_COLOR,
-            fontFamily:'DM Mono,monospace', lineHeight:1, padding:'3px 4px' }}>×{it.qty}</span>
-        )}
-        {onEdit && (
-          <span aria-hidden="true" style={{ position:'absolute', right:3, bottom:3, background:'rgba(0,0,0,0.62)',
-            border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:5, fontSize:9, lineHeight:1, padding:'3px 4px' }}>✏️</span>
+            fontFamily:'DM Mono,monospace', lineHeight:1, padding:'3px 4px' }}>×{qty}</span>
         )}
       </div>
-      <div style={{ fontSize: dense ? 9 : 9.5, fontWeight:700, color:C.text, marginTop: dense ? 3 : 4, lineHeight:1.25,
-        display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>
-        {it.meta && it.meta.ai ? <span title="Estimation par IA, pas une cotation">✨ </span> : null}{it.name}
+      {!bulkView && (
+        <div style={{ fontSize:9.5, fontWeight:700, color:C.text, lineHeight:1.25,
+          display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>
+          {it.meta && it.meta.ai ? <span title="Estimation par IA, pas une cotation">✨ </span> : null}{it.name}
+        </div>
+      )}
+      <div style={{ display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:4,
+        fontFamily:'DM Mono,monospace', fontSize:8.5, whiteSpace:'nowrap' }}>
+        <span title={bulkView ? undefined : it.sub} style={{ color:C.dim, overflow:'hidden', textOverflow:'ellipsis' }}>
+          {bulkView ? (num ? 'n°' + num : '—') : (it.sub || '')}
+        </span>
+        {money}
       </div>
-      {line && <div title={line} style={{ fontSize: dense ? 8 : 8.5, color:C.dim, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{line}</div>}
-      <div style={{ fontSize: dense ? 9 : 9.5, fontWeight:800, fontFamily:'DM Mono,monospace', color:COLLECTION_COLOR, marginTop:2 }}>
-        {it.price != null ? collEur(it.price) : '— €'}
-      </div>
+      {setName && (
+        <div title={setName} style={{ fontSize:8, color:C.dim, lineHeight:1.2,
+          whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{setName}</div>
+      )}
       {actions}
     </div>
    );
   };
+  const barBtn = { flex:'0 0 34px', width:34, height:34, display:'flex', alignItems:'center',
+    justifyContent:'center', background:`${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`,
+    borderRadius:9, color:COLLECTION_COLOR, fontSize:14, cursor:'pointer', padding:0 };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-      {/* BANNIÈRE : synthèse de la collection, cliquable pour ouvrir le visuel + la recherche */}
+      {/* BANNIÈRE — le SEUL élément visible à l'arrivée : tout le reste (collection, barre,
+          outils) vit à l'intérieur, et rien ne s'ouvre tout seul. */}
       <button onClick={toggleOpen} type="button"
         title={open ? 'Replier' : `Voir mes ${unit}s et en ajouter`}
-        style={{ display:'flex', alignItems:'center', gap:12, width:'100%', textAlign:'left',
-          background:`${COLLECTION_COLOR}14`, border:`1px solid ${COLLECTION_COLOR}55`, borderRadius:12,
-          padding:'11px 14px', cursor:'pointer', color:C.text, fontFamily:'inherit' }}>
-        <span style={{ fontSize:26, lineHeight:1, flexShrink:0 }}>{sub.icon}</span>
+        style={{ display:'flex', alignItems:'center', gap:11, width:'100%', textAlign:'left',
+          background: open ? `${COLLECTION_COLOR}14` : 'transparent',
+          border:`1px solid ${COLLECTION_COLOR}${open ? '55' : '33'}`, borderRadius:12,
+          padding:'10px 13px', cursor:'pointer', color:C.text, fontFamily:'inherit' }}>
+        <span style={{ fontSize:22, lineHeight:1, flexShrink:0 }}>{sub.icon}</span>
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontSize:12.5, fontWeight:800, color:COLLECTION_COLOR }}>{sub.label}</div>
-          <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:3 }}>
-            {s.qty} {unit}{s.qty > 1 ? 's' : ''} · {s.uniq} référence{s.uniq > 1 ? 's' : ''} · {collEur(s.value)}
+          <div style={{ fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2 }}>
+            {s.qty} {unit}{s.qty > 1 ? 's' : ''} · {s.uniq} réf. · {collEur(s.value)}
+            {s.uniq > s.priced ? ` · ${s.uniq - s.priced} sans prix` : ''}
           </div>
-          {s.uniq > s.priced && (
-            <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:2 }}>
-              {s.uniq - s.priced} sans prix connu (non compté dans le total)
-            </div>
-          )}
         </div>
-        <span style={{ fontSize:12, color:C.dim, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
+        <span style={{ fontSize:11, color:C.dim, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
       </button>
 
-      {/* ── MA COLLECTION — LE SEUL CONTENU DU COLLAPSE, ET AU-DESSUS DE LA RECHERCHE ─ */}
       {open && <>
-        {list.length === 0
-          ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Collection vide — cherche ci-dessous pour ajouter {sub.article || 'un premier élément'}.</div>
-          : <>
-            {bulkView && (
-              <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-                <input type="text" value={fq} onChange={e => setFq(e.target.value)} placeholder="Filtrer ma collection (nom, extension, numéro)…"
-                  style={{ ...inputStyle, padding:'5px 9px', fontSize:11, borderColor: fq ? COLLECTION_COLOR : C.border }} />
-                <span style={{ fontSize:9.5, color:C.dim, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{viewList.length} / {list.length}</span>
-                {fq && <button onClick={() => setFq('')} title="Effacer le filtre"
-                  style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim, fontSize:12, padding:'0 9px', cursor:'pointer', flexShrink:0 }}>×</button>}
+        {/* ── LA BARRE, COLLANTE ────────────────────────────────────────────────────
+            UNE seule saisie : ce qu'on tape filtre la collection en direct, ⏎ (ou 🔎) va
+            chercher au catalogue. Collante, elle reste à portée pendant qu'on fait défiler
+            des centaines de cartes. Le bouton d'import est un carré de même hauteur, collé
+            à droite — il n'existe que là où il y a quelque chose à importer. */}
+        {sub.search && (
+          <div style={{ position:'sticky', top:0, zIndex:3, background:C.bg, padding:'2px 0 4px' }}>
+            <div style={{ display:'flex', gap:6 }}>
+              <div style={{ flex:'1 1 auto', minWidth:0, display:'flex', alignItems:'center', gap:4, height:34,
+                padding:'0 6px', background:C.surface, borderRadius:9,
+                border:`1px solid ${q.trim() ? COLLECTION_COLOR + '66' : C.border}` }}>
+                <button onClick={run} disabled={st.busy || !q.trim()} type="button" title="Chercher dans le catalogue"
+                  style={{ background:'none', border:0, padding:'0 3px', fontSize:12, lineHeight:1, flexShrink:0,
+                    color: st.busy || !q.trim() ? C.dim : COLLECTION_COLOR,
+                    cursor: st.busy || !q.trim() ? 'default' : 'pointer' }}>{st.busy ? '⏳' : '🔎'}</button>
+                <input type="text" value={q} onChange={e => setQ(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') run(); }}
+                  placeholder={sub.placeholder || 'Chercher…'}
+                  style={{ flex:'1 1 auto', minWidth:0, background:'none', border:0, outline:'none',
+                    color:C.text, fontSize:12, fontFamily:'inherit' }} />
+                {q && (
+                  <button onClick={clearQ} type="button" title="Effacer"
+                    style={{ background:'none', border:0, color:C.dim, fontSize:14, lineHeight:1,
+                      padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+                )}
+              </div>
+              {sub.barBtn && <sub.barBtn style={barBtn} onReport={setImpMsg} onCards={importCards} />}
+            </div>
+          </div>
+        )}
+
+        {/* Une seule ligne d'état sous la barre : compteur du filtre, bilan d'import, erreur. */}
+        {st.err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
+        {impMsg && <div style={{ fontSize:10, color: impMsg.startsWith('⚠') ? '#e05050' : COLLECTION_COLOR,
+          fontWeight:600, lineHeight:1.5 }}>{impMsg}</div>}
+        {setRun && <div style={{ fontSize:10, color:COLLECTION_COLOR, fontStyle:'italic' }}>⏳ Ajout de l'extension — {setRun.step}</div>}
+
+        {/* ── RÉSULTATS : l'EXTENSION d'abord (l'action la plus lourde), les cartes ensuite ── */}
+        {st.sets && st.sets.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+            <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.12em',
+              textTransform:'uppercase', color:C.dim }}>Extension{st.sets.length > 1 ? 's' : ''}</div>
+            {st.sets.slice(0, 6).map(g => (
+              <div key={g.id} style={{ display:'flex', alignItems:'center', gap:9, padding:'7px 9px',
+                background:`${COLLECTION_COLOR}14`, border:`1px solid ${COLLECTION_COLOR}55`, borderRadius:11 }}>
+                {g.symbol
+                  ? <img src={g.symbol} alt="" loading="lazy" referrerPolicy="no-referrer"
+                      style={{ width:22, height:22, objectFit:'contain', flexShrink:0 }} />
+                  : <span style={{ width:22, flexShrink:0, textAlign:'center' }}>{sub.icon}</span>}
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:11.5, fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{g.name}</div>
+                  <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:1,
+                    whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                    {[g.series, g.date, g.total && `${g.total} cartes`].filter(Boolean).join(' · ')}
+                  </div>
+                </div>
+                <button onClick={() => addSet(g)} disabled={!!setRun} type="button"
+                  style={{ flexShrink:0, background: setRun ? 'none' : COLLECTION_COLOR, border: setRun ? `1px solid ${C.border}` : 0,
+                    borderRadius:8, color: setRun ? C.dim : '#08121f', fontSize:10.5, fontWeight:800,
+                    padding:'6px 9px', cursor: setRun ? 'default' : 'pointer', fontFamily:'inherit' }}>
+                  {setRun && setRun.id === g.id ? '⏳' : '＋ Tout ajouter'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {st.cards && st.cards.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+            <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.12em',
+              textTransform:'uppercase', color:C.dim }}>{bulkView ? 'Cartes' : 'Résultats'}</div>
+            <div className={`coll-grid${bulkView ? '' : ' coll-grid-wide'}`}>
+              {st.cards.map(r => card(r, (
+                <button onClick={() => add(r)} type="button" title="Ajouter à ma collection"
+                  style={{ width:'100%', background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:7,
+                    color:COLLECTION_COLOR, fontSize:9.5, fontWeight:700, padding:'3px 0', cursor:'pointer',
+                    fontFamily:'DM Mono,monospace' }}>＋</button>
+              )))}
+            </div>
+          </div>
+        )}
+        {st.cards && st.cards.length === 0 && (!st.sets || !st.sets.length) && (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucun résultat pour « {q.trim()} » dans le catalogue.</div>
+        )}
+
+        {/* ── MA COLLECTION ───────────────────────────────────────────────────────── */}
+        {list.length === 0 ? (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>
+            Collection vide — cherche ci-dessus pour ajouter {sub.article || 'un premier élément'}.
+          </div>
+        ) : viewList.length === 0 ? (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>
+            Aucune {unit} de ta collection ne correspond à « {q.trim()} » — appuie sur 🔎 pour chercher au catalogue.
+          </div>
+        ) : bulkView ? (
+          /* ── UNE EXTENSION = UN COLLAPSE ────────────────────────────────────────
+             Seules les extensions dont on possède au moins une carte existent ici : les
+             groupes sont DÉRIVÉS de la collection, il n'y a rien à filtrer.
+             ⚠ Replié, le groupe ne rend AUCUNE vignette (même parti pris que
+             `StatsCollapse`) : c'est ce qui permet de porter 20 000 cartes sans geler la
+             page. Un filtre actif, ou une seule extension, ouvre d'office. */
+          <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+            {cardSets.busy[sub.id] && (
+              <div style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>⏳ Lecture du catalogue des extensions…</div>
+            )}
+            {cardSets.err[sub.id] && (
+              <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+                ⚠ Totaux par extension indisponibles ({cardSets.err[sub.id]}) — seul le nombre de cartes possédées est affiché.
               </div>
             )}
-            {bulkView && viewList.length === 0 && (
-              <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucune {unit} ne correspond à « {fq.trim()} ».</div>
-            )}
-            {/* ── UNE EXTENSION = UN COLLAPSE TRÈS FIN ─────────────────────────────
-                Seules les extensions dont on possède au moins une carte existent ici : les
-                groupes sont DÉRIVÉS de la collection, il n'y a rien à filtrer.
-                ⚠ Replié, le groupe ne rend AUCUNE vignette (même parti pris que
-                `StatsCollapse`) : c'est ce qui permet d'afficher 20 000 cartes sans geler
-                la page. Un filtre actif, ou une seule extension, ouvre d'office. */}
-            {bulkView && <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
-              {cardSets.busy[sub.id] && (
-                <div style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>⏳ Lecture du catalogue des extensions…</div>
-              )}
-              {cardSets.err[sub.id] && (
-                <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
-                  ⚠ Totaux par extension indisponibles ({cardSets.err[sub.id]}) — seul le nombre de cartes possédées est affiché.
-                </div>
-              )}
-              {groups.map(g => {
-                const forced = !!fq.trim() || groups.length === 1;
-                const on  = Object.prototype.hasOwnProperty.call(openSets, g.key) ? openSets[g.key] : forced;
-                const lim = shownBy[g.key] || COLL_PAGE;
-                const rest = g.items.length - lim;
-                return (
-                  <div key={g.key}>
-                    <button type="button" onClick={() => setOpenSets(o => ({ ...o, [g.key]: !on }))}
-                      title={g.total ? `${g.owned} numéro${g.owned > 1 ? 's' : ''} sur ${g.total}` : `${g.owned} carte${g.owned > 1 ? 's' : ''}`}
-                      style={{ display:'flex', alignItems:'center', gap:6, width:'100%', textAlign:'left',
-                        background: on ? `${COLLECTION_COLOR}14` : 'transparent',
-                        border:`1px solid ${COLLECTION_COLOR}${on ? '55' : '2e'}`, borderRadius:6,
-                        padding:'3px 8px', cursor:'pointer', color:C.text, fontFamily:'inherit' }}>
-                      <span style={{ fontSize:8, color:C.dim, flexShrink:0, transform: on ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
-                      <span style={{ flex:1, minWidth:0, fontSize:10.5, fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{g.label}</span>
-                      <span style={{ fontSize:9.5, fontWeight:800, fontFamily:'DM Mono,monospace', color:COLLECTION_COLOR, flexShrink:0 }}>
-                        {g.owned}{g.total ? ` / ${g.total}` : ''}
+            {groups.map(g => {
+              const forced = !!q.trim() || groups.length === 1;
+              const on  = Object.prototype.hasOwnProperty.call(openSets, g.key) ? openSets[g.key] : forced;
+              const lim = shownBy[g.key] || COLL_PAGE;
+              const rest = g.items.length - lim;
+              return (
+                <div key={g.key}>
+                  <button type="button" onClick={() => setOpenSets(o => ({ ...o, [g.key]: !on }))}
+                    title={g.total ? `${g.owned} numéro${g.owned > 1 ? 's' : ''} sur ${g.total}` : `${g.owned} carte${g.owned > 1 ? 's' : ''}`}
+                    style={{ display:'flex', alignItems:'center', gap:9, width:'100%', textAlign:'left',
+                      background: on ? `${COLLECTION_COLOR}14` : C.surface,
+                      border:`1px solid ${on ? COLLECTION_COLOR + '55' : C.border}`, borderRadius:12,
+                      padding:'7px 10px', cursor:'pointer', color:C.text, fontFamily:'inherit' }}>
+                    <CollRing pct={g.total ? g.owned / g.total : 0} />
+                    <span style={{ flex:1, minWidth:0 }}>
+                      <span style={{ display:'block', fontSize:11.5, fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{g.label}</span>
+                      <span style={{ display:'block', fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:1 }}>
+                        {g.items.length} fiche{g.items.length > 1 ? 's' : ''}
                       </span>
-                    </button>
-                    {on && <>
-                      <div className="coll-grid-dense" style={{ marginTop:5 }}>
-                        {g.items.slice(0, lim).map(it => card(it, null, () => setEdit(it.id), true))}
-                      </div>
-                      {rest > 0 && (
-                        <button type="button" onClick={() => setShownBy(s => ({ ...s, [g.key]: lim + COLL_PAGE }))}
-                          style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6, color:COLLECTION_COLOR,
-                            fontSize:10, fontWeight:700, padding:'4px 9px', marginTop:5, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
-                          ↓ Afficher {Math.min(COLL_PAGE, rest)} de plus ({rest} restante{rest > 1 ? 's' : ''})
-                        </button>
-                      )}
-                    </>}
-                  </div>
-                );
-              })}
-            </div>}
-            {/* Les autres collections (Displate, Pop, jeux vidéo…) gardent leurs 96 px et
-                leur liste à plat : elles comptent des dizaines de fiches, pas des milliers. */}
-            {!bulkView && <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-              {viewList.map(it => card(it, (
-                <div style={{ display:'flex', alignItems:'center', gap:4, marginTop:3 }}>
-                  <button onClick={() => onData(collBump(data, sub.id, it.id, -1))} disabled={(it.qty || 1) <= 1} title="−1"
-                    style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:5, color: (it.qty || 1) <= 1 ? '#333' : C.muted, fontSize:11, lineHeight:1, padding:'1px 5px', cursor: (it.qty || 1) <= 1 ? 'default' : 'pointer' }}>−</button>
-                  <span style={{ fontSize:9.5, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.muted, flex:1, textAlign:'center' }}>×{it.qty || 1}</span>
-                  <button onClick={() => onData(collBump(data, sub.id, it.id, +1))} title="+1"
-                    style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:5, color:C.muted, fontSize:11, lineHeight:1, padding:'1px 5px', cursor:'pointer' }}>+</button>
-                  <button onClick={() => { if (confirm(`Retirer « ${it.name} » de ta collection ?`)) onData(collRemove(data, sub.id, it.id)); }} title="Retirer"
-                    style={{ background:'none', border:'1px solid #e0505055', borderRadius:5, color:'#e05050', fontSize:11, lineHeight:1, padding:'1px 5px', cursor:'pointer' }}>×</button>
+                    </span>
+                    <span style={{ fontSize:11, fontWeight:700, fontFamily:'DM Mono,monospace', color:COLLECTION_COLOR, flexShrink:0 }}>
+                      {g.owned}{g.total ? ` / ${g.total}` : ''}
+                    </span>
+                  </button>
+                  {on && <>
+                    <div className="coll-grid" style={{ marginTop:6 }}>
+                      {g.items.slice(0, lim).map(it => card(it, null, () => setEdit(it.id)))}
+                    </div>
+                    {rest > 0 && (
+                      <button type="button" onClick={() => setShownBy(v => ({ ...v, [g.key]: lim + COLL_PAGE }))}
+                        style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:8, color:COLLECTION_COLOR,
+                          fontSize:10, fontWeight:700, padding:'5px 10px', marginTop:6, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                        ↓ Afficher {Math.min(COLL_PAGE, rest)} de plus ({rest} restante{rest > 1 ? 's' : ''})
+                      </button>
+                    )}
+                  </>}
                 </div>
-              ), () => setEdit(it.id)))}
-            </div>}
-          </>}
+              );
+            })}
+          </div>
+        ) : (
+          <div className="coll-grid coll-grid-wide">
+            {viewList.map(it => card(it, (
+              <div style={{ display:'flex', alignItems:'center', gap:3 }}>
+                <button onClick={() => onData(collBump(data, sub.id, it.id, -1))} disabled={(it.qty || 1) <= 1} title="−1"
+                  style={{ flex:1, background:'none', border:`1px solid ${C.border}`, borderRadius:6, color: (it.qty || 1) <= 1 ? '#333' : C.muted, fontSize:11, lineHeight:1, padding:'2px 0', cursor: (it.qty || 1) <= 1 ? 'default' : 'pointer' }}>−</button>
+                <button onClick={() => onData(collBump(data, sub.id, it.id, +1))} title="+1"
+                  style={{ flex:1, background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, lineHeight:1, padding:'2px 0', cursor:'pointer' }}>+</button>
+                <button onClick={() => { if (confirm(`Retirer « ${it.name} » de ta collection ?`)) onData(collRemove(data, sub.id, it.id)); }} title="Retirer"
+                  style={{ flex:1, background:'none', border:'1px solid #e0505055', borderRadius:6, color:'#e05050', fontSize:11, lineHeight:1, padding:'2px 0', cursor:'pointer' }}>×</button>
+              </div>
+            ), () => setEdit(it.id)))}
+          </div>
+        )}
 
+        {/* ── OUTILS SECONDAIRES — dans le collapse eux aussi ──────────────────────── */}
+        {sub.tools && <sub.tools list={list} onList={setList} />}
+
+        {/* AJOUT MANUEL (sous-collections sans catalogue fiable : Pop, montres, vins…) */}
+        {sub.manual && (
+          <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+            <input type="text" value={mName} onChange={e => setMName(e.target.value)} placeholder={sub.manualPlaceholder || 'Ajouter à la main : nom…'}
+              style={{ ...inputStyle, padding:'5px 9px', fontSize:11 }} />
+            <input type="text" inputMode="decimal" value={mPrice} onChange={e => setMPrice(e.target.value)} placeholder="Prix €"
+              style={{ ...inputStyle, flex:'0 0 74px', padding:'5px 9px', fontSize:11 }} />
+            <button onClick={addManual} disabled={!mName.trim()} title="Ajouter à ma collection"
+              style={{ background:'none', border:`1px solid ${mName.trim() ? COLLECTION_COLOR + '88' : C.border}`, borderRadius:6,
+                color: mName.trim() ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
+                cursor: mName.trim() ? 'pointer' : 'default', flexShrink:0, fontFamily:'DM Mono,monospace' }}>+ Ajouter</button>
+          </div>
+        )}
+
+        {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (Steam, classeur Finance) */}
+        {sub.importer && <sub.importer sub={sub} list={list} onImport={addMany} onMerge={mergeRows} onCards={importCards} onList={setList} />}
+
+        {/* ESTIMATION PAR PHOTO (Pierre précieuse / Montre / Vin) */}
+        {sub.photo && <CollPhotoEstimate kind={sub.photo} onAdd={add} />}
+
+        {/* ⓘ — la note de source ne s'affiche QUE si on la demande : elle faisait deux
+            paragraphes en italique sous chaque collection, et c'est ce qui encombrait le plus. */}
+        {sub.note && <>
+          <button type="button" onClick={() => setShowNote(v => !v)}
+            style={{ alignSelf:'flex-start', background:'none', border:0, color:C.dim, fontSize:9.5,
+              padding:0, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+            {showNote ? '▾' : '▸'} ⓘ D'où viennent ces données
+          </button>
+          {showNote && (
+            <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+              {typeof sub.note === 'function' ? sub.note() : sub.note}
+            </div>
+          )}
+        </>}
       </>}
+
       {/* ✏️ ÉDITION — l'item est RELU dans `list` à chaque rendu (et non figé au clic) :
           la pop-up reflète ce qui vient d'être enregistré, et se ferme toute seule si la
           référence disparaît (retirée depuis la pop-up elle-même ou un autre onglet). */}
@@ -17373,62 +17540,6 @@ function CollectionSub({ sub, data, onData }) {
           onSave={patch => onData(collEdit(data, sub.id, it.id, patch))}
           onDelete={() => onData(collRemove(data, sub.id, it.id))} />;
       })()}
-
-      {/* ── OUTILS D'AJOUT — HORS DU COLLAPSE, donc toujours visibles ────────────── */}
-      {/* RECHERCHE */}
-      {sub.search && <>
-        <div style={{ display:'flex', gap:6, marginTop:2 }}>
-          <input type="text" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') run(); }}
-            placeholder={sub.placeholder || 'Chercher…'}
-            style={{ ...inputStyle, padding:'5px 9px', fontSize:11, borderColor: q ? COLLECTION_COLOR : C.border }} />
-          <button onClick={() => run()} disabled={st.busy || !q.trim()} title="Chercher"
-            style={{ background:'none', border:`1px solid ${st.busy || !q.trim() ? C.border : COLLECTION_COLOR + '88'}`, borderRadius:6,
-              color: st.busy || !q.trim() ? C.dim : COLLECTION_COLOR, fontSize:12, padding:'0 10px', cursor: st.busy || !q.trim() ? 'default' : 'pointer', flexShrink:0 }}>
-            {st.busy ? '…' : '🔎'}
-          </button>
-          {(st.results || st.err) && (
-            <button onClick={() => { setQ(''); setSt({ busy:false, results:null, err:'' }); }} title="Effacer la recherche"
-              style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim, fontSize:12, padding:'0 9px', cursor:'pointer', flexShrink:0 }}>×</button>
-          )}
-        </div>
-        {st.busy && <div style={{ fontSize:10, color:COLLECTION_COLOR, fontStyle:'italic' }}>⏳ Recherche en cours…</div>}
-        {st.err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
-        {st.results && st.results.length === 0 && (
-          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucun résultat pour « {q.trim()} ».</div>
-        )}
-        {st.results && st.results.length > 0 && (
-          <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-            {st.results.map(r => card(r, (
-              <button onClick={() => add(r)} title="Ajouter à ma collection"
-                style={{ width:'100%', marginTop:3, background:`${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`,
-                  borderRadius:5, color:COLLECTION_COLOR, fontSize:9.5, fontWeight:700, padding:'3px 0', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>+ Ajouter</button>
-            )))}
-          </div>
-        )}
-      </>}
-      {/* AJOUT MANUEL (sous-collections sans catalogue fiable : Pop, montres, vins…) —
-          toujours disponible, y compris sans aucune clé d'IA. */}
-      {sub.manual && (
-        <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
-          <input type="text" value={mName} onChange={e => setMName(e.target.value)} placeholder={sub.manualPlaceholder || 'Ajouter à la main : nom…'}
-            style={{ ...inputStyle, padding:'5px 9px', fontSize:11 }} />
-          <input type="text" inputMode="decimal" value={mPrice} onChange={e => setMPrice(e.target.value)} placeholder="Prix €"
-            style={{ ...inputStyle, flex:'0 0 74px', padding:'5px 9px', fontSize:11 }} />
-          <button onClick={addManual} disabled={!mName.trim()} title="Ajouter à ma collection"
-            style={{ background:'none', border:`1px solid ${mName.trim() ? COLLECTION_COLOR + '88' : C.border}`, borderRadius:6,
-              color: mName.trim() ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
-              cursor: mName.trim() ? 'pointer' : 'default', flexShrink:0, fontFamily:'DM Mono,monospace' }}>+ Ajouter</button>
-        </div>
-      )}
-
-      {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (jeux vidéo → Steam) */}
-      {sub.importer && <sub.importer sub={sub} list={list} onImport={addMany} onMerge={mergeRows} onCards={importCards} onList={setList} />}
-
-      {/* ESTIMATION PAR PHOTO (Pierre précieuse / Montre / Vin) */}
-      {sub.photo && <CollPhotoEstimate kind={sub.photo} onAdd={add} />}
-
-      {/* Note de source / diagnostic : en tout dernier, et seulement collapse ouvert. */}
-      {open && sub.note && <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>{typeof sub.note === 'function' ? sub.note() : sub.note}</div>}
     </div>
   );
 }
@@ -18689,59 +18800,83 @@ function mtgQuoteApply(list, cards) {
   return { list: out, n };
 }
 
-// Composant d'import (slot `sub.importer` de `CollectionSub`, comme Steam pour les jeux).
 const MTG_CSV_HELP = "ManaBox : ⋯ → Export collection → CSV. Delver Lens : ☰ → Export → CSV.";
-function MtgCsvImport({ list, onCards, onList }) {
-  const [busy, setBusy]   = React.useState(false);
-  const [err, setErr]     = React.useState('');
-  const [rep, setRep]     = React.useState(null);   // bilan du dernier import
-  const [q, setQ]         = React.useState(null);   // cotation en cours : { done, total, n, err }
+// ── Import Magic : DEUX composants, un seul état ─────────────────────────────────
+// Le panneau d'avant occupait dix lignes sous la collection. Il se scinde : le 📥 devient
+// un carré dans la barre de recherche, et tout ce qu'il a à RACONTER (colonnes retenues,
+// cotation en cours) vit sous la barre, dans `MtgTools`. Les deux lisent le même état
+// module-level — c'est le seul moyen de rendre deux morceaux d'une même action à deux
+// endroits de l'arbre (pattern `_finance` / `_coll`).
+const _mtgImp = { rep: null, quote: null, subs: new Set() };
+function mtgImpPublish() { for (const f of _mtgImp.subs) { try { f(); } catch {} } }
+function useMtgImp() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { _mtgImp.subs.add(bump); return () => { _mtgImp.subs.delete(bump); }; }, []);
+  return _mtgImp;
+}
+function MtgImportBtn({ style, onReport, onCards }) {
   const fileRef = React.useRef(null);
-  const stopRef = React.useRef(false);
-  // ⚠ Ref anti-closure : la cotation dure des minutes, elle doit toujours repartir de la
-  // liste RÉELLE au moment où elle démarre, pas de celle capturée au premier rendu.
-  const listRef = React.useRef(list); listRef.current = list;
+  const [busy, setBusy] = React.useState(false);
   const pick = () => { if (fileRef.current) { fileRef.current.value = ''; fileRef.current.click(); } };
   const onFile = e => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    setBusy(true); setErr(''); setRep(null);
+    setBusy(true); _mtgImp.rep = null; mtgImpPublish(); onReport('');
     const fr = new FileReader();
-    fr.onerror = () => { setBusy(false); setErr('Fichier illisible.'); };
+    fr.onerror = () => { setBusy(false); onReport('⚠ Fichier illisible.'); };
     // ⚠ UN SEUL FORMAT IMPORTABLE : le CSV. Un binaire n'est pas lu, il est NOMMÉ — la
     // sauvegarde ManaBox est chiffrée, et celle de Delver Lens peut l'être aussi selon la
-    // version : plutôt qu'un lecteur qui devinerait un schéma non documenté et rendrait une
-    // collection à moitié fausse, on renvoie vers l'export CSV, que les deux applis savent
-    // produire et qui, lui, dit ce qu'il contient.
+    // version. Reconnu par son CONTENU et pas par son extension : un `.backup` rebaptisé
+    // `.csv` ne doit pas être présenté comme un CSV cassé.
     fr.onload = () => {
       setBusy(false);
       const text = String(fr.result || '');
-      if (!text) { setErr('Fichier vide.'); return; }
-      // ⚠ Reconnu par son CONTENU et pas par son extension : un `.backup` rebaptisé `.csv`
-      // ne doit pas être présenté comme un CSV cassé.
+      if (!text) { onReport('⚠ Fichier vide.'); return; }
       if (mtgLooksBinary(text)) {
-        setErr(/\.backup$/i.test(f.name)
-          ? "Ce fichier est la sauvegarde CHIFFRÉE de ManaBox (sa base interne) : seule ManaBox peut la rouvrir, aucune application ne sait la lire. Depuis ManaBox, choisis l'EXPORT CSV de ta collection — c'est ce fichier-là qu'il faut ici."
-          : "Ce fichier n'est pas du texte : seul l'export CSV est importable. " + MTG_CSV_HELP);
+        onReport(/\.backup$/i.test(f.name)
+          ? "⚠ C'est la sauvegarde CHIFFRÉE de ManaBox : seule ManaBox peut la rouvrir. Choisis son EXPORT CSV."
+          : "⚠ Ce fichier n'est pas du texte : seul l'export CSV est importable. " + MTG_CSV_HELP);
         return;
       }
       let p = null;
       try { p = mtgCsvParse(text); }
-      catch (e2) { setErr(String((e2 && e2.message) || e2)); return; }
-      if (!p.rows.length) { setErr('Aucune carte lue dans ce fichier.'); return; }
+      catch (e2) { onReport('⚠ ' + String((e2 && e2.message) || e2)); return; }
+      if (!p.rows.length) { onReport('⚠ Aucune carte lue dans ce fichier.'); return; }
       const r = onCards(p.rows);
-      setRep({ ...r, read: p.rows.length, skipped: p.skipped, col: p.col, header: p.header, file: f.name });
+      _mtgImp.rep = { col: p.col, header: p.header, file: f.name }; mtgImpPublish();
+      onReport(`✓ ${f.name} — ${p.rows.length} ligne${p.rows.length > 1 ? 's' : ''} lue${p.rows.length > 1 ? 's' : ''} · `
+        + `${r.added} ajoutée${r.added > 1 ? 's' : ''} · ${r.updated} mise${r.updated > 1 ? 's' : ''} à jour`
+        + (p.skipped ? ` · ${p.skipped} sans nom ignorée${p.skipped > 1 ? 's' : ''}` : '')
+        + (r.full ? ` · ⚠ plafond de ${CARDS_MAX} atteint` : '')
+        + (r.saveErr ? ' · ⚠ ENREGISTREMENT REFUSÉ' : ''));
     };
     fr.readAsText(f, 'utf-8');
   };
-  // Cotation : lots de 75, publication tous les 10 lots (≈750 cartes) pour qu'un arrêt en
-  // cours de route ne perde pas ce qui a déjà été coté.
+  return (
+    <>
+      <button onClick={pick} disabled={busy} type="button" style={style}
+        title="Importer un export CSV (ManaBox ou Delver Lens)">{busy ? '⏳' : '📥'}</button>
+      {/* ⚠ Les extensions « illisibles » sont dans `accept` EXPRÈS : sans elles le sélecteur
+          grisait le `.backup` de ManaBox, et le message qui explique pourquoi il ne peut pas
+          être lu devenait inatteignable — un fichier impossible à choisir, sans explication. */}
+      <input ref={fileRef} type="file" accept=".csv,.txt,.dlens,.bin,.backup,text/csv,text/plain"
+        onChange={onFile} style={{ display:'none' }} />
+    </>
+  );
+}
+// Sous la barre : la cote, et ce que l'import a lu. ⚠ Les colonnes retenues sont AFFICHÉES —
+// elles sont DEVINÉES par mots-clés, et si un export change on doit voir ce qui a été pris
+// pour quoi plutôt que de chercher pourquoi la collection est bizarre.
+function MtgTools({ list, onList }) {
+  const st = useMtgImp();
+  const stopRef = React.useRef(false);
+  const listRef = React.useRef(list); listRef.current = list;
   const quote = async () => {
     const start = (listRef.current || []).filter(Boolean);
-    if (!start.length || (q && q.busy)) return;
+    if (!start.length || (st.quote && st.quote.busy)) return;
     stopRef.current = false;
     let work = start.slice(), n = 0, done = 0;
-    setQ({ busy: true, done: 0, total: start.length, n: 0, err: '' });
+    _mtgImp.quote = { busy: true, done: 0, total: start.length, n: 0, err: '' }; mtgImpPublish();
     for (let i = 0; i < start.length && !stopRef.current; i += MTG_QUOTE_LOT) {
       const lot = start.slice(i, i + MTG_QUOTE_LOT);
       const ctl = new AbortController();
@@ -18753,75 +18888,51 @@ function MtgCsvImport({ list, onCards, onList }) {
       } catch (e) {
         clearTimeout(t);
         const m = String((e && e.message) || e);
-        setQ({ busy: false, done, total: start.length, n, err: /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m });
-        onList(work);
+        _mtgImp.quote = { busy: false, done, total: start.length, n,
+          err: /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m };
+        mtgImpPublish(); onList(work);
         return;
       }
       clearTimeout(t);
       done += lot.length;
-      setQ({ busy: true, done, total: start.length, n, err: '' });
+      _mtgImp.quote = { busy: true, done, total: start.length, n, err: '' }; mtgImpPublish();
+      // Publication tous les 10 lots (≈750 cartes) : un arrêt en route ne perd pas ce qui
+      // a déjà été coté.
       if ((i / MTG_QUOTE_LOT) % 10 === 9) onList(work);
       if (!stopRef.current) await new Promise(r => setTimeout(r, MTG_QUOTE_GAP));
     }
     onList(work);
-    setQ({ busy: false, done, total: start.length, n, err: stopRef.current ? 'Arrêté.' : '' });
+    _mtgImp.quote = { busy: false, done, total: start.length, n, err: stopRef.current ? 'Arrêté.' : '' };
+    mtgImpPublish();
   };
-  const col = COLLECTION_COLOR;
-  const btn = on => ({ background: on ? `${col}22` : 'none', border:`1px solid ${on ? col + '88' : C.border}`,
-    borderRadius:6, color: on ? col : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
-    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
-  // Ce qui a été pris pour quoi — les colonnes du CSV étant devinées, elles s'affichent.
-  const named = rep ? Object.keys(rep.col).filter(k => rep.col[k] >= 0).map(k => `${k} → « ${rep.header[rep.col[k]]} »`) : [];
+  const q = st.quote;
+  const named = st.rep ? Object.keys(st.rep.col).filter(k => st.rep.col[k] >= 0)
+    .map(k => `${k} → « ${st.rep.header[st.rep.col[k]]} »`) : [];
   return (
-    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
-      background:`${col}10`, border:`1px solid ${col}44`, borderRadius:8 }}>
-      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-        <span style={{ fontSize:11, fontWeight:800, color:col }}>📥 Importer ManaBox / Delver Lens</span>
-        <button onClick={pick} disabled={busy} style={btn(!busy)}>{busy ? '⏳ Lecture…' : 'Choisir un CSV'}</button>
-        <button onClick={() => (q && q.busy) ? (stopRef.current = true) : quote()} disabled={!list.length}
+    <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+      <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+        <button onClick={() => (q && q.busy) ? (stopRef.current = true) : quote()} disabled={!list.length} type="button"
           title="Prix Cardmarket en euros, par lots de 75 cartes"
-          style={btn(!!list.length)}>{q && q.busy ? '⏹ Arrêter' : '💰 Mettre à jour la cote'}</button>
+          style={{ background:'none', border:`1px solid ${list.length ? COLLECTION_COLOR + '66' : C.border}`, borderRadius:8,
+            color: list.length ? COLLECTION_COLOR : C.dim, fontSize:10.5, fontWeight:700, padding:'5px 10px',
+            cursor: list.length ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' }}>
+          {q && q.busy ? '⏹ Arrêter la cotation' : '💰 Mettre à jour la cote'}
+        </button>
       </div>
-      {/* ⚠ Seul le CSV est IMPORTABLE, mais les sauvegardes restent CHOISISSABLES : sans
-          elles dans la liste, le sélecteur grisait le `.backup` de ManaBox et le message qui
-          explique pourquoi il ne peut pas être lu devenait inatteignable — on restait devant
-          un fichier impossible à choisir, sans la moindre explication. */}
-      <input ref={fileRef} type="file" accept=".csv,.txt,.dlens,.bin,.backup,text/csv,text/plain"
-        onChange={onFile} style={{ display:'none' }} />
-      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
-      {rep && (
-        <div style={{ fontSize:10, color:col, fontWeight:600, lineHeight:1.5 }}>
-          ✓ {rep.file} — {rep.read} ligne{rep.read > 1 ? 's' : ''} lue{rep.read > 1 ? 's' : ''} ·{' '}
-          {rep.added} ajoutée{rep.added > 1 ? 's' : ''} · {rep.updated} mise{rep.updated > 1 ? 's' : ''} à jour
-          {rep.skipped ? ` · ${rep.skipped} ligne${rep.skipped > 1 ? 's' : ''} sans nom ignorée${rep.skipped > 1 ? 's' : ''}` : ''}
-          {rep.full ? ` · ⚠ plafond de ${CARDS_MAX} cartes atteint` : ''}
-          {rep.saveErr ? ' · ⚠ ENREGISTREMENT REFUSÉ' : ''}
-          <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', fontWeight:400, marginTop:2 }}>
-            Colonnes retenues : {named.join(' · ') || 'aucune'}
-          </div>
-        </div>
-      )}
       {q && (
-        <div style={{ fontSize:10, color: q.err ? '#e05050' : col, lineHeight:1.5 }}>
-          {q.busy ? `⏳ Cotation ${q.done} / ${q.total} — ${q.n} carte${q.n > 1 ? 's' : ''} cotée${q.n > 1 ? 's' : ''}…`
+        <div style={{ fontSize:9.5, color: q.err ? '#e05050' : C.muted, lineHeight:1.5, fontFamily:'DM Mono,monospace' }}>
+          {q.busy ? `⏳ ${q.done} / ${q.total} — ${q.n} cotée${q.n > 1 ? 's' : ''}…`
                   : `${q.err ? '⚠ ' + q.err + ' — ' : '✓ '}${q.n} carte${q.n > 1 ? 's' : ''} cotée${q.n > 1 ? 's' : ''} sur ${q.done} interrogée${q.done > 1 ? 's' : ''}.`}
         </div>
       )}
-      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
-        {MTG_CSV_HELP} Les colonnes sont reconnues par leur NOM, dans n'importe quel ordre.
-        Réimporter le même export MET À JOUR les quantités (le fichier fait autorité), il ne double rien.
-        ⚠ <b>Seul le CSV est importable</b> : les fichiers de SAUVEGARDE des deux applis
-        (<code>.backup</code> de ManaBox, <code>.dlens</code>/<code>.bin</code> de Delver Lens) sont leurs bases
-        internes — celle de ManaBox est chiffrée, celle de Delver Lens l'est selon la version.
-        Les cartes sont rangées dans <b>leur propre base</b> (IndexedDB), pas dans le stockage local du Hub :
-        des dizaines de milliers de lignes n'y saturent rien. Les images ne sont jamais stockées, elles se
-        déduisent de l'identifiant Scryfall. « Mettre à jour la cote » interroge Scryfall par lots de 75 (prix Cardmarket en €).
-      </div>
+      {named.length > 0 && (
+        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+          Colonnes retenues : {named.join(' · ')}
+        </div>
+      )}
     </div>
   );
 }
-
-
 
 // ── 🗂️ CATALOGUE DES EXTENSIONS — le dénominateur du « X / Y » ───────────────────
 // Une collection de cartes se lit par EXTENSION, et « 12 » ne veut rien dire sans « / 102 ».
@@ -18927,108 +19038,19 @@ function cardGroups(subId, list, idx) {
     .sort((a, b) => a.label.localeCompare(b.label, 'fr'));
 }
 
-// ── 🎴 IMPORT D'UNE ÉDITION POKÉMON (slot `sub.importer`) ────────────────────────
-// Une recherche → la liste des extensions → un bouton qui verse toute l'extension.
-// ⚠ Le bilan dit toujours combien de cartes étaient DÉJÀ là : sans ça, ajouter une
-// extension qu'on possédait à moitié affichait « 120 ajoutées » sur 250 sans expliquer
-// l'écart, et ça ressemblait à un import qui aurait raté la moitié du travail.
-function PokeSetImport({ onImport }) {
-  const [q, setQ]       = React.useState('');
-  const [st, setSt]     = React.useState({ busy:false, sets:null, err:'' });
-  const [run, setRun]   = React.useState(null);   // { id, name, step } pendant le versement
-  const [rep, setRep]   = React.useState(null);   // bilan du dernier ajout
-  const col = COLLECTION_COLOR;
-  const search = async () => {
-    if (st.busy) return;
-    setSt({ busy:true, sets:null, err:'' }); setRep(null);
-    try {
-      const sets = await pokeSetSearch(q);
-      setSt({ busy:false, sets, err:'' });
-    } catch (e) {
-      const m = String((e && e.message) || e);
-      setSt({ busy:false, sets:null, err: /abort/i.test(m) ? 'Source injoignable (délai dépassé).' : m });
-    }
-  };
-  const addSet = async s => {
-    if (run) return;
-    setRun({ id:s.id, name:s.name, step:'Lecture de l\'extension…' }); setRep(null);
-    try {
-      const rows = await pokeSetCards(s.id, (got, tot) => setRun({ id:s.id, name:s.name, step:`Lecture… ${got}${tot ? ' / ' + tot : ''}` }));
-      const r = onImport(rows, { pokeSet: s.id, setAt: Date.now() });
-      setRep({ ...r, read: rows.length, name: s.name });
-    } catch (e) {
-      setRep({ err: String((e && e.message) || e), name: s.name });
-    }
-    setRun(null);
-  };
-  const inp = { flex:1, minWidth:0, background:'#111', border:`1px solid ${q ? col : C.border}`, borderRadius:6,
-    padding:'5px 9px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
-  const btn = on => ({ background: on ? `${col}22` : 'none', border:`1px solid ${on ? col + '88' : C.border}`,
-    borderRadius:6, color: on ? col : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
-    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
-  return (
-    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
-      background:`${col}10`, border:`1px solid ${col}44`, borderRadius:8 }}>
-      <span style={{ fontSize:11, fontWeight:800, color:col }}>🎴 Ajouter une ÉDITION entière</span>
-      <div style={{ display:'flex', gap:6 }}>
-        <input type="text" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') search(); }}
-          placeholder="Chercher une extension (ex. Évolutions, Écarlate et Violet)…" style={inp} />
-        <button onClick={search} disabled={st.busy} style={btn(!st.busy)}>{st.busy ? '…' : '🔎'}</button>
-      </div>
-      {st.err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
-      {st.sets && st.sets.length === 0 && (
-        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucune extension pour « {q.trim()} ».</div>
-      )}
-      {st.sets && st.sets.length > 0 && (
-        <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:230, overflowY:'auto' }}>
-          {st.sets.map(s => (
-            <div key={s.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 6px',
-              background:'#ffffff06', border:`1px solid ${C.border}`, borderRadius:6 }}>
-              {/* ⚠ no-referrer : hôte tiers, il n'a pas à savoir sur quelle page il s'affiche. */}
-              {s.symbol && <img src={s.symbol} alt="" loading="lazy" referrerPolicy="no-referrer"
-                style={{ width:22, height:22, objectFit:'contain', flexShrink:0 }} />}
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:11, fontWeight:700, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.name}</div>
-                <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
-                  {[s.series, s.date, s.total && `${s.total} cartes`].filter(Boolean).join(' · ')}
-                </div>
-              </div>
-              <button onClick={() => addSet(s)} disabled={!!run} style={{ ...btn(!run), flexShrink:0, fontSize:10.5 }}>
-                {run && run.id === s.id ? '⏳' : '+ Tout ajouter'}
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      {run && <div style={{ fontSize:10, color:col, fontStyle:'italic' }}>⏳ {run.name} — {run.step}</div>}
-      {rep && (rep.err
-        ? <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {rep.name} — {rep.err}</div>
-        : <div style={{ fontSize:10, color:col, fontWeight:600, lineHeight:1.5 }}>
-            ✓ {rep.name} — {rep.added} carte{rep.added > 1 ? 's' : ''} ajoutée{rep.added > 1 ? 's' : ''} sur {rep.read} lue{rep.read > 1 ? 's' : ''}
-            {rep.skipped ? ` · ${rep.skipped} déjà dans ta collection` : ''}
-            {rep.full ? ` · ⚠ plafond de ${CARDS_MAX} cartes atteint` : ''}
-          </div>)}
-      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
-        Source : Pokémon TCG API (sans clé). Une extension entière arrive en une ou deux requêtes, avec ses
-        prix Cardmarket. Les cartes que tu possèdes déjà sont <b>reconnues et laissées telles quelles</b> — leur
-        quantité n'est pas incrémentée. Comme pour Magic, les cartes sont rangées dans leur propre base : une
-        extension de 250 fiches ne consomme rien du stockage local du Hub.
-      </div>
-    </div>
-  );
-}
-
 // Sous-collections par catégorie. `CARTES` (7.8.3) = Pokémon + Magic, chacune avec sa
 // propre source de recherche ; les autres catégories arrivent ensuite.
 const COLLECTION_SUBS = {
   cartes: [
+    // ⚠ UNE SEULE BARRE pour deux choses : `search` rend les cartes, `searchSets` les
+    // extensions, et les deux partent ensemble. `addSet` verse l'extension choisie.
     { id:'pokemon', label:'Pokémon', icon:'🔴', unit:'carte', article:'une première carte',
-      search: pokeSearch, placeholder:'Chercher une carte Pokémon (ex. Dracaufeu)…',
-      importer: PokeSetImport,
-      note:"Source : Pokémon TCG API (sans clé). Le prix affiché est le prix MOYEN DE VENTE récent sur Cardmarket quand il est publié — sinon le prix de tendance, sinon le marché TCGplayer. Une ÉDITION ENTIÈRE s'ajoute en une recherche (🎴 ci-dessous), les cartes déjà possédées étant laissées telles quelles. Seules les références (nom, série, prix, adresse de l'image) sont enregistrées : les images elles-mêmes ne sont jamais stockées." },
+      search: pokeSearch, searchSets: pokeSetSearch, addSet: pokeSetCards,
+      placeholder:'Une carte ou une extension…',
+      note:"Source : Pokémon TCG API (sans clé). Le prix affiché est le prix MOYEN DE VENTE récent sur Cardmarket quand il est publié — sinon le prix de tendance, sinon le marché TCGplayer. La barre accepte aussi bien le nom d'une carte que celui d'une extension : une extension trouvée s'ajoute en entier d'un bouton, les cartes déjà possédées étant laissées telles quelles. Seules les références (nom, série, prix, adresse de l'image) sont enregistrées : les images elles-mêmes ne sont jamais stockées." },
     { id:'magic', label:'Magic', icon:'🟣', unit:'carte', article:'une première carte',
-      search: magicSearch, placeholder:'Chercher une carte Magic (ex. Black Lotus)…',
-      importer: MtgCsvImport, img: mtgImgUrl,
+      search: magicSearch, placeholder:'Chercher une carte Magic…',
+      barBtn: MtgImportBtn, tools: MtgTools, img: mtgImgUrl,
       note:"Source : Scryfall (sans clé). Prix en euros repris de Cardmarket. Une collection entière s'importe depuis l'export CSV de ManaBox ou de Delver Lens (le .backup de ManaBox, lui, est sa base chiffrée : illisible ailleurs). Les cartes sont rangées dans leur PROPRE base IndexedDB, pas dans le stockage local du Hub, et leur image se déduit de l'identifiant Scryfall au lieu d'être enregistrée." },
   ],
   displate: [
