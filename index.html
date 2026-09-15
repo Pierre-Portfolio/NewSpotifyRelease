@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.15.2';
+const APP_VERSION = '13.15.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16895,7 +16895,7 @@ async function pokeSetSearch(q) {
   const j = await collGetJson(url);
   return (j && Array.isArray(j.data) ? j.data : []).map(s => ({
     id: String(s.id || ''), name: String(s.name || ''), series: String(s.series || ''),
-    date: String(s.releaseDate || ''), total: s.printedTotal || s.total || 0,
+    date: String(s.releaseDate || ''), total: s.printedTotal || s.total || 0, full: Math.max(s.total || 0, s.printedTotal || 0),
     symbol: (s.images && (s.images.symbol || s.images.logo)) || '',
   })).filter(s => s.id && s.name);
 }
@@ -17106,14 +17106,19 @@ function CollectionSub({ sub, data, onData }) {
   // variables qu'il liste les figerait à `undefined`.
   const bulkView = isCardSub(sub.id);
   const [fq, setFq] = React.useState('');
-  const [shown, setShown] = React.useState(COLL_PAGE);
-  React.useEffect(() => { setShown(COLL_PAGE); }, [fq]);
+  const [openSets, setOpenSets] = React.useState({});   // extension dépliée (clé = code)
+  const [shownBy, setShownBy] = React.useState({});     // pagination, PAR extension
+  React.useEffect(() => { setShownBy({}); }, [fq]);
   const viewList = React.useMemo(() => {
     const t = bulkView ? fq.trim().toLowerCase() : '';
     if (!t) return list;
     return list.filter(x => x && (String(x.name || '').toLowerCase().includes(t) || String(x.sub || '').toLowerCase().includes(t)));
   }, [list, fq, bulkView]);
-  const shownMax = bulkView ? shown : viewList.length;
+  // ⚠ Le catalogue n'est demandé QUE si la collection est ouverte ET qu'il s'agit de cartes.
+  const cardSets = useCardSets(sub.id, bulkView && open);
+  const setsIdx  = cardSets.idx[sub.id];
+  const groups = React.useMemo(() => bulkView ? cardGroups(sub.id, viewList, setsIdx) : [],
+    [bulkView, sub.id, viewList, setsIdx]);
   // ⚠ Déclaré ICI et pas plus haut : un hook à tableau de deps doit venir APRÈS les
   // variables qu'il liste, sinon Babel figerait `[undefined]` (piège 2).
   const hadItems = React.useRef(list.length > 0);
@@ -17276,12 +17281,60 @@ function CollectionSub({ sub, data, onData }) {
             {bulkView && viewList.length === 0 && (
               <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucune {unit} ne correspond à « {fq.trim()} ».</div>
             )}
-            {/* ⚠ La grille dense ne vaut QUE pour « ma collection » de cartes : les résultats
-                de recherche gardent leurs 96 px, leur bouton « + Ajouter » ne tiendrait pas
-                sous 56 px — et ils sont 24 au plus, la densité n'y sert à rien. */}
-            <div className={bulkView ? 'coll-grid-dense' : undefined}
-              style={bulkView ? undefined : { display:'flex', gap:8, flexWrap:'wrap' }}>
-              {viewList.slice(0, shownMax).map(it => card(it, bulkView ? null : (
+            {/* ── UNE EXTENSION = UN COLLAPSE TRÈS FIN ─────────────────────────────
+                Seules les extensions dont on possède au moins une carte existent ici : les
+                groupes sont DÉRIVÉS de la collection, il n'y a rien à filtrer.
+                ⚠ Replié, le groupe ne rend AUCUNE vignette (même parti pris que
+                `StatsCollapse`) : c'est ce qui permet d'afficher 20 000 cartes sans geler
+                la page. Un filtre actif, ou une seule extension, ouvre d'office. */}
+            {bulkView && <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+              {cardSets.busy[sub.id] && (
+                <div style={{ fontSize:9, color:C.dim, fontStyle:'italic' }}>⏳ Lecture du catalogue des extensions…</div>
+              )}
+              {cardSets.err[sub.id] && (
+                <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+                  ⚠ Totaux par extension indisponibles ({cardSets.err[sub.id]}) — seul le nombre de cartes possédées est affiché.
+                </div>
+              )}
+              {groups.map(g => {
+                const forced = !!fq.trim() || groups.length === 1;
+                const on  = Object.prototype.hasOwnProperty.call(openSets, g.key) ? openSets[g.key] : forced;
+                const lim = shownBy[g.key] || COLL_PAGE;
+                const rest = g.items.length - lim;
+                return (
+                  <div key={g.key}>
+                    <button type="button" onClick={() => setOpenSets(o => ({ ...o, [g.key]: !on }))}
+                      title={g.total ? `${g.owned} numéro${g.owned > 1 ? 's' : ''} sur ${g.total}` : `${g.owned} carte${g.owned > 1 ? 's' : ''}`}
+                      style={{ display:'flex', alignItems:'center', gap:6, width:'100%', textAlign:'left',
+                        background: on ? `${COLLECTION_COLOR}14` : 'transparent',
+                        border:`1px solid ${COLLECTION_COLOR}${on ? '55' : '2e'}`, borderRadius:6,
+                        padding:'3px 8px', cursor:'pointer', color:C.text, fontFamily:'inherit' }}>
+                      <span style={{ fontSize:8, color:C.dim, flexShrink:0, transform: on ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
+                      <span style={{ flex:1, minWidth:0, fontSize:10.5, fontWeight:700, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{g.label}</span>
+                      <span style={{ fontSize:9.5, fontWeight:800, fontFamily:'DM Mono,monospace', color:COLLECTION_COLOR, flexShrink:0 }}>
+                        {g.owned}{g.total ? ` / ${g.total}` : ''}
+                      </span>
+                    </button>
+                    {on && <>
+                      <div className="coll-grid-dense" style={{ marginTop:5 }}>
+                        {g.items.slice(0, lim).map(it => card(it, null, () => setEdit(it.id), true))}
+                      </div>
+                      {rest > 0 && (
+                        <button type="button" onClick={() => setShownBy(s => ({ ...s, [g.key]: lim + COLL_PAGE }))}
+                          style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6, color:COLLECTION_COLOR,
+                            fontSize:10, fontWeight:700, padding:'4px 9px', marginTop:5, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                          ↓ Afficher {Math.min(COLL_PAGE, rest)} de plus ({rest} restante{rest > 1 ? 's' : ''})
+                        </button>
+                      )}
+                    </>}
+                  </div>
+                );
+              })}
+            </div>}
+            {/* Les autres collections (Displate, Pop, jeux vidéo…) gardent leurs 96 px et
+                leur liste à plat : elles comptent des dizaines de fiches, pas des milliers. */}
+            {!bulkView && <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+              {viewList.map(it => card(it, (
                 <div style={{ display:'flex', alignItems:'center', gap:4, marginTop:3 }}>
                   <button onClick={() => onData(collBump(data, sub.id, it.id, -1))} disabled={(it.qty || 1) <= 1} title="−1"
                     style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:5, color: (it.qty || 1) <= 1 ? '#333' : C.muted, fontSize:11, lineHeight:1, padding:'1px 5px', cursor: (it.qty || 1) <= 1 ? 'default' : 'pointer' }}>−</button>
@@ -17291,15 +17344,8 @@ function CollectionSub({ sub, data, onData }) {
                   <button onClick={() => { if (confirm(`Retirer « ${it.name} » de ta collection ?`)) onData(collRemove(data, sub.id, it.id)); }} title="Retirer"
                     style={{ background:'none', border:'1px solid #e0505055', borderRadius:5, color:'#e05050', fontSize:11, lineHeight:1, padding:'1px 5px', cursor:'pointer' }}>×</button>
                 </div>
-              ), () => setEdit(it.id), bulkView))}
-            </div>
-            {viewList.length > shownMax && (
-              <button onClick={() => setShown(v => v + COLL_PAGE)} type="button"
-                style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6, color:COLLECTION_COLOR,
-                  fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace', alignSelf:'flex-start' }}>
-                ↓ Afficher {Math.min(COLL_PAGE, viewList.length - shownMax)} de plus ({viewList.length - shownMax} restante{viewList.length - shownMax > 1 ? 's' : ''})
-              </button>
-            )}
+              ), () => setEdit(it.id)))}
+            </div>}
           </>}
 
       </>}
@@ -18746,6 +18792,111 @@ function MtgCsvImport({ list, onCards, onList }) {
   );
 }
 
+
+
+// ── 🗂️ CATALOGUE DES EXTENSIONS — le dénominateur du « X / Y » ───────────────────
+// Une collection de cartes se lit par EXTENSION, et « 12 » ne veut rien dire sans « / 102 ».
+// Ce total n'est PAS stocké dans les fiches : ce serait la même valeur recopiée des
+// centaines de fois, et périmée dès qu'une extension s'agrandit. Il vient du catalogue de
+// l'éditeur — UNE requête par jeu et par session.
+// ⚠ Elle ne part QU'À L'OUVERTURE de la collection : le collapse 🃏 Cartes est
+//   `defaultOpen={false}`, donc replié le module ne demande toujours rien.
+// ⚠ Magic réutilise le catalogue DÉJÀ chargé par l'Analyse Cardmarket (`mtgSetLoadSets`) :
+//   une seule requête Scryfall pour les deux écrans.
+// ⚠ Catalogue injoignable (hors ligne, ou piège 32) ⇒ on affiche le nombre possédé SANS
+//   dénominateur, et on le DIT. Jamais un total deviné.
+const _cardSets = { idx: {}, err: {}, busy: {}, subs: new Set() };
+function cardSetsPublish() { for (const f of _cardSets.subs) { try { f(); } catch {} } }
+let _pokeSetsAll = null;
+async function pokeSetsAll() {
+  if (_pokeSetsAll) return _pokeSetsAll;
+  const sets = await pokeSetSearch('');          // requête sans filtre = tout le catalogue
+  if (!sets.length) throw new Error('Catalogue revenu vide.');
+  _pokeSetsAll = sets;
+  return sets;
+}
+async function cardSetsLoad(subId) {
+  if (_cardSets.idx[subId] || _cardSets.busy[subId]) return;
+  _cardSets.busy[subId] = true; cardSetsPublish();
+  const idx = {};
+  // Indexé DEUX FOIS : par code, et par nom normalisé. Une fiche venue de `magicSearch` ne
+  // porte que le NOM de son extension, une fiche venue du CSV que son CODE — les deux
+  // doivent retomber sur la même entrée, donc sur le même groupe.
+  const put = (code, name, total) => {
+    const e = { code: String(code).toLowerCase(), name: String(name || code), total: total || 0 };
+    idx[e.code] = e;
+    const k = '~' + mtgNorm(e.name);
+    if (!idx[k]) idx[k] = e;                     // deux extensions homonymes existent : 1er arrivé
+  };
+  try {
+    if (subId === 'magic') {
+      await mtgSetLoadSets();
+      if (!_mtgSet.sets) throw new Error(_mtgSet.setsErr || 'Scryfall injoignable.');
+      for (const s of _mtgSet.sets) put(s.code, s.name, s.count);
+    } else {
+      for (const s of await pokeSetsAll()) put(s.id, s.name, s.full);
+    }
+    _cardSets.idx[subId] = idx; _cardSets.err[subId] = '';
+  } catch (e) { _cardSets.err[subId] = String((e && e.message) || e) || 'Catalogue injoignable.'; }
+  finally { _cardSets.busy[subId] = false; cardSetsPublish(); }
+}
+function useCardSets(subId, active) {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => {
+    if (!active) return;
+    _cardSets.subs.add(bump);
+    cardSetsLoad(subId).catch(() => {});
+    return () => { _cardSets.subs.delete(bump); };
+  }, [subId, active]);
+  return _cardSets;
+}
+// Code d'extension et numéro d'une fiche.
+// ⚠ Les fiches Pokémon d'avant 13.15.1 ne portent ni `setId` ni `num` — les deux se
+// DÉDUISENT de leur id (`pkm:<extension>-<numéro>`), qui les contient depuis toujours.
+function cardSetCode(subId, it) {
+  const m = (it && it.meta) || {};
+  if (subId === 'magic') return String(m.code || '').toLowerCase();
+  if (m.setId) return String(m.setId).toLowerCase();
+  const mm = /^pkm:([^-]+)-/.exec(String((it && it.id) || ''));
+  return mm ? mm[1].toLowerCase() : '';
+}
+function cardNum(subId, it) {
+  const m = (it && it.meta) || {};
+  if (m.num) return String(m.num);
+  const mm = /^pkm:[^-]+-(.+)$/.exec(String((it && it.id) || ''));
+  return mm ? mm[1] : '';
+}
+function cardSetName(subId, it, idx) {
+  const m = (it && it.meta) || {};
+  const hit = idx && idx[cardSetCode(subId, it)];
+  return (hit && hit.name) || String(m.set || '') || cardSetCode(subId, it).toUpperCase();
+}
+// Extension d'une fiche, RÉSOLUE contre le catalogue dès qu'il est là (cf. `put`).
+function cardSetOf(subId, it, idx) {
+  const code = cardSetCode(subId, it);
+  const name = String(((it && it.meta) || {}).set || '');
+  const hit = idx && (idx[code] || (name ? idx['~' + mtgNorm(name)] : null));
+  if (hit) return { key: hit.code, label: hit.name, total: hit.total };
+  return { key: code || ('~' + mtgNorm(name)) || '?', label: name || code.toUpperCase() || 'Extension inconnue', total: 0 };
+}
+// Regroupement par extension — ordre ALPHABÉTIQUE, comme partout ailleurs dans le Hub.
+// ⚠ Le X du « X / Y » compte les NUMÉROS DISTINCTS, pas les fiches : une carte possédée en
+// foil ET en normal fait deux fiches mais un seul numéro de l'extension. Sans ça on
+// affichait « 180 / 165 », qui ne veut rien dire.
+function cardGroups(subId, list, idx) {
+  const map = new Map();
+  for (const it of list) {
+    if (!it) continue;
+    const s = cardSetOf(subId, it, idx);
+    let g = map.get(s.key);
+    if (!g) { g = { key: s.key, label: s.label, total: s.total, items: [], nums: new Set() }; map.set(s.key, g); }
+    g.items.push(it);
+    g.nums.add(cardNum(subId, it) || it.id);
+  }
+  return [...map.values()]
+    .map(g => ({ key: g.key, label: g.label, total: g.total, items: g.items, owned: g.nums.size }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'fr'));
+}
 
 // ── 🎴 IMPORT D'UNE ÉDITION POKÉMON (slot `sub.importer`) ────────────────────────
 // Une recherche → la liste des extensions → un bouton qui verse toute l'extension.
