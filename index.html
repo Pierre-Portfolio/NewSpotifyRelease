@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.15.0';
+const APP_VERSION = '13.15.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16841,22 +16841,65 @@ async function collGetJson(url, opts) {
 }
 // Pokémon TCG API — prix : `cardmarket.prices.averageSellPrice` = le PRIX MOYEN DE VENTE
 // récent sur Cardmarket, exactement la référence demandée pour les autres catégories.
+// ⚠ Conversion écrite UNE fois : la recherche à l'unité et l'import d'une édition entière
+// doivent rendre exactement la même fiche pour la même carte, sinon la seconde créerait
+// des doublons de ce que la première a déjà ajouté (l'id est la clé de dédoublonnage).
+function pokeCardRow(c) {
+  const cm = (c.cardmarket && c.cardmarket.prices) || {};
+  const tp = (c.tcgplayer && c.tcgplayer.prices) || {};
+  const first = Object.keys(tp).length ? tp[Object.keys(tp)[0]] : null;
+  const price = typeof cm.averageSellPrice === 'number' ? cm.averageSellPrice
+              : typeof cm.trendPrice === 'number' ? cm.trendPrice
+              : (first && typeof first.market === 'number') ? first.market : null;
+  return { id: 'pkm:' + c.id, name: String(c.name || ''),
+    sub: [c.set && c.set.name, c.number && `n°${c.number}`, c.rarity].filter(Boolean).join(' · '),
+    img: (c.images && (c.images.small || c.images.large)) || '',
+    price, url: (c.cardmarket && c.cardmarket.url) || '',
+    meta: { set: (c.set && c.set.name) || '', setId: (c.set && c.set.id) || '', num: String(c.number || ''), rarity: c.rarity || '' } };
+}
 async function pokeSearch(q) {
   const url = POKE_API + '?pageSize=24&orderBy=-set.releaseDate&q=' + encodeURIComponent(`name:"*${q.replace(/"/g, '')}*"`);
   const j = await collGetJson(url);
-  return (j && Array.isArray(j.data) ? j.data : []).map(c => {
-    const cm = (c.cardmarket && c.cardmarket.prices) || {};
-    const tp = (c.tcgplayer && c.tcgplayer.prices) || {};
-    const first = Object.keys(tp).length ? tp[Object.keys(tp)[0]] : null;
-    const price = typeof cm.averageSellPrice === 'number' ? cm.averageSellPrice
-                : typeof cm.trendPrice === 'number' ? cm.trendPrice
-                : (first && typeof first.market === 'number') ? first.market : null;
-    return { id: 'pkm:' + c.id, name: String(c.name || ''),
-      sub: [c.set && c.set.name, c.number && `n°${c.number}`, c.rarity].filter(Boolean).join(' · '),
-      img: (c.images && (c.images.small || c.images.large)) || '',
-      price, url: (c.cardmarket && c.cardmarket.url) || '',
-      meta: { set: (c.set && c.set.name) || '', rarity: c.rarity || '' } };
-  }).filter(r => r.name);
+  return (j && Array.isArray(j.data) ? j.data : []).map(pokeCardRow).filter(r => r.name);
+}
+// ── 🎴 UNE ÉDITION ENTIÈRE EN UNE RECHERCHE (Pokémon seulement) ───────────────────
+// Demande utilisateur : « valider une édition entière en une recherche ». On cherche donc
+// l'EXTENSION (et non la carte), et un seul bouton verse toutes ses cartes.
+// ⚠ Pokémon seulement, et c'est un choix de source, pas un oubli : l'API Pokémon TCG rend
+// une extension complète en une ou deux requêtes paginées à 250, prix compris. Magic passe,
+// lui, par l'import ManaBox/Delver Lens — une extension Magic sans savoir ce qu'on en
+// possède n'aurait aucun sens.
+// ⚠ Les cartes déjà présentes ne sont PAS re-comptées : `collAddMany` ignore un id connu au
+// lieu d'incrémenter sa quantité (ajouter une extension ne doit pas transformer en « ×2 »
+// les cartes qu'on avait déjà ajoutées à l'unité).
+const POKE_SETS_API  = 'https://api.pokemontcg.io/v2/sets';
+const POKE_SET_PAGE  = 250;   // plafond de l'API
+const POKE_SET_PAGES = 8;     // garde-fou (2 000 cartes : aucune extension n'approche ça)
+async function pokeSetSearch(q) {
+  const term = String(q || '').replace(/"/g, '').trim();
+  const url = POKE_SETS_API + '?orderBy=-releaseDate' + (term ? '&q=' + encodeURIComponent(`name:"*${term}*"`) : '');
+  const j = await collGetJson(url);
+  return (j && Array.isArray(j.data) ? j.data : []).map(s => ({
+    id: String(s.id || ''), name: String(s.name || ''), series: String(s.series || ''),
+    date: String(s.releaseDate || ''), total: s.printedTotal || s.total || 0,
+    symbol: (s.images && (s.images.symbol || s.images.logo)) || '',
+  })).filter(s => s.id && s.name);
+}
+// Toutes les cartes d'une extension. ⚠ Parsing défensif et lot vide = erreur NOMMÉE : cet
+// hôte n'est pas joignable depuis l'environnement d'agent (piège 32), rien de ce qui suit
+// n'a pu être vu répondre autrement que dans un vrai navigateur.
+async function pokeSetCards(setId, onStep) {
+  const out = [];
+  for (let page = 1; page <= POKE_SET_PAGES; page++) {
+    const j = await collGetJson(`${POKE_API}?pageSize=${POKE_SET_PAGE}&page=${page}&orderBy=number&q=`
+      + encodeURIComponent(`set.id:${setId}`), { timeout: 20000 });
+    const arr = (j && Array.isArray(j.data)) ? j.data : [];
+    for (const c of arr) out.push(c);
+    if (onStep) onStep(out.length, (j && j.totalCount) || 0);
+    if (arr.length < POKE_SET_PAGE) break;
+  }
+  if (!out.length) throw new Error("L'extension a répondu, mais sans aucune carte — réessaie plus tard.");
+  return out.map(pokeCardRow).filter(r => r.name);
 }
 // Scryfall (Magic) — `prices.eur` = dernière vente Cardmarket en euros.
 async function magicSearch(q) {
@@ -18675,13 +18718,106 @@ function MtgCsvImport({ list, onCards, onList }) {
   );
 }
 
+
+// ── 🎴 IMPORT D'UNE ÉDITION POKÉMON (slot `sub.importer`) ────────────────────────
+// Une recherche → la liste des extensions → un bouton qui verse toute l'extension.
+// ⚠ Le bilan dit toujours combien de cartes étaient DÉJÀ là : sans ça, ajouter une
+// extension qu'on possédait à moitié affichait « 120 ajoutées » sur 250 sans expliquer
+// l'écart, et ça ressemblait à un import qui aurait raté la moitié du travail.
+function PokeSetImport({ onImport }) {
+  const [q, setQ]       = React.useState('');
+  const [st, setSt]     = React.useState({ busy:false, sets:null, err:'' });
+  const [run, setRun]   = React.useState(null);   // { id, name, step } pendant le versement
+  const [rep, setRep]   = React.useState(null);   // bilan du dernier ajout
+  const col = COLLECTION_COLOR;
+  const search = async () => {
+    if (st.busy) return;
+    setSt({ busy:true, sets:null, err:'' }); setRep(null);
+    try {
+      const sets = await pokeSetSearch(q);
+      setSt({ busy:false, sets, err:'' });
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      setSt({ busy:false, sets:null, err: /abort/i.test(m) ? 'Source injoignable (délai dépassé).' : m });
+    }
+  };
+  const addSet = async s => {
+    if (run) return;
+    setRun({ id:s.id, name:s.name, step:'Lecture de l\'extension…' }); setRep(null);
+    try {
+      const rows = await pokeSetCards(s.id, (got, tot) => setRun({ id:s.id, name:s.name, step:`Lecture… ${got}${tot ? ' / ' + tot : ''}` }));
+      const r = onImport(rows, { pokeSet: s.id, setAt: Date.now() });
+      setRep({ ...r, read: rows.length, name: s.name });
+    } catch (e) {
+      setRep({ err: String((e && e.message) || e), name: s.name });
+    }
+    setRun(null);
+  };
+  const inp = { flex:1, minWidth:0, background:'#111', border:`1px solid ${q ? col : C.border}`, borderRadius:6,
+    padding:'5px 9px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
+  const btn = on => ({ background: on ? `${col}22` : 'none', border:`1px solid ${on ? col + '88' : C.border}`,
+    borderRadius:6, color: on ? col : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
+    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
+      background:`${col}10`, border:`1px solid ${col}44`, borderRadius:8 }}>
+      <span style={{ fontSize:11, fontWeight:800, color:col }}>🎴 Ajouter une ÉDITION entière</span>
+      <div style={{ display:'flex', gap:6 }}>
+        <input type="text" value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') search(); }}
+          placeholder="Chercher une extension (ex. Évolutions, Écarlate et Violet)…" style={inp} />
+        <button onClick={search} disabled={st.busy} style={btn(!st.busy)}>{st.busy ? '…' : '🔎'}</button>
+      </div>
+      {st.err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
+      {st.sets && st.sets.length === 0 && (
+        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucune extension pour « {q.trim()} ».</div>
+      )}
+      {st.sets && st.sets.length > 0 && (
+        <div style={{ display:'flex', flexDirection:'column', gap:4, maxHeight:230, overflowY:'auto' }}>
+          {st.sets.map(s => (
+            <div key={s.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 6px',
+              background:'#ffffff06', border:`1px solid ${C.border}`, borderRadius:6 }}>
+              {/* ⚠ no-referrer : hôte tiers, il n'a pas à savoir sur quelle page il s'affiche. */}
+              {s.symbol && <img src={s.symbol} alt="" loading="lazy" referrerPolicy="no-referrer"
+                style={{ width:22, height:22, objectFit:'contain', flexShrink:0 }} />}
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:11, fontWeight:700, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{s.name}</div>
+                <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                  {[s.series, s.date, s.total && `${s.total} cartes`].filter(Boolean).join(' · ')}
+                </div>
+              </div>
+              <button onClick={() => addSet(s)} disabled={!!run} style={{ ...btn(!run), flexShrink:0, fontSize:10.5 }}>
+                {run && run.id === s.id ? '⏳' : '+ Tout ajouter'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {run && <div style={{ fontSize:10, color:col, fontStyle:'italic' }}>⏳ {run.name} — {run.step}</div>}
+      {rep && (rep.err
+        ? <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {rep.name} — {rep.err}</div>
+        : <div style={{ fontSize:10, color:col, fontWeight:600, lineHeight:1.5 }}>
+            ✓ {rep.name} — {rep.added} carte{rep.added > 1 ? 's' : ''} ajoutée{rep.added > 1 ? 's' : ''} sur {rep.read} lue{rep.read > 1 ? 's' : ''}
+            {rep.skipped ? ` · ${rep.skipped} déjà dans ta collection` : ''}
+            {rep.full ? ` · ⚠ plafond de ${CARDS_MAX} cartes atteint` : ''}
+          </div>)}
+      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+        Source : Pokémon TCG API (sans clé). Une extension entière arrive en une ou deux requêtes, avec ses
+        prix Cardmarket. Les cartes que tu possèdes déjà sont <b>reconnues et laissées telles quelles</b> — leur
+        quantité n'est pas incrémentée. Comme pour Magic, les cartes sont rangées dans leur propre base : une
+        extension de 250 fiches ne consomme rien du stockage local du Hub.
+      </div>
+    </div>
+  );
+}
+
 // Sous-collections par catégorie. `CARTES` (7.8.3) = Pokémon + Magic, chacune avec sa
 // propre source de recherche ; les autres catégories arrivent ensuite.
 const COLLECTION_SUBS = {
   cartes: [
     { id:'pokemon', label:'Pokémon', icon:'🔴', unit:'carte', article:'une première carte',
       search: pokeSearch, placeholder:'Chercher une carte Pokémon (ex. Dracaufeu)…',
-      note:"Source : Pokémon TCG API (sans clé). Le prix affiché est le prix MOYEN DE VENTE récent sur Cardmarket quand il est publié — sinon le prix de tendance, sinon le marché TCGplayer. Seules les références (nom, série, prix, adresse de l'image) sont enregistrées : les images elles-mêmes ne sont jamais stockées." },
+      importer: PokeSetImport,
+      note:"Source : Pokémon TCG API (sans clé). Le prix affiché est le prix MOYEN DE VENTE récent sur Cardmarket quand il est publié — sinon le prix de tendance, sinon le marché TCGplayer. Une ÉDITION ENTIÈRE s'ajoute en une recherche (🎴 ci-dessous), les cartes déjà possédées étant laissées telles quelles. Seules les références (nom, série, prix, adresse de l'image) sont enregistrées : les images elles-mêmes ne sont jamais stockées." },
     { id:'magic', label:'Magic', icon:'🟣', unit:'carte', article:'une première carte',
       search: magicSearch, placeholder:'Chercher une carte Magic (ex. Black Lotus)…',
       importer: MtgCsvImport, img: mtgImgUrl,
