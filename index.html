@@ -211,7 +211,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.14.9';
+const APP_VERSION = '13.15.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1159,8 +1159,11 @@ function saveActifs(d) {
   try { localStorage.setItem(ACTIFS_LS, JSON.stringify(d)); } catch {}
 }
 
-// Parseur CSV minimal mais complet (guillemets, virgules et sauts de ligne quotés)
-function actifsParseCsvRows(text) {
+// Parseur CSV minimal mais complet (guillemets, séparateurs et sauts de ligne quotés).
+// ⚠ `sep` (défaut « , ») : un export passé par un Excel français sort en « ; », et le
+// découper sur la virgule rendrait UNE seule colonne — cf. `mtgCsvSep`, qui le déduit.
+function actifsParseCsvRows(text, sep) {
+  const S = sep || ',';
   const rows = [[]]; let cur = '', inQ = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
@@ -1169,7 +1172,7 @@ function actifsParseCsvRows(text) {
       else cur += ch;
     }
     else if (ch === '"')  inQ = true;
-    else if (ch === ',')  { rows[rows.length - 1].push(cur); cur = ''; }
+    else if (ch === S)    { rows[rows.length - 1].push(cur); cur = ''; }
     else if (ch === '\n') { rows[rows.length - 1].push(cur); cur = ''; rows.push([]); }
     else if (ch !== '\r') cur += ch;
   }
@@ -3207,6 +3210,8 @@ function StoreProvider({ children }) {
         // Tant qu'elle n'a pas répondu, `loadTvItems` rend une liste vide et `saveTvItems`
         // refuse d'écrire — attendre ici, c'est ce qui garde les deux honnêtes.
         try { await tvItemsPreload(); } catch {}
+        // Cartes (Pokémon/Magic) : même déménagement, même verrou anti-perte.
+        try { await cardsPreload(); } catch {}
 
         // TV Time : SYNCHRO QUOTIDIENNE dès la connexion (8.9.2) — nouvelles vidéos/Shorts de
         // chaque chaîne YouTube puis nouvelles saisons des séries suivies, 1× par jour civil.
@@ -4503,6 +4508,13 @@ function StoreProvider({ children }) {
     try {
       if (Array.isArray(data && data.tvtime) && !(await tvFlushDone()) && !res.failed.includes('spotifyplus_tvtime')) {
         res.failed.push('spotifyplus_tvtime');
+      }
+    } catch {}
+    // ⚠ Même raison pour les CARTES (13.14.9) : leur base est asynchrone elle aussi.
+    try {
+      if (data && data.collection && !(await cardsFlushDone()) && !res.failed.includes(COLLECTION_LS)) {
+        res.failed.push(COLLECTION_LS);
+        cardsCacheReload();
       }
     } catch {}
     // ⚠ 9.0.1 — Médias des notes : hors d'`applyBackup`, qui est SYNCHRONE alors qu'IndexedDB
@@ -16439,10 +16451,156 @@ const COLLECTION_LS = 'spotifyplus_collection';   // { "<subId>": [item, …] }
 // ⚠ `img` est une URL DISTANTE, jamais une image encodée : « ne save pas les images »
 // (une data URL de carte pèserait ~50 ko et ferait exploser le quota localStorage, qui est
 // partagé par tout le Hub). Conséquence assumée : les visuels ont besoin du réseau.
-const COLLECTION_MAX = 3000;      // garde-fou de quota (toutes catégories confondues)
+const COLLECTION_MAX = 3000;      // garde-fou de quota du localStorage (hors cartes, cf. `collFull`)
+const COLL_PAGE      = 120;       // vignettes affichées d'un coup dans une collection de MILLIERS de fiches
+
+// ── 🗃️ LES CARTES ONT LEUR PROPRE BASE (13.14.9) ─────────────────────────────────
+// ⚠ Une collection Magic importée de ManaBox, c'est 5 000 à 50 000 lignes. Le localStorage
+// (≈5 Mo POUR TOUT LE HUB) est hors sujet : l'import l'aurait saturé, et un quota plein ne
+// lève rien (piège 14) — la collection aurait eu l'air importée puis aurait disparu au F5,
+// en emportant au passage les écritures de tous les autres modules.
+// Les deux sous-collections de CARTES vivent donc dans une base IndexedDB DÉDIÉE
+// (`spotifyplus_cards_db`, UNE entrée par sous-collection) : plafond de l'origine (des
+// centaines de Mo) et rangement par clonage structuré, pas par sérialisation UTF-16.
+// ⚠ Base SÉPARÉE et non un store de plus dans `spotifyplus` (piège 20) : un store en plus
+// impose un changement de version, qu'un onglet resté ouvert bloque — et cette base-là
+// porte le SQLite, cœur de l'app.
+// ⚠ RIEN D'AUTRE NE CHANGE : `collLoad()` recolle ces deux listes dans la même map
+// `{subId:[item…]}` et `collSave()` les redirige vers la base. CollectionSub, les Stats,
+// MtgSetSection et la sauvegarde ne voient aucune différence.
+// ⚠ Verrou anti-perte identique à TV Time : tant que la base n'a pas répondu, `_cards.ready`
+// est faux, `collLoad()` rend ce que porte ENCORE le localStorage (l'état d'avant le
+// déménagement) et `cardsSet()` REFUSE d'écrire — une liste vide lue trop tôt ne peut donc
+// pas figer ce vide sur le disque.
+const CARD_SUBS    = ['pokemon', 'magic'];
+const CARDSDB_NAME = 'spotifyplus_cards_db', CARDSDB_STORE = 'subs';
+const CARDS_MAX    = 60000;      // garde-fou propre aux cartes (le 3 000 du localStorage ne s'y applique plus)
+const isCardSub    = id => CARD_SUBS.indexOf(id) >= 0;
+let _cardsIdb = null;
+function cardsIdbOpen() {
+  if (_cardsIdb) return _cardsIdb;
+  _cardsIdb = new Promise((res, rej) => {
+    const req = indexedDB.open(CARDSDB_NAME, 1);
+    req.onupgradeneeded = e => { const db = e.target.result; if (!db.objectStoreNames.contains(CARDSDB_STORE)) db.createObjectStore(CARDSDB_STORE); };
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = e => { _cardsIdb = null; rej(e); };
+  });
+  return _cardsIdb;
+}
+function cardsIdbGet(sub) {
+  return cardsIdbOpen().then(db => new Promise((res, rej) => {
+    const r = db.transaction(CARDSDB_STORE, 'readonly').objectStore(CARDSDB_STORE).get(sub);
+    r.onsuccess = () => res(r.result);
+    r.onerror   = () => rej(r.error);
+  }));
+}
+function cardsIdbPut(sub, list) {
+  return cardsIdbOpen().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(CARDSDB_STORE, 'readwrite');
+    tx.objectStore(CARDSDB_STORE).put(list, sub);
+    tx.oncomplete = () => res(true);
+    tx.onerror    = () => rej(tx.error);
+    tx.onabort    = () => rej(tx.error);
+  }));
+}
+// État partagé (même motif que `_coll`) : la base est lue UNE fois pour toute la session.
+const _cards = { map: {}, ready: false, err: false, subs: new Set() };
+function cardsPublish() { for (const f of _cards.subs) { try { f(); } catch {} } }
+// Précharge les deux listes — et les déménage du localStorage au tout premier passage.
+// Appelée par `bootLocal`, avant que quoi que ce soit ne touche à Collection.
+async function cardsPreload() {
+  if (_cards.ready) return _cards.map;
+  const got = {};
+  for (const s of CARD_SUBS) {
+    let l = null;
+    // ⚠ Base injoignable (mode privé, données de site bloquées) ⇒ on RESSORT sans poser
+    // `ready` : le Hub reste sur la copie localStorage, dégradé mais jamais amputé.
+    try { l = await cardsIdbGet(s); } catch { return _cards.map; }
+    got[s] = Array.isArray(l) ? l : null;
+  }
+  let ls = null;
+  try { ls = JSON.parse(localStorage.getItem(COLLECTION_LS)); } catch {}
+  ls = (ls && typeof ls === 'object' && !Array.isArray(ls)) ? ls : {};
+  let moved = false;
+  for (const s of CARD_SUBS) {
+    if (got[s] !== null) continue;
+    const old = Array.isArray(ls[s]) ? ls[s] : [];
+    try { await cardsIdbPut(s, old); } catch { return _cards.map; }   // écriture refusée ⇒ on reste en localStorage
+    got[s] = old;
+    if (ls[s] !== undefined) moved = true;
+  }
+  // ⚠ La copie localStorage n'est retirée qu'APRÈS des écritures CONFIRMÉES (même règle
+  // que le déménagement de TV Time) : une base indisponible ne doit jamais faire
+  // disparaître une collection déjà constituée à la main.
+  if (moved) {
+    const rest = { ...ls };
+    for (const s of CARD_SUBS) delete rest[s];
+    lsSet(COLLECTION_LS, JSON.stringify(rest));
+  }
+  _cards.map = got; _cards.ready = true;
+  cardsPublish();
+  return _cards.map;
+}
+// Écriture SÉRIALISÉE par sous-collection (même pattern que `saveDB`/`tvPersist`) : deux
+// enregistrements rapprochés ne se doublent pas et c'est toujours le dernier état du cache
+// qui part sur le disque.
+const _cardsDirty = new Set();
+let _cardsSavePromise = null;
+function cardsPersist() {
+  if (_cardsSavePromise) return _cardsSavePromise;
+  _cardsSavePromise = (async () => {
+    try {
+      while (_cardsDirty.size) {
+        const s = _cardsDirty.values().next().value;
+        _cardsDirty.delete(s);
+        await cardsIdbPut(s, _cards.map[s] || []);
+      }
+      _cards.err = false;
+    } catch (e) {
+      _cards.err = true;
+      console.warn('[Spotify+] Cartes : écriture IndexedDB échouée —', (e && e.name) || e);
+    } finally { _cardsSavePromise = null; }
+  })();
+  return _cardsSavePromise;
+}
+// ⚠ Renvoie un booléen, comme `saveTvItems` (piège 14) : `false` = REFUSÉ, et alors le
+// cache n'a pas bougé non plus — l'écran ne doit jamais montrer ce que le disque n'a pas.
+function cardsSet(sub, list) {
+  if (!_cards.ready) { console.warn('[Spotify+] Cartes : écriture refusée, la base n\'a pas encore répondu'); return false; }
+  if (_cards.map[sub] === list) return !_cards.err;
+  _cards.map[sub] = list;
+  _cardsDirty.add(sub);
+  cardsPersist();
+  return !_cards.err;
+}
+// Attend l'écriture en vol et dit si elle est passée (la restauration doit pouvoir
+// annoncer un échec plutôt qu'un « ✓ restauré » mensonger).
+async function cardsFlushDone() { try { await _cardsSavePromise; } catch {} return !_cards.err; }
+// Après une restauration ratée : l'écran ne doit pas garder une fusion que le disque n'a pas.
+function cardsCacheReload() { _cards.ready = false; _cards.map = {}; try { cardsPreload(); } catch {} }
+// Re-rend quand la base finit de répondre (sinon Collection resterait sur l'écran d'avant
+// le préchargement, c'est-à-dire vide, jusqu'à la prochaine interaction).
+function useCards() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => {
+    _cards.subs.add(bump);
+    cardsPreload().catch(() => {});
+    return () => { _cards.subs.delete(bump); };
+  }, []);
+  return _cards;
+}
+
 function collLoad() {
-  try { const d = JSON.parse(localStorage.getItem(COLLECTION_LS)); return (d && typeof d === 'object' && !Array.isArray(d)) ? d : {}; }
-  catch { return {}; }
+  let d = {};
+  try { const r = JSON.parse(localStorage.getItem(COLLECTION_LS)); if (r && typeof r === 'object' && !Array.isArray(r)) d = r; }
+  catch {}
+  // ⚠ Les deux sous-collections de CARTES viennent de leur base (cf. `cardsPreload`). Tant
+  // qu'elle n'a pas répondu, on rend ce que porte ENCORE le localStorage — l'état d'avant
+  // le déménagement — et `cardsSet` refuse d'écrire, donc ce provisoire ne fige rien.
+  if (!_cards.ready) return d;
+  const out = { ...d };
+  for (const s of CARD_SUBS) out[s] = _cards.map[s] || [];
+  return out;
 }
 // ⚠ `lsSet` écrit la valeur TELLE QUELLE (c'est un simple `localStorage.setItem` gardé) :
 // lui passer l'objet enregistrait la chaîne « [object Object] », que `collLoad` n'arrivait
@@ -16458,9 +16616,21 @@ function collLoad() {
 // est réellement relisible depuis localStorage (une écriture partielle ou tronquée compte
 // comme un échec), et les appelants doivent traiter `false` comme « rien n'a été enregistré ».
 function collSave(data) {
-  const payload = JSON.stringify(data || {});
+  const d = data || {};
+  // ⚠ Les cartes partent dans leur base, le RESTE seulement dans le localStorage : une
+  // seule ligne de trop ici et l'import ManaBox ressaturerait le quota partagé du Hub.
+  let ok = true;
+  const rest = { ...d };
+  if (_cards.ready) {
+    for (const s of CARD_SUBS) {
+      if (!cardsSet(s, collList(d, s))) ok = false;
+      delete rest[s];
+    }
+  }
+  const payload = JSON.stringify(rest);
   if (!lsSet(COLLECTION_LS, payload)) return false;
-  try { return localStorage.getItem(COLLECTION_LS) === payload; } catch { return false; }
+  try { if (localStorage.getItem(COLLECTION_LS) !== payload) return false; } catch { return false; }
+  return ok;
 }
 // État PARTAGÉ (pattern `_finance`/`_delta`) : plusieurs `CollectionCat` peuvent être montés
 // en même temps (deux catégories dépliées), chacun avec SA copie de la map chargée à son
@@ -16562,6 +16732,15 @@ function useCollPhotos() {
 }
 function collList(data, subId) { return Array.isArray(data && data[subId]) ? data[subId] : []; }
 function collCount(data) { return Object.keys(data || {}).reduce((a, k) => a + collList(data, k).length, 0); }
+// ⚠ DEUX plafonds, parce qu'il y a deux stockages : `COLLECTION_MAX` protège le quota
+// localStorage (≈5 Mo partagés par tout le Hub) et ne compte donc QUE ce qui y est écrit ;
+// les cartes, qui vivent dans leur propre base, ont le leur, bien plus haut. Compter les
+// 20 000 cartes d'un import dans le premier aurait interdit d'ajouter le moindre Displate.
+function collLsCount(data) { return Object.keys(data || {}).reduce((a, k) => a + (isCardSub(k) ? 0 : collList(data, k).length), 0); }
+function collFull(data, subId) {
+  return isCardSub(subId) ? collList(data, subId).length >= CARDS_MAX : collLsCount(data) >= COLLECTION_MAX;
+}
+const collFullMax = subId => (isCardSub(subId) ? CARDS_MAX : COLLECTION_MAX);
 // Normalise un résultat de recherche en item stockable (jette ce qui n'a ni id ni nom).
 function collItem(r) {
   const id = String((r && (r.id || r.name)) || '').trim();
@@ -16581,7 +16760,7 @@ function collAdd(data, subId, r, extraMeta) {
   const i = list.findIndex(x => x && x.id === it.id);
   if (i >= 0) list[i] = { ...list[i], qty: (list[i].qty || 1) + 1 };
   else {
-    if (collCount(data) >= COLLECTION_MAX) return data;   // quota : on n'ajoute plus
+    if (collFull(data, subId)) return data;               // quota : on n'ajoute plus
     list.push(it);
   }
   return { ...data, [subId]: list };
@@ -16596,7 +16775,7 @@ function collAddMany(data, subId, rows, extraMeta) {
     const it = collItem(r);
     if (!it) { skipped++; continue; }
     if (collList(next, subId).some(x => x && x.id === it.id)) { skipped++; continue; }
-    if (collCount(next) >= COLLECTION_MAX) { full = true; break; }
+    if (collFull(next, subId)) { full = true; break; }
     if (extraMeta) it.meta = { ...it.meta, ...extraMeta };
     next = { ...next, [subId]: collList(next, subId).concat([it]) };
     added++;
@@ -16862,6 +17041,22 @@ function CollectionSub({ sub, data, onData }) {
   const [mPrice, setMPrice] = React.useState('');
   const list = collList(data, sub.id);
   const s = collStats(list);
+  // ⚠ UNE COLLECTION DE CARTES COMPTE DES MILLIERS DE FICHES : rendre `list` en entier
+  // poserait 20 000 vignettes d'un coup et gèlerait la page (chacune porte une image et
+  // trois boutons). Les deux sous-collections de cartes passent donc par un filtre local
+  // + une pagination ; toutes les autres sont rendues exactement comme avant.
+  // ⚠ Déclaré APRÈS `list` (piège 2) : un hook à tableau de deps placé au-dessus des
+  // variables qu'il liste les figerait à `undefined`.
+  const bulkView = isCardSub(sub.id);
+  const [fq, setFq] = React.useState('');
+  const [shown, setShown] = React.useState(COLL_PAGE);
+  React.useEffect(() => { setShown(COLL_PAGE); }, [fq]);
+  const viewList = React.useMemo(() => {
+    const t = bulkView ? fq.trim().toLowerCase() : '';
+    if (!t) return list;
+    return list.filter(x => x && (String(x.name || '').toLowerCase().includes(t) || String(x.sub || '').toLowerCase().includes(t)));
+  }, [list, fq, bulkView]);
+  const shownMax = bulkView ? shown : viewList.length;
   // ⚠ Déclaré ICI et pas plus haut : un hook à tableau de deps doit venir APRÈS les
   // variables qu'il liste, sinon Babel figerait `[undefined]` (piège 2).
   const hadItems = React.useRef(list.length > 0);
@@ -16925,6 +17120,16 @@ function CollectionSub({ sub, data, onData }) {
     if (r.added || r.updated) onData(r.data);
     return r;
   };
+  // Import d'une collection ENTIÈRE (CSV ManaBox / Delver Lens) : le fichier fait autorité
+  // sur les quantités, cf. `collImportCards`. ⚠ `saveErr` remonte un refus d'écriture —
+  // sans lui l'import s'annoncerait réussi alors que rien n'aurait été enregistré (piège 14).
+  const importCards = rows => {
+    const r = collImportCards(dataRef.current, sub.id, rows);
+    if (!(r.added || r.updated)) return r;
+    return onData(r.data) === false ? { ...r, saveErr: true } : r;
+  };
+  // Réécriture de la liste entière (cotation Scryfall d'un import).
+  const setList = next => onData({ ...dataRef.current, [sub.id]: next });
   const add = r0 => {
     // Copie : `onAdd` peut retoucher l'item avant enregistrement (les jeux vidéo y posent
     // la plateforme choisie) sans altérer la liste de résultats affichée.
@@ -16932,7 +17137,7 @@ function CollectionSub({ sub, data, onData }) {
     const extra = sub.onAdd ? sub.onAdd(r) : null;
     if (extra === false) return;                      // ajout annulé (ex. plateforme non choisie)
     const next = collAdd(data, sub.id, r, extra || null);
-    if (next === data) { alert(`Collection pleine (${COLLECTION_MAX} références). Retire des éléments avant d'en ajouter.`); return; }
+    if (next === data) { alert(`Collection pleine (${collFullMax(sub.id)} références). Retire des éléments avant d'en ajouter.`); return; }
     onData(next);
     // ⚠ `__photoBlob` (posé par `CollPhotoEstimate`) ne rejoint JAMAIS le stockage : `collItem`
     // rebâtit l'item champ par champ. La photo part sur Drive une fois l'ajout accepté, en
@@ -16947,7 +17152,7 @@ function CollectionSub({ sub, data, onData }) {
         style={{ width:96, height:134, borderRadius:8, overflow:'hidden', background:'#111', position:'relative',
         display:'flex', alignItems:'center', justifyContent:'center', border:`1px solid ${C.border}`,
         cursor: onEdit ? 'pointer' : 'default' }}>
-        <CollImg src={it.img} fileId={collPhotoFileId(it.id)} icon={sub.icon} />
+        <CollImg src={it.img || (sub.img ? sub.img(it) : '')} fileId={collPhotoFileId(it.id)} icon={sub.icon} />
         {onEdit && (
           <span aria-hidden="true" style={{ position:'absolute', right:3, bottom:3, background:'rgba(0,0,0,0.62)',
             border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:5, fontSize:9, lineHeight:1, padding:'3px 4px' }}>✏️</span>
@@ -16991,8 +17196,21 @@ function CollectionSub({ sub, data, onData }) {
       {open && <>
         {list.length === 0
           ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Collection vide — cherche ci-dessous pour ajouter {sub.article || 'un premier élément'}.</div>
-          : <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-              {list.map(it => card(it, (
+          : <>
+            {bulkView && (
+              <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+                <input type="text" value={fq} onChange={e => setFq(e.target.value)} placeholder="Filtrer ma collection (nom, extension, numéro)…"
+                  style={{ ...inputStyle, padding:'5px 9px', fontSize:11, borderColor: fq ? COLLECTION_COLOR : C.border }} />
+                <span style={{ fontSize:9.5, color:C.dim, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{viewList.length} / {list.length}</span>
+                {fq && <button onClick={() => setFq('')} title="Effacer le filtre"
+                  style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim, fontSize:12, padding:'0 9px', cursor:'pointer', flexShrink:0 }}>×</button>}
+              </div>
+            )}
+            {bulkView && viewList.length === 0 && (
+              <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Aucune {unit} ne correspond à « {fq.trim()} ».</div>
+            )}
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+              {viewList.slice(0, shownMax).map(it => card(it, (
                 <div style={{ display:'flex', alignItems:'center', gap:4, marginTop:3 }}>
                   <button onClick={() => onData(collBump(data, sub.id, it.id, -1))} disabled={(it.qty || 1) <= 1} title="−1"
                     style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:5, color: (it.qty || 1) <= 1 ? '#333' : C.muted, fontSize:11, lineHeight:1, padding:'1px 5px', cursor: (it.qty || 1) <= 1 ? 'default' : 'pointer' }}>−</button>
@@ -17003,7 +17221,15 @@ function CollectionSub({ sub, data, onData }) {
                     style={{ background:'none', border:'1px solid #e0505055', borderRadius:5, color:'#e05050', fontSize:11, lineHeight:1, padding:'1px 5px', cursor:'pointer' }}>×</button>
                 </div>
               ), () => setEdit(it.id)))}
-            </div>}
+            </div>
+            {viewList.length > shownMax && (
+              <button onClick={() => setShown(v => v + COLL_PAGE)} type="button"
+                style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:6, color:COLLECTION_COLOR,
+                  fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace', alignSelf:'flex-start' }}>
+                ↓ Afficher {Math.min(COLL_PAGE, viewList.length - shownMax)} de plus ({viewList.length - shownMax} restante{viewList.length - shownMax > 1 ? 's' : ''})
+              </button>
+            )}
+          </>}
 
       </>}
       {/* ✏️ ÉDITION — l'item est RELU dans `list` à chaque rendu (et non figé au clic) :
@@ -17065,7 +17291,7 @@ function CollectionSub({ sub, data, onData }) {
       )}
 
       {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (jeux vidéo → Steam) */}
-      {sub.importer && <sub.importer sub={sub} onImport={addMany} onMerge={mergeRows} />}
+      {sub.importer && <sub.importer sub={sub} list={list} onImport={addMany} onMerge={mergeRows} onCards={importCards} onList={setList} />}
 
       {/* ESTIMATION PAR PHOTO (Pierre précieuse / Montre / Vin) */}
       {sub.photo && <CollPhotoEstimate kind={sub.photo} onAdd={add} />}
@@ -17851,7 +18077,7 @@ function collMergeFinance(data, subId, items) {
   const list = collList(data, subId).slice();
   const byId = new Map();
   list.forEach((x, i) => { if (x && x.id) byId.set(x.id, i); });
-  let added = 0, updated = 0, full = false, count = collCount(data);
+  let added = 0, updated = 0, full = false, count = collLsCount(data);
   for (const it of (items || [])) {
     const at = byId.has(it.id) ? byId.get(it.id) : -1;
     const stamp = { finance: true, financeAt: Date.now() };
@@ -18111,6 +18337,344 @@ function CollPhotoEstimate({ kind, onAdd }) {
 }
 const COLL_PHOTO_NOTE = "Aucun catalogue interrogeable n'existe pour cette famille : l'estimation vient d'une IA à partir de ta photo (clé du module API), et une estimation n'est pas une expertise. ⚠ La photo n'est envoyée nulle part ailleurs qu'au modèle ; si tu ajoutes la référence, elle est conservée dans ton Google Drive (HUB_Pierre/Collection, un fichier par référence) et jamais sur le téléphone. L'ajout à la main fonctionne sans aucune clé.";
 
+// ── 📥 IMPORT MANABOX / DELVER LENS (13.14.9) ────────────────────────────────────
+// « Je ne veux pas refaire ma collection Magic de zéro. » Ces deux applis sont les deux
+// scanneurs de cartes du marché, et toutes deux savent EXPORTER en CSV.
+//
+// ⚠⚠ LE FICHIER `.backup` DE MANABOX N'EST PAS LISIBLE, ET NE LE SERA PAS. C'est la base
+// interne de l'appli, CHIFFRÉE (entropie maximale, aucune en-tête, pages de 4 096 octets :
+// une base SQLCipher). Seule ManaBox détient la clé, et rien dans un navigateur ne peut
+// l'ouvrir. On le RECONNAÎT donc pour le dire en clair et renvoyer vers l'export CSV
+// (ManaBox → ⋯ → Export collection), plutôt que de rendre un « format invalide » qui
+// laisserait croire à un bug.
+//
+// ⚠ Les colonnes sont DEVINÉES par mots-clés et non codées en dur (même parti pris que le
+// tableur Displate) : ManaBox et Delver Lens n'ont ni le même ordre, ni les mêmes noms, et
+// les deux peuvent changer sans prévenir. Les colonnes retenues sont AFFICHÉES après
+// l'import — si un export bouge, on voit immédiatement ce qui a été pris pour quoi.
+// ⚠ Zéro requête à l'import : tout est local. La COTE (et l'image des lignes sans id
+// Scryfall) se demande ensuite, explicitement, par lots de 75 — cf. `mtgQuoteRun`.
+const MTG_CSV_MAX  = 60000;      // garde-fou de lecture (au-delà, c'est un autre problème)
+const MTG_QUOTE_LOT = 75;        // plafond IMPOSÉ par `/cards/collection` de Scryfall
+const MTG_QUOTE_GAP = 120;       // ms entre deux lots (Scryfall demande 50–100 ms de politesse)
+const MTG_COLL_URL  = 'https://api.scryfall.com/cards/collection';
+// Séparateur : DÉDUIT de la ligne d'en-tête (hors guillemets), jamais supposé. Un export
+// français passé par Excel sort en « ; », et découper un tel fichier sur la virgule
+// rendait une seule colonne — donc « aucune colonne Nom », donc un import vide.
+function mtgCsvSep(text) {
+  const line = String(text || '').split(/\r?\n/)[0] || '';
+  let best = ',', n = -1;
+  for (const s of [',', ';', '\t']) {
+    let c = 0, q = false;
+    for (const ch of line) { if (ch === '"') q = !q; else if (ch === s && !q) c++; }
+    if (c > n) { n = c; best = s; }
+  }
+  return best;
+}
+const mtgNorm = s => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+// Une colonne par rôle : on prend d'abord un en-tête EXACT, sinon le premier qui contient
+// l'un des mots-clés. ⚠ L'exact d'abord n'est pas un détail : Delver Lens porte à la fois
+// « Count » et « Tradelist Count », et le second n'est pas la quantité possédée.
+const MTG_CSV_COLS = [
+  ['qty',   ['quantity', 'count', 'qty', 'quantite', 'nombre'],              ['quantit', 'count', 'qty']],
+  ['name',  ['name', 'card name', 'nom', 'carte'],                           ['name', 'nom']],
+  ['scry',  ['scryfall id', 'scryfallid', 'scryfall'],                       ['scryfall']],
+  ['code',  ['set code', 'setcode', 'edition code', 'code'],                 ['set code', 'edition code']],
+  ['set',   ['set name', 'set', 'edition', 'expansion', 'serie'],            ['set', 'edition', 'expansion']],
+  ['num',   ['collector number', 'card number', 'number', 'numero', 'no'],   ['collector', 'number', 'numero']],
+  ['foil',  ['foil', 'printing', 'finish'],                                  ['foil', 'finish', 'printing']],
+  ['lang',  ['language', 'lang', 'langue'],                                  ['lang']],
+  ['cond',  ['condition', 'etat'],                                           ['condition', 'etat']],
+  ['price', ['purchase price', 'price', 'prix', 'my price', 'valeur'],       ['price', 'prix', 'valeur']],
+];
+function mtgCsvPickCols(header) {
+  const h = header.map(mtgNorm);
+  const used = new Set(), col = {};
+  for (const [key, exact, loose] of MTG_CSV_COLS) {
+    let at = -1;
+    for (const e of exact) { const i = h.indexOf(e); if (i >= 0 && !used.has(i)) { at = i; break; } }
+    if (at < 0) for (let i = 0; i < h.length; i++) { if (used.has(i) || !h[i]) continue; if (loose.some(w => h[i].includes(w))) { at = i; break; } }
+    col[key] = at;
+    if (at >= 0) used.add(at);
+  }
+  return col;
+}
+const MTG_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// ⚠ L'IMAGE N'EST JAMAIS STOCKÉE : elle se DÉDUIT de l'id Scryfall (même parti pris que
+// `ytStill` pour les vignettes YouTube). 10 000 cartes × 70 caractères d'URL, ce serait
+// 700 ko de plus dans la base ET dans chaque sauvegarde, pour une chaîne calculable.
+function mtgImgUrl(it) {
+  const m = it && it.meta && MTG_UUID.test(String(it.meta.scry || '')) ? String(it.meta.scry)
+          : (it && /^mtg:[0-9a-f-]{36}$/.test(String(it.id)) ? String(it.id).slice(4) : '');
+  return m ? `https://cards.scryfall.io/small/front/${m[0]}/${m[1]}/${m}.jpg` : '';
+}
+// Lien d'achat : sans id Scryfall on ne connaît pas l'URL Cardmarket de LA carte — la
+// recherche par nom y mène en un clic, et vaut mieux qu'un lien mort.
+const mtgBuyUrl = name => 'https://www.cardmarket.com/fr/Magic/Products/Search?searchString=' + encodeURIComponent(String(name || ''));
+// Une ligne de CSV → un item de collection (ou `null` si elle n'a même pas de nom).
+function mtgCsvRow(col, r) {
+  const at = k => (col[k] >= 0 ? String(r[col[k]] == null ? '' : r[col[k]]).trim() : '');
+  const name = at('name');
+  if (!name) return null;
+  const scry = at('scry').toLowerCase();
+  const code = at('code').toLowerCase(), set = at('set'), num = at('num');
+  const foilTxt = mtgNorm(at('foil'));
+  const foil = !!foilTxt && !/^(normal|non|no|false|0|regular)$/.test(foilTxt);
+  const lang = at('lang'), cond = at('cond');
+  const qty = Math.max(1, Math.min(9999, Math.round(actifsNum(at('qty')) || 1)));
+  const price = actifsNum(at('price'));
+  // ⚠ Id ALIGNÉ sur `magicSearch` (`mtg:<id Scryfall>`) quand ManaBox le donne : c'est ce
+  // qui fait que l'import, la recherche et le « déjà possédée » de l'Analyse Cardmarket
+  // parlent de la même carte, sans aucun rapprochement par nom. À défaut (Delver Lens n'a
+  // pas cette colonne), un id de repli STABLE — extension + numéro + finition + langue —
+  // que `mtgQuoteRun` complétera ensuite par un vrai id Scryfall dans `meta.scry`.
+  const id = MTG_UUID.test(scry) ? 'mtg:' + scry
+    : 'mtg:csv:' + (mtgNorm([code || set, num, foil ? 'foil' : '', lang].filter(Boolean).join('-')).replace(/[^a-z0-9-]+/g, '-')
+       || mtgNorm(name).replace(/[^a-z0-9]+/g, '-')).slice(0, 90);
+  return {
+    id, name: name.slice(0, 120),
+    sub: [set || code.toUpperCase(), num && ('n°' + num), foil ? 'foil' : '', lang && lang.toUpperCase()].filter(Boolean).join(' · '),
+    img: '', price: (typeof price === 'number' && price > 0) ? price : null,
+    url: mtgBuyUrl(name), qty,
+    meta: { set: set || code.toUpperCase(), code, num, foil, lang, cond, csv: true, scry: MTG_UUID.test(scry) ? scry : '' },
+  };
+}
+// CSV → lignes fusionnées (un même id listé deux fois = ses quantités ADDITIONNÉES : c'est
+// le même exemplaire compté deux fois dans le fichier, pas un doublon d'import).
+function mtgCsvParse(text) {
+  const rows = actifsParseCsvRows(String(text || ''), mtgCsvSep(text));
+  if (rows.length < 2) throw new Error("Fichier vide ou sans ligne d'en-tête.");
+  const col = mtgCsvPickCols(rows[0]);
+  if (col.name < 0) throw new Error("Aucune colonne « Name » trouvée : ce n'est pas un export de collection (en-têtes lus : " + rows[0].slice(0, 8).join(', ') + ").");
+  const out = [], byId = new Map();
+  let skipped = 0;
+  for (const r of rows.slice(1)) {
+    if (out.length >= MTG_CSV_MAX) break;
+    const it = mtgCsvRow(col, r);
+    if (!it) { if (r.some(c => String(c || '').trim())) skipped++; continue; }
+    const at = byId.get(it.id);
+    if (at === undefined) { byId.set(it.id, out.length); out.push(it); }
+    else out[at] = { ...out[at], qty: out[at].qty + it.qty };
+  }
+  return { rows: out, col, header: rows[0], skipped };
+}
+// ⚠ Un `.backup` (ou tout autre binaire) ne doit pas être présenté comme un CSV cassé :
+// les octets nuls et les caractères de remplacement le trahissent dès les premiers kilos.
+function mtgLooksBinary(text) {
+  const head = String(text || '').slice(0, 4096);
+  if (!head) return true;
+  let bad = 0;
+  for (const ch of head) { const c = ch.codePointAt(0); if (c === 0 || c === 0xfffd || (c < 9) || (c > 13 && c < 32)) bad++; }
+  return bad > head.length * 0.02;
+}
+// Fusion d'un import dans la collection. ⚠ Contrairement à `collAddMany`, un id DÉJÀ
+// présent n'est PAS ignoré : le CSV est l'export COMPLET de la collection, donc il fait
+// autorité sur les quantités (réimporter après trois boosters doit mettre à jour, pas
+// doubler ni rester bloqué sur l'ancien compte).
+// ⚠ Le prix d'une fiche CORRIGÉE À LA MAIN (`meta.edited`) n'est jamais écrasé.
+function collImportCards(data, subId, rows) {
+  const list = collList(data, subId).slice();
+  const byId = new Map();
+  list.forEach((x, i) => { if (x && x.id) byId.set(x.id, i); });
+  let added = 0, updated = 0, skipped = 0, full = false;
+  for (const r of (rows || [])) {
+    const it = collItem(r);
+    if (!it) { skipped++; continue; }
+    it.qty = Math.max(1, Math.round(r.qty || 1));
+    const at = byId.has(it.id) ? byId.get(it.id) : -1;
+    if (at >= 0) {
+      const cur = list[at];
+      const keepPrice = cur.meta && cur.meta.edited;
+      const price = keepPrice ? cur.price : (it.price != null ? it.price : cur.price);
+      if (cur.qty === it.qty && cur.price === price && cur.sub === (it.sub || cur.sub)) continue;
+      list[at] = { ...cur, qty: it.qty, sub: it.sub || cur.sub, price, meta: { ...(cur.meta || {}), ...it.meta } };
+      updated++;
+    } else {
+      if (list.length >= CARDS_MAX) { full = true; break; }
+      byId.set(it.id, list.length);
+      list.push(it); added++;
+    }
+  }
+  return { data: { ...data, [subId]: list }, added, updated, skipped, full };
+}
+
+// ── 💰 COTE SCRYFALL (lots de 75) ────────────────────────────────────────────────
+// `/cards/collection` accepte 75 identifiants par requête — c'est LA seule façon de coter
+// des milliers de cartes sans lancer des milliers d'appels. Une carte identifiée par son
+// extension + son numéro (Delver Lens) y récupère en prime son id Scryfall, donc son image.
+// ⚠ Prix en EUROS (Cardmarket), foil sur `eur_foil` : prendre `eur` pour une foil
+// sous-évaluait franchement les cartes qui coûtent le plus cher.
+// ⚠ AbortController sur chaque lot (piège 28) et arrêt possible : 10 000 cartes = 134 lots.
+function mtgQuoteIdent(it) {
+  const m = it && it.meta ? it.meta : {};
+  if (MTG_UUID.test(String(m.scry || ''))) return { id: String(m.scry) };
+  if (/^mtg:[0-9a-f-]{36}$/.test(String(it.id))) return { id: String(it.id).slice(4) };
+  if (m.code && m.num) return { set: String(m.code).toLowerCase(), collector_number: String(m.num) };
+  return { name: String(it.name || '') };
+}
+async function mtgQuoteLot(items, signal) {
+  const r = await fetch(MTG_COLL_URL, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifiers: items.map(mtgQuoteIdent) }),
+  });
+  if (!r.ok) throw new Error(`Scryfall a répondu ${r.status}.`);
+  const j = await r.json();
+  return Array.isArray(j && j.data) ? j.data : [];
+}
+// Applique un lot de cartes Scryfall aux items correspondants (clé = id Scryfall, sinon
+// extension+numéro, sinon nom normalisé — dans cet ordre, du plus sûr au plus flou).
+function mtgQuoteApply(list, cards) {
+  const byScry = new Map(), bySn = new Map(), byName = new Map();
+  list.forEach((x, i) => {
+    if (!x) return;
+    const m = x.meta || {};
+    if (MTG_UUID.test(String(m.scry || ''))) byScry.set(String(m.scry), i);
+    else if (/^mtg:[0-9a-f-]{36}$/.test(String(x.id))) byScry.set(String(x.id).slice(4), i);
+    if (m.code && m.num) bySn.set(String(m.code).toLowerCase() + '|' + String(m.num), i);
+    if (!byName.has(mtgNorm(x.name))) byName.set(mtgNorm(x.name), i);
+  });
+  const out = list.slice();
+  let n = 0;
+  for (const c of cards) {
+    if (!c || !c.id) continue;
+    const key = String(c.set || '').toLowerCase() + '|' + String(c.collector_number || '');
+    const at = byScry.has(c.id) ? byScry.get(c.id)
+             : bySn.has(key) ? bySn.get(key)
+             : byName.has(mtgNorm(c.name)) ? byName.get(mtgNorm(c.name)) : -1;
+    if (at < 0 || !out[at]) continue;
+    const cur = out[at], m = cur.meta || {};
+    const p = c.prices || {};
+    const raw = m.foil ? (p.eur_foil || p.eur) : (p.eur || p.eur_foil);
+    const eur = raw != null ? parseFloat(raw) : null;
+    out[at] = { ...cur,
+      price: (m.edited || !(typeof eur === 'number' && isFinite(eur))) ? cur.price : eur,
+      sub: cur.sub || [c.set_name, c.collector_number && ('n°' + c.collector_number)].filter(Boolean).join(' · '),
+      url: safeHref((c.purchase_uris && c.purchase_uris.cardmarket) || '') || cur.url,
+      meta: { ...m, scry: c.id, set: m.set || c.set_name || '', code: m.code || c.set || '',
+              num: m.num || String(c.collector_number || ''), quotedAt: Date.now() } };
+    n++;
+  }
+  return { list: out, n };
+}
+
+// Composant d'import (slot `sub.importer` de `CollectionSub`, comme Steam pour les jeux).
+const MTG_CSV_HELP = "ManaBox : ⋯ → Export collection → CSV. Delver Lens : ☰ → Export → CSV.";
+function MtgCsvImport({ list, onCards, onList }) {
+  const [busy, setBusy]   = React.useState(false);
+  const [err, setErr]     = React.useState('');
+  const [rep, setRep]     = React.useState(null);   // bilan du dernier import
+  const [q, setQ]         = React.useState(null);   // cotation en cours : { done, total, n, err }
+  const fileRef = React.useRef(null);
+  const stopRef = React.useRef(false);
+  // ⚠ Ref anti-closure : la cotation dure des minutes, elle doit toujours repartir de la
+  // liste RÉELLE au moment où elle démarre, pas de celle capturée au premier rendu.
+  const listRef = React.useRef(list); listRef.current = list;
+  const pick = () => { if (fileRef.current) { fileRef.current.value = ''; fileRef.current.click(); } };
+  const onFile = e => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    setBusy(true); setErr(''); setRep(null);
+    const fr = new FileReader();
+    fr.onerror = () => { setBusy(false); setErr('Fichier illisible.'); };
+    fr.onload = () => {
+      setBusy(false);
+      const text = String(fr.result || '');
+      // ⚠ Le `.backup` de ManaBox est sa base CHIFFRÉE : on le dit, on ne le « rate » pas.
+      if (mtgLooksBinary(text)) {
+        setErr(/\.backup$/i.test(f.name)
+          ? "Ce fichier est la sauvegarde CHIFFRÉE de ManaBox (sa base interne) : seule ManaBox peut la rouvrir, aucune application ne sait la lire. Depuis ManaBox, choisis l'EXPORT CSV de ta collection — c'est ce fichier-là qu'il faut ici."
+          : "Ce fichier n'est pas du texte : il faut un export CSV. " + MTG_CSV_HELP);
+        return;
+      }
+      let p = null;
+      try { p = mtgCsvParse(text); }
+      catch (e2) { setErr(String((e2 && e2.message) || e2)); return; }
+      if (!p.rows.length) { setErr('Aucune carte lue dans ce fichier.'); return; }
+      const r = onCards(p.rows);
+      setRep({ ...r, read: p.rows.length, skipped: p.skipped, col: p.col, header: p.header, file: f.name });
+    };
+    fr.readAsText(f, 'utf-8');
+  };
+  // Cotation : lots de 75, publication tous les 10 lots (≈750 cartes) pour qu'un arrêt en
+  // cours de route ne perde pas ce qui a déjà été coté.
+  const quote = async () => {
+    const start = (listRef.current || []).filter(Boolean);
+    if (!start.length || (q && q.busy)) return;
+    stopRef.current = false;
+    let work = start.slice(), n = 0, done = 0;
+    setQ({ busy: true, done: 0, total: start.length, n: 0, err: '' });
+    for (let i = 0; i < start.length && !stopRef.current; i += MTG_QUOTE_LOT) {
+      const lot = start.slice(i, i + MTG_QUOTE_LOT);
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 15000);
+      try {
+        const cards = await mtgQuoteLot(lot, ctl.signal);
+        const a = mtgQuoteApply(work, cards);
+        work = a.list; n += a.n;
+      } catch (e) {
+        clearTimeout(t);
+        const m = String((e && e.message) || e);
+        setQ({ busy: false, done, total: start.length, n, err: /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m });
+        onList(work);
+        return;
+      }
+      clearTimeout(t);
+      done += lot.length;
+      setQ({ busy: true, done, total: start.length, n, err: '' });
+      if ((i / MTG_QUOTE_LOT) % 10 === 9) onList(work);
+      if (!stopRef.current) await new Promise(r => setTimeout(r, MTG_QUOTE_GAP));
+    }
+    onList(work);
+    setQ({ busy: false, done, total: start.length, n, err: stopRef.current ? 'Arrêté.' : '' });
+  };
+  const col = COLLECTION_COLOR;
+  const btn = on => ({ background: on ? `${col}22` : 'none', border:`1px solid ${on ? col + '88' : C.border}`,
+    borderRadius:6, color: on ? col : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
+    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
+  const named = rep ? Object.keys(rep.col).filter(k => rep.col[k] >= 0).map(k => `${k} → « ${rep.header[rep.col[k]]} »`) : [];
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
+      background:`${col}10`, border:`1px solid ${col}44`, borderRadius:8 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+        <span style={{ fontSize:11, fontWeight:800, color:col }}>📥 Importer ManaBox / Delver Lens</span>
+        <button onClick={pick} disabled={busy} style={btn(!busy)}>{busy ? '⏳ Lecture…' : 'Choisir un CSV'}</button>
+        <button onClick={() => (q && q.busy) ? (stopRef.current = true) : quote()} disabled={!list.length}
+          title="Prix Cardmarket en euros, par lots de 75 cartes"
+          style={btn(!!list.length)}>{q && q.busy ? '⏹ Arrêter' : '💰 Mettre à jour la cote'}</button>
+      </div>
+      <input ref={fileRef} type="file" accept=".csv,.txt,text/csv,text/plain" onChange={onFile} style={{ display:'none' }} />
+      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
+      {rep && (
+        <div style={{ fontSize:10, color:col, fontWeight:600, lineHeight:1.5 }}>
+          ✓ {rep.file} — {rep.read} ligne{rep.read > 1 ? 's' : ''} lue{rep.read > 1 ? 's' : ''} ·{' '}
+          {rep.added} ajoutée{rep.added > 1 ? 's' : ''} · {rep.updated} mise{rep.updated > 1 ? 's' : ''} à jour
+          {rep.skipped ? ` · ${rep.skipped} ligne${rep.skipped > 1 ? 's' : ''} sans nom ignorée${rep.skipped > 1 ? 's' : ''}` : ''}
+          {rep.full ? ` · ⚠ plafond de ${CARDS_MAX} cartes atteint` : ''}
+          {rep.saveErr ? ' · ⚠ ENREGISTREMENT REFUSÉ' : ''}
+          <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', fontWeight:400, marginTop:2 }}>
+            Colonnes retenues : {named.join(' · ') || 'aucune'}
+          </div>
+        </div>
+      )}
+      {q && (
+        <div style={{ fontSize:10, color: q.err ? '#e05050' : col, lineHeight:1.5 }}>
+          {q.busy ? `⏳ Cotation ${q.done} / ${q.total} — ${q.n} carte${q.n > 1 ? 's' : ''} cotée${q.n > 1 ? 's' : ''}…`
+                  : `${q.err ? '⚠ ' + q.err + ' — ' : '✓ '}${q.n} carte${q.n > 1 ? 's' : ''} cotée${q.n > 1 ? 's' : ''} sur ${q.done} interrogée${q.done > 1 ? 's' : ''}.`}
+        </div>
+      )}
+      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
+        {MTG_CSV_HELP} Les colonnes sont reconnues par leur NOM, dans n'importe quel ordre.
+        Réimporter le même export MET À JOUR les quantités (le fichier fait autorité), il ne double rien.
+        ⚠ <b>Le fichier <code>.backup</code> de ManaBox ne peut pas être lu</b> : c'est sa base interne chiffrée.
+        Les cartes sont rangées dans <b>leur propre base</b> (IndexedDB), pas dans le stockage local du Hub :
+        des dizaines de milliers de lignes n'y saturent rien. Les images ne sont jamais stockées, elles se
+        déduisent de l'identifiant Scryfall. « Mettre à jour la cote » interroge Scryfall par lots de 75 (prix Cardmarket en €).
+      </div>
+    </div>
+  );
+}
+
 // Sous-collections par catégorie. `CARTES` (7.8.3) = Pokémon + Magic, chacune avec sa
 // propre source de recherche ; les autres catégories arrivent ensuite.
 const COLLECTION_SUBS = {
@@ -18120,7 +18684,8 @@ const COLLECTION_SUBS = {
       note:"Source : Pokémon TCG API (sans clé). Le prix affiché est le prix MOYEN DE VENTE récent sur Cardmarket quand il est publié — sinon le prix de tendance, sinon le marché TCGplayer. Seules les références (nom, série, prix, adresse de l'image) sont enregistrées : les images elles-mêmes ne sont jamais stockées." },
     { id:'magic', label:'Magic', icon:'🟣', unit:'carte', article:'une première carte',
       search: magicSearch, placeholder:'Chercher une carte Magic (ex. Black Lotus)…',
-      note:"Source : Scryfall (sans clé). Prix en euros repris de Cardmarket. Comme pour Pokémon, seules les références sont enregistrées, pas les images." },
+      importer: MtgCsvImport, img: mtgImgUrl,
+      note:"Source : Scryfall (sans clé). Prix en euros repris de Cardmarket. Une collection entière s'importe depuis l'export CSV de ManaBox ou de Delver Lens (le .backup de ManaBox, lui, est sa base chiffrée : illisible ailleurs). Les cartes sont rangées dans leur PROPRE base IndexedDB, pas dans le stockage local du Hub, et leur image se déduit de l'identifiant Scryfall au lieu d'être enregistrée." },
   ],
   displate: [
     { id:'displate', label:'Displate', icon:'🖼️', unit:'Displate', article:'un premier Displate',
@@ -18196,6 +18761,11 @@ function CollectionCat({ cat }) {
     _coll.subs.add(f);
     return () => { _coll.subs.delete(f); };
   }, []);
+  // ⚠ La base des CARTES est asynchrone et répond après le premier rendu : sans cet
+  // abonnement, Collection resterait figée sur l'état d'AVANT le préchargement — c'est-à-dire
+  // sur une sous-collection Magic vide juste après un import.
+  const cards = useCards();
+  React.useEffect(() => { if (cards.ready) setData(collLoad()); }, [cards.ready]);
   // Filet « je me reconnecte » : au retour sur l'onglet, on se resynchronise sur le disque —
   // une écriture faite dans un autre onglet du Hub serait sinon écrasée par la copie en RAM.
   React.useEffect(() => {
@@ -22258,8 +22828,13 @@ function buildBackup() {
     // fichiers nommés "<idAnnonce>__<n>" → elles se rattachent seules aux articles restaurés)
     revente: lsJson(REVENTE_LS) || null,
     // Collection : références possédées par sous-collection (cartes, Displate, Pop…).
-    // ⚠ AUCUNE image n'y est stockée, seulement l'ADRESSE de la vignette distante.
-    collection: lsJson(COLLECTION_LS) || null,
+    // ⚠ AUCUNE image n'y est stockée, seulement l'ADRESSE de la vignette distante — et pas
+    // même ça pour les cartes Magic, dont l'image se déduit de l'id Scryfall (`mtgImgUrl`).
+    // ⚠ `collLoad()` et non `lsJson` : depuis 13.14.9, les deux sous-collections de cartes
+    // vivent dans leur propre base IndexedDB, et une sauvegarde qui les oublierait perdrait
+    // la plus grosse collection du Hub. Le cache mémoire est chargé au boot ⇒ lecture
+    // synchrone possible, comme pour TV Time.
+    collection: (() => { const d = collLoad(); return Object.keys(d).length ? d : null; })(),
     // Histoire : fiches d'œuvres rédigées par l'IA (⚠ JAMAIS les photos, qui ne sont
     // de toute façon pas conservées — seul le texte de la fiche vit ici)
     histoire: (() => { const a = lsJson(HISTOIRE_LS); return Array.isArray(a) ? a : null; })(),
@@ -22795,11 +23370,22 @@ function applyBackup(data) {
         if (!safeKey(k)) continue;
         const inc = Array.isArray(data.collection[k]) ? data.collection[k] : [];
         const cur = Array.isArray(next[k]) ? next[k].slice() : [];
-        const seen = new Set(cur.map(x => x && x.id));
-        inc.forEach(x => { if (x && x.id && !seen.has(x.id)) { cur.push(x); seen.add(x.id); } });
+        const idx = new Map();
+        cur.forEach((x, i) => { if (x && x.id) idx.set(x.id, i); });
+        inc.forEach(x => {
+          if (!x || !x.id) return;
+          const at = idx.has(x.id) ? idx.get(x.id) : -1;
+          if (at < 0) { idx.set(x.id, cur.length); cur.push(x); return; }
+          // ⚠ Quantités au MAX, JAMAIS en somme (piège 17) : la sauvegarde porte déjà
+          // l'historique local, les additionner doublerait la collection à chaque ré-import.
+          const q = Math.max(cur[at].qty || 1, x.qty || 1);
+          if (q !== (cur[at].qty || 1)) cur[at] = { ...cur[at], qty: q };
+        });
         next[k] = cur;
       }
-      put(COLLECTION_LS, next);
+      // ⚠ `collSave` et non `put` : les cartes ne repassent PAS par le localStorage (elles
+      // le satureraient), il les redirige vers leur base. Un refus est SIGNALÉ, jamais avalé.
+      if (!collSave(next)) failed.push(COLLECTION_LS);
     } catch {}
   }
   // Revente — articles FUSIONNÉS par id (le local gagne sur un id déjà présent, les articles
@@ -25524,7 +26110,7 @@ function lsuScan() {
 // de renvoyer l'utilisateur vers un « IndexedDB » opaque de plusieurs centaines de Mo.
 // ⚠ Curseur et non `getAll()` sur les médias : un seul enregistrement en RAM à la fois.
 async function lsuIdbScan() {
-  const out = { db:0, media:0, mediaN:0, tv:0 };
+  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0 };
   try { const raw = await idbGet(IDB_KEY); out.db = (raw && (raw.byteLength || raw.length)) || 0; } catch {}
   // TV Time : sa base ne range pas une chaîne mais des OBJETS (clonage structuré), dont la
   // taille sur disque n'est exposée par aucune API — on la mesure à sa sérialisation JSON,
@@ -25535,6 +26121,14 @@ async function lsuIdbScan() {
   // fois plus lourd que la base SQLite à poids égal — et ne collait pas non plus à la taille
   // du fichier exporté, qui est de l'UTF-8.
   try { const l = await tvIdbGet(); if (Array.isArray(l)) out.tv = JSON.stringify(l).length; } catch {}
+  // Cartes (Pokémon + Magic) : même mesure, même unité. C'est LE poste qui peut peser le
+  // plus lourd après un import ManaBox — et le seul endroit où on peut le voir.
+  try {
+    for (const s of CARD_SUBS) {
+      const l = await cardsIdbGet(s);
+      if (Array.isArray(l)) { out.cards += JSON.stringify(l).length; out.cardsN += l.length; }
+    }
+  } catch {}
   try {
     const st = await _noteMediaTx('readonly');
     await new Promise(res => {
@@ -25672,8 +26266,8 @@ function DataLimitPanel() {
   // Ventilation finale : le localStorage de chaque module + sa part de base IndexedDB.
   const rows = scan.rows.map(r => ({
     ...r,
-    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : 0,
-    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : '',
+    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : r.id === 'collection' ? idb.cards : 0,
+    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : r.id === 'collection' ? `base Cartes — ${idb.cardsN} carte${idb.cardsN > 1 ? 's' : ''} (Pokémon, Magic)` : '',
   })).map(r => ({ ...r, tot: r.ls + r.idb }))
      .filter(r => r.tot > 0)
      .sort((a, b) => b.tot - a.tot);
