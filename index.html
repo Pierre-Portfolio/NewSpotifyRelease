@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.1';
+const APP_VERSION = '13.16.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28475,7 +28475,13 @@ function SiteLink({ href, label, color }) {
 const CARTO_TTL  = 15 * 60 * 1000;
 const _cartoSum  = {};   // { clé: { at, d } } — survit au repli du collapse
 
+// ⚠ 13.16.2 — CHAQUE FICHE ARRIVE REPLIÉE (demande utilisateur), et une fiche repliée ne
+// demande RIEN : ouvrir 🗺️ Cartographie lançait onze relevés d'un coup, dont une grille
+// aurorale au degré. Le `open` vit donc ICI, à côté du chargement, pour qu'il n'y ait qu'un
+// seul endroit où les deux soient liés — la fiche se charge à sa PREMIÈRE ouverture, et le
+// cache module (`_cartoSum`) fait que la replier puis la rouvrir ne redemande rien.
 function useCartoSummary(key, fetcher, defArg) {
+  const [open, setOpen] = React.useState(false);
   const [st, setSt] = React.useState(() => {
     const c = _cartoSum[key];
     return (c && Date.now() - c.at < CARTO_TTL)
@@ -28491,8 +28497,10 @@ function useCartoSummary(key, fetcher, defArg) {
       setSt({ loading:false, data:d, err:'' });
     } catch (e) { setSt({ loading:false, data:null, err: cartoErr(e) }); }
   }, []);
-  React.useEffect(() => { if (!st.data) load(false, defArg); }, []);
-  return [st, load];
+  React.useEffect(() => { if (open && !st.data) load(false, defArg); }, [open]);
+  // ⚠ `show` à côté de `toggle` : rafraîchir une fiche repliée ne montrerait rien, donc le ↻
+  // l'ouvre au passage.
+  return [st, load, { open, toggle: () => setOpen(o => !o), show: () => setOpen(true) }];
 }
 // Message d'échec lisible : un CORS refusé et un réseau coupé donnent tous deux un
 // `TypeError: Failed to fetch` — on ne prétend pas savoir lequel, on dit les deux.
@@ -28504,23 +28512,37 @@ function cartoErr(e) {
 }
 
 // Coquille commune : `[titre] [↗ site] ————— [↻]`, exactement comme `BullrunSumCard`.
-function CartoCard({ title, site, st, onReload, note, children }) {
+function CartoCard({ title, site, st, onReload, card, note, children }) {
+  const open = !card || card.open;     // `card` absente ⇒ fiche toujours ouverte
+  const btn = { fontSize:10, fontWeight:600, background:'none', borderRadius:6, padding:'3px 9px',
+    flexShrink:0, fontFamily:'inherit', lineHeight:1.4 };
   return (
     <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 12px 11px' }}>
-      <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:6 }}>
-        <div style={{ flex:1, minWidth:0, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom: open ? 6 : 0 }}>
+        {/* Le titre lui-même déplie : viser un bouton de 9 px au pouce est pénible. */}
+        <div onClick={() => card && card.toggle()}
+          style={{ flex:1, minWidth:0, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap',
+            cursor: card ? 'pointer' : 'default' }}>
           <span style={{ fontSize:11, fontWeight:700, color:ACTU_COLOR, letterSpacing:'0.05em' }}>{title}</span>
           {site && <SiteLink href={site.href} label={site.label} color={ACTU_COLOR} />}
         </div>
-        <button onClick={() => !st.loading && onReload(true)} disabled={st.loading}
-          style={{ fontSize:10, fontWeight:600, color: st.loading ? C.dim : ACTU_COLOR, background:'none',
-            border:`1px solid ${st.loading ? C.border : ACTU_COLOR + '66'}`, borderRadius:6, padding:'3px 9px',
-            cursor: st.loading ? 'default' : 'pointer', flexShrink:0 }}>{st.loading ? '…' : '↻'}</button>
+        <button onClick={() => { if (st.loading) return; if (card) card.show(); onReload(true); }} disabled={st.loading}
+          title="Rafraîchir" style={{ ...btn, color: st.loading ? C.dim : ACTU_COLOR,
+            border:`1px solid ${st.loading ? C.border : ACTU_COLOR + '66'}`,
+            cursor: st.loading ? 'default' : 'pointer' }}>{st.loading ? '…' : '↻'}</button>
+        {/* ⚠ À DROITE du ↻ (demande utilisateur) : replier / déplier CETTE fiche. */}
+        {card && (
+          <button onClick={card.toggle} title={open ? 'Replier cette carte' : 'Déplier cette carte'}
+            aria-expanded={open} style={{ ...btn, color:C.dim, border:`1px solid ${C.border}`, cursor:'pointer',
+              transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</button>
+        )}
       </div>
-      {st.loading && <div style={{ fontSize:11, color:ACTU_COLOR, fontStyle:'italic' }}>Lecture en cours…</div>}
-      {st.err && <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
-      {st.data ? children : null}
-      {note && <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, marginTop:8, borderTop:`1px solid ${C.border}`, paddingTop:5 }}>{note}</div>}
+      {open && <>
+        {st.loading && <div style={{ fontSize:11, color:ACTU_COLOR, fontStyle:'italic' }}>Lecture en cours…</div>}
+        {st.err && <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
+        {st.data ? children : null}
+        {note && <div style={{ fontSize:9, color:C.dim, lineHeight:1.5, marginTop:8, borderTop:`1px solid ${C.border}`, paddingTop:5 }}>{note}</div>}
+      </>}
     </div>
   );
 }
@@ -28747,11 +28769,11 @@ async function cartoFetchAurora() {
 // n'existe pas. On ne met des décimales que s'il y en a vraiment.
 const auroraKp = k => 'Kp ' + cartoNum(k, k % 1 ? 2 : 0);
 function CartoAurora() {
-  const [st, load] = useCartoSummary('aurora', cartoFetchAurora);
+  const [st, load, card] = useCartoSummary('aurora', cartoFetchAurora);
   const d = st.data;
   const lc = (d && d.cur) ? auroraLevel(d.cur.kp) : null, lp = d && d.peak && auroraLevel(d.peak.kp);
   return (
-    <CartoCard title="🌌 AURORES BORÉALES" site={CARTO_SITES_BY.aurora} st={st} onReload={load}
+    <CartoCard title="🌌 AURORES BORÉALES" site={CARTO_SITES_BY.aurora} st={st} card={card} onReload={load}
       note="Kp = indice planétaire 0-9 de la perturbation du champ magnétique terrestre. Il faut Kp ≥ 6 pour espérer voir quelque chose depuis le nord de la France, et un ciel sans nuage ni lune.">
       {d && <>
         {/* LA CARTE — zones vertes = probabilité de voir une aurore MAINTENANT (OVATION).
@@ -28814,10 +28836,10 @@ async function cartoFetchQuakes() {
 }
 const quakeColor = m => m >= 7 ? '#e0407a' : m >= 6 ? '#e05050' : m >= 5.5 ? '#f0731f' : '#f0a93c';
 function CartoQuakes() {
-  const [st, load] = useCartoSummary('quakes', cartoFetchQuakes);
+  const [st, load, card] = useCartoSummary('quakes', cartoFetchQuakes);
   const d = st.data;
   return (
-    <CartoCard title="🌪️ CATASTROPHES NATURELLES" site={CARTO_SITES_BY.disaster} st={st} onReload={load}
+    <CartoCard title="🌪️ CATASTROPHES NATURELLES" site={CARTO_SITES_BY.disaster} st={st} card={card} onReload={load}
       note={d ? `Magnitude ${QUAKE_MIN} et plus, les 8 plus forts. Source : catalogue temps réel de l'USGS depuis le ${d.since}.` : null}>
       {d && <>
         <CartoRow first label={`Magnitude ${QUAKE_MIN}+ dans le monde`}
@@ -28938,13 +28960,13 @@ function CartoCommuneInput({ value, onChange, onGo, busy }) {
 // échelle (« × la moyenne ») : un chiffre de densité seul ne dit rien à personne.
 const FRANCE_DENS = 106;
 function CartoInsee() {
-  const [st, load] = useCartoSummary('commune', cartoSearchCommunes, CARTO_COMMUNE_DEFAUT);
+  const [st, load, card] = useCartoSummary('commune', cartoSearchCommunes, CARTO_COMMUNE_DEFAUT);
   // Le collapse démonte ses enfants : au retour, le champ doit rappeler la commune dont les
   // chiffres sont affichés, pas repartir sur le défaut.
   const [q, setQ] = React.useState(() => (_cartoSum.commune && _cartoSum.commune.d && _cartoSum.commune.d.q) || CARTO_COMMUNE_DEFAUT);
   const d = st.data;
   return (
-    <CartoCard title="📊 CARTE INSEE" site={CARTO_SITES_BY.insee} st={st}
+    <CartoCard title="📊 CARTE INSEE" site={CARTO_SITES_BY.insee} st={st} card={card}
       onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}>
       <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
       {d && d.list.map((c, i) => (
@@ -29077,10 +29099,10 @@ function CartoWaterRow({ x, first }) {
   );
 }
 function CartoWater() {
-  const [st, load] = useCartoSummary('water', cartoFetchWater);
+  const [st, load, card] = useCartoSummary('water', cartoFetchWater);
   const d = st.data;
   return (
-    <CartoCard title="💧 QUALITÉ DE L'EAU" site={CARTO_SITES_BY.water} st={st} onReload={load}
+    <CartoCard title="💧 QUALITÉ DE L'EAU" site={CARTO_SITES_BY.water} st={st} card={card} onReload={load}
       note="Résultats officiels du contrôle sanitaire de l'eau distribuée (Hub'Eau, ministère de la Santé), sur les lieux du module Météo. Touche une ligne pour voir le détail du dernier prélèvement. Il peut dater de plusieurs semaines : c'est le rythme des campagnes, pas un défaut de lecture.">
       {d && d.list.map((x, i) => <CartoWaterRow key={x.key} x={x} first={i === 0} />)}
     </CartoCard>
@@ -29122,10 +29144,10 @@ async function cartoFetchAir() {
   return { list, at: Date.now() };
 }
 function CartoAir() {
-  const [st, load] = useCartoSummary('air', cartoFetchAir);
+  const [st, load, card] = useCartoSummary('air', cartoFetchAir);
   const d = st.data;
   return (
-    <CartoCard title="🌫️ QUALITÉ DE L'AIR" site={CARTO_SITES_BY.air} st={st} onReload={load}
+    <CartoCard title="🌫️ QUALITÉ DE L'AIR" site={CARTO_SITES_BY.air} st={st} card={card} onReload={load}
       note="Indice européen de qualité de l'air (0 = bon, > 100 = extrêmement mauvais) et concentrations en µg/m³, sur les lieux du module Météo. Le seuil qui compte au quotidien est le PM2,5 : l'OMS recommande de rester sous 15 µg/m³ sur 24 h.">
       {d && d.list.map((x, i) => {
         const b = aqiBand(x.aqi);
@@ -29204,10 +29226,10 @@ async function cartoFetchWar() {
            plein: j.Result.length >= UCDP_PAGE, version: used, since, at: Date.now() };
 }
 function CartoWar() {
-  const [st, load] = useCartoSummary('war', cartoFetchWar);
+  const [st, load, card] = useCartoSummary('war', cartoFetchWar);
   const d = st.data;
   return (
-    <CartoCard title="⚔️ GUERRE" site={CARTO_SITES_BY.war} st={st} onReload={load}
+    <CartoCard title="⚔️ GUERRE" site={CARTO_SITES_BY.war} st={st} card={card} onReload={load}
       note="Source : UCDP (Uppsala), la base académique de référence sur les conflits — une base de RECHERCHE, donc vérifiée mais publiée avec du retard : elle ne dit pas ce qui se passe aujourd'hui, elle dit ce qui est établi. « Morts » = estimation de référence (best) cumulée sur les événements reçus.">
       {d && <>
         <CartoRow first label="Morts recensées (12 mois)" value={cartoNum(d.tot)} color="#e05050"
@@ -29260,11 +29282,11 @@ async function cartoFetchScene(q) {
   return { list, tot, q: cherche, at: Date.now() };
 }
 function CartoScene() {
-  const [st, load] = useCartoSummary('scene', cartoFetchScene, '');
+  const [st, load, card] = useCartoSummary('scene', cartoFetchScene, '');
   const [q, setQ] = React.useState(() => (_cartoSum.scene && _cartoSum.scene.d && _cartoSum.scene.d.q) || '');
   const d = st.data;
   return (
-    <CartoCard title="🎬 LIEUX DE TOURNAGE" site={CARTO_SITES_BY.scene} st={st} onReload={() => load(true, q)}
+    <CartoCard title="🎬 LIEUX DE TOURNAGE" site={CARTO_SITES_BY.scene} st={st} card={card} onReload={() => load(true, q)}
       note="Registre des autorisations de tournage délivrées par la Ville de Paris (open data, sans clé) : films, séries, clips et publicités, avec l'adresse exacte. ⚠ Paris uniquement — la carte mondiale du site va bien plus loin, mais elle n'expose aucune donnée.">
       <div style={{ display:'flex', gap:6, marginBottom:8 }}>
         <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') load(true, q); }}
@@ -29327,11 +29349,11 @@ async function cartoFetchPhoto(q) {
   return { com, n: hits.length, plein: hits.length >= PHOTO_LIMIT, top, at: Date.now() };
 }
 function CartoPhoto() {
-  const [st, load] = useCartoSummary('photo', cartoFetchPhoto, CARTO_COMMUNE_DEFAUT);
+  const [st, load, card] = useCartoSummary('photo', cartoFetchPhoto, CARTO_COMMUNE_DEFAUT);
   const [q, setQ] = React.useState(() => (_cartoSum.photo && _cartoSum.photo.d && _cartoSum.photo.d.com.nom) || CARTO_COMMUNE_DEFAUT);
   const d = st.data;
   return (
-    <CartoCard title="📸 LIEUX LES PLUS PHOTOGRAPHIÉS" site={CARTO_SITES_BY.photo} st={st}
+    <CartoCard title="📸 LIEUX LES PLUS PHOTOGRAPHIÉS" site={CARTO_SITES_BY.photo} st={st} card={card}
       onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}
       note={`Photos géolocalisées de Wikimedia Commons dans un rayon de ${PHOTO_RADIUS / 1000} km autour du centre de la commune, regroupées par sujet. Ce n'est pas la carte de chaleur mondiale du site — c'est le même signal (où les gens photographient), mesuré là où tu regardes.`}>
       <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
@@ -29390,11 +29412,11 @@ async function cartoFetchSpace() {
   return { total, pays, exact: iTot >= 0, at: Date.now() };
 }
 function CartoSpace() {
-  const [st, load] = useCartoSummary('space', cartoFetchSpace);
+  const [st, load, card] = useCartoSummary('space', cartoFetchSpace);
   const d = st.data;
   const part = d && d.total.tot ? (d.total.deb / d.total.tot) * 100 : null;
   return (
-    <CartoCard title="🛰️ POLLUTION SPATIALE" site={CARTO_SITES_BY.space} st={st} onReload={load}
+    <CartoCard title="🛰️ POLLUTION SPATIALE" site={CARTO_SITES_BY.space} st={st} card={card} onReload={load}
       note="Boxscore du catalogue SATCAT : tout ce qui est suivi au radar et encore en orbite, par pays d'origine. « Débris » regroupe les étages de fusée et les fragments — c'est la part qui ne sert plus à rien et qu'on ne peut pas piloter.">
       {d && <>
         <CartoRow first label="Objets encore en orbite" value={cartoNum(d.total.tot)} color="#e05050"
@@ -29441,10 +29463,10 @@ async function cartoFetchTransport() {
   return { list, tot: list.reduce((s, x) => s + x.n, 0), at: Date.now() };
 }
 function CartoTransport() {
-  const [st, load] = useCartoSummary('transport', cartoFetchTransport);
+  const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
   const d = st.data;
   return (
-    <CartoCard title="🚇 RÉSEAUX DE TRANSPORT PARIS" site={CARTO_SITES_BY.transport} st={st} onReload={load}
+    <CartoCard title="🚇 RÉSEAUX DE TRANSPORT PARIS" site={CARTO_SITES_BY.transport} st={st} card={card} onReload={load}
       note="Référentiel des lignes d'Île-de-France Mobilités (open data, sans clé). ⚠ Ce sont les lignes EXISTANTES, pas l'état du trafic : l'info temps réel d'IDFM demande une clé PRIM, que cette app n'a pas.">
       {d && <>
         <CartoRow first label="Lignes au référentiel" value={cartoNum(d.tot)} color={ACTU_COLOR}
@@ -29507,10 +29529,10 @@ async function cartoFetchSante() {
   return { list, at: Date.now() };
 }
 function CartoSante() {
-  const [st, load] = useCartoSummary('sante', cartoFetchSante);
+  const [st, load, card] = useCartoSummary('sante', cartoFetchSante);
   const d = st.data;
   return (
-    <CartoCard title="🏥 SANTÉ" site={CARTO_SITES_BY.sante} st={st} onReload={load}
+    <CartoCard title="🏥 SANTÉ" site={CARTO_SITES_BY.sante} st={st} card={card} onReload={load}
       note="Concentrations de pollens en grains/m³ (Open-Meteo, sans clé), sur les lieux du module Météo. Échelle générique : le seuil qui déclenche des symptômes dépend du pollen ET de la personne. Hors saison, tout est à zéro — c'est normal, pas une panne.">
       {d && d.list.map((x, i) => {
         const b = pollenBand(x.pire ? x.pire.v : null);
