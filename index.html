@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.17.9';
+const APP_VERSION = '13.18.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29148,19 +29148,24 @@ function CartoWaterRow({ x, first }) {
 // elle vit en état local, la fiche repliée l'oublie, et les trois lieux fixes ne bougent pas.
 // ⚠ Le code INSEE / le centre viennent de `cartoSearchCommunes`, jamais d'une saisie libre :
 // aucune coordonnée devinée, et Hub'Eau a besoin du code exact.
-function useCartoCity(fetchOne) {
+// ⚠ `fetchOne` est FACULTATIF : sans lui, la ville trouvée ne sert qu'à recadrer la carte.
+// ⚠ `pre(nom)` permet à une fiche de répondre LOCALEMENT (🚇 cherche d'abord dans les gares
+// déjà chargées) : trouvé ⇒ aucune requête, sinon on retombe sur la recherche de commune.
+function useCartoCity(fetchOne, pre) {
   const [q, setQ] = React.useState('');
   const [st, setSt] = React.useState({ busy:false, err:'', row:null });
   const run = async () => {
     const nom = q.trim();
     if (!nom || st.busy) return;
+    const local = pre ? pre(nom) : null;
+    if (local) { setSt({ busy:false, err:'', row: local }); return; }
     setSt({ busy:true, err:'', row:null });
     try {
       const { list } = await cartoSearchCommunes(nom);
       const c = list[0];
       if (c.lat == null || c.lon == null) throw new Error(`Pas de centre publié pour ${c.nom}.`);
-      const row = await fetchOne({ key:'q:' + c.code, name:c.nom, lat:c.lat, lon:c.lon, code:c.code });
-      setSt({ busy:false, err:'', row });
+      const loc = { key:'q:' + c.code, name:c.nom, lat:c.lat, lon:c.lon, code:c.code };
+      setSt({ busy:false, err:'', row: fetchOne ? await fetchOne(loc) : loc });
     } catch (e) { setSt({ busy:false, err: cartoErr(e), row:null }); }
   };
   const clear = () => { setQ(''); setSt({ busy:false, err:'', row:null }); };
@@ -29846,18 +29851,28 @@ async function cartoFetchTransport() {
   ]);
   return { list, gares, traces, tot: list.reduce((s, x) => s + x.n, 0), at: Date.now() };
 }
+const cartoNorm = v => String(v == null ? '' : v).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 function CartoTransport() {
   const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
   const d = st.data;
+  // ⚠ Une GARE déjà chargée répond sans aucune requête ; à défaut, la commune (le réseau est
+  // francilien, mais rien n'interdit de chercher ailleurs — la carte s'y rendra, vide).
+  const city = useCartoCity(null, nom => {
+    const n = cartoNorm(nom);
+    const g = (d && d.gares ? d.gares.list : []).find(x => cartoNorm(x.nom).includes(n));
+    return g ? { key:'gare:' + g.nom, name:g.nom, lat:g.lat, lon:g.lon, gare:true } : null;
+  });
   return (
     <CartoCard title="🚇 RÉSEAUX DE TRANSPORT PARIS" site={CARTO_SITES_BY.transport} st={st} card={card} onReload={load}>
+      {d && <CartoCitySearch city={city} placeholder="Une gare ou une commune…" />}
       {d && <>
         {/* LA CARTE, entre l'en-tête et les lignes (demande utilisateur). ⚠ Ce sont les
             GARES : le référentiel des LIGNES ne porte aucune géométrie. */}
         {(d.gares && d.gares.list.length > 0) || (d.traces && d.traces.list.length > 0) ? (
           <div style={{ marginBottom:9 }}>
             <CartoMiniMap fit zoom={11} height={230}
-              overlaySig={'idfm' + ((d.traces && d.traces.list.length) || 0)}
+              focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null} focusZoom={14}
+              overlaySig={'idfm' + ((d.traces && d.traces.list.length) || 0) + '|' + (city.st.row ? city.st.row.key : '')}
               overlay={grp => {
                 if (!d.traces) return;
                 for (const t of d.traces.list) {
@@ -29867,13 +29882,20 @@ function CartoTransport() {
                   }
                 }
               }}
-              markers={(d.gares ? d.gares.list : []).map(g => ({ lat:g.lat, lon:g.lon, r:4.5, color: idfmGareColor(g.mode),
-                label: [g.nom, g.res, g.mode].filter(Boolean).join(' · ') }))} />
+              markers={[
+                ...(d.gares ? d.gares.list : []).map(g => ({ lat:g.lat, lon:g.lon, r:4.5, color: idfmGareColor(g.mode),
+                  label: [g.nom, g.res, g.mode].filter(Boolean).join(' · ') })),
+                // ⚠ Le point cherché est BLANC et non `CARTO_PICK` : l'orange est déjà la
+                // couleur officielle du métro sur cette carte-ci, il s'y serait fondu.
+                ...(city.st.row ? [{ lat:city.st.row.lat, lon:city.st.row.lon, r:9, color:'#ffffff',
+                  label: city.st.row.name + (city.st.row.gare ? ' (gare)' : '') }] : []),
+              ]} />
             <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.5 }}>
               {d.traces
                 ? `${cartoNum(d.traces.list.length)} tracés du réseau ferré à leur couleur officielle (open data IDFM)`
                 : 'tracés indisponibles'}
               {d.gares ? ` · ${cartoNum(d.gares.list.length)} gares posées${d.gares.tot ? ` sur ${cartoNum(d.gares.tot)}` : ''}` : ''}
+              {city.st.row ? ` · ${city.st.row.gare ? 'gare' : 'commune'} « ${city.st.row.name} » en blanc` : ''}
               {' · le plan du site lui-même n\'est pas embarquable, c\'est le même réseau redessiné ici'}
             </div>
           </div>
