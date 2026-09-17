@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.19.3';
+const APP_VERSION = '13.19.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5029,6 +5029,7 @@ const GAMES = [
   { id:'airhockey',  label:'Air Hockey',      min:2, max:2 },
   { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
+  { id:'cdl',        label:'Des chiffres et des lettres', min:1, max:8 },
   { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
   { id:'findcolor',  label:'Find Color',      min:2, max:8 },
   { id:'findflag',   label:'Find the Flag',   min:1, max:1 },
@@ -5140,6 +5141,7 @@ function GameHost({ game, label }) {
     case 'airhockey':  return <GameAirHockey />;
     case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
+    case 'cdl':        return <GameChiffresLettres />;
     case 'doodle':     return <GameDoodle />;
     case 'findcolor':  return <GameFindColor />;
     case 'findflag':   return <GameFindFlag />;
@@ -10384,6 +10386,308 @@ function PartySetup({ color, icon, title, rules, min, max, count, setCount, name
       {children}
       <button onClick={onStart} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>{cta}</button>
     </div>
+  );
+}
+
+// ════════ Des chiffres et des lettres (1 à 8 joueurs, même appareil) ════════
+// ⚠ LE HUB N'EST PAS L'ARBITRE, c'est le TABLEAU (demande utilisateur : « puis je dirais qui
+// a gagné ou non »). Il tire, il compte le temps, il dévoile — et c'est un humain qui désigne
+// le gagnant de la manche. Même parti pris que Flip 7 : tout le monde est autour de
+// l'appareil, personne n'a besoin qu'un programme tranche à sa place.
+// ⚠ Rien n'est persisté (aucune clé de stockage, donc rien à ajouter à la sauvegarde) : une
+// partie dure une soirée, pas une vie — contrairement à Flip 7, dont le tableau se reprend.
+const CDL_COLOR = '#57c2e8';
+const CDL_MAX_P = 8;
+const CDL_DURS = [30, 45, 60];                 // durées de manche proposées, en secondes
+// Plaques du « compte est bon » : 1 à 10 en double, plus les quatre grosses.
+const CDL_PLAQUES = [1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,25,50,75,100];
+const CDL_NUMS = 6;
+const CDL_TMIN = 101, CDL_TMAX = 999;
+// Sacs de lettres aux fréquences du Scrabble français, VOYELLES et CONSONNES séparées : le
+// joueur demande l'une ou l'autre, comme à la télévision.
+// ⚠ `cdlBag` est déclarée AVANT les deux constantes qui l'appellent (piège 2) : une const
+// module-level lue plus haut, c'est une TDZ, donc un écran noir.
+const cdlBag = pairs => pairs.map(([l, n]) => l.repeat(n)).join('');
+const CDL_VOY = cdlBag([['A',9],['E',15],['I',8],['O',6],['U',6],['Y',1]]);
+const CDL_CON = cdlBag([['B',2],['C',2],['D',3],['F',2],['G',2],['H',2],['J',1],['K',1],['L',5],
+                        ['M',3],['N',6],['P',2],['Q',1],['R',6],['S',6],['T',6],['V',2],['W',1],['X',1],['Z',1]]);
+const CDL_LETTERS = 10;
+// Garde-fous du tirage : au plus 6 consonnes et au plus 8 voyelles ⇒ jamais un tirage
+// injouable (ni « QQQXWZKJVB », ni « AEIOUAEIOU »).
+const CDL_MAX_CON = 6, CDL_MAX_VOY = 8;
+const CDL_WORDS_MAX = 24;
+const cdlPick = bag => bag[Math.floor(Math.random() * bag.length)];
+
+// ── « Le compte est bon » : la meilleure solution, calculée ici ────────────────────
+// Recherche exhaustive : on combine deux plaques, on recommence sur la liste réduite. Les
+// entiers seuls (pas de fraction, pas de négatif) et jamais ×1 ni ÷1, qui ne font rien.
+// ⚠ `seen` mémorise les multi-ensembles DÉJÀ développés : un même lot de plaques atteint par
+// deux chemins donne exactement les mêmes suites, l'explorer deux fois ne peut rien apprendre.
+// C'est ce qui ramène le pire cas mesuré à ~70 ms — sans lui le calcul figeait la page.
+// ⚠ On garde le PLUS PROCHE, pas seulement l'exact : « le compte n'est pas bon » est un
+// résultat du jeu, et annoncer l'écart fait partie de l'annonce.
+function cdlSolve(nums, target) {
+  let best = { val:null, steps:[], diff:Infinity };
+  const seen = new Set();
+  const rec = (list, steps) => {
+    for (const v of list) {
+      const d = Math.abs(v - target);
+      if (d < best.diff) { best = { val:v, steps:steps.slice(), diff:d }; if (!d) return true; }
+    }
+    if (list.length < 2) return false;
+    const key = list.slice().sort((a, b) => a - b).join(',');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const rest = []; for (let k = 0; k < list.length; k++) if (k !== i && k !== j) rest.push(list[k]);
+        const hi = Math.max(list[i], list[j]), lo = Math.min(list[i], list[j]);
+        const cand = [[hi + lo, '+']];
+        if (hi - lo > 0) cand.push([hi - lo, '−']);
+        if (lo > 1) cand.push([hi * lo, '×']);
+        if (lo > 1 && hi % lo === 0) cand.push([hi / lo, '÷']);
+        for (const [v, op] of cand) if (rec(rest.concat(v), steps.concat(`${hi} ${op} ${lo} = ${v}`))) return true;
+      }
+    }
+    return false;
+  };
+  rec(nums.slice(), []);
+  return best;
+}
+// ── « Le mot le plus long » : ce que NOTRE dictionnaire trouve ─────────────────────
+// ⚠ Ce n'est PAS un arbitrage et ça ne peut pas l'être : le dictionnaire embarqué est celui
+// de Motus, qui ne contient que des mots de 6 à 9 lettres. Un mot de 4 ou de 10 lettres
+// parfaitement valable n'y est pas — l'écran le DIT, et c'est toujours l'humain qui tranche.
+function cdlWordsFrom(letters) {
+  const have = {};
+  for (const ch of letters) have[ch] = (have[ch] || 0) + 1;
+  const dico = window.MOTUS_DICO || {};
+  const lens = Object.keys(dico).map(Number).filter(n => n).sort((a, b) => b - a);
+  const out = [];
+  for (const len of lens) {
+    for (const w of dico[len]) {
+      const need = {};
+      let ok = true;
+      for (const ch of w) { need[ch] = (need[ch] || 0) + 1; if (need[ch] > (have[ch] || 0)) { ok = false; break; } }
+      if (ok) out.push(w);
+    }
+    if (out.length >= CDL_WORDS_MAX) break;      // les plus LONGS d'abord : on s'arrête dès qu'on en a assez
+  }
+  return out.slice(0, CDL_WORDS_MAX);
+}
+function GameChiffresLettres() {
+  const [phase, setPhase]   = React.useState('setup');   // setup | draw | run | score
+  const [count, setCount]   = React.useState(2);
+  const [names, setNames]   = React.useState(() => Array(CDL_MAX_P).fill(''));
+  const [dur, setDur]       = React.useState(45);
+  const [mode, setMode]     = React.useState('chiffres');
+  const [game, setGame]     = React.useState(null);      // { players:[], scores:[], round }
+  const [tir, setTir]       = React.useState(null);      // { nums, target } | { letters }
+  const [left, setLeft]     = React.useState(0);
+  const [sol, setSol]       = React.useState(null);      // solution du compte est bon
+  const [mots, setMots]     = React.useState({ busy:false, err:'', list:null });
+  const start = () => {
+    const players = names.slice(0, count).map((n, i) => n.trim() || `Joueur ${i + 1}`);
+    setGame({ players, scores: players.map(() => 0), round:1 });
+    newRound();
+  };
+  const newRound = () => { setTir(null); setSol(null); setMots({ busy:false, err:'', list:null }); setPhase('draw'); };
+  const drawNums = () => {
+    const bag = CDL_PLAQUES.slice(), nums = [];
+    for (let i = 0; i < CDL_NUMS; i++) nums.push(...bag.splice(Math.floor(Math.random() * bag.length), 1));
+    setTir({ nums, target: CDL_TMIN + Math.floor(Math.random() * (CDL_TMAX - CDL_TMIN + 1)) });
+  };
+  const addLetter = kind => setTir(t => {
+    const cur = (t && t.letters) || [];
+    if (cur.length >= CDL_LETTERS) return t;
+    return { letters: cur.concat(cdlPick(kind === 'v' ? CDL_VOY : CDL_CON)) };
+  });
+  const letters = (tir && tir.letters) || [];
+  const nVoy = letters.filter(l => CDL_VOY.includes(l)).length;
+  const nCon = letters.length - nVoy;
+  const ready = mode === 'chiffres' ? !!(tir && tir.nums) : letters.length === CDL_LETTERS;
+  const go = () => { setLeft(dur); setPhase('run'); };
+  // ⚠ La solution est calculée À L'ARRIVÉE sur l'écran de résultat, jamais pendant le rendu :
+  // 70 ms dans un rendu, c'est une image sautée sur le décompte.
+  const finish = () => {
+    if (mode === 'chiffres' && tir && tir.nums) setSol(cdlSolve(tir.nums, tir.target));
+    setPhase('score');
+  };
+  const award = idx => {
+    setGame(g => ({ ...g, scores: g.scores.map((s, i) => (i === idx ? s + 1 : s)), round: g.round + 1 }));
+    newRound();
+  };
+  const noOne = () => { setGame(g => ({ ...g, round: g.round + 1 })); newRound(); };
+  // ⚠ Déclaré APRÈS `finish`, qu'il appelle (piège 2).
+  // Chrono de la manche. ⚠ Un `setTimeout` relancé à chaque seconde (et non un `setInterval`
+  // capturé une fois) : l'effet se rejoue avec la valeur courante, aucune closure figée
+  // (piège 6), et quitter la phase l'arrête tout seul.
+  React.useEffect(() => {
+    if (phase !== 'run') return;
+    if (left <= 0) { finish(); return; }
+    const t = setTimeout(() => setLeft(l => l - 1), 1000);
+    return () => clearTimeout(t);
+  }, [phase, left]);
+
+  const seeWords = () => {
+    setMots({ busy:true, err:'', list:null });
+    loadMotusData()
+      .then(() => setMots({ busy:false, err:'', list: cdlWordsFrom(letters) }))
+      .catch(e => setMots({ busy:false, err: String((e && e.message) || e) || 'dictionnaire injoignable', list:null }));
+  };
+  const card = partyCard(CDL_COLOR);
+  const big  = extra => gameBtn({ padding:'11px 20px', fontSize:13, ...(extra || {}) });
+  const chip = on => gameBtn({ padding:'6px 12px', fontSize:12,
+    background: on ? `${CDL_COLOR}2e` : 'none', border:`1px solid ${on ? CDL_COLOR : C.border}`,
+    color: on ? CDL_COLOR : C.muted });
+  const tile = (txt, key, big2) => (
+    <div key={key} style={{ minWidth: big2 ? 46 : 40, padding: big2 ? '9px 8px' : '7px 6px', borderRadius:9,
+      background:`${CDL_COLOR}18`, border:`1px solid ${CDL_COLOR}55`, color:C.text,
+      fontSize: big2 ? 20 : 17, fontWeight:900, fontFamily:'DM Mono,monospace', textAlign:'center' }}>{txt}</div>
+  );
+
+  if (phase === 'setup') return (
+    <GameWrap hint="Le tirage et le chrono sont ici ; la réponse se dit à voix haute, autour de l'appareil. À la fin de la manche, le Hub dévoile ce qu'il sait faire — et c'est toi qui désignes le gagnant.">
+      <PartySetup color={CDL_COLOR} icon="🔢" title="DES CHIFFRES ET DES LETTRES" min={1} max={CDL_MAX_P}
+        rules="À chaque manche, tu choisis : le compte est bon, ou le mot le plus long. Le Hub tire et lance le chrono, vous cherchez, puis tu dis qui a gagné — ou personne."
+        count={count} setCount={setCount} names={names} setNames={setNames} cta="Commencer →" onStart={start}>
+        <div style={{ width:'100%' }}>
+          <div style={{ fontSize:11.5, color:C.muted, marginBottom:6, textAlign:'center' }}>Durée d'une manche</div>
+          <div style={{ display:'flex', gap:6, justifyContent:'center' }}>
+            {CDL_DURS.map(d => <button key={d} onClick={() => setDur(d)} style={chip(dur === d)}>{d} s</button>)}
+          </div>
+        </div>
+      </PartySetup>
+    </GameWrap>
+  );
+
+  const bar = (
+    <>
+      <span style={{ fontSize:12, color:C.muted }}>Manche <b style={{ color:CDL_COLOR }}>{game.round}</b> · {dur} s</span>
+      <button onClick={() => setPhase('setup')} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted })}>↻ Nouvelle partie</button>
+    </>
+  );
+  // Tableau des scores, sous chaque écran : c'est LE produit du jeu ici.
+  const board = (
+    <div style={{ width:'100%', maxWidth:340, display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center' }}>
+      {game.players.map((p, i) => (
+        <div key={p + i} style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 9px', borderRadius:9,
+          background:C.surface, border:`1px solid ${C.border}` }}>
+          <PartyAvatar name={p} idx={i} size={22} />
+          <span style={{ fontSize:11.5, color:C.text, maxWidth:96, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p}</span>
+          <b style={{ fontSize:13, color:CDL_COLOR, fontFamily:'DM Mono,monospace' }}>{game.scores[i]}</b>
+        </div>
+      ))}
+    </div>
+  );
+
+  if (phase === 'draw') return (
+    <GameWrap bar={bar}>
+      <div style={card}>
+        <div style={{ display:'flex', gap:6 }}>
+          <button onClick={() => { setMode('chiffres'); setTir(null); }} style={chip(mode === 'chiffres')}>🔢 Le compte est bon</button>
+          <button onClick={() => { setMode('lettres'); setTir(null); }} style={chip(mode === 'lettres')}>🔤 Le mot le plus long</button>
+        </div>
+        {mode === 'chiffres' ? (
+          tir ? <>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center' }}>{tir.nums.map((n, i) => tile(n, 'n' + i))}</div>
+            <div style={{ fontSize:11, color:C.muted, marginBottom:-6 }}>Compte à trouver</div>
+            <div style={{ fontSize:38, fontWeight:900, color:CDL_COLOR, fontFamily:'DM Mono,monospace', lineHeight:1 }}>{tir.target}</div>
+          </> : (
+            <div style={{ fontSize:11.5, color:C.muted, lineHeight:1.55 }}>Six plaques, un compte entre {CDL_TMIN} et {CDL_TMAX}.<br/>+ − × ÷, chaque plaque au plus une fois.</div>
+          )
+        ) : <>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center', minHeight:38 }}>
+            {letters.map((l, i) => tile(l, 'l' + i))}
+            {letters.length === 0 && <div style={{ fontSize:11.5, color:C.muted, lineHeight:1.55 }}>Demande tes {CDL_LETTERS} lettres, une par une.</div>}
+          </div>
+          <div style={{ display:'flex', gap:6 }}>
+            <button onClick={() => addLetter('v')} disabled={nVoy >= CDL_MAX_VOY || letters.length >= CDL_LETTERS}
+              style={big({ opacity: (nVoy >= CDL_MAX_VOY || letters.length >= CDL_LETTERS) ? 0.4 : 1 })}>Voyelle</button>
+            <button onClick={() => addLetter('c')} disabled={nCon >= CDL_MAX_CON || letters.length >= CDL_LETTERS}
+              style={big({ opacity: (nCon >= CDL_MAX_CON || letters.length >= CDL_LETTERS) ? 0.4 : 1 })}>Consonne</button>
+          </div>
+          <div style={{ fontSize:10.5, color:C.muted }}>{letters.length}/{CDL_LETTERS} · {nVoy} voyelle{nVoy > 1 ? 's' : ''}, {nCon} consonne{nCon > 1 ? 's' : ''} (max {CDL_MAX_VOY} / {CDL_MAX_CON})</div>
+        </>}
+        <div style={{ display:'flex', gap:6 }}>
+          {mode === 'chiffres' && <button onClick={drawNums} style={big()}>🎲 {tir ? 'Retirer' : 'Tirer'}</button>}
+          {mode === 'lettres' && letters.length > 0 && <button onClick={() => setTir(null)} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted })}>↺ Effacer</button>}
+          {ready && <button onClick={go} style={big()}>▶ Lancer les {dur} s</button>}
+        </div>
+      </div>
+      {board}
+    </GameWrap>
+  );
+
+  if (phase === 'run') return (
+    <GameWrap bar={bar}>
+      <div style={{ ...card, justifyContent:'center' }}>
+        {mode === 'chiffres' ? <>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center' }}>{tir.nums.map((n, i) => tile(n, 'n' + i))}</div>
+          <div style={{ fontSize:34, fontWeight:900, color:CDL_COLOR, fontFamily:'DM Mono,monospace', lineHeight:1 }}>{tir.target}</div>
+        </> : (
+          <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center' }}>{letters.map((l, i) => tile(l, 'l' + i, true))}</div>
+        )}
+        <div style={{ fontSize:52, fontWeight:900, color: left <= 5 ? '#e05050' : C.text, fontFamily:'DM Mono,monospace', lineHeight:1 }}>{left}</div>
+        {/* Barre de temps : la couleur passe au rouge sur les 5 dernières secondes. */}
+        <div style={{ width:'100%', height:6, borderRadius:3, background:C.surface, overflow:'hidden' }}>
+          <div style={{ width: `${Math.max(0, (left / dur) * 100)}%`, height:'100%',
+            background: left <= 5 ? '#e05050' : CDL_COLOR, transition:'width 1s linear' }} />
+        </div>
+        <button onClick={finish} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted })}>⏭ Terminer maintenant</button>
+      </div>
+      {board}
+    </GameWrap>
+  );
+
+  // ── Résultat : ce que le Hub sait, puis LE GAGNANT DÉSIGNÉ À LA MAIN ──────────
+  return (
+    <GameWrap bar={bar}>
+      <div style={card}>
+        {mode === 'chiffres' ? <>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center' }}>{tir.nums.map((n, i) => tile(n, 'n' + i))}</div>
+          <div style={{ fontSize:12, color:C.muted, marginBottom:-8 }}>Compte demandé <b style={{ color:C.text }}>{tir.target}</b></div>
+          {sol && <>
+            <div style={{ fontSize:14, fontWeight:900, color: sol.diff === 0 ? '#5fd35f' : '#f0a93c' }}>
+              {sol.diff === 0 ? '✓ Le compte est bon' : `Le plus proche : ${sol.val} (à ${sol.diff})`}
+            </div>
+            <div style={{ width:'100%', display:'flex', flexDirection:'column', gap:3 }}>
+              {sol.steps.map((s, i) => (
+                <div key={i} style={{ fontSize:12, color:C.muted, fontFamily:'DM Mono,monospace' }}>{s}</div>
+              ))}
+            </div>
+          </>}
+        </> : <>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center' }}>{letters.map((l, i) => tile(l, 'l' + i))}</div>
+          {!mots.list && !mots.busy && !mots.err && (
+            <button onClick={seeWords} style={big()}>🔎 Des mots possibles</button>
+          )}
+          {mots.busy && <div style={{ fontSize:11.5, color:C.muted, fontStyle:'italic' }}>⏳ Lecture du dictionnaire…</div>}
+          {mots.err && <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>⚠ Dictionnaire indisponible ({mots.err}).</div>}
+          {mots.list && (mots.list.length ? <>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:5, justifyContent:'center' }}>
+              {mots.list.map(w => (
+                <span key={w} style={{ fontSize:11.5, fontWeight:700, fontFamily:'DM Mono,monospace', color:CDL_COLOR,
+                  background:`${CDL_COLOR}14`, border:`1px solid ${CDL_COLOR}44`, borderRadius:7, padding:'3px 7px' }}>{w}</span>
+              ))}
+            </div>
+            <div style={{ fontSize:10, color:C.dim, lineHeight:1.5 }}>Dictionnaire embarqué (celui de Motus) : <b>6 à 9 lettres seulement</b>. Un mot plus court ou plus long peut être parfaitement valable — c'est vous qui tranchez.</div>
+          </> : (
+            <div style={{ fontSize:11, color:C.muted, lineHeight:1.5 }}>Aucun mot de 6 à 9 lettres dans ce tirage pour le dictionnaire embarqué — ce qui ne veut pas dire qu'il n'y en a pas.</div>
+          ))}
+        </>}
+        <div style={{ fontSize:11.5, fontWeight:800, color:C.text, marginTop:2 }}>Qui gagne la manche ?</div>
+        <div style={{ width:'100%', display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center' }}>
+          {game.players.map((p, i) => (
+            <button key={p + i} onClick={() => award(i)} style={gameBtn({ padding:'8px 12px', fontSize:12 })}>🏆 {p}</button>
+          ))}
+          <button onClick={noOne} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted, padding:'8px 12px', fontSize:12 })}>
+            {game.players.length > 1 ? 'Personne' : '❌ Raté'}
+          </button>
+        </div>
+      </div>
+      {board}
+    </GameWrap>
   );
 }
 
