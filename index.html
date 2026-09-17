@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.17.6';
+const APP_VERSION = '13.17.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28527,9 +28527,11 @@ const _cartoSum  = {};   // { clé: { at, d } } — survit au repli du collapse
 function useCartoSummary(key, fetcher, defArg) {
   const [open, setOpen] = React.useState(false);
   const [st, setSt] = React.useState(() => {
+    // ⚠ `loading:false` même sans cache : depuis que la fiche arrive REPLIÉE, rien ne part au
+    // montage — un état « en cours » figé grisait le ↻ d'une fiche qui ne chargeait rien, et
+    // le rendait donc inutilisable tant qu'on ne l'avait pas dépliée autrement.
     const c = _cartoSum[key];
-    return (c && Date.now() - c.at < CARTO_TTL)
-      ? { loading:false, data:c.d, err:'' } : { loading:true, data:null, err:'' };
+    return { loading:false, data: (c && Date.now() - c.at < CARTO_TTL) ? c.d : null, err:'' };
   });
   const load = React.useCallback(async (force, arg) => {
     const c = _cartoSum[key];
@@ -28658,7 +28660,7 @@ const CARTO_MAP_H = 190;
 function cartoMarkSig(markers) {
   return (markers || []).map(m => [m.lat, m.lon, m.label, m.color, m.r].join('~')).join('|');
 }
-function CartoMiniMap({ markers, center, zoom, fit, height, overlay, overlaySig }) {
+function CartoMiniMap({ markers, center, zoom, fit, height, overlay, overlaySig, focus, focusZoom }) {
   const [status, setStatus] = React.useState(window.L ? 'ready' : 'loading');
   const divRef = React.useRef(null), mapRef = React.useRef(null), layRef = React.useRef(null);
   const sig = cartoMarkSig(markers) + '#' + (overlaySig || '');
@@ -28702,6 +28704,15 @@ function CartoMiniMap({ markers, center, zoom, fit, height, overlay, overlaySig 
     }
     setTimeout(() => { try { map.invalidateSize(); } catch {} }, 60);
   }, [status, sig]);
+  // ⚠ RECADRAGE, effet SÉPARÉ et posé APRÈS celui du contenu : `fit` cadre sur l'ensemble des
+  // marqueurs à chaque changement de signature, `focus` amène la carte sur CELUI qu'on vient
+  // de choisir. Dans cet ordre, le second gagne — l'inverse aurait annulé le geste.
+  const fkey = focus ? focus.join(',') : '';
+  React.useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !focus) return;
+    try { map.setView(focus, Math.max(map.getZoom(), focusZoom == null ? 14 : focusZoom)); } catch {}
+  }, [status, fkey]);
   if (status === 'error') return (
     <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ Carte indisponible (Leaflet n'a pas pu être chargé).</div>
   );
@@ -29328,10 +29339,16 @@ async function cartoFetchScene(q) {
   // ⚠ `search(champ, "texte")` veut des guillemets DOUBLES : on retire ceux de la saisie,
   // sinon la clause est coupée en deux et l'API rend un 400.
   const where = cherche ? '&where=' + encodeURIComponent(`search(nom_tournage,"${cherche.replace(/"/g, '')}")`) : '';
-  const url = SCENE_API + '?limit=10&order_by=' + encodeURIComponent('annee_tournage desc') + where;
-  const r = await fetchTimeout(url, 14000, { cache:'no-store' });
-  if (!r.ok) throw new Error('opendata.paris.fr a répondu ' + r.status + '.');
-  const j = await r.json();
+  // ⚠ « LES 10 PLUS RÉCENTS » se trie sur la DATE DE DÉBUT, pas sur `annee_tournage` : une
+  // année entière ne départage pas dix tournages, on rendait dix lignes au hasard dans 2026.
+  // Le nom du champ de date a changé sur le portail → CASCADE, et l'année reste le dernier
+  // repli : un `order_by` sur un champ inexistant rend un 400, jamais une liste.
+  let j = null, r = null;
+  for (const tri of ['date_debut desc', 'date_de_debut desc', 'annee_tournage desc']) {
+    r = await fetchTimeout(SCENE_API + '?limit=10&order_by=' + encodeURIComponent(tri) + where, 14000, { cache:'no-store' });
+    if (r.ok) { j = await r.json(); break; }
+  }
+  if (!j) throw new Error('opendata.paris.fr a répondu ' + (r ? r.status : '—') + '.');
   const rows = Array.isArray(j && j.results) ? j.results : [];
   const list = rows.map((x, i) => ({
     id: String((x && x.id_lieu) || i) + '|' + String((x && x.nom_tournage) || ''),
@@ -29339,6 +29356,8 @@ async function cartoFetchScene(q) {
     type: String((x && x.type_tournage) || ''),
     real: String((x && x.nom_realisateur) || ''),
     an: (x && x.annee_tournage) != null ? String(x.annee_tournage) : '',
+    // Date de début quand le registre la publie : c'est elle qui fait « le plus récent ».
+    jour: String((x && (x.date_debut || x.date_de_debut)) || '').slice(0, 10),
     adr: String((x && x.adresse_lieu) || ''),
     ardt: String((x && x.ardt_lieu) || ''),
     // La position du tournage : le registre la publie, on ne géocode donc rien.
@@ -29351,10 +29370,17 @@ async function cartoFetchScene(q) {
   const tot = (j && typeof j.total_count === 'number') ? j.total_count : null;
   return { list, tot, q: cherche, at: Date.now() };
 }
+// Couleur du point CHOISI dans la liste — la même partout où une ligne commande un marqueur.
+const CARTO_PICK = '#f0a93c';
 function CartoScene() {
   const [st, load, card] = useCartoSummary('scene', cartoFetchScene, '');
   const [q, setQ] = React.useState(() => (_cartoSum.scene && _cartoSum.scene.d && _cartoSum.scene.d.q) || '');
+  // ⚠ Ligne choisie = marqueur teinté ET carte recadrée dessus (demande utilisateur). L'état
+  // est LOCAL et non persisté : c'est un geste de lecture. Recliquer la même ligne désélectionne.
+  const [pick, setPick] = React.useState(null);
+  React.useEffect(() => { setPick(null); }, [st.data]);   // nouveau lot ⇒ ancien choix caduc
   const d = st.data;
+  const picked = d && pick ? d.list.find(x => x.id === pick) : null;
   return (
     <CartoCard title="🎬 LIEUX DE TOURNAGE" site={CARTO_SITES_BY.scene} st={st} card={card} onReload={() => load(true, q)}>
       <div style={{ display:'flex', gap:6, marginBottom:8 }}>
@@ -29374,8 +29400,13 @@ function CartoScene() {
       {d && d.list.some(x => x.pt) && (
         <div style={{ marginBottom:8 }}>
           <CartoMiniMap fit zoom={13} height={200}
-            markers={d.list.filter(x => x.pt).map(x => ({ lat:x.pt.lat, lon:x.pt.lon, r:6,
-              label: [x.nom, x.an, x.adr].filter(Boolean).join(' · ') }))} />
+            focus={picked && picked.pt ? [picked.pt.lat, picked.pt.lon] : null} focusZoom={15}
+            markers={d.list.filter(x => x.pt).map(x => ({ lat:x.pt.lat, lon:x.pt.lon,
+              r: x.id === pick ? 9 : 6, color: x.id === pick ? CARTO_PICK : ACTU_COLOR,
+              label: [x.nom, x.jour ? x.jour.split('-').reverse().join('/') : x.an, x.adr].filter(Boolean).join(' · ') }))} />
+          <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4 }}>
+            Touche un tournage ci-dessous : son point passe en orange et la carte s'y rend.
+          </div>
         </div>
       )}
       {d && <>
@@ -29383,10 +29414,27 @@ function CartoScene() {
           <CartoRow first label={d.q ? `Tournages « ${d.q} »` : 'Tournages au registre'} value={cartoNum(d.tot)}
             color={ACTU_COLOR} sub={d.q ? 'correspondances au registre parisien' : 'autorisations délivrées à Paris depuis 2016'} />
         )}
-        {d.list.map((x, i) => (
-          <CartoRow key={x.id} first={d.tot == null && i === 0} label={x.nom} value={x.an || '—'}
-            sub={[x.type, x.real, [x.adr, x.ardt].filter(Boolean).join(', ')].filter(Boolean).join(' · ')} />
-        ))}
+        {/* ⚠ Sans recherche, la liste EST « les dix plus récents » (`limit=10` + tri sur la date
+            de début) : on le DIT, sinon dix lignes sur des milliers ressemblent à un extrait
+            arbitraire. Avec une recherche, ce sont les dix meilleures correspondances. */}
+        <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.1em',
+          textTransform:'uppercase', color:C.dim, marginTop:8 }}>
+          {d.q ? `Correspondances · ${d.list.length}` : `Les ${d.list.length} tournages les plus récents à Paris`}
+        </div>
+        {d.list.map((x, i) => {
+          const on = x.id === pick;
+          return (
+            <div key={x.id} onClick={() => x.pt && setPick(p => (p === x.id ? null : x.id))}
+              style={{ cursor: x.pt ? 'pointer' : 'default',
+                background: on ? `${CARTO_PICK}14` : 'none', borderRadius: on ? 8 : 0,
+                margin: on ? '0 -6px' : 0, padding: on ? '0 6px 4px' : 0 }}>
+              <CartoRow first={d.tot == null && i === 0} label={on ? `📍 ${x.nom}` : x.nom}
+                value={x.an || '—'} color={on ? CARTO_PICK : undefined}
+                sub={[x.jour ? 'tournage du ' + x.jour.split('-').reverse().join('/') : null,
+                      x.type, x.real, [x.adr, x.ardt].filter(Boolean).join(', ')].filter(Boolean).join(' · ')} />
+            </div>
+          );
+        })}
       </>}
     </CartoCard>
   );
