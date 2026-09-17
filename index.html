@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.19.1';
+const APP_VERSION = '13.19.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17153,7 +17153,7 @@ function CollectionSub({ sub, data, onData }) {
   // ouvrir une referme celle qui l'était. C'est aussi ce qui garantit qu'au plus un catalogue
   // de cartes manquantes est lu à la fois.
   const [openSet, setOpenSet] = React.useState(null);   // clé de l'extension dépliée
-  const [missOn, setMissOn] = React.useState(_cardMissOn);
+  const [missOn, setMissOn] = React.useState(_cardMissOn);   // 'off' | 'inline' | 'apart'
   const chooseMiss = v => { _cardMissOn = v; setMissOn(v); };
   const [shownBy, setShownBy] = React.useState({});     // pagination, PAR extension
   const [showNote, setShowNote] = React.useState(false);
@@ -17181,7 +17181,9 @@ function CollectionSub({ sub, data, onData }) {
   // ⚠ Déclaré APRÈS `groups` et `openSet` (piège 2). Une extension dont le catalogue n'a pas
   // donné de total (`g.total` à 0) n'a pas de code exploitable : on ne demande rien pour elle.
   const openGroup = groups.find(g => g.key === openSet) || null;
-  const miss = useCardMiss(sub.id, (missOn && openGroup && openGroup.total) ? openGroup.key : '', missOn);
+  const missWanted = missOn !== 'off';
+  const miss = useCardMiss(sub.id, (missWanted && openGroup && openGroup.total) ? openGroup.key : '', missWanted);
+  const byNum = cardNumCmp(sub.id);
   const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
     padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
   // Listes déroulantes de la barre d'extensions (ordre, manquantes). ⚠ `colorScheme:'dark'`
@@ -17305,7 +17307,10 @@ function CollectionSub({ sub, data, onData }) {
   //   lui seul porte son extension, sinon on ignore laquelle on s'apprête à ajouter.
   // `hideSet` : sous une carte MANQUANTE, l'extension est déjà le titre du groupe au-dessus —
   // la répéter cent fois n'apprend rien (même règle que pour les cartes possédées).
-  const card = (it, actions, onEdit, hideSet) => {
+  // `ghost` : une carte du catalogue qu'on ne POSSÈDE PAS — grisée sur la fiche elle-même et
+  // non cliquable. Le grisé ne peut plus vivre sur la grille : en vue « à leur place », une
+  // manquante et une possédée sont voisines dans la MÊME grille.
+  const card = (it, actions, onEdit, hideSet, ghost) => {
    const qty = it.qty || 1;
    const num = bulkView ? cardNum(sub.id, it) : '';
    const setName = (bulkView && !onEdit && !hideSet) ? cardSetName(sub.id, it, setsIdx) : '';
@@ -17313,8 +17318,10 @@ function CollectionSub({ sub, data, onData }) {
      <span style={{ color:COLLECTION_COLOR, fontWeight:700, flexShrink:0 }}>{collEurShort(it.price)}</span>
    );
    return (
-    <div key={it.id} style={{ minWidth:0, display:'flex', flexDirection:'column', gap:4, padding:5,
-      background:C.surface, border:`1px solid ${C.border}`, borderRadius:10 }}>
+    <div key={it.id} title={ghost ? `n°${num || '?'} — tu ne l'as pas` : undefined}
+      style={{ minWidth:0, display:'flex', flexDirection:'column', gap:4, padding:5,
+      background:C.surface, border:`1px solid ${C.border}`, borderRadius:10,
+      ...(ghost ? { opacity:0.45, filter:'grayscale(0.85)' } : null) }}>
       <div onClick={onEdit} title={onEdit ? 'Modifier cette référence' : undefined}
         style={{ width:'100%', aspectRatio:'96 / 134', borderRadius:6, overflow:'hidden', background:'#111',
           position:'relative', display:'flex', alignItems:'center', justifyContent:'center',
@@ -17474,25 +17481,30 @@ function CollectionSub({ sub, data, onData }) {
                   {CARD_SORTS.map(([v, lab]) => <option key={v} value={v}>{lab}</option>)}
                 </select>
               </>}
-              <button type="button" onClick={() => chooseMiss(!missOn)}
-                title="Afficher en grisé les cartes de l'extension OUVERTE que tu ne possèdes pas. Le catalogue n'est lu que pour cette extension-là."
-                style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', borderRadius:7,
-                  padding:'3px 8px', cursor:'pointer',
-                  background: missOn ? `${COLLECTION_COLOR}22` : 'none',
-                  border:`1px solid ${missOn ? COLLECTION_COLOR + '88' : C.border}`,
-                  color: missOn ? COLLECTION_COLOR : C.dim }}>{missOn ? '☑' : '☐'} Manquantes</button>
+              <select value={missOn} onChange={e => chooseMiss(e.target.value)} style={cardSelStyle}
+                title="Afficher en grisé les cartes de l'extension OUVERTE que tu ne possèdes pas — à leur place parmi les tiennes, ou en liste à part. Le catalogue n'est lu que pour cette extension-là.">
+                {CARD_MISS_MODES.map(([v, lab]) => <option key={v} value={v}>{lab}</option>)}
+              </select>
             </div>
             {groups.map(g => {
               const forced = !!q.trim() || groups.length === 1;
               const on  = forced || openSet === g.key;
-              const lim = shownBy[g.key] || COLL_PAGE;
-              const rest = g.items.length - lim;
               // Les numéros DÉJÀ possédés de cette extension — la clé de « il me manque quoi ».
-              const owned = on && missOn ? new Set(g.items.map(it => cardNum(sub.id, it)).filter(Boolean)) : null;
-              const missing = (on && missOn && miss.rows && openSet === g.key)
-                ? miss.rows.filter(r => { const n = cardNum(sub.id, r); return n && !owned.has(n); })
-                    .sort(cardNumCmp(sub.id))
+              const owned = on && missWanted ? new Set(g.items.map(it => cardNum(sub.id, it)).filter(Boolean)) : null;
+              const missing = (on && missWanted && miss.rows && openSet === g.key)
+                ? miss.rows.filter(r => { const n = cardNum(sub.id, r); return n && !owned.has(n); }).sort(byNum)
                 : null;
+              // ⚠ Vue « CLASSEUR » : les manquantes ne sont pas une liste à part, elles
+              // prennent LEUR PLACE dans la suite des numéros — c'est là qu'on voit le trou.
+              // Une seule grille, donc une seule pagination : `rows` porte les deux, et le
+              // drapeau `miss` dit laquelle est un fantôme (grisé, non cliquable).
+              const inline = missOn === 'inline' && missing ? missing : null;
+              const rows = inline
+                ? [...g.items.map(it => ({ it, miss:false })), ...inline.map(it => ({ it, miss:true }))]
+                    .sort((a, b) => byNum(a.it, b.it))
+                : g.items.map(it => ({ it, miss:false }));
+              const lim = shownBy[g.key] || COLL_PAGE;
+              const rest = rows.length - lim;
               return (
                 <div key={g.key}>
                   <button type="button" onClick={() => setOpenSet(o => (o === g.key ? null : g.key))}
@@ -17513,8 +17525,31 @@ function CollectionSub({ sub, data, onData }) {
                     </span>
                   </button>
                   {on && <>
+                    {missWanted && openSet === g.key && g.total > 0 && <>
+                      {miss.busy && (
+                        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:7 }}>⏳ Lecture du catalogue de l'extension…</div>
+                      )}
+                      {miss.err && (
+                        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:7, lineHeight:1.5 }}>
+                          ⚠ Cartes manquantes indisponibles ({miss.err}) — ce que tu possèdes reste affiché.
+                        </div>
+                      )}
+                      {missing && missing.length > 0 && (
+                        <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.1em',
+                          textTransform:'uppercase', color:C.dim, marginTop:9 }}>
+                          Il te manque {missing.length} carte{missing.length > 1 ? 's' : ''}
+                        </div>
+                      )}
+                      {missing && missing.length === 0 && (
+                        <div style={{ fontSize:9.5, color:COLLECTION_COLOR, fontWeight:700, marginTop:7 }}>
+                          ✓ Extension complète — il ne te manque aucun numéro.
+                        </div>
+                      )}
+                    </>}
                     <div className="coll-grid" style={{ marginTop:6 }}>
-                      {g.items.slice(0, lim).map(it => card(it, null, () => setEdit(it.id)))}
+                      {rows.slice(0, lim).map(r => r.miss
+                        ? card(r.it, null, null, true, true)
+                        : card(r.it, null, () => setEdit(r.it.id)))}
                     </div>
                     {rest > 0 && (
                       <button type="button" onClick={() => setShownBy(v => ({ ...v, [g.key]: lim + COLL_PAGE }))}
@@ -17524,37 +17559,22 @@ function CollectionSub({ sub, data, onData }) {
                       </button>
                     )}
                     {/* ── CE QUI MANQUE, en grisé (option active + extension ouverte) ────── */}
-                    {missOn && openSet === g.key && g.total > 0 && <>
-                      {miss.busy && (
-                        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:7 }}>⏳ Lecture du catalogue de l'extension…</div>
-                      )}
-                      {miss.err && (
-                        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:7, lineHeight:1.5 }}>
-                          ⚠ Cartes manquantes indisponibles ({miss.err}) — ce que tu possèdes reste affiché.
-                        </div>
-                      )}
-                      {missing && missing.length > 0 && <>
-                        <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.1em',
-                          textTransform:'uppercase', color:C.dim, marginTop:9 }}>
-                          Il te manque {missing.length} carte{missing.length > 1 ? 's' : ''}
-                        </div>
-                        {/* ⚠ Grisées ET non cliquables : ce ne sont pas des fiches de la
-                            collection, il n'y a rien à éditer derrière. */}
-                        <div className="coll-grid" style={{ marginTop:6, opacity:0.45, filter:'grayscale(0.85)' }}>
-                          {missing.slice(0, missShown).map(r => card(r, null, null, true))}
-                        </div>
-                        {missing.length > missShown && (
-                          <button type="button" onClick={() => setMissShown(v => v + COLL_PAGE)}
-                            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.dim,
-                              fontSize:10, fontWeight:700, padding:'5px 10px', marginTop:6, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
-                            ↓ Afficher {Math.min(COLL_PAGE, missing.length - missShown)} manquante(s) de plus
-                          </button>
-                        )}
-                      </>}
-                      {missing && missing.length === 0 && (
-                        <div style={{ fontSize:9.5, color:COLLECTION_COLOR, fontWeight:700, marginTop:7 }}>
-                          ✓ Extension complète — il ne te manque aucun numéro.
-                        </div>
+                    {/* ⚠ La liste SÉPARÉE, et elle seule, dépend du mode : l'attente, l'échec
+                        et le compte se disent dans les DEUX (ils sont rendus au-dessus de la
+                        grille) — sinon la vue « à leur place » restait muette pendant la
+                        lecture du catalogue, puis muette aussi quand il ne répondait pas. */}
+                    {missOn === 'apart' && openSet === g.key && g.total > 0 && missing && missing.length > 0 && <>
+                      {/* ⚠ Grisées ET non cliquables : ce ne sont pas des fiches de la
+                          collection, il n'y a rien à éditer derrière. */}
+                      <div className="coll-grid" style={{ marginTop:6 }}>
+                        {missing.slice(0, missShown).map(r => card(r, null, null, true, true))}
+                      </div>
+                      {missing.length > missShown && (
+                        <button type="button" onClick={() => setMissShown(v => v + COLL_PAGE)}
+                          style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.dim,
+                            fontSize:10, fontWeight:700, padding:'5px 10px', marginTop:6, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                          ↓ Afficher {Math.min(COLL_PAGE, missing.length - missShown)} manquante(s) de plus
+                        </button>
                       )}
                     </>}
                   </>}
@@ -19146,13 +19166,22 @@ let _cardSort = 'pct';   // survit au repli du collapse, sans occuper de clé de
 // ── 🕳️ LES CARTES QUI MANQUENT (13.18.1, demande utilisateur) ────────────────────
 // Une extension dépliée ne montrait que ce qu'on POSSÈDE : on ne voyait pas le trou. Le
 // catalogue complet est donc lu à la demande et les numéros absents rendus en grisé.
-// ⚠ DÉCOCHÉ PAR DÉFAUT, et lu pour la SEULE extension ouverte : une extension Magic, c'est
+// ⚠ ÉTEINT PAR DÉFAUT, et lu pour la SEULE extension ouverte : une extension Magic, c'est
 // jusqu'à cinq pages Scryfall — le faire pour toutes celles qu'on possède serait ingérable.
 // C'est aussi pour ça que les extensions deviennent un ACCORDÉON : une seule ouverte à la
 // fois, donc au plus un catalogue en vol.
 // ⚠ Cache AU NIVEAU MODULE (même motif que `_cardSets`) : replier puis rouvrir ne redemande
 // rien, et le repli du collapse ne perd pas la lecture.
-let _cardMissOn = false;
+// ⚠ 13.19.2 — TROIS façons de les montrer (demande utilisateur), dans une liste déroulante :
+//   `off`    ne rien demander du tout (défaut) ;
+//   `inline` les intercaler À LEUR PLACE, en grisé, entre les cartes possédées — c'est la
+//            vue « classeur » : le trou se voit là où il est ;
+//   `apart`  la liste séparée, sous les cartes possédées (le comportement de 13.18.1).
+// `off` est la SEULE valeur qui ne lit rien : les deux autres déclenchent la même lecture.
+const CARD_MISS_MODES = [['off', 'Ne pas afficher les manquantes'],
+                         ['inline', 'Manquantes à leur place'],
+                         ['apart', 'Manquantes séparément']];
+let _cardMissOn = 'off';
 const _cardMiss = { map:{}, busy:{}, err:{}, subs:new Set() };
 function cardMissPublish() { for (const f of _cardMiss.subs) { try { f(); } catch {} } }
 const cardMissKey = (subId, setKey) => subId + '|' + setKey;
