@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.17.8';
+const APP_VERSION = '13.17.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29143,28 +29143,82 @@ function CartoWaterRow({ x, first }) {
 // Carte commune à 💧 Eau, 🌫️ Air et 🏥 Santé : les MÊMES trois lieux (`METEO_LOCS`), un
 // marqueur coloré par le verdict du lieu. ⚠ Posée SOUS les lignes (demande utilisateur) :
 // on lit d'abord les trois valeurs, la carte ne fait que les situer.
-function CartoWaterAirMap({ rows }) {
+// ── 🔎 UNE VILLE EN PLUS DES TROIS (13.17.9, demande utilisateur) ────────────────
+// ⚠ La ville trouvée n'est PAS ajoutée à `METEO_LOCS` : c'est un coup d'œil, pas un réglage —
+// elle vit en état local, la fiche repliée l'oublie, et les trois lieux fixes ne bougent pas.
+// ⚠ Le code INSEE / le centre viennent de `cartoSearchCommunes`, jamais d'une saisie libre :
+// aucune coordonnée devinée, et Hub'Eau a besoin du code exact.
+function useCartoCity(fetchOne) {
+  const [q, setQ] = React.useState('');
+  const [st, setSt] = React.useState({ busy:false, err:'', row:null });
+  const run = async () => {
+    const nom = q.trim();
+    if (!nom || st.busy) return;
+    setSt({ busy:true, err:'', row:null });
+    try {
+      const { list } = await cartoSearchCommunes(nom);
+      const c = list[0];
+      if (c.lat == null || c.lon == null) throw new Error(`Pas de centre publié pour ${c.nom}.`);
+      const row = await fetchOne({ key:'q:' + c.code, name:c.nom, lat:c.lat, lon:c.lon, code:c.code });
+      setSt({ busy:false, err:'', row });
+    } catch (e) { setSt({ busy:false, err: cartoErr(e), row:null }); }
+  };
+  const clear = () => { setQ(''); setSt({ busy:false, err:'', row:null }); };
+  return { q, setQ, st, run, clear };
+}
+function CartoCitySearch({ city, placeholder }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:4, marginBottom:8 }}>
+      <div style={{ display:'flex', gap:6 }}>
+        <input value={city.q} onChange={e => city.setQ(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') city.run(); }}
+          placeholder={placeholder || 'Chercher une autre ville…'}
+          style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${city.q.trim() ? ACTU_COLOR + '66' : C.border}`,
+            borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+        {city.st.row && (
+          <button onClick={city.clear} title="Retirer cette ville"
+            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim,
+              fontSize:12, padding:'5px 9px', cursor:'pointer', flexShrink:0, fontFamily:'inherit' }}>×</button>
+        )}
+        <button onClick={city.run} disabled={city.st.busy}
+          style={{ background:'none', border:`1px solid ${city.st.busy ? C.border : ACTU_COLOR + '66'}`, borderRadius:6,
+            color: city.st.busy ? C.dim : ACTU_COLOR, fontSize:11, fontWeight:700, padding:'5px 11px',
+            cursor: city.st.busy ? 'default' : 'pointer', flexShrink:0, fontFamily:'inherit' }}>{city.st.busy ? '…' : '🔍'}</button>
+      </div>
+      {city.st.err && <div style={{ fontSize:9.5, color:'#e05050', lineHeight:1.5 }}>⚠ {city.st.err}</div>}
+    </div>
+  );
+}
+function CartoWaterAirMap({ rows, focus }) {
   const pts = (rows || []).filter(r => isFinite(r.lat) && isFinite(r.lon));
   if (!pts.length) return null;
   return (
     <div style={{ marginTop:9 }}>
-      <CartoMiniMap fit zoom={11} height={180}
+      <CartoMiniMap fit zoom={11} height={180} focus={focus || null} focusZoom={12}
         markers={pts.map(r => ({ lat:r.lat, lon:r.lon, color:r.color, r:9, label:r.label }))} />
     </div>
   );
 }
 function CartoWater() {
   const [st, load, card] = useCartoSummary('water', cartoFetchWater);
+  // Une ville cherchée passe par le MÊME `cartoFetchWaterOne` que les trois lieux fixes.
+  const city = useCartoCity(async loc => ({ key:loc.key, name:loc.name, lat:loc.lat, lon:loc.lon,
+    d: await cartoFetchWaterOne(loc), err:'' }));
   const d = st.data;
+  const rows = d ? (city.st.row ? [...d.list, city.st.row] : d.list) : [];
   return (
     <CartoCard title="💧 QUALITÉ DE L'EAU" site={CARTO_SITES_BY.water} st={st} card={card} onReload={load}>
-      {d && d.list.map((x, i) => <CartoWaterRow key={x.key} x={x} first={i === 0} />)}
-      {/* LA CARTE, SOUS les trois villes (demande utilisateur) : la couleur du marqueur est
-          celle du verdict — un lieu non lu reste ORANGE, jamais vert par défaut. */}
-      {d && <CartoWaterAirMap rows={d.list.map(x => {
-        const w = x.d ? waterState(x.d.concl) : { label:'⚠ non lu', color:'#e0a040' };
-        return { key:x.key, lat:x.lat, lon:x.lon, color:w.color, label:`${x.name} — ${w.label}` };
-      })} />}
+      <CartoCitySearch city={city} placeholder="Chercher une autre commune…" />
+      {rows.map((x, i) => <CartoWaterRow key={x.key} x={x} first={i === 0} />)}
+      {/* LA CARTE, SOUS les villes (demande utilisateur) : la couleur du marqueur est celle du
+          verdict — un lieu non lu reste ORANGE, jamais vert par défaut. La ville cherchée y
+          entre comme les autres, et la carte se rend dessus. */}
+      {d && <CartoWaterAirMap
+        focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null}
+        rows={rows.map(x => {
+          const w = x.d ? waterState(x.d.concl) : { label:'⚠ non lu', color:'#e0a040' };
+          return { key:x.key, lat:x.lat, lon:x.lon, color:w.color, label:`${x.name} — ${w.label}` };
+        })} />}
     </CartoCard>
   );
 }
@@ -29183,10 +29237,12 @@ const AQI_BANDS = [
   [0,   '#5fd35f', 'Bon'],
 ];
 const aqiBand = v => (v == null || !isFinite(v)) ? [0, C.muted, '—'] : (AQI_BANDS.find(b => v >= b[0]) || AQI_BANDS[AQI_BANDS.length - 1]);
-async function cartoFetchAir() {
+// ⚠ Sorti de `cartoFetchAir` (13.17.9) pour servir aussi une VILLE CHERCHÉE : mêmes champs,
+// même parsing, un seul endroit à corriger le jour où Open-Meteo bouge.
+async function cartoAirRows(locs) {
   const url = CARTO_AIR_URL
-    + '?latitude=' + METEO_LOCS.map(l => l.lat).join(',')
-    + '&longitude=' + METEO_LOCS.map(l => l.lon).join(',')
+    + '?latitude=' + locs.map(l => l.lat).join(',')
+    + '&longitude=' + locs.map(l => l.lon).join(',')
     + '&current=european_aqi,pm2_5,pm10,nitrogen_dioxide,ozone&timezone=auto';
   const r = await fetchTimeout(url, 13000, { cache:'no-store' });
   if (!r.ok) throw new Error('Open-Meteo a répondu ' + r.status + '.');
@@ -29194,21 +29250,27 @@ async function cartoFetchAir() {
   // ⚠ Interrogé sur PLUSIEURS coordonnées, Open-Meteo renvoie un TABLEAU d'objets (un par
   // point) et non l'objet unique du cas à une coordonnée. On accepte les deux formes.
   const arr = Array.isArray(j) ? j : [j];
-  const list = METEO_LOCS.map((l, i) => {
+  return locs.map((l, i) => {
     const c = (arr[i] && arr[i].current) || null;
     const num = k => (c && typeof c[k] === 'number') ? c[k] : null;
     return { key:l.key, name:l.name, lat:l.lat, lon:l.lon, aqi:num('european_aqi'), pm25:num('pm2_5'),
       pm10:num('pm10'), no2:num('nitrogen_dioxide'), o3:num('ozone') };
   });
+}
+async function cartoFetchAir() {
+  const list = await cartoAirRows(METEO_LOCS);
   if (!list.some(x => x.aqi != null)) throw new Error('Aucun indice renvoyé par Open-Meteo.');
   return { list, at: Date.now() };
 }
 function CartoAir() {
   const [st, load, card] = useCartoSummary('air', cartoFetchAir);
+  const city = useCartoCity(async loc => (await cartoAirRows([loc]))[0]);
   const d = st.data;
+  const rows = d ? (city.st.row ? [...d.list, city.st.row] : d.list) : [];
   return (
     <CartoCard title="🌫️ QUALITÉ DE L'AIR" site={CARTO_SITES_BY.air} st={st} card={card} onReload={load}>
-      {d && d.list.map((x, i) => {
+      <CartoCitySearch city={city} placeholder="Chercher une autre commune…" />
+      {rows.map((x, i) => {
         const b = aqiBand(x.aqi);
         return (
           <CartoRow key={x.key} first={i === 0} label={x.name} value={x.aqi != null ? cartoNum(x.aqi) : '—'} color={b[1]}
@@ -29219,9 +29281,11 @@ function CartoAir() {
                   x.o3   != null ? 'O₃ ' + cartoNum(x.o3, 0) : null].filter(Boolean).join(' · ')} />
         );
       })}
-      {d && <CartoWaterAirMap rows={d.list.map(x => ({ key:x.key, lat:x.lat, lon:x.lon,
-        color: aqiBand(x.aqi)[1],
-        label: `${x.name} — indice ${x.aqi != null ? cartoNum(x.aqi) : '—'} · ${aqiBand(x.aqi)[2]}` }))} />}
+      {d && <CartoWaterAirMap
+        focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null}
+        rows={rows.map(x => ({ key:x.key, lat:x.lat, lon:x.lon,
+          color: aqiBand(x.aqi)[1],
+          label: `${x.name} — indice ${x.aqi != null ? cartoNum(x.aqi) : '—'} · ${aqiBand(x.aqi)[2]}` }))} />}
     </CartoCard>
   );
 }
@@ -29691,6 +29755,49 @@ const IDFM_MODE_COLORS = { metro:'#f0a93c', rail:'#7ecbff', rer:'#7ecbff', train
   transilien:'#7ecbff', tram:'#a8d13f', tramway:'#a8d13f', bus:'#e0a040', funicular:'#d98ae0',
   cable:'#d98ae0', ferry:'#5fd35f' };
 const idfmGareColor = m => IDFM_MODE_COLORS[String(m || '').toLowerCase().replace(/[^a-z]/g, '')] || ACTU_COLOR;
+// ── 28) LE PLAN LUI-MÊME, autant qu'on puisse l'avoir (demande utilisateur) ──────
+// ⚠ On ne peut PAS embarquer la carte du site : aucune page tierce n'est plus embarquée
+// (piège 27), et un plan RATP/IDFM est une application, pas une image. Ce qu'IDFM publie en
+// revanche en open data, ce sont les TRACÉS du réseau ferré — c'est-à-dire exactement le
+// dessin du plan. On les pose donc sur notre carte, à leur couleur officielle.
+// ⚠ Même cascade et mêmes précautions que pour les gares : nom de jeu changeant, aucun
+// `select` (un champ inexact = 400), échec ⇒ la fiche garde ses gares et ses chiffres.
+const IDFM_TRACE_SETS = ['traces-du-reseau-ferre-idf', 'traces-du-reseau-ferre-idf-data-generalisee'];
+const IDFM_TRACE_MAX  = 100;
+// Extrait les polylignes d'une géométrie GeoJSON, en [lat, lon] (le fichier est en [lon, lat]).
+function odsLines(g) {
+  const geo = (g && (g.geometry || g)) || null;
+  const t = geo && geo.type, c = geo && geo.coordinates;
+  if (!Array.isArray(c)) return [];
+  const line = arr => arr.filter(p => Array.isArray(p) && isFinite(p[0]) && isFinite(p[1]))
+    .map(p => [Number(p[1]), Number(p[0])]);
+  if (t === 'LineString') { const l = line(c); return l.length > 1 ? [l] : []; }
+  if (t === 'MultiLineString') return c.map(line).filter(l => l.length > 1);
+  return [];
+}
+async function idfmTraces() {
+  for (const ds of IDFM_TRACE_SETS) {
+    try {
+      const r = await fetchTimeout(IDFM_BASE + ds + '/records?limit=' + IDFM_TRACE_MAX, 16000, { cache:'no-store' });
+      if (!r.ok) continue;
+      const j = await r.json();
+      const rows = Array.isArray(j && j.results) ? j.results : [];
+      const list = rows.map(x => {
+        const lines = odsLines(x && (x.geo_shape || x.shape || x.geometry));
+        if (!lines.length) return null;
+        const hex = String((x && (x.colourweb_hexa || x.couleur || x.colour)) || '').replace(/^#/, '');
+        return {
+          nom: String((x && (x.res_com || x.nom_ligne || x.name_line || x.route_long_name)) || 'Ligne'),
+          mode: String((x && (x.mode || x.transportmode)) || ''),
+          color: /^[0-9a-f]{6}$/i.test(hex) ? '#' + hex : null,
+          lines,
+        };
+      }).filter(Boolean);
+      if (list.length) return { list, ds };
+    } catch {}
+  }
+  return null;
+}
 async function idfmGares() {
   for (const ds of IDFM_GARES_SETS) {
     try {
@@ -29733,8 +29840,11 @@ async function cartoFetchTransport() {
   if (!list.length) throw new Error('Aucun mode de transport renvoyé par Île-de-France Mobilités.');
   // La carte est un BONUS : son échec ne doit pas emporter le décompte, qui est l'information
   // principale de la fiche.
-  const gares = await idfmGares().catch(() => null);
-  return { list, gares, tot: list.reduce((s, x) => s + x.n, 0), at: Date.now() };
+  const [gares, traces] = await Promise.all([
+    idfmGares().catch(() => null),
+    idfmTraces().catch(() => null),
+  ]);
+  return { list, gares, traces, tot: list.reduce((s, x) => s + x.n, 0), at: Date.now() };
 }
 function CartoTransport() {
   const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
@@ -29744,16 +29854,30 @@ function CartoTransport() {
       {d && <>
         {/* LA CARTE, entre l'en-tête et les lignes (demande utilisateur). ⚠ Ce sont les
             GARES : le référentiel des LIGNES ne porte aucune géométrie. */}
-        {d.gares && d.gares.list.length > 0 && (
+        {(d.gares && d.gares.list.length > 0) || (d.traces && d.traces.list.length > 0) ? (
           <div style={{ marginBottom:9 }}>
-            <CartoMiniMap fit zoom={11} height={210}
-              markers={d.gares.list.map(g => ({ lat:g.lat, lon:g.lon, r:4.5, color: idfmGareColor(g.mode),
+            <CartoMiniMap fit zoom={11} height={230}
+              overlaySig={'idfm' + ((d.traces && d.traces.list.length) || 0)}
+              overlay={grp => {
+                if (!d.traces) return;
+                for (const t of d.traces.list) {
+                  for (const l of t.lines) {
+                    L.polyline(l, { color: t.color || idfmGareColor(t.mode), weight: 2.5, opacity: 0.85 })
+                      .bindPopup(mapsEsc([t.nom, t.mode].filter(Boolean).join(' · '))).addTo(grp);
+                  }
+                }
+              }}
+              markers={(d.gares ? d.gares.list : []).map(g => ({ lat:g.lat, lon:g.lon, r:4.5, color: idfmGareColor(g.mode),
                 label: [g.nom, g.res, g.mode].filter(Boolean).join(' · ') }))} />
             <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.5 }}>
-              {cartoNum(d.gares.list.length)} gares posées{d.gares.tot ? ` sur ${cartoNum(d.gares.tot)} au référentiel` : ''} · couleur = mode · le référentiel des LIGNES ne porte aucune géométrie, ce sont donc les gares
+              {d.traces
+                ? `${cartoNum(d.traces.list.length)} tracés du réseau ferré à leur couleur officielle (open data IDFM)`
+                : 'tracés indisponibles'}
+              {d.gares ? ` · ${cartoNum(d.gares.list.length)} gares posées${d.gares.tot ? ` sur ${cartoNum(d.gares.tot)}` : ''}` : ''}
+              {' · le plan du site lui-même n\'est pas embarquable, c\'est le même réseau redessiné ici'}
             </div>
           </div>
-        )}
+        ) : null}
         <CartoRow first label="Lignes au référentiel" value={cartoNum(d.tot)} color={ACTU_COLOR}
           sub="tous modes confondus, Île-de-France · lignes existantes, pas l'état du trafic" />
         {d.list.map(x => (
