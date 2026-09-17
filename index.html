@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.18.1';
+const APP_VERSION = '13.18.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -46040,6 +46040,19 @@ function rappelBadge(days) {
 // un rappel récurrent ne tombe jamais « en retard », il resonne à chaque échéance.
 // { "<section>.<item>": N mois } — la clé porte le même format que `spotifyplus_rappels`.
 const RAPPEL_RECUR = { 'anniversaire.couple_cecile': 6 };   // « Couple avec Cécile » : tous les 6 mois
+// ⚠ 13.18.2 — TOUT ANNIVERSAIRE SE RÉPÈTE CHAQUE ANNÉE (demande utilisateur) : ce qu'on y
+// saisit est un JOUR et un MOIS, pas une échéance — d'où l'année masquée dans le champ, et
+// une périodicité de 12 mois posée par la CLÉ et non ligne par ligne. `RAPPEL_RECUR` garde
+// ses exceptions explicites (la clé y gagne : « Couple avec Cécile » reste à 6 mois).
+const isAnnivKey = k => /^(anniversaire|anniv)\./.test(String(k || ''));
+const rappelRecurOf = key => RAPPEL_RECUR[key] || (isAnnivKey(key) ? 12 : 0);
+// ⚠ Un anniversaire ne prévient QUE le jour même et 3 jours avant (demande utilisateur) :
+// prévenu à J-3, on n'a pas besoin de l'être encore à J-1. Les autres rappels gardent leurs
+// jalons J-30 / J-7 / J-1 / jour J / en retard.
+const ANNIV_ALERTS = [3, 0];
+const rappelAlertDue = r => isAnnivKey(r.key)
+  ? ANNIV_ALERTS.indexOf(r.days) >= 0
+  : (r.days === 30 || r.days === 7 || r.days === 1 || r.days <= 0);
 // Ajoute n mois à une date 'YYYY-MM-DD' en BORNANT le jour au dernier jour du mois cible
 // (31 août + 6 mois → 28/29 février, jamais un débordement sur mars comme le ferait
 // setMonth). Renvoie une chaîne 'YYYY-MM-DD'.
@@ -46057,7 +46070,7 @@ function rappelAddMonths(dateStr, n) {
 // Le nombre de périodes écoulées est calculé directement (pas de boucle sur des années) ;
 // la petite boucle finale ne sert qu'à rattraper le jour du mois (bornage ci-dessus).
 function rappelNextDate(key, dateStr) {
-  const step = RAPPEL_RECUR[key];
+  const step = rappelRecurOf(key);
   if (!step || !dateStr) return dateStr;
   const base = new Date(dateStr + 'T00:00:00');
   if (isNaN(base.getTime())) return dateStr;
@@ -46074,7 +46087,7 @@ function rappelTimeOf(key, times) {
 }
 // Libellé court de la périodicité, affiché à côté d'un rappel récurrent ('' si non récurrent).
 function rappelRecurLabel(key) {
-  const n = RAPPEL_RECUR[key];
+  const n = rappelRecurOf(key);
   return n ? (n === 12 ? '↻ 1 an' : `↻ ${n} mois`) : '';
 }
 // Tous les rappels datés (fixes + persos) avec leur nb de jours restants
@@ -46098,7 +46111,13 @@ function rememberAllWithDelta() {
   });
   loadRemembers().forEach(r => { const d = rappelDelta(r.date); if (d != null) out.push({ key: 'custom.' + r.id, label: r.label, days: d, date: r.date, time: r.time || '' }); });
   loadGaranties().forEach(g => { const d = rappelDelta(g.date); if (d != null) out.push({ key: 'garantie.' + g.id, label: g.label, days: d, date: g.date, time: g.time || '' }); });
-  loadAnnivs().forEach(a => { const d = rappelDelta(a.date); if (d != null) out.push({ key: 'anniv.' + a.id, label: a.label, days: d, date: a.date, time: a.time || '' }); });
+  // ⚠ Les anniversaires raisonnent sur la PROCHAINE occurrence, comme les rappels récurrents :
+  // une date passée n'est pas « en retard », elle revient l'an prochain.
+  loadAnnivs().forEach(a => {
+    const ds = rappelNextDate('anniv.' + a.id, a.date);
+    const d = rappelDelta(ds);
+    if (d != null) out.push({ key: 'anniv.' + a.id, label: a.label, days: d, date: ds, time: '' });
+  });
   return out;
 }
 // Stats de la section Remember (collapse Stats) — 100% localStorage, 0 requête.
@@ -46118,7 +46137,7 @@ function rememberStats() {
 // Notification à l'ouverture de l'app aux JALONS J-30 (1 mois), J-7, J-1 et le jour J
 // (+ rappels en retard) — throttlée 1×/jour.
 function notifyDueReminders() {
-  const alerts = rememberAllWithDelta().filter(r => r.days === 30 || r.days === 7 || r.days === 1 || r.days <= 0);
+  const alerts = rememberAllWithDelta().filter(rappelAlertDue);
   if (!alerts.length) return;
   // ⚠ Jour LOCAL (piège 16) : `rememberAllWithDelta` calcule ses échéances en heure locale,
   // et une clé UTC vaut encore la veille entre minuit et 2 h — l'alerte du jour J était donc
@@ -47928,7 +47947,12 @@ function RappelPanel() {
   RAPPEL_EXTRA.forEach(e => { const d = rappelDelta(rappelNextDate(e.key, dates[e.key])); if (d != null && d <= 0) due.push(e.label); });
   customs.forEach(c => { const d = rappelDelta(c.date); if (d != null && d <= 0) due.push(c.label); });
   garanties.forEach(g => { const d = rappelDelta(g.date); if (d != null && d <= 0) due.push(g.label); });
-  annivs.forEach(a => { const d = rappelDelta(a.date); if (d != null && d <= 0) due.push(a.label); });
+  // ⚠ Un anniversaire alerte DÈS J-3 (demande utilisateur) et jamais « en retard » : sa
+  // prochaine occurrence est toujours devant.
+  annivs.forEach(a => {
+    const d = rappelDelta(rappelNextDate('anniv.' + a.id, a.date));
+    if (d != null && d <= ANNIV_ALERTS[0]) due.push(a.label);
+  });
 
   // Alertes des veilles API (Dependabot / Speedrun) — bandeaux visibles en tête du
   // panneau, comme « X rappels à traiter ». Fetch au montage : les deux fonctions ont
@@ -47968,7 +47992,11 @@ function RappelPanel() {
     // laquelle des trois listes libres elle ampute (13.17.1 : deux champs ne suffisaient plus).
     customs.forEach(c => { const d = rappelDelta(c.date); if (d != null) out.push({ key: 'custom.' + c.id, label: c.label, date: c.date, time: c.time || '', days: d, perso: { list:'custom', id: c.id } }); });
     garanties.forEach(g => { const d = rappelDelta(g.date); if (d != null) out.push({ key: 'garantie.' + g.id, label: g.label, date: g.date, time: g.time || '', days: d, perso: { list:'garantie', id: g.id } }); });
-    annivs.forEach(a => { const d = rappelDelta(a.date); if (d != null) out.push({ key: 'anniv.' + a.id, label: a.label, date: a.date, time: a.time || '', days: d, perso: { list:'anniv', id: a.id } }); });
+    annivs.forEach(a => {
+      const k = 'anniv.' + a.id, ds = rappelNextDate(k, a.date), d = rappelDelta(ds);
+      if (d != null) out.push({ key: k, label: a.label, date: ds, time: '', days: d,
+        recur: rappelRecurLabel(k), perso: { list:'anniv', id: a.id } });
+    });
     return out.sort((a, b) => a.days - b.days);
   }, [dates, customs, garanties, annivs, times]);
   const upcoming = React.useMemo(() => allDated.filter(r => r.days >= 0), [allDated]);
@@ -47978,6 +48006,40 @@ function RappelPanel() {
     <input type="date" value={val} onChange={onChange}
       style={{ background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'3px 6px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', flexShrink:0 }} />
   );
+  // ⚠ 13.18.2 — CHAMP JJ/MM pour les anniversaires (demande utilisateur) : un anniversaire
+  // revient chaque année, l'année saisie n'apprend rien et un `<input type="date">` l'impose.
+  // ⚠ Le STOCKAGE ne change pas : c'est toujours un 'YYYY-MM-DD' (badge, calendrier, To do,
+  // notifications et sauvegarde le lisent tous), seule l'ANNÉE est choisie pour nous —
+  // l'année en cours, `rappelNextDate` faisant ensuite avancer l'occurrence de 12 en 12 mois.
+  const dayMonthInput = (val, onChange) => {
+    const shown = /^\d{4}-\d{2}-\d{2}$/.test(val || '') ? val.slice(8, 10) + '/' + val.slice(5, 7) : '';
+    // « 24/12 », « 24-12 », « 24.12 », « 24 12 », « 2412 » et « 4/7 ».
+    const parse = txt => {
+      const t = String(txt || '').trim();
+      const m = /^(\d{1,2})\s*[\/\-. ]\s*(\d{1,2})$/.exec(t) || /^(\d{2})(\d{2})$/.exec(t);
+      if (!m) return '';
+      const d = +m[1], mo = +m[2];
+      if (!(d >= 1 && d <= 31 && mo >= 1 && mo <= 12)) return '';
+      const p2 = v => String(v).padStart(2, '0');
+      return `${new Date().getFullYear()}-${p2(mo)}-${p2(d)}`;
+    };
+    // ⚠ VALIDÉ À LA SORTIE DU CHAMP (ou sur Entrée), jamais à la frappe : « 24/1 » est un
+    // état valide EN COURS de saisie de « 24/12 », et l'enregistrer aurait réécrit le champ
+    // sous les doigts (la `key` le remonte à chaque changement de valeur enregistrée).
+    const commit = txt => {
+      const v = parse(txt);
+      if (v !== val && (v || !String(txt).trim())) onChange({ target:{ value: v } });
+    };
+    return (
+      <input type="text" inputMode="numeric" defaultValue={shown} key={val || 'vide'}
+        placeholder="JJ/MM" title="Jour et mois — l'anniversaire revient chaque année"
+        onBlur={e => commit(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') commit(e.target.value); }}
+        style={{ width:62, boxSizing:'border-box', background:'#111', border:`1px solid ${val ? RAPPEL_PURPLE : C.border}`,
+          borderRadius:6, padding:'3px 6px', fontSize:10, color:C.text, outline:'none', fontFamily:'inherit',
+          textAlign:'center', flexShrink:0 }} />
+    );
+  };
   // Heure OPTIONNELLE — révélée en cliquant sur le libellé. Taille d'origine
   // (identique à l'input date) mais largeur divisée par 3.
   const timeInput = (val, onChange) => (
@@ -47996,18 +48058,27 @@ function RappelPanel() {
   // (🎂 Anniversaire). Le gabarit reste unique — deux copies auraient divergé.
   const listeLibre = cfg => {
     const corps = <>
-      <div style={{ fontSize:8.5, color:C.muted, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>Notification à l'ouverture de l'app quand la date arrive.</div>
+      <div style={{ fontSize:8.5, color:C.muted, fontFamily:'DM Mono,monospace', lineHeight:1.4 }}>
+        {cfg.hint || "Notification à l'ouverture de l'app quand la date arrive."}
+      </div>
       {cfg.items.length === 0
         ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', fontFamily:'DM Mono,monospace' }}>{cfg.empty}</div>
         : cfg.items.map(c => {
-            const b = rappelBadge(rappelDelta(c.date));
+            // Liste récurrente (anniversaires) : le badge parle de la PROCHAINE occurrence,
+            // la date stockée restant celle d'origine.
+            const next = cfg.keyOf ? rappelNextDate(cfg.keyOf(c.id), c.date) : c.date;
+            const b = rappelBadge(rappelDelta(next));
             return (
               <div key={c.id} style={{ display:'flex', alignItems:'center', gap:8 }}>
-                <div onClick={() => c.date && toggleTime(c.id)} title={c.date ? 'Cliquer pour afficher/masquer l’heure' : undefined}
-                  style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: c.date ? 'pointer' : 'default' }}>{c.label}</div>
+                <div onClick={() => !cfg.noTime && c.date && toggleTime(c.id)}
+                  title={!cfg.noTime && c.date ? 'Cliquer pour afficher/masquer l’heure' : undefined}
+                  style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word',
+                    cursor: (!cfg.noTime && c.date) ? 'pointer' : 'default' }}>{c.label}</div>
                 <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', color:b.color, whiteSpace:'nowrap', flexShrink:0 }}>{b.txt}</span>
-                {dateInput(c.date || '', e => cfg.onDate(c.id, e.target.value))}
-                {c.date && openTimes.has(c.id) && timeInput(c.time || '', e => cfg.onTime(c.id, e.target.value))}
+                {cfg.dayMonth
+                  ? dayMonthInput(c.date || '', e => cfg.onDate(c.id, e.target.value))
+                  : dateInput(c.date || '', e => cfg.onDate(c.id, e.target.value))}
+                {!cfg.noTime && c.date && openTimes.has(c.id) && timeInput(c.time || '', e => cfg.onTime(c.id, e.target.value))}
                 <button onClick={() => askRemove(c.label, () => cfg.onRemove(c.id))} title="Supprimer" style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
               </div>
             );
@@ -48016,8 +48087,10 @@ function RappelPanel() {
         <input type="text" value={cfg.label} placeholder={cfg.placeholder}
           onChange={e => cfg.setLabel(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') cfg.onAdd(); }}
           style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${cfg.label ? RAPPEL_PURPLE : C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }} />
-        {dateInput(cfg.date, e => cfg.setDate(e.target.value))}
-        {cfg.date && timeInput(cfg.time, e => cfg.setTime(e.target.value))}
+        {cfg.dayMonth
+          ? dayMonthInput(cfg.date, e => cfg.setDate(e.target.value))
+          : dateInput(cfg.date, e => cfg.setDate(e.target.value))}
+        {!cfg.noTime && cfg.date && timeInput(cfg.time, e => cfg.setTime(e.target.value))}
         <button onClick={cfg.onAdd} title="Ajouter" style={{ background:`${RAPPEL_PURPLE}22`, border:`1px solid ${RAPPEL_PURPLE}66`, borderRadius:6, color:RAPPEL_PURPLE, fontSize:16, lineHeight:1, padding:'0 10px', cursor:'pointer', flexShrink:0 }}>+</button>
       </div>
     </>;
@@ -48041,7 +48114,8 @@ function RappelPanel() {
   });
   // Rendue SOUS les lignes prédéfinies de 🎂 Anniversaire, pas en tête comme les deux autres.
   const mesAnnivs = listeLibre({
-    bare: true,
+    bare: true, dayMonth: true, noTime: true, keyOf: id => 'anniv.' + id,
+    hint: "Jour et mois seulement : un anniversaire revient chaque année. Alerte et notification le jour même et 3 jours avant.",
     title:'🎂 Mes anniversaires', empty:'Aucun anniversaire ajouté', placeholder:'Nouvel anniversaire…',
     items:annivs, onDate:setAnnivDate, onTime:setAnnivTime, onRemove:removeAnniv,
     label:aLabel, setLabel:setALabel, date:aDate, setDate:setADate, time:aTime, setTime:setATime, onAdd:addAnniv,
@@ -48128,7 +48202,7 @@ function RappelPanel() {
                   style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word', cursor: val ? 'pointer' : 'default' }}>
                   {label}
                   {recur && (
-                    <span title={val ? `Prochaine échéance : ${fmtRappelDate(next)}` : `Se répète tous les ${RAPPEL_RECUR[key]} mois`}
+                    <span title={val ? `Prochaine échéance : ${fmtRappelDate(next)}` : `Se répète tous les ${rappelRecurOf(key)} mois`}
                       style={{ marginLeft:6, fontSize:8, fontFamily:'DM Mono,monospace', color:RAPPEL_PURPLE, border:`1px solid ${RAPPEL_PURPLE}55`, borderRadius:4, padding:'1px 4px', whiteSpace:'nowrap' }}>
                       {recur}{val ? ' · ' + fmtRappelDate(next) : ''}
                     </span>
