@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.3';
+const APP_VERSION = '13.16.4';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29358,6 +29358,9 @@ function CartoScene() {
 const COMMONS_API = 'https://commons.wikimedia.org/w/api.php';
 const PHOTO_RADIUS = 10000;   // mètres — le maximum accepté par geosearch
 const PHOTO_LIMIT  = 500;     // plafond de l'API : au-delà, le compte est tronqué (on le dit)
+// ⚠ Plafond du NUAGE de points, pas de la lecture : 500 `circleMarker` sur une carte de
+// 200 px, c'est 500 éléments SVG pour un nuage qu'on lit tout aussi bien avec 300.
+const PHOTO_MAP_PTS = 300;
 async function cartoFetchPhoto(q) {
   // On réutilise la recherche de commune : elle rend déjà le centre officiel de chaque
   // commune, donc aucun géocodeur de plus et aucune coordonnée en dur.
@@ -29378,13 +29381,22 @@ async function cartoFetchPhoto(q) {
     const titre = String((h && h.title) || '').replace(/^File:/, '').replace(/\.[a-z0-9]{2,4}$/i, '');
     const cle = titre.split(/[,\-–_(]/)[0].trim().replace(/\s+\d[\d\s.]*$/, '').trim();
     if (!cle) continue;
-    const cur = by.get(cle) || { cle, n: 0, d: Infinity };
+    const cur = by.get(cle) || { cle, n: 0, d: Infinity, lat: null, lon: null };
     cur.n++;
-    if (typeof h.dist === 'number') cur.d = Math.min(cur.d, h.dist);
+    // ⚠ On retient la position de la photo la PLUS PROCHE du centre pour ce sujet : un même
+    // monument est photographié de partout, prendre la première venue déplacerait le marqueur.
+    const dist = typeof h.dist === 'number' ? h.dist : Infinity;
+    if (dist < cur.d) {
+      cur.d = dist;
+      if (isFinite(h.lat) && isFinite(h.lon)) { cur.lat = h.lat; cur.lon = h.lon; }
+    }
     by.set(cle, cur);
   }
   const top = [...by.values()].sort((a, b) => b.n - a.n).slice(0, 8);
-  return { com, n: hits.length, plein: hits.length >= PHOTO_LIMIT, top, at: Date.now() };
+  // Le nuage de TOUTES les photos lues : c'est lui qui montre où les gens photographient.
+  const pts = hits.filter(h => isFinite(h.lat) && isFinite(h.lon))
+    .slice(0, PHOTO_MAP_PTS).map(h => [h.lat, h.lon]);
+  return { com, n: hits.length, plein: hits.length >= PHOTO_LIMIT, top, pts, at: Date.now() };
 }
 function CartoPhoto() {
   const [st, load, card] = useCartoSummary('photo', cartoFetchPhoto, CARTO_COMMUNE_DEFAUT);
@@ -29395,6 +29407,23 @@ function CartoPhoto() {
       onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}
       note={`Photos géolocalisées de Wikimedia Commons dans un rayon de ${PHOTO_RADIUS / 1000} km autour du centre de la commune, regroupées par sujet. Ce n'est pas la carte de chaleur mondiale du site — c'est le même signal (où les gens photographient), mesuré là où tu regardes.`}>
       <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
+      {/* LA CARTE, entre la barre et les lignes (demande utilisateur). Deux couches : le
+          NUAGE de toutes les photos lues — c'est lui qui montre où les gens photographient —
+          et les huit sujets les plus photographiés, marqués et nommés au clic. */}
+      {d && d.pts && d.pts.length > 0 && (
+        <div style={{ marginBottom:8 }}>
+          <CartoMiniMap height={200} center={[d.com.lat, d.com.lon]} zoom={12}
+            overlaySig={d.com.code + '|' + d.pts.length}
+            overlay={grp => { for (const p of d.pts) L.circleMarker(p, { radius:2.5, stroke:false,
+              fillColor:'#7ecbff', fillOpacity:0.55, interactive:false }).addTo(grp); }}
+            markers={d.top.filter(x => x.lat != null).map(x => ({ lat:x.lat, lon:x.lon, r:7,
+              label: `${x.cle} — ${x.n} photo${x.n > 1 ? 's' : ''}` }))} />
+          <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4 }}>
+            {cartoNum(d.pts.length)} photo{d.pts.length > 1 ? 's' : ''} posée{d.pts.length > 1 ? 's' : ''} en bleu
+            {d.pts.length < d.n ? ` (sur ${cartoNum(d.n)} lues)` : ''} · les cercles nomment les sujets les plus photographiés
+          </div>
+        </div>
+      )}
       {d && <>
         <CartoRow first label={`Photos autour de ${d.com.nom}`} value={cartoNum(d.n) + (d.plein ? '+' : '')} color={ACTU_COLOR}
           sub={d.plein ? `plafond de l'API atteint — il y en a au moins ${cartoNum(PHOTO_LIMIT)}`
