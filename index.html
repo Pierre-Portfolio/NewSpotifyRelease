@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.15.8';
+const APP_VERSION = '13.15.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16839,6 +16839,18 @@ function collEur(v) { return v == null ? '—' : v.toLocaleString('fr-FR', { min
 // Cote COURTE, pour la ligne sous une vignette : « 1 531 € » tient là où « 1 531,00 € »
 // passait à la ligne. Le centime ne se lit pas à 8,5 px et n'aide personne — il reste
 // lisible en entier dans la fiche.
+// Cote ARRONDIE AU SUPÉRIEUR, pour l'en-tête d'un collapse replié (demande utilisateur) :
+// « 5 956 € » là où la valeur exacte est 5 955,02 € — un centime ne se lit pas dans un titre
+// de section, et un total de collection n'est de toute façon qu'une estimation.
+function collEurUp(v) {
+  if (v == null) return '— €';
+  return Math.ceil(v).toLocaleString('fr-FR') + ' €';
+}
+// Résumé d'une sous-collection porté par le TITRE de son collapse : « 🔴 POKÉMON - 228 CARTES ».
+function collSubTitle(sub, st) {
+  const unit = sub.unit || 'élément';
+  return `${sub.icon} ${sub.label.toUpperCase()} - ${st.qty} ${unit.toUpperCase()}${st.qty > 1 ? 'S' : ''}`;
+}
 function collEurShort(v) {
   if (v == null) return '— €';
   return v >= 100 ? Math.round(v).toLocaleString('fr-FR') + ' €'
@@ -17104,8 +17116,12 @@ function CollectionSub({ sub, data, onData }) {
   // page de plusieurs écrans avant même qu'on ait choisi quoi regarder.
   // ⚠ Conséquence assumée : après un import, il faut un clic pour voir ce qui est arrivé —
   // c'est pour ça que le bilan de l'import s'affiche en toutes lettres sous la barre.
-  const [open, setOpen] = React.useState(false);     // bannière cliquée = ma collection + les outils
-  const toggleOpen = () => setOpen(o => !o);
+  // ⚠ 13.15.9 — PLUS DE BANNIÈRE (demande utilisateur). Elle formait un TROISIÈME niveau de
+  // repli — catégorie → sous-collection → bannière — qui ne cachait rien qu'on ne veuille voir
+  // en ouvrant la sous-collection. Son résumé (nom, nombre d'exemplaires, cote) est passé dans
+  // le TITRE du collapse parent, tout ce qu'elle cachait est rendu directement, et l'ancien
+  // garde `open` des requêtes de catalogue devient « monté » : `StatsCollapse` démonte ses
+  // enfants au repli (piège 5), donc ce composant n'existe que collapse OUVERT.
   const [edit, setEdit] = React.useState(null);      // id de la référence en cours d'édition
   useCollPhotos();                                   // re-rend quand l'index Drive change
   const [q, setQ] = React.useState('');
@@ -17113,7 +17129,6 @@ function CollectionSub({ sub, data, onData }) {
   const [mName, setMName] = React.useState('');    // ajout manuel (sub.manual)
   const [mPrice, setMPrice] = React.useState('');
   const list = collList(data, sub.id);
-  const s = collStats(list);
   // ⚠ UNE COLLECTION DE CARTES COMPTE DES MILLIERS DE FICHES : rendre `list` en entier
   // poserait 20 000 vignettes d'un coup et gèlerait la page (chacune porte une image et
   // trois boutons). Les deux sous-collections de cartes passent donc par un filtre local
@@ -17137,7 +17152,7 @@ function CollectionSub({ sub, data, onData }) {
       || String(x.sub || '').toLowerCase().includes(t)));
   }, [list, q]);
   // ⚠ Le catalogue n'est demandé QUE si la collection est ouverte ET qu'il s'agit de cartes.
-  const cardSets = useCardSets(sub.id, bulkView && open);
+  const cardSets = useCardSets(sub.id, bulkView);
   const setsIdx  = cardSets.idx[sub.id];
   const groups = React.useMemo(() => bulkView ? cardGroups(sub.id, viewList, setsIdx) : [],
     [bulkView, sub.id, viewList, setsIdx]);
@@ -17229,7 +17244,6 @@ function CollectionSub({ sub, data, onData }) {
       setImpMsg(`✓ ${setRow.name} — ${r.added} carte${r.added > 1 ? 's' : ''} ajoutée${r.added > 1 ? 's' : ''} sur ${rows.length} lue${rows.length > 1 ? 's' : ''}`
         + (r.skipped ? ` · ${r.skipped} déjà dans ta collection` : '')
         + (r.full ? ` · ⚠ plafond de ${CARDS_MAX} atteint` : ''));
-      setOpen(true);
     } catch (e) { setSetRun(null); setImpMsg('⚠ ' + String((e && e.message) || e)); }
   };
   const add = r0 => {
@@ -17307,26 +17321,6 @@ function CollectionSub({ sub, data, onData }) {
     borderRadius:9, color:COLLECTION_COLOR, fontSize:14, cursor:'pointer', padding:0 };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-      {/* BANNIÈRE — le SEUL élément visible à l'arrivée : tout le reste (collection, barre,
-          outils) vit à l'intérieur, et rien ne s'ouvre tout seul. */}
-      <button onClick={toggleOpen} type="button"
-        title={open ? 'Replier' : `Voir mes ${unit}s et en ajouter`}
-        style={{ display:'flex', alignItems:'center', gap:11, width:'100%', textAlign:'left',
-          background: open ? `${COLLECTION_COLOR}14` : 'transparent',
-          border:`1px solid ${COLLECTION_COLOR}${open ? '55' : '33'}`, borderRadius:12,
-          padding:'10px 13px', cursor:'pointer', color:C.text, fontFamily:'inherit' }}>
-        <span style={{ fontSize:22, lineHeight:1, flexShrink:0 }}>{sub.icon}</span>
-        <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:12.5, fontWeight:800, color:COLLECTION_COLOR }}>{sub.label}</div>
-          <div style={{ fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:2 }}>
-            {s.qty} {unit}{s.qty > 1 ? 's' : ''} · {s.uniq} réf. · {collEur(s.value)}
-            {s.uniq > s.priced ? ` · ${s.uniq - s.priced} sans prix` : ''}
-          </div>
-        </div>
-        <span style={{ fontSize:11, color:C.dim, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
-      </button>
-
-      {open && <>
         {/* ── LA BARRE, COLLANTE ────────────────────────────────────────────────────
             UNE seule saisie : ce qu'on tape filtre la collection en direct, ⏎ (ou 🔎) va
             chercher au catalogue. Collante, elle reste à portée pendant qu'on fait défiler
@@ -17528,7 +17522,6 @@ function CollectionSub({ sub, data, onData }) {
             </div>
           )}
         </>}
-      </>}
 
       {/* ✏️ ÉDITION — l'item est RELU dans `list` à chaque rendu (et non figé au clic) :
           la pop-up reflète ce qui vient d'être enregistré, et se ferme toute seule si la
@@ -19107,7 +19100,10 @@ function CollectionCardmarket() {
 }
 // Contenu d'une catégorie : ses sous-collections (le state vit ici pour qu'elles
 // partagent le même stockage) — vide tant que la catégorie n'a pas encore de contenu.
-function CollectionCat({ cat }) {
+// ⚠ 13.15.9 — L'ÉTAT A ÉTÉ REMONTÉ DANS `CollectionPanel` (hook ci-dessous) : les titres des
+// collapses portent désormais le résumé de ce qu'ils contiennent, et une catégorie repliée
+// (donc DÉMONTÉE, piège 5) ne peut pas calculer le sien. Le stockage reste unique.
+function useCollStore() {
   const [data, setData] = React.useState(collLoad);
   const [saveErr, setSaveErr] = React.useState(false);   // dernière écriture refusée par le stockage
   // ⚠ On n'affiche JAMAIS un ajout qui n'a pas été réellement enregistré : sinon la référence
@@ -19120,8 +19116,8 @@ function CollectionCat({ cat }) {
     setSaveErr(true);
     return false;
   };
-  // Les autres catégories dépliées suivent la même map (sinon elles réécriraient une copie
-  // périmée par-dessus l'ajout qu'on vient de faire).
+  // Un autre onglet du Hub (ou un autre abonné) suit la même map (sinon il réécrirait une
+  // copie périmée par-dessus l'ajout qu'on vient de faire).
   React.useEffect(() => {
     const f = d => setData(d);
     _coll.subs.add(f);
@@ -19139,6 +19135,9 @@ function CollectionCat({ cat }) {
     document.addEventListener('visibilitychange', sync);
     return () => document.removeEventListener('visibilitychange', sync);
   }, []);
+  return { data, save, saveErr };
+}
+function CollectionCat({ cat, data, save, saveErr }) {
   const subs = COLLECTION_SUBS[cat.id] || [];
   if (!subs.length) return (
     <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', lineHeight:1.5, padding:'2px 0' }}>
@@ -19146,7 +19145,8 @@ function CollectionCat({ cat }) {
     </div>
   );
   // ⚠ Une catégorie qui n'a QU'UNE sous-collection du même nom (Displate, Pop, Jeux vidéo)
-  // n'a pas besoin d'un 2e collapse au titre identique : sa bannière est rendue directement.
+  // n'a pas besoin d'un 2e collapse au titre identique : son contenu est rendu directement,
+  // et c'est le collapse de la CATÉGORIE qui porte son résumé (cf. `CollectionPanel`).
   const single = subs.length === 1 && subs[0].id === cat.id;
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -19159,13 +19159,16 @@ function CollectionCat({ cat }) {
           Fais une sauvegarde (À propos → ↧ Exporter, ou Drive/Dropbox), puis libère de la place — purge tes écoutes ou un import Maps volumineux — et réessaie.
         </div>
       )}
-      {subs.map(sub => single
-        ? <CollectionSub key={sub.id} sub={sub} data={data} onData={save} />
-        : (
-          <StatsCollapse key={sub.id} title={`${sub.icon} ${sub.label.toUpperCase()}`} color={COLLECTION_COLOR} defaultOpen={false}>
+      {subs.map(sub => {
+        if (single) return <CollectionSub key={sub.id} sub={sub} data={data} onData={save} />;
+        const st = collStats(collList(data, sub.id));
+        return (
+          <StatsCollapse key={sub.id} title={collSubTitle(sub, st)} right={collEurUp(st.value)}
+            color={COLLECTION_COLOR} defaultOpen={false}>
             <CollectionSub sub={sub} data={data} onData={save} />
           </StatsCollapse>
-        ))}
+        );
+      })}
       {/* 🃏 Analyse Cardmarket : dans CARTES seulement, et en DERNIER — donc juste sous 🟣 Magic. */}
       {cat.id === 'cartes' && <CollectionCardmarket />}
     </div>
@@ -20011,6 +20014,7 @@ function CollectionPanel() {
   // requête si Drive n'est pas connecté — `collPhotosSync` s'arrête sur `gdriveToken()`).
   // ⚠ Pas de `gdriveAutoLogin()` ici : ouvrir Collection ne doit pas déclencher de popup.
   const photos = useCollPhotos();
+  const store = useCollStore();
   React.useEffect(() => { collPhotosSync(); }, []);
   return (
     <div ref={rootRef} style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -20039,11 +20043,21 @@ function CollectionPanel() {
       {photos.state === 'error' && (
         <div style={{ fontSize:9.5, color:'#ff8a8a', lineHeight:1.5 }}>⚠ Google Drive : {photos.err}</div>
       )}
-      {COLLECTION_CATS.map(c => (
-        <StatsCollapse key={c.id} title={`${c.icon} ${c.label.toUpperCase()}`} color={COLLECTION_COLOR} defaultOpen={false}>
-          <CollectionCat cat={c} />
-        </StatsCollapse>
-      ))}
+      {/* ⚠ Le résumé n'est porté ici QUE par une catégorie dont l'unique sous-collection a le
+          même id (Displate, Pop, Montre…) : son collapse est le seul au-dessus des fiches.
+          Pour CARTES, il vit sur le collapse de chaque sous-collection (Pokémon, Magic). */}
+      {COLLECTION_CATS.map(c => {
+        const subs = COLLECTION_SUBS[c.id] || [];
+        const only = subs.length === 1 && subs[0].id === c.id ? subs[0] : null;
+        const st   = only ? collStats(collList(store.data, only.id)) : null;
+        return (
+          <StatsCollapse key={c.id} color={COLLECTION_COLOR} defaultOpen={false}
+            title={only ? collSubTitle(only, st) : `${c.icon} ${c.label.toUpperCase()}`}
+            right={only ? collEurUp(st.value) : null}>
+            <CollectionCat cat={c} data={store.data} save={store.save} saveErr={store.saveErr} />
+          </StatsCollapse>
+        );
+      })}
       <PanelTopButton anchor={rootRef} color={COLLECTION_COLOR} />
     </div>
   );
@@ -23848,7 +23862,7 @@ function applyBackup(data) {
 }
 
 // Section repliable (collapse) réutilisable pour VosEcoutesPanel
-function StatsCollapse({ title, color, defaultOpen, children }) {
+function StatsCollapse({ title, color, right, defaultOpen, children }) {
   const [open, setOpen] = React.useState(!!defaultOpen);
   return (
     <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, overflow:'hidden' }}>
@@ -23861,8 +23875,14 @@ function StatsCollapse({ title, color, defaultOpen, children }) {
             Bretonneux » sur mobile — les lignes se centrent et le titre décroche du bord.
             Correction posée dans le GABARIT : elle vaut pour tous les collapses, et ne
             change rien au rendu de ceux qui tiennent sur une ligne. */}
-        <span style={{ fontSize:12, fontWeight:800, letterSpacing:'0.05em', color: color || C.text, textAlign:'left' }}>{title}</span>
-        <span style={{ fontSize:12, color:C.dim, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
+        <span style={{ flex:1, minWidth:0, fontSize:12, fontWeight:800, letterSpacing:'0.05em', color: color || C.text, textAlign:'left' }}>{title}</span>
+        {/* ⚠ 13.15.9 — RÉSUMÉ À DROITE, optionnel : Collection y met la cote de la collection
+            repliée (le titre porte déjà son nom et son nombre d'exemplaires). Absent partout
+            ailleurs ⇒ rendu inchangé, le titre prend simplement toute la largeur restante. */}
+        {right != null && right !== '' && (
+          <span style={{ fontSize:11, fontWeight:700, color: color || C.text, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{right}</span>
+        )}
+        <span style={{ fontSize:12, color:C.dim, flexShrink:0, transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
       </button>
       {open && (
         <div style={{ padding:'0 12px 12px', display:'flex', flexDirection:'column', gap:10 }}>
