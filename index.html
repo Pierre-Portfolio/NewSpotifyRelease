@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.18.9';
+const APP_VERSION = '13.19.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17184,6 +17184,11 @@ function CollectionSub({ sub, data, onData }) {
   const miss = useCardMiss(sub.id, (missOn && openGroup && openGroup.total) ? openGroup.key : '', missOn);
   const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
     padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
+  // Listes déroulantes de la barre d'extensions (ordre, manquantes). ⚠ `colorScheme:'dark'`
+  // n'est pas cosmétique : sans lui le menu natif s'ouvre en blanc sur fond blanc.
+  const cardSelStyle = { fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', borderRadius:7,
+    padding:'3px 6px', cursor:'pointer', background:`${COLLECTION_COLOR}22`,
+    border:`1px solid ${COLLECTION_COLOR}88`, color:COLLECTION_COLOR, outline:'none', colorScheme:'dark' };
   const unit = sub.unit || 'élément';
   // ⚠ `collItem` fige les champs d'une référence à l'AJOUT : une image trouvée plus tard ne
   // remonterait jamais jusqu'à ce qui est déjà enregistré. `sub.hydrate(list)` complète donc
@@ -17465,14 +17470,9 @@ function CollectionSub({ sub, data, onData }) {
             <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:1, flexWrap:'wrap' }}>
               {groups.length > 1 && <>
                 <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>Trier :</span>
-                {CARD_SORTS.map(([v, lab]) => (
-                  <button key={v} type="button" onClick={() => chooseSort(v)}
-                    style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', borderRadius:7,
-                      padding:'3px 8px', cursor:'pointer',
-                      background: sortBy === v ? `${COLLECTION_COLOR}22` : 'none',
-                      border:`1px solid ${sortBy === v ? COLLECTION_COLOR + '88' : C.border}`,
-                      color: sortBy === v ? COLLECTION_COLOR : C.dim }}>{lab}</button>
-                ))}
+                <select value={sortBy} onChange={e => chooseSort(e.target.value)} style={cardSelStyle}>
+                  {CARD_SORTS.map(([v, lab]) => <option key={v} value={v}>{lab}</option>)}
+                </select>
               </>}
               <button type="button" onClick={() => chooseMiss(!missOn)}
                 title="Afficher en grisé les cartes de l'extension OUVERTE que tu ne possèdes pas. Le catalogue n'est lu que pour cette extension-là."
@@ -19046,8 +19046,9 @@ async function cardSetsLoad(subId) {
   // Indexé DEUX FOIS : par code, et par nom normalisé. Une fiche venue de `magicSearch` ne
   // porte que le NOM de son extension, une fiche venue du CSV que son CODE — les deux
   // doivent retomber sur la même entrée, donc sur le même groupe.
-  const put = (code, name, total) => {
-    const e = { code: String(code).toLowerCase(), name: String(name || code), total: total || 0 };
+  const put = (code, name, total, date) => {
+    const e = { code: String(code).toLowerCase(), name: String(name || code), total: total || 0,
+                date: String(date || '').replace(/\//g, '-') };
     idx[e.code] = e;
     const k = '~' + mtgNorm(e.name);
     if (!idx[k]) idx[k] = e;                     // deux extensions homonymes existent : 1er arrivé
@@ -19056,9 +19057,9 @@ async function cardSetsLoad(subId) {
     if (subId === 'magic') {
       await mtgSetLoadSets();
       if (!_mtgSet.sets) throw new Error(_mtgSet.setsErr || 'Scryfall injoignable.');
-      for (const s of _mtgSet.sets) put(s.code, s.name, s.count);
+      for (const s of _mtgSet.sets) put(s.code, s.name, s.count, s.date);
     } else {
-      for (const s of await pokeSetsAll()) put(s.id, s.name, s.full);
+      for (const s of await pokeSetsAll()) put(s.id, s.name, s.full, s.date);
     }
     _cardSets.idx[subId] = idx; _cardSets.err[subId] = '';
   } catch (e) { _cardSets.err[subId] = String((e && e.message) || e) || 'Catalogue injoignable.'; }
@@ -19100,8 +19101,8 @@ function cardSetOf(subId, it, idx) {
   const code = cardSetCode(subId, it);
   const name = String(((it && it.meta) || {}).set || '');
   const hit = idx && (idx[code] || (name ? idx['~' + mtgNorm(name)] : null));
-  if (hit) return { key: hit.code, label: hit.name, total: hit.total };
-  return { key: code || ('~' + mtgNorm(name)) || '?', label: name || code.toUpperCase() || 'Extension inconnue', total: 0 };
+  if (hit) return { key: hit.code, label: hit.name, total: hit.total, date: hit.date || '' };
+  return { key: code || ('~' + mtgNorm(name)) || '?', label: name || code.toUpperCase() || 'Extension inconnue', total: 0, date: '' };
 }
 // Regroupement par extension. ⚠ Le X du « X / Y » compte les NUMÉROS DISTINCTS, pas les fiches : une carte possédée en
 // foil ET en normal fait deux fiches mais un seul numéro de l'extension. Sans ça on
@@ -19111,7 +19112,12 @@ function cardSetOf(subId, it, idx) {
 // de compléter, pas ce qui commence par A. Une extension dont le catalogue n'a pas donné de
 // total n'a PAS de pourcentage : elle passe à la fin, classée sur ce qu'on en possède —
 // jamais à 0 %, qui se lirait comme « rien de cette extension ».
-const CARD_SORTS = [['pct', '% complété'], ['alpha', 'A → Z']];
+// ⚠ 13.19.0 — Les trois ordres tiennent dans une LISTE DÉROULANTE (demande utilisateur) :
+// alignés côte à côte, les boutons prenaient toute la largeur de la barre sur mobile. La
+// DATE vient du catalogue de l'éditeur (`put`), jamais d'une fiche : une extension dont le
+// catalogue n'a pas répondu n'a pas de date et passe en FIN, comme elle passe en fin sans
+// total — jamais au 1er janvier 1970, qui se lirait comme une vraie date.
+const CARD_SORTS = [['alpha', 'Alphabétique'], ['date', 'Date de sortie'], ['pct', '% complété']];
 let _cardSort = 'pct';   // survit au repli du collapse, sans occuper de clé de stockage
 // ── 🕳️ LES CARTES QUI MANQUENT (13.18.1, demande utilisateur) ────────────────────
 // Une extension dépliée ne montrait que ce qu'on POSSÈDE : on ne voyait pas le trou. Le
@@ -19171,14 +19177,16 @@ function cardGroups(subId, list, idx, sort) {
     if (!it) continue;
     const s = cardSetOf(subId, it, idx);
     let g = map.get(s.key);
-    if (!g) { g = { key: s.key, label: s.label, total: s.total, items: [], nums: new Set() }; map.set(s.key, g); }
+    if (!g) { g = { key: s.key, label: s.label, total: s.total, date: s.date || '', items: [], nums: new Set() }; map.set(s.key, g); }
     g.items.push(it);
     g.nums.add(cardNum(subId, it) || it.id);
   }
   const out = [...map.values()]
-    .map(g => ({ key: g.key, label: g.label, total: g.total, items: g.items, owned: g.nums.size }));
+    .map(g => ({ key: g.key, label: g.label, total: g.total, date: g.date, items: g.items, owned: g.nums.size }));
   const alpha = (a, b) => a.label.localeCompare(b.label, 'fr');
   if (sort === 'alpha') return out.sort(alpha);
+  if (sort === 'date') return out.sort((a, b) =>
+    (b.date ? 1 : 0) - (a.date ? 1 : 0) || (b.date || '').localeCompare(a.date || '') || alpha(a, b));
   const pct = g => (g.total ? g.owned / g.total : -1);
   return out.sort((a, b) => (pct(b) - pct(a)) || (b.owned - a.owned) || alpha(a, b));
 }
