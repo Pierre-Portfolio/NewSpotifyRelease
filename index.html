@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.0';
+const APP_VERSION = '13.16.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28849,7 +28849,7 @@ async function cartoSearchCommunes(q) {
   // ⚠ `centre` n'est pas décoratif : c'est LUI qui permet à 📸 Lieux les plus photographiés
   // d'interroger Wikimedia Commons sans géocodeur supplémentaire ni coordonnée en dur.
   const url = GEOAPI_COMMUNES + '?nom=' + encodeURIComponent(nom)
-    + '&fields=nom,code,codesPostaux,population,surface,departement,region,epci,centre'
+    + '&fields=nom,code,codesPostaux,population,surface,departement,region,epci,centre,siren,zone'
     + '&boost=population&limit=8';
   const r = await fetchTimeout(url, 12000, { cache:'no-store' });
   if (!r.ok) throw new Error('geo.api.gouv.fr a répondu ' + r.status + '.');
@@ -28863,14 +28863,61 @@ async function cartoSearchCommunes(q) {
     const coords = (c.centre && Array.isArray(c.centre.coordinates)) ? c.centre.coordinates : null;
     return { code, nom: String(c.nom || code), pop, km2,
       dens: (pop != null && km2) ? pop / km2 : null,
-      cp: Array.isArray(c.codesPostaux) ? c.codesPostaux.slice(0, 3).join(' · ') : '',
+      cp: Array.isArray(c.codesPostaux) ? c.codesPostaux.join(' · ') : '',
+      nCp: Array.isArray(c.codesPostaux) ? c.codesPostaux.length : 0,
       dep: (c.departement && c.departement.nom) || '', reg: (c.region && c.region.nom) || '',
-      epci: (c.epci && c.epci.nom) || '',
+      depCode: (c.departement && c.departement.code) || '', regCode: (c.region && c.region.code) || '',
+      epci: (c.epci && c.epci.nom) || '', siren: c.siren ? String(c.siren) : '',
+      zone: COMMUNE_ZONES[String(c.zone || '')] || '',
       // GeoJSON = [longitude, latitude] — dans CET ordre, l'inverser enverrait 📸 ailleurs.
       lon: coords ? coords[0] : null, lat: coords ? coords[1] : null };
   }).filter(Boolean);
   if (!list.length) throw new Error(`Aucune commune ne s'appelle « ${nom} ».`);
-  return { q: nom, list, at: Date.now() };
+  // ⚠ ENRICHISSEMENT DE LA SEULE COMMUNE EN TÊTE : la recherche en rend jusqu'à huit, les
+  // enrichir toutes ferait seize requêtes pour sept lignes qu'on ne lit pas. Les deux
+  // sources sont facultatives — un échec laisse la fiche telle qu'elle était.
+  const top = list[0];
+  const [alt, wiki] = await Promise.all([
+    (top.lat != null && top.lon != null) ? communeElevation(top.lat, top.lon) : Promise.resolve(null),
+    communeWiki(top.nom, top.dep),
+  ]);
+  return { q: nom, list, alt, wiki, at: Date.now() };
+}
+// Ce que geo.api.gouv.fr appelle `zone`, en français.
+const COMMUNE_ZONES = { metro:'France métropolitaine', dom:'Département d\'outre-mer',
+  drom:'Département ou région d\'outre-mer', com:'Collectivité d\'outre-mer' };
+// ── CE QU'ON SAIT DIRE D'UNE COMMUNE AU-DELÀ DU RECENSEMENT (13.16.1) ────────────
+// Altitude : Open-Meteo publie un modèle d'élévation, sans clé, déjà dans la CSP.
+const OPENMETEO_ELEV = 'https://api.open-meteo.com/v1/elevation';
+async function communeElevation(lat, lon) {
+  try {
+    const r = await fetchTimeout(`${OPENMETEO_ELEV}?latitude=${lat}&longitude=${lon}`, 10000);
+    if (!r || !r.ok) return null;
+    const j = await r.json();
+    const e = j && Array.isArray(j.elevation) ? j.elevation[0] : null;
+    return typeof e === 'number' ? Math.round(e) : null;
+  } catch { return null; }
+}
+// Wikipédia : le résumé de tête d'article — l'histoire, la situation, ce qui fait la
+// commune. C'est la seule source publique qui en DIT quelque chose plutôt que de la compter.
+const WIKI_SUMMARY = 'https://fr.wikipedia.org/api/rest_v1/page/summary/';
+async function communeWiki(nom, dep) {
+  // ⚠ HOMONYMES : « Massy » est à la fois une commune de l'Essonne, une de Saône-et-Loire et
+  // une page d'homonymie. On tente donc « Nom (Département) » d'abord, le nom nu ensuite, et
+  // on REFUSE une page d'homonymie plutôt que d'afficher « Massy peut désigner… ».
+  for (const t of (dep ? [`${nom} (${dep})`, nom] : [nom])) {
+    try {
+      const r = await fetchTimeout(WIKI_SUMMARY + encodeURIComponent(t.replace(/ /g, '_')), 10000);
+      if (!r || !r.ok) continue;
+      const j = await r.json();
+      const ex = String((j && j.extract) || '').trim();
+      if (!ex || /homonymie|peut (faire référence|désigner)/i.test(ex) || (j && j.type && /disambiguation/i.test(j.type))) continue;
+      const page = (j.content_urls && j.content_urls.desktop && j.content_urls.desktop.page) || '';
+      return { extract: ex, url: safeHref(String(page)) || null,
+        img: (j.thumbnail && safeHref(String(j.thumbnail.source || ''))) || null };
+    } catch {}
+  }
+  return null;
 }
 // Champ de recherche partagé par les deux cartes communales.
 function CartoCommuneInput({ value, onChange, onGo, busy }) {
@@ -28898,8 +28945,7 @@ function CartoInsee() {
   const d = st.data;
   return (
     <CartoCard title="📊 CARTE INSEE" site={CARTO_SITES_BY.insee} st={st}
-      onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}
-      note="Population légale, superficie et densité par commune (API Découpage administratif de l'État). La carte de l'INSEE va plus loin — revenus, pauvreté, équipements à l'échelle infracommunale.">
+      onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}>
       <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
       {d && d.list.map((c, i) => (
         <CartoRow key={c.code} first={i === 0} label={`${c.nom}${c.cp ? ' · ' + c.cp : ''}`}
@@ -28907,9 +28953,33 @@ function CartoInsee() {
           sub={[c.km2 ? cartoNum(c.km2, 2) + ' km²' : null,
                c.dens ? cartoNum(c.dens) + ' hab./km² (× ' + cartoNum(c.dens / FRANCE_DENS, 1) + ' la moyenne française)' : null,
                c.epci,
-               [c.dep, c.reg].filter(Boolean).join(', '),
-               'INSEE ' + c.code].filter(Boolean).join(' · ')} />
+               [c.dep && c.dep + (c.depCode ? ' (' + c.depCode + ')' : ''), c.reg].filter(Boolean).join(', '),
+               c.zone,
+               'INSEE ' + c.code,
+               c.siren ? 'SIREN ' + c.siren : null,
+               // Altitude et coordonnées ne sont cherchées que pour la commune de tête.
+               i === 0 && d.alt != null ? cartoNum(d.alt) + ' m d\'altitude' : null,
+               i === 0 && c.lat != null ? cartoNum(c.lat, 4) + '° N · ' + cartoNum(c.lon, 4) + '° E' : null,
+              ].filter(Boolean).join(' · ')} />
       ))}
+      {/* 📖 CE QUE LA COMMUNE EST, et pas seulement ce qu'elle pèse : le résumé de tête
+          d'article de Wikipédia (fr), pour la commune en tête de liste uniquement.
+          ⚠ Texte BRUT dans un <div> — jamais `dangerouslySetInnerHTML` (piège 29). */}
+      {d && d.wiki && (
+        <div style={{ display:'flex', gap:9, marginTop:9, paddingTop:8, borderTop:`1px solid ${C.border}` }}>
+          {d.wiki.img && <img src={d.wiki.img} alt="" loading="lazy" referrerPolicy="no-referrer"
+            style={{ width:58, height:58, objectFit:'cover', borderRadius:8, flexShrink:0, border:`1px solid ${C.border}` }} />}
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:10, color:C.muted, lineHeight:1.55 }}>{d.wiki.extract}</div>
+            {d.wiki.url && (
+              <a href={d.wiki.url} target="_blank" rel="noopener noreferrer"
+                style={{ fontSize:9, color:ACTU_COLOR, textDecoration:'none', fontFamily:'DM Mono,monospace' }}>
+                ↗ l'article complet sur Wikipédia
+              </a>
+            )}
+          </div>
+        </div>
+      )}
     </CartoCard>
   );
 }
