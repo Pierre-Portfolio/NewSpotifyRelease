@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.6';
+const APP_VERSION = '13.16.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29581,7 +29581,41 @@ function CartoSpace() {
 // L'info trafic temps réel d'IDFM demande une clé PRIM, mais leur RÉFÉRENTIEL DES LIGNES est
 // en open data sans clé : de quoi dire ce que le plan montre, en chiffres. Un seul appel —
 // c'est Opendatasoft qui agrège (`group_by`), on ne télécharge pas les milliers de lignes.
-const IDFM_LIGNES = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/referentiel-des-lignes/records';
+const IDFM_BASE   = 'https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets/';
+const IDFM_LIGNES = IDFM_BASE + 'referentiel-des-lignes/records';
+// ── La carte de la fiche : les GARES, pas les lignes ─────────────────────────────
+// ⚠ Le référentiel des LIGNES ne porte aucune géométrie : il compte, il ne dessine pas. Les
+// gares, elles, sont publiées avec leur point — c'est donc elles qu'on pose. Le nom du jeu
+// de données a changé plusieurs fois sur le portail : d'où une CASCADE (même motif que
+// `UCDP_VERSIONS`), et un échec complet laisse la fiche EXACTEMENT comme avant, sans carte.
+// ⚠ Aucun `select` : un nom de champ inexact rend un 400 sur Opendatasoft. On prend le lot
+// tel quel et on lit ce qu'on reconnaît.
+const IDFM_GARES_SETS = ['emplacement-des-gares-idf', 'emplacement-des-gares-idf-data-generalisee', 'arrets'];
+const IDFM_GARES_MAX  = 120;   // marqueurs posés : au-delà, la carte devient une bouillie
+const IDFM_MODE_COLORS = { metro:'#f0a93c', rail:'#7ecbff', rer:'#7ecbff', train:'#7ecbff',
+  transilien:'#7ecbff', tram:'#a8d13f', tramway:'#a8d13f', bus:'#e0a040', funicular:'#d98ae0',
+  cable:'#d98ae0', ferry:'#5fd35f' };
+const idfmGareColor = m => IDFM_MODE_COLORS[String(m || '').toLowerCase().replace(/[^a-z]/g, '')] || ACTU_COLOR;
+async function idfmGares() {
+  for (const ds of IDFM_GARES_SETS) {
+    try {
+      const r = await fetchTimeout(IDFM_BASE + ds + '/records?limit=' + IDFM_GARES_MAX, 14000, { cache:'no-store' });
+      if (!r.ok) continue;
+      const j = await r.json();
+      const rows = Array.isArray(j && j.results) ? j.results : [];
+      const list = rows.map(x => {
+        const pt = odsPoint(x && (x.geo_point_2d || x.geo_shape || x.pointgeo));
+        if (!pt) return null;
+        const nom = String((x && (x.nom_long || x.nom || x.nom_zdl || x.arrname || x.nom_gare)) || 'Gare');
+        const mode = String((x && (x.mode || x.transportmode || x.mode_ || x.arrtype)) || '');
+        const res = String((x && (x.res_com || x.reseau || x.ligne)) || '');
+        return { nom, mode, res, lat:pt.lat, lon:pt.lon };
+      }).filter(Boolean);
+      if (list.length) return { list, tot: (j && typeof j.total_count === 'number') ? j.total_count : null, ds };
+    } catch {}
+  }
+  return null;
+}
 const IDFM_MODES = {
   metro:'🚇 Métro', rail:'🚆 RER et Transilien', tram:'🚊 Tramway', bus:'🚌 Bus',
   funicular:'🚡 Funiculaire', cable:'🚠 Câble', ferry:'⛴️ Navette fluviale', coach:'🚍 Autocar',
@@ -29602,7 +29636,10 @@ async function cartoFetchTransport() {
     return (mode && isFinite(n)) ? { mode, label: IDFM_MODES[mode] || mode, n } : null;
   }).filter(Boolean).sort((a, b) => b.n - a.n);
   if (!list.length) throw new Error('Aucun mode de transport renvoyé par Île-de-France Mobilités.');
-  return { list, tot: list.reduce((s, x) => s + x.n, 0), at: Date.now() };
+  // La carte est un BONUS : son échec ne doit pas emporter le décompte, qui est l'information
+  // principale de la fiche.
+  const gares = await idfmGares().catch(() => null);
+  return { list, gares, tot: list.reduce((s, x) => s + x.n, 0), at: Date.now() };
 }
 function CartoTransport() {
   const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
@@ -29610,8 +29647,20 @@ function CartoTransport() {
   return (
     <CartoCard title="🚇 RÉSEAUX DE TRANSPORT PARIS" site={CARTO_SITES_BY.transport} st={st} card={card} onReload={load}>
       {d && <>
+        {/* LA CARTE, entre l'en-tête et les lignes (demande utilisateur). ⚠ Ce sont les
+            GARES : le référentiel des LIGNES ne porte aucune géométrie. */}
+        {d.gares && d.gares.list.length > 0 && (
+          <div style={{ marginBottom:9 }}>
+            <CartoMiniMap fit zoom={11} height={210}
+              markers={d.gares.list.map(g => ({ lat:g.lat, lon:g.lon, r:4.5, color: idfmGareColor(g.mode),
+                label: [g.nom, g.res, g.mode].filter(Boolean).join(' · ') }))} />
+            <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.5 }}>
+              {cartoNum(d.gares.list.length)} gares posées{d.gares.tot ? ` sur ${cartoNum(d.gares.tot)} au référentiel` : ''} · couleur = mode · le référentiel des LIGNES ne porte aucune géométrie, ce sont donc les gares
+            </div>
+          </div>
+        )}
         <CartoRow first label="Lignes au référentiel" value={cartoNum(d.tot)} color={ACTU_COLOR}
-          sub="tous modes confondus, Île-de-France" />
+          sub="tous modes confondus, Île-de-France · lignes existantes, pas l'état du trafic" />
         {d.list.map(x => (
           <CartoRow key={x.mode} label={x.label} value={cartoNum(x.n)}
             sub={d.tot ? cartoNum((x.n / d.tot) * 100, 1) + ' % du réseau' : ''} />
