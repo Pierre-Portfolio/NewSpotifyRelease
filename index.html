@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.9';
+const APP_VERSION = '13.17.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2027,7 +2027,7 @@ const spotifyFollowArtists = ids =>
 // de sa `last_scraped_at` d'origine. C'est tout l'intérêt de garder la ligne.
 // ⚠ Si l'artiste n'a JAMAIS été scrapé (quota 100/jour : suivi mais pas encore visité), il
 // n'a pas de ligne → on en crée une avec la sentinelle FULL_SCRAPE_FROM, celle-là même qui
-// vaut « jamais scrapé » pour la boucle : un réabonnement prendra toute sa discographie.
+// vaut « jamais scrapé » pour la boucle : un réabonnement repartira sur sa dernière année.
 // Le désabonnement Spotify exige le scope `user-follow-modify` (403 sur un jeton ancien) ;
 // comme pour « 🗑 Supprimer », l'écriture LOCALE se fait quand même — l'utilisateur voit
 // alors le message qui lui dit de se reconnecter.
@@ -2269,7 +2269,7 @@ async function initDB() {
   // et chargée dans knownUris au boot — jamais purgée.
   _db.run("CREATE TABLE IF NOT EXISTS purged_uris (spotify_uri TEXT PRIMARY KEY)");
   // ── Index de la FILE D'ATTENTE ──────────────────────────────────────────────
-  // `tracks` n'a aucun plafond (un premier scan reprend toute la discographie d'un artiste)
+  // `tracks` n'a aucun plafond (des années de sorties s'y accumulent artiste après artiste)
   // et n'avait aucun index : `loadFeedFromDB` la balayait en entier puis triait, à chaque
   // frappe dans le champ de recherche (debounce 150 ms), et `loadListenStatsFromDB` faisait
   // deux agrégats de plus APRÈS CHAQUE ÉCOUTE.
@@ -2878,15 +2878,28 @@ async function dwCaptureFromContext(contextUri, addLog) {
 
 // Point de départ d'un artiste DÉJÀ connu qui n'a pas encore de date de scan.
 const DEFAULT_SCRAPE_FROM = '2026-03-15';
-// ⚠ Sentinelle « discographie ENTIÈRE » : posée comme `last_scraped_at` sur la ligne
-// « légère » d'un PREMIER scan. Elle sert de marque-page — si un 429 coupe le scan au
+// ⚠ Sentinelle « PREMIER SCAN PAS ENCORE TERMINÉ » : posée comme `last_scraped_at` sur la
+// ligne « légère » d'un premier scan. Elle sert de marque-page — si un 429 coupe le scan au
 // milieu, l'artiste existe déjà en base mais reste reconnu comme jamais scanné, et la
-// reprise repart bien sur TOUTE la discographie au lieu des seules sorties récentes.
+// reprise repart bien sur sa fenêtre de premier scan au lieu de « depuis 1900 ».
 // La date définitive (`datetime('now')`) n'est écrite qu'à la fin, artiste terminé.
 const FULL_SCRAPE_FROM = '1900-01-01';
-// Garde-fou de pagination du premier scan (10 albums par page) : 200 pages = 2000 sorties.
-// Ce n'est pas un plafond fonctionnel mais une sécurité contre un `next` qui boucle.
-const FULL_SCRAPE_MAX_PAGES = 200;
+// ── ⚠ 13.17.0 — UN PREMIER SCAN NE PREND PLUS QUE LA DERNIÈRE ANNÉE ──────────────
+// Il prenait TOUTE la discographie, en déroulant `next` page par page : suivre un artiste
+// au catalogue fourni versait des centaines de titres d'un coup dans le feed — « ça spam
+// beaucoup trop » — et coûtait des dizaines de requêtes là où un artiste connu en coûte UNE.
+// Un premier scan lit donc désormais la SEULE première page d'albums, comme un artiste déjà
+// connu, et ne retient que les sorties de la dernière année GLISSANTE.
+// ⚠ La sentinelle `FULL_SCRAPE_FROM` reste posée par l'écriture « légère » : c'est elle qui
+// fait reconnaître l'artiste comme jamais scanné (panneau Artistes, reprise après un 429),
+// et elle ne décrit plus une PROFONDEUR de scan mais un ÉTAT — « pas encore terminé ».
+const FIRST_SCRAPE_MONTHS = 12;
+function firstScrapeFrom(now) {
+  const d = new Date(now || Date.now());
+  d.setMonth(d.getMonth() - FIRST_SCRAPE_MONTHS);
+  // Clé de jour LOCALE (piège 16) : `toISOString()` reculerait d'un jour en France.
+  return localDayStr(d);
+}
 // Une release_date Spotify a une précision variable : 'day' ("2026-05-10"), 'month'
 // ("2026-05") ou 'year' ("2026"). new Date("2026") → 1er janvier : une nouveauté datée à
 // l'année seule passait alors SOUS le cutoff (ex. 2026-03-15) et était ratée. On considère
@@ -4123,17 +4136,21 @@ function StoreProvider({ children }) {
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
-          // PREMIÈRE FOIS qu'on voit cet artiste → on prend 100 % de sa discographie (aucun
-          // cutoff, toutes les pages d'albums). Vaut aussi pour la reprise d'un premier scan
-          // interrompu, reconnaissable à la sentinelle FULL_SCRAPE_FROM laissée par la ligne
-          // « légère ». Un artiste déjà scanné garde son scan incrémental depuis sa date.
+          // PREMIÈRE FOIS qu'on voit cet artiste → sa dernière ANNÉE de sorties (fenêtre
+          // glissante), et une seule page d'albums, exactement comme un artiste déjà connu.
+          // Vaut aussi pour la reprise d'un premier scan interrompu, reconnaissable à la
+          // sentinelle FULL_SCRAPE_FROM laissée par la ligne « légère ».
           const prevScraped = scrapedDates[artist.id];
           const firstScrape = !prevScraped || prevScraped.slice(0, 10) <= FULL_SCRAPE_FROM;
           // Cutoff tronqué au JOUR du dernier scan : une sortie publiée le jour même du scan
           // mais indexée après ne doit pas être ratée (les doublons sont absorbés par INSERT OR IGNORE)
-          const cutoffISO = firstScrape ? FULL_SCRAPE_FROM : (prevScraped || DEFAULT_SCRAPE_FROM).slice(0, 10);
+          const cutoffISO = firstScrape ? firstScrapeFrom() : (prevScraped || DEFAULT_SCRAPE_FROM).slice(0, 10);
           const cutoff = new Date(cutoffISO);
-          if (firstScrape) setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name} · discographie complète`, 'pulse');
+          // ⚠ Ce qui est ÉCRIT sur la ligne légère n'est pas ce qui FILTRE : au premier scan
+          // c'est la sentinelle, sinon l'artiste cesserait d'être « jamais scanné » alors que
+          // son scan n'est pas terminé.
+          const lightISO = firstScrape ? FULL_SCRAPE_FROM : cutoffISO;
+          if (firstScrape) setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name} · premier scan, 1 an`, 'pulse');
           const albumsData = await apiGetSafe(
             // ⚠ Migration Spotify fév./mars 2026 : limit max de cet endpoint réduit de 50 à 10
             // (limit=20 → 400 "Invalid limit" depuis le 9 mars 2026, même pour les apps existantes)
@@ -4156,37 +4173,30 @@ function StoreProvider({ children }) {
           }
           setDailyScrapings(dailyCount);
 
-          // ⚠ `limit` max = 10 → une page ne couvre que 10 sorties. Pour un artiste déjà
-          // connu ça suffit largement (l'endpoint rend les plus récentes d'abord et le
-          // cutoff coupe tout de suite), mais au PREMIER scan il faut dérouler `next`
-          // jusqu'au bout, sinon « 100 % de la discographie » s'arrêterait à 10 sorties.
-          // Chaque page passe par apiGetSafe → checkpoint (pause + fenêtre 429) respecté.
+          // ⚠ PLUS DE PAGINATION AU PREMIER SCAN (13.17.0) : `limit` max = 10, et l'endpoint
+          // rend les sorties les plus RÉCENTES d'abord — une page couvre donc largement une
+          // fenêtre d'un an pour l'écrasante majorité des artistes, et le cutoff coupe le
+          // reste. Un premier scan coûte désormais UNE requête d'albums, comme un scan
+          // incrémental. Le prix : un artiste qui aurait publié plus de dix sorties en un an
+          // verrait les plus anciennes lui échapper — c'est dit dans le journal.
           if (firstScrape && albumsData?.items) {
-            let nextAlbums = albumsData.next, albumPages = 1;
-            while (nextAlbums && albumPages < FULL_SCRAPE_MAX_PAGES) {
-              const more = await apiGetSafe(nextAlbums);
-              if (!more?.items?.length) break;
-              albumsData.items = albumsData.items.concat(more.items);
-              nextAlbums = more.next || null;
-              albumPages++;
-              setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name} · ${albumsData.items.length} sorties trouvées`, 'pulse');
-            }
-            log(`★ ${artist.name} · premier scan — discographie complète : ${albumsData.items.length} sortie(s)`, 'info');
+            const rest = albumsData.next ? ' · d\'autres pages existent, non lues' : '';
+            log(`★ ${artist.name} · premier scan — sorties depuis le ${cutoff.toLocaleDateString('fr-FR')} (1ʳᵉ page, ${albumsData.items.length} lue(s))${rest}`, 'info');
           }
 
           if (albumsData?.items) {
             const inRange = albumsData.items.filter(a => releaseInRange(a.release_date, cutoff, ceiling));
             if (inRange.length === 0) log(firstScrape
-              ? `→ ${artist.name} · aucune sortie exploitable dans sa discographie`
+              ? `→ ${artist.name} · aucune sortie sur la dernière année`
               : `→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
             let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
             const artistFeedItems = []; // #opt : on batche les items de l'artiste → UN seul setFeed
 
             // Ligne "légère" écrite DÈS que les albums sont lus, AVANT la boucle des pistes :
             // l'artiste devient visible dans le panneau même si un 429 coupe le scan plus bas.
-            // ⚠ last_scraped_at posé à la valeur de `cutoffISO` (date existante, ou la sentinelle
-            // FULL_SCRAPE_FROM au premier scan), JAMAIS avancée ici → aucun titre raté, et une
-            // discographie coupée en route se reprend en ENTIER. Statut 'partial' jusqu'à la fin.
+            // ⚠ last_scraped_at posé à `lightISO` (date existante, ou la sentinelle
+            // FULL_SCRAPE_FROM au premier scan), JAMAIS avancée ici → aucun titre raté, et un
+            // premier scan coupé en route reste un PREMIER scan. Statut 'partial' jusqu'à la fin.
             // ON CONFLICT ne touche QUE les métadonnées (pas last_scraped_at/scan_count/total).
             try {
               dbRun(
@@ -4202,7 +4212,7 @@ function StoreProvider({ children }) {
                    spotify_url = excluded.spotify_url,
                    following   = 1`,
                 [
-                  artist.id, cutoffISO, artist.name || null,
+                  artist.id, lightISO, artist.name || null,
                   artist.images?.[1]?.url || artist.images?.[0]?.url || null, artist.popularity ?? null,
                   artist.followers?.total ?? null, JSON.stringify(artist.genres || []),
                   artist.external_urls?.spotify || null,
@@ -48011,7 +48021,7 @@ function formatListenedAt(s) {
   if (!s) return '';
   const str = String(s).trim();
   // ⚠ Sentinelle du premier scan : ce n'est pas une date de scan mais un marque-page
-  // « discographie entière à faire » → l'artiste s'affiche « — », pas « il y a 46 000 jours ».
+  // « premier scan pas encore fait » → l'artiste s'affiche « — », pas « il y a 46 000 jours ».
   if (str === FULL_SCRAPE_FROM) return '';
   // Deux formats possibles : 'YYYY-MM-DD HH:MM:SS' (datetime('now'), UTC) et 'YYYY-MM-DD'
   // seul (last_scraped_at posé par la ligne « légère » d'un scan partiel). Une date sans
@@ -48951,7 +48961,7 @@ function DeltaArtistList({ artists, empty, onUnfollow, canFollow }) {
 // playlists, ou les deux — mais tu ne le suis pas. D'où le bouton ➕ : c'est la seule action
 // qui a du sens ici (l'inverse du ⊘ de la liste au-dessus).
 // ⚠ S'abonner ne crée AUCUNE ligne locale : c'est le prochain scan qui verra l'artiste dans
-// /me/following et lui prendra sa discographie complète. On se contente de relever un
+// /me/following et lui prendra sa dernière année de sorties. On se contente de relever un
 // `following = 0` laissé par un désabonnement passé, pour que le panneau Artistes ne le montre
 // pas archivé alors qu'on vient de se réabonner.
 // ⚠ L'objet vient d'une piste (forme simplifiée de l'API) : ni image ni URL, d'où la vignette
@@ -48978,7 +48988,7 @@ function DeltaGapArtistRow({ a, onFollow, canFollow }) {
         <div style={{ flex:1, minWidth:0 }}>
           <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{a.name}</div>
           <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-            {on ? '✓ abonné — le prochain scan prendra sa discographie'
+            {on ? '✓ abonné — le prochain scan prendra sa dernière année'
                 : [nl ? `❤ ${nl} liké${nl > 1 ? 's' : ''}` : '', np ? `🔀 ${np} en playlist` : '']
                     .filter(Boolean).join(' · ') + ' — tu ne le suis pas'}
           </div>
@@ -49380,7 +49390,7 @@ function DeltaPanel() {
       const row = (_delta.data?.likedGap || []).find(x => x.id === a.id);
       if (row) row.followed = true;
       // ⚠ UPDATE seul, jamais d'INSERT : un artiste jamais scrapé ne doit pas gagner une ligne
-      // ici (le scan la créera avec sa discographie). On ne fait que relever un `following = 0`
+      // ici (le scan la créera avec sa dernière année). On ne fait que relever un `following = 0`
       // laissé par un désabonnement passé.
       try { dbRun("UPDATE artists_scraped SET following = 1 WHERE spotify_id = ?", [a.id]); await saveDB(); } catch {}
       try { deltaCacheSave(_delta.data); } catch {}
@@ -49538,7 +49548,7 @@ function DeltaPanel() {
                 <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
                   Artistes que tu <b>ne suis pas</b> mais qui sont chez toi — dans tes titres likés
                   et/ou dans tes playlists : {data.likedGap.length} artiste(s), du plus présent au moins présent.
-                  Le <b>➕</b> t'y abonne sur Spotify ; le prochain scan prendra alors toute sa discographie.
+                  Le <b>➕</b> t'y abonne sur Spotify ; le prochain scan prendra alors sa dernière année de sorties.
                 </div>
                 <DeltaLikedArtistList artists={data.likedGap} onFollow={followArtist} canFollow={followScope === true}
                   empty="Tous les artistes de tes likés et de tes playlists font partie de tes abonnements." />

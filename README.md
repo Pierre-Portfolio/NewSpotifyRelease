@@ -26,7 +26,7 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 - Connexion **OAuth 2.0 PKCE** 100 % client, aucun secret dans le code
 - Scan des artistes suivis, délai configurable (10/20/30 s)
 - Chaque artiste part de **sa propre date de dernier scan**, avancée seulement si le scan réussit
-- **Un artiste jamais scrapé rapporte TOUTE sa discographie** — les scans suivants redeviennent incrémentaux
+- **Un artiste jamais scrapé rapporte sa dernière ANNÉE de sorties** (fenêtre glissante, une seule requête comme un scan normal) — les scans suivants redeviennent incrémentaux
 - **Pause / reprise**, reprise après fermeture (bouton « ↩ Reprendre »)
 - **Protection rate-limit** : dès le 1er 429 tout s'arrête 15 min minimum (persiste au rechargement)
 - **Quota de 100 artistes / 24 h glissantes** avec compte à rebours, réinitialisable dans À propos
