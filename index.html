@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.17.5';
+const APP_VERSION = '13.17.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28590,6 +28590,27 @@ function CartoCard({ title, site, st, onReload, card, note, children }) {
     </div>
   );
 }
+// 🐾 La carte qui est À NOUS n'a ni source distante ni ↻ — mais elle doit pouvoir se replier
+// comme les onze autres (13.17.6, demande utilisateur), et surtout ne RIEN monter tant qu'elle
+// est repliée : c'est elle qui charge Leaflet et télécharge des tuiles.
+function CartoOwnCard({ title, children }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 12px 11px' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom: open ? 6 : 0 }}>
+        <div onClick={() => setOpen(o => !o)} style={{ flex:1, minWidth:0, cursor:'pointer' }}>
+          <span style={{ fontSize:11, fontWeight:700, color:ACTU_COLOR, letterSpacing:'0.05em' }}>{title}</span>
+        </div>
+        <button onClick={() => setOpen(o => !o)} title={open ? 'Replier cette carte' : 'Déplier cette carte'}
+          aria-expanded={open}
+          style={{ fontSize:10, fontWeight:600, background:'none', borderRadius:6, padding:'3px 9px', flexShrink:0,
+            fontFamily:'inherit', lineHeight:1.4, color:C.dim, border:`1px solid ${C.border}`, cursor:'pointer',
+            transform: open ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</button>
+      </div>
+      {open && children}
+    </div>
+  );
+}
 // Carte SANS source : pas de ↻ (il n'y aurait rien à rappeler), on dit ce que le site
 // montre et pourquoi il reste le seul moyen de le voir.
 function CartoLinkCard({ title, site, what, why }) {
@@ -28941,11 +28962,8 @@ async function cartoSearchCommunes(q) {
   // enrichir toutes ferait seize requêtes pour sept lignes qu'on ne lit pas. Les deux
   // sources sont facultatives — un échec laisse la fiche telle qu'elle était.
   const top = list[0];
-  const [alt, wiki] = await Promise.all([
-    (top.lat != null && top.lon != null) ? communeElevation(top.lat, top.lon) : Promise.resolve(null),
-    communeWiki(top.nom, top.dep),
-  ]);
-  return { q: nom, list, alt, wiki, at: Date.now() };
+  const alt = (top.lat != null && top.lon != null) ? await communeElevation(top.lat, top.lon) : null;
+  return { q: nom, list, alt, at: Date.now() };
 }
 // Ce que geo.api.gouv.fr appelle `zone`, en français.
 const COMMUNE_ZONES = { metro:'France métropolitaine', dom:'Département d\'outre-mer',
@@ -28962,27 +28980,9 @@ async function communeElevation(lat, lon) {
     return typeof e === 'number' ? Math.round(e) : null;
   } catch { return null; }
 }
-// Wikipédia : le résumé de tête d'article — l'histoire, la situation, ce qui fait la
-// commune. C'est la seule source publique qui en DIT quelque chose plutôt que de la compter.
-const WIKI_SUMMARY = 'https://fr.wikipedia.org/api/rest_v1/page/summary/';
-async function communeWiki(nom, dep) {
-  // ⚠ HOMONYMES : « Massy » est à la fois une commune de l'Essonne, une de Saône-et-Loire et
-  // une page d'homonymie. On tente donc « Nom (Département) » d'abord, le nom nu ensuite, et
-  // on REFUSE une page d'homonymie plutôt que d'afficher « Massy peut désigner… ».
-  for (const t of (dep ? [`${nom} (${dep})`, nom] : [nom])) {
-    try {
-      const r = await fetchTimeout(WIKI_SUMMARY + encodeURIComponent(t.replace(/ /g, '_')), 10000);
-      if (!r || !r.ok) continue;
-      const j = await r.json();
-      const ex = String((j && j.extract) || '').trim();
-      if (!ex || /homonymie|peut (faire référence|désigner)/i.test(ex) || (j && j.type && /disambiguation/i.test(j.type))) continue;
-      const page = (j.content_urls && j.content_urls.desktop && j.content_urls.desktop.page) || '';
-      return { extract: ex, url: safeHref(String(page)) || null,
-        img: (j.thumbnail && safeHref(String(j.thumbnail.source || ''))) || null };
-    } catch {}
-  }
-  return null;
-}
+// ⚠ 13.17.6 — LE RÉSUMÉ WIKIPÉDIA A ÉTÉ RETIRÉ (demande utilisateur) : la fiche redevient un
+// relevé de chiffres, et `communeWiki` avec lui — une requête pour un paragraphe qu'on ne lit
+// pas n'a pas à partir. Rien d'autre ne l'appelait.
 // Champ de recherche partagé par les deux cartes communales.
 function CartoCommuneInput({ value, onChange, onGo, busy }) {
   return (
@@ -29026,24 +29026,6 @@ function CartoInsee() {
                i === 0 && c.lat != null ? cartoNum(c.lat, 4) + '° N · ' + cartoNum(c.lon, 4) + '° E' : null,
               ].filter(Boolean).join(' · ')} />
       ))}
-      {/* 📖 CE QUE LA COMMUNE EST, et pas seulement ce qu'elle pèse : le résumé de tête
-          d'article de Wikipédia (fr), pour la commune en tête de liste uniquement.
-          ⚠ Texte BRUT dans un <div> — jamais `dangerouslySetInnerHTML` (piège 29). */}
-      {d && d.wiki && (
-        <div style={{ display:'flex', gap:9, marginTop:9, paddingTop:8, borderTop:`1px solid ${C.border}` }}>
-          {d.wiki.img && <img src={d.wiki.img} alt="" loading="lazy" referrerPolicy="no-referrer"
-            style={{ width:58, height:58, objectFit:'cover', borderRadius:8, flexShrink:0, border:`1px solid ${C.border}` }} />}
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:10, color:C.muted, lineHeight:1.55 }}>{d.wiki.extract}</div>
-            {d.wiki.url && (
-              <a href={d.wiki.url} target="_blank" rel="noopener noreferrer"
-                style={{ fontSize:9, color:ACTU_COLOR, textDecoration:'none', fontFamily:'DM Mono,monospace' }}>
-                ↗ l'article complet sur Wikipédia
-              </a>
-            )}
-          </div>
-        </div>
-      )}
     </CartoCard>
   );
 }
@@ -31095,12 +31077,10 @@ function ActuPanel() {
             le collapse principal, supprime la box et laisse le sous-menu »). Chaque carte
             garde donc son ancien titre de sous-collapse comme en-tête, et `CartoCard` fournit
             déjà le gabarit `[titre] [↗ site] … [↻]`.
-            ⚠ CONSÉQUENCE ASSUMÉE : les sous-collapses ne montaient leurs enfants qu'à
-            l'ouverture, donc une seule carte requêtait à la fois. À plat, ouvrir 🗺️
-            CARTOGRAPHIE lance les onze aperçus d'un coup (et charge Leaflet pour 🐾). C'est
-            le prix du déballage ; il reste borné par le cache module-level `_cartoSum`
-            (15 min, qui survit au repli) et par le fait que CE collapse-ci est
-            `defaultOpen={false}` — tant qu'on ne l'ouvre pas, rien ne part.
+            ⚠ Chaque fiche arrive REPLIÉE et ne demande rien tant qu'elle l'est (13.16.2 pour
+            les onze `CartoCard`, 13.17.6 pour 🐾 et son Leaflet) : ouvrir 🗺️ CARTOGRAPHIE ne
+            lance donc AUCUNE requête, il déroule douze titres. Le cache module-level
+            `_cartoSum` (15 min, qui survit au repli) fait le reste.
             ⚠ Ordre ALPHABÉTIQUE du titre, emoji ignoré. */}
         <StatsCollapse defaultOpen={false} color={ACTU_COLOR}
           title={<span>🗺️ CARTOGRAPHIE</span>}>
@@ -31108,11 +31088,8 @@ function ActuPanel() {
           <CartoInsee />
           <CartoQuakes />
           {/* La seule VRAIE carte : elle est à nous (Leaflet + tuiles GBIF), donc pas de
-              `CartoCard` — d'où l'en-tête posé ici pour qu'elle reste nommée comme les autres. */}
-          <div style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'9px 12px 11px' }}>
-            <div style={{ fontSize:11, fontWeight:700, color:ACTU_COLOR, letterSpacing:'0.05em', marginBottom:6 }}>🐾 ESPÈCES ANIMALES</div>
-            <EspeceMapSection />
-          </div>
+              `CartoCard` mais `CartoOwnCard`, qui lui donne le même repli qu'aux autres. */}
+          <CartoOwnCard title="🐾 ESPÈCES ANIMALES"><EspeceMapSection /></CartoOwnCard>
           <CartoWar />
           <CartoScene />
           <CartoPhoto />
