@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.18.0';
+const APP_VERSION = '13.18.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -17146,12 +17146,19 @@ function CollectionSub({ sub, data, onData }) {
   // ⚠ Déclaré APRÈS `list` (piège 2) : un hook à tableau de deps placé au-dessus des
   // variables qu'il liste les figerait à `undefined`.
   const bulkView = isCardSub(sub.id);
-  const [openSets, setOpenSets] = React.useState({});   // extension dépliée (clé = code)
+  // ⚠ ACCORDÉON (13.18.1, demande utilisateur) : UNE seule extension ouverte à la fois — en
+  // ouvrir une referme celle qui l'était. C'est aussi ce qui garantit qu'au plus un catalogue
+  // de cartes manquantes est lu à la fois.
+  const [openSet, setOpenSet] = React.useState(null);   // clé de l'extension dépliée
+  const [missOn, setMissOn] = React.useState(_cardMissOn);
+  const chooseMiss = v => { _cardMissOn = v; setMissOn(v); };
   const [shownBy, setShownBy] = React.useState({});     // pagination, PAR extension
   const [showNote, setShowNote] = React.useState(false);
   const [impMsg, setImpMsg] = React.useState('');       // bilan d'un ajout d'extension
   const [setRun, setSetRun] = React.useState(null);     // extension en cours de versement
   React.useEffect(() => { setShownBy({}); }, [q]);
+  const [missShown, setMissShown] = React.useState(COLL_PAGE);
+  React.useEffect(() => { setMissShown(COLL_PAGE); }, [openSet, missOn]);
   // ⚠ UNE SEULE BARRE, DEUX MÉTIERS : ce qu'on tape FILTRE la collection en direct (local,
   // instantané), et ⏎ va chercher au CATALOGUE (distant). Deux champs côte à côte — « filtrer »
   // et « chercher » — se confondaient à l'usage : on tapait dans l'un en attendant l'autre.
@@ -17168,6 +17175,10 @@ function CollectionSub({ sub, data, onData }) {
   const chooseSort = v => { _cardSort = v; setSortBy(v); };
   const groups = React.useMemo(() => bulkView ? cardGroups(sub.id, viewList, setsIdx, sortBy) : [],
     [bulkView, sub.id, viewList, setsIdx, sortBy]);
+  // ⚠ Déclaré APRÈS `groups` et `openSet` (piège 2). Une extension dont le catalogue n'a pas
+  // donné de total (`g.total` à 0) n'a pas de code exploitable : on ne demande rien pour elle.
+  const openGroup = groups.find(g => g.key === openSet) || null;
+  const miss = useCardMiss(sub.id, (missOn && openGroup && openGroup.total) ? openGroup.key : '', missOn);
   const inputStyle = { flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
     padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark' };
   const unit = sub.unit || 'élément';
@@ -17284,10 +17295,12 @@ function CollectionSub({ sub, data, onData }) {
   //   quand celle-ci est déjà le titre du groupe qui la contient : il reste le numéro et la
   //   cote. Un RÉSULTAT de recherche (`onEdit` absent) n'a pas de groupe au-dessus de lui —
   //   lui seul porte son extension, sinon on ignore laquelle on s'apprête à ajouter.
-  const card = (it, actions, onEdit) => {
+  // `hideSet` : sous une carte MANQUANTE, l'extension est déjà le titre du groupe au-dessus —
+  // la répéter cent fois n'apprend rien (même règle que pour les cartes possédées).
+  const card = (it, actions, onEdit, hideSet) => {
    const qty = it.qty || 1;
    const num = bulkView ? cardNum(sub.id, it) : '';
-   const setName = (bulkView && !onEdit) ? cardSetName(sub.id, it, setsIdx) : '';
+   const setName = (bulkView && !onEdit && !hideSet) ? cardSetName(sub.id, it, setsIdx) : '';
    const money = (
      <span style={{ color:COLLECTION_COLOR, fontWeight:700, flexShrink:0 }}>{collEurShort(it.price)}</span>
    );
@@ -17442,10 +17455,12 @@ function CollectionSub({ sub, data, onData }) {
                 ⚠ Totaux par extension indisponibles ({cardSets.err[sub.id]}) — seul le nombre de cartes possédées est affiché.
               </div>
             )}
-            {/* Le tri des extensions — % complété par défaut. Rendu seulement s'il y a
-                plusieurs extensions : sur une seule, un sélecteur d'ordre n'a pas de sens. */}
-            {groups.length > 1 && (
-              <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:1 }}>
+            {/* Tri des extensions (plusieurs extensions seulement — sur une seule, un ordre
+                n'a pas de sens) et, à droite du dernier bouton de tri, l'option
+                « manquantes », DÉCOCHÉE par défaut : c'est elle qui autorise la lecture du
+                catalogue de l'extension qu'on ouvre. */}
+            <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:1, flexWrap:'wrap' }}>
+              {groups.length > 1 && <>
                 <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>Trier :</span>
                 {CARD_SORTS.map(([v, lab]) => (
                   <button key={v} type="button" onClick={() => chooseSort(v)}
@@ -17455,16 +17470,28 @@ function CollectionSub({ sub, data, onData }) {
                       border:`1px solid ${sortBy === v ? COLLECTION_COLOR + '88' : C.border}`,
                       color: sortBy === v ? COLLECTION_COLOR : C.dim }}>{lab}</button>
                 ))}
-              </div>
-            )}
+              </>}
+              <button type="button" onClick={() => chooseMiss(!missOn)}
+                title="Afficher en grisé les cartes de l'extension OUVERTE que tu ne possèdes pas. Le catalogue n'est lu que pour cette extension-là."
+                style={{ fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', borderRadius:7,
+                  padding:'3px 8px', cursor:'pointer',
+                  background: missOn ? `${COLLECTION_COLOR}22` : 'none',
+                  border:`1px solid ${missOn ? COLLECTION_COLOR + '88' : C.border}`,
+                  color: missOn ? COLLECTION_COLOR : C.dim }}>{missOn ? '☑' : '☐'} Manquantes</button>
+            </div>
             {groups.map(g => {
               const forced = !!q.trim() || groups.length === 1;
-              const on  = Object.prototype.hasOwnProperty.call(openSets, g.key) ? openSets[g.key] : forced;
+              const on  = forced || openSet === g.key;
               const lim = shownBy[g.key] || COLL_PAGE;
               const rest = g.items.length - lim;
+              // Les numéros DÉJÀ possédés de cette extension — la clé de « il me manque quoi ».
+              const owned = on && missOn ? new Set(g.items.map(it => cardNum(sub.id, it)).filter(Boolean)) : null;
+              const missing = (on && missOn && miss.rows && openSet === g.key)
+                ? miss.rows.filter(r => { const n = cardNum(sub.id, r); return n && !owned.has(n); })
+                : null;
               return (
                 <div key={g.key}>
-                  <button type="button" onClick={() => setOpenSets(o => ({ ...o, [g.key]: !on }))}
+                  <button type="button" onClick={() => setOpenSet(o => (o === g.key ? null : g.key))}
                     title={g.total ? `${g.owned} numéro${g.owned > 1 ? 's' : ''} sur ${g.total}` : `${g.owned} carte${g.owned > 1 ? 's' : ''}`}
                     style={{ display:'flex', alignItems:'center', gap:9, width:'100%', textAlign:'left',
                       background: on ? `${COLLECTION_COLOR}14` : C.surface,
@@ -17492,6 +17519,40 @@ function CollectionSub({ sub, data, onData }) {
                         ↓ Afficher {Math.min(COLL_PAGE, rest)} de plus ({rest} restante{rest > 1 ? 's' : ''})
                       </button>
                     )}
+                    {/* ── CE QUI MANQUE, en grisé (option active + extension ouverte) ────── */}
+                    {missOn && openSet === g.key && g.total > 0 && <>
+                      {miss.busy && (
+                        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:7 }}>⏳ Lecture du catalogue de l'extension…</div>
+                      )}
+                      {miss.err && (
+                        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', marginTop:7, lineHeight:1.5 }}>
+                          ⚠ Cartes manquantes indisponibles ({miss.err}) — ce que tu possèdes reste affiché.
+                        </div>
+                      )}
+                      {missing && missing.length > 0 && <>
+                        <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.1em',
+                          textTransform:'uppercase', color:C.dim, marginTop:9 }}>
+                          Il te manque {missing.length} carte{missing.length > 1 ? 's' : ''}
+                        </div>
+                        {/* ⚠ Grisées ET non cliquables : ce ne sont pas des fiches de la
+                            collection, il n'y a rien à éditer derrière. */}
+                        <div className="coll-grid" style={{ marginTop:6, opacity:0.45, filter:'grayscale(0.85)' }}>
+                          {missing.slice(0, missShown).map(r => card(r, null, null, true))}
+                        </div>
+                        {missing.length > missShown && (
+                          <button type="button" onClick={() => setMissShown(v => v + COLL_PAGE)}
+                            style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.dim,
+                              fontSize:10, fontWeight:700, padding:'5px 10px', marginTop:6, cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+                            ↓ Afficher {Math.min(COLL_PAGE, missing.length - missShown)} manquante(s) de plus
+                          </button>
+                        )}
+                      </>}
+                      {missing && missing.length === 0 && (
+                        <div style={{ fontSize:9.5, color:COLLECTION_COLOR, fontWeight:700, marginTop:7 }}>
+                          ✓ Extension complète — il ne te manque aucun numéro.
+                        </div>
+                      )}
+                    </>}
                   </>}
                 </div>
               );
@@ -19049,6 +19110,58 @@ function cardSetOf(subId, it, idx) {
 // jamais à 0 %, qui se lirait comme « rien de cette extension ».
 const CARD_SORTS = [['pct', '% complété'], ['alpha', 'A → Z']];
 let _cardSort = 'pct';   // survit au repli du collapse, sans occuper de clé de stockage
+// ── 🕳️ LES CARTES QUI MANQUENT (13.18.1, demande utilisateur) ────────────────────
+// Une extension dépliée ne montrait que ce qu'on POSSÈDE : on ne voyait pas le trou. Le
+// catalogue complet est donc lu à la demande et les numéros absents rendus en grisé.
+// ⚠ DÉCOCHÉ PAR DÉFAUT, et lu pour la SEULE extension ouverte : une extension Magic, c'est
+// jusqu'à cinq pages Scryfall — le faire pour toutes celles qu'on possède serait ingérable.
+// C'est aussi pour ça que les extensions deviennent un ACCORDÉON : une seule ouverte à la
+// fois, donc au plus un catalogue en vol.
+// ⚠ Cache AU NIVEAU MODULE (même motif que `_cardSets`) : replier puis rouvrir ne redemande
+// rien, et le repli du collapse ne perd pas la lecture.
+let _cardMissOn = false;
+const _cardMiss = { map:{}, busy:{}, err:{}, subs:new Set() };
+function cardMissPublish() { for (const f of _cardMiss.subs) { try { f(); } catch {} } }
+const cardMissKey = (subId, setKey) => subId + '|' + setKey;
+// Conversion d'une carte Scryfall — même forme que `magicSearch`, plus le NUMÉRO, qui est
+// ce qui permet de dire « je l'ai / je ne l'ai pas ».
+function mtgSetCardRow(c) {
+  if (!c || !c.id) return null;
+  const face = (c.image_uris ? c : (Array.isArray(c.card_faces) ? c.card_faces[0] : null)) || {};
+  const eur = c.prices && (c.prices.eur || c.prices.eur_foil);
+  return { id: 'mtg:' + c.id, name: String(c.name || ''),
+    sub: [c.set_name, c.collector_number && `n°${c.collector_number}`, c.rarity].filter(Boolean).join(' · '),
+    img: (face.image_uris && (face.image_uris.small || face.image_uris.normal)) || '',
+    price: eur ? parseFloat(eur) : null,
+    url: (c.purchase_uris && c.purchase_uris.cardmarket) || c.scryfall_uri || '',
+    meta: { set: c.set_name || '', setId: String(c.set || ''), num: String(c.collector_number || ''),
+            rarity: c.rarity || '' } };
+}
+async function cardMissLoad(subId, setKey) {
+  const k = cardMissKey(subId, setKey);
+  if (_cardMiss.map[k] || _cardMiss.busy[k]) return;
+  _cardMiss.busy[k] = true; cardMissPublish();
+  try {
+    const rows = subId === 'magic'
+      ? (await mtgSetFetchCards(setKey)).map(mtgSetCardRow).filter(r => r && r.name)
+      : await pokeSetCards(setKey);
+    if (!rows.length) throw new Error('catalogue vide');
+    _cardMiss.map[k] = rows; _cardMiss.err[k] = '';
+  } catch (e) { _cardMiss.err[k] = String((e && e.message) || e) || 'Catalogue injoignable.'; }
+  finally { _cardMiss.busy[k] = false; cardMissPublish(); }
+}
+// Re-rend l'abonné à chaque changement du magasin, et déclenche la lecture quand une
+// extension est ouverte AVEC l'option active.
+function useCardMiss(subId, setKey, active) {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => {
+    _cardMiss.subs.add(bump);
+    return () => { _cardMiss.subs.delete(bump); };
+  }, []);
+  React.useEffect(() => { if (active && setKey) cardMissLoad(subId, setKey); }, [subId, setKey, active]);
+  const k = setKey ? cardMissKey(subId, setKey) : '';
+  return { rows: (k && _cardMiss.map[k]) || null, busy: !!(k && _cardMiss.busy[k]), err: (k && _cardMiss.err[k]) || '' };
+}
 function cardGroups(subId, list, idx, sort) {
   const map = new Map();
   for (const it of list) {
