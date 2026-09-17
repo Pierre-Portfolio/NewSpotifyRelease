@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.19.2';
+const APP_VERSION = '13.19.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29371,16 +29371,25 @@ async function cartoFetchWater() {
 // Une ligne = un lieu. Repliée elle ne montre QUE la conclusion ; dépliée, tout ce que le
 // dernier prélèvement publié contient. L'état d'ouverture est local et volontairement NON
 // mémorisé : c'est un geste de lecture, pas un réglage.
-function CartoWaterRow({ x, first }) {
+// ⚠ Ici le clic fait DEUX choses (13.19.3) : il déplie le détail du prélèvement, comme avant,
+// et il désigne la ville sur la carte. Un second bouton « 📍 » aurait doublé chaque ligne pour
+// un geste qui veut dire la même chose — « c'est de celle-là que je parle ».
+function CartoWaterRow({ x, first, on, onPick }) {
   const [open, setOpen] = React.useState(false);
   const st = x.d ? waterState(x.d.concl) : { label:'⚠ non lu', color:'#e0a040' };
+  // ⚠ Piège 3 : le raccourci `padding` et `paddingLeft`/`paddingRight` ne peuvent pas
+  // cohabiter (React supprime les longues au re-rendu) — tout est écrit en longues.
   return (
-    <div style={{ padding:'6px 0 0', borderTop: first ? 'none' : `1px solid ${C.border}`, marginTop: first ? 0 : 6 }}>
-      <button onClick={() => x.d && setOpen(o => !o)} type="button"
-        style={{ width:'100%', background:'none', border:'none', padding:0, cursor: x.d ? 'pointer' : 'default',
+    <div style={{ paddingTop:6, paddingBottom: on ? 4 : 0,
+      paddingLeft: on ? 6 : 0, paddingRight: on ? 6 : 0,
+      borderTop: first ? 'none' : `1px solid ${C.border}`, marginTop: first ? 0 : 6,
+      marginLeft: on ? -6 : 0, marginRight: on ? -6 : 0,
+      background: on ? `${CARTO_PICK}14` : 'none', borderRadius: on ? 8 : 0 }}>
+      <button onClick={() => { if (x.d) setOpen(o => !o); if (onPick) onPick(); }} type="button"
+        style={{ width:'100%', background:'none', border:'none', padding:0, cursor:'pointer',
           display:'flex', alignItems:'baseline', justifyContent:'space-between', gap:8, color:C.text, fontFamily:'inherit', textAlign:'left' }}>
         <span style={{ fontSize:11, fontWeight:600, minWidth:0, wordBreak:'break-word' }}>
-          {x.d && <span style={{ color:C.dim, marginRight:4, fontSize:9 }}>{open ? '▾' : '▸'}</span>}{x.name}
+          {x.d && <span style={{ color:C.dim, marginRight:4, fontSize:9 }}>{open ? '▾' : '▸'}</span>}{on ? '📍 ' : ''}{x.name}
         </span>
         <span style={{ textAlign:'right', flexShrink:0, fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:st.color }}>{st.label}</span>
       </button>
@@ -29468,13 +29477,43 @@ function CartoCitySearch({ city, placeholder }) {
     </div>
   );
 }
-function CartoWaterAirMap({ rows, focus }) {
+// ── 📍 TOUCHER UNE VILLE LA DÉSIGNE SUR LA CARTE (13.19.3, demande utilisateur) ───
+// Les trois fiches qui partagent cette carte (💧 Eau, 🌫️ Air, 🤧 Pollens) partagent aussi le
+// geste : toucher une ligne agrandit son point, le passe en `CARTO_PICK` et recadre la carte
+// dessus — exactement ce que fait déjà 🎬 Tournages. Retoucher la même ligne annule.
+// ⚠ C'est la SÉLECTION qui change de couleur, pas la mesure : le chiffre de la ligne garde
+// la couleur de son verdict, sinon toucher un lieu orange le ferait passer pour « bon ».
+// ⚠ Pas d'effet de nettoyage sur `pick` : une ville retirée ou une recharge laisse une clé
+// qui ne correspond plus à rien — aucune ligne n'est alors allumée et `focus` est nul, ce
+// qui est exactement l'état voulu. Un effet ne ferait que retourner le rendu.
+function useCartoPick(rows) {
+  const [pick, setPick] = React.useState(null);
+  const row = (rows || []).find(r => r && r.key === pick) || null;
+  return { pick, toggle: k => setPick(p => (p === k ? null : k)),
+    focus: (row && isFinite(row.lat) && isFinite(row.lon)) ? [row.lat, row.lon] : null };
+}
+function CartoPickRow({ on, onClick, children }) {
+  return (
+    <div onClick={onClick} style={{ cursor:'pointer', background: on ? `${CARTO_PICK}14` : 'none',
+      borderRadius: on ? 8 : 0, margin: on ? '0 -6px' : 0, padding: on ? '0 6px 4px' : 0 }}>{children}</div>
+  );
+}
+// ⚠ Le point choisi passe en BLANC, et non en `CARTO_PICK` : l'orange de `CARTO_PICK` est
+// EXACTEMENT celui de la bande « Dégradé » / « Modéré » de ces trois cartes — un lieu choisi
+// aurait pris la couleur d'un verdict. Même raison que le point blanc de 🚇 Transport.
+const CARTO_PICK_DOT = '#ffffff';
+function CartoWaterAirMap({ rows, focus, pick }) {
   const pts = (rows || []).filter(r => isFinite(r.lat) && isFinite(r.lon));
   if (!pts.length) return null;
   return (
     <div style={{ marginTop:9 }}>
       <CartoMiniMap fit zoom={11} height={180} focus={focus || null} focusZoom={12}
-        markers={pts.map(r => ({ lat:r.lat, lon:r.lon, color:r.color, r:9, label:r.label }))} />
+        markers={pts.map(r => ({ lat:r.lat, lon:r.lon,
+          color: r.key === pick ? CARTO_PICK_DOT : r.color,
+          r: r.key === pick ? 13 : 9, label:r.label }))} />
+      <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4 }}>
+        Touche une ville ci-dessus : son point passe en blanc, s'agrandit, et la carte s'y rend.
+      </div>
     </div>
   );
 }
@@ -29485,15 +29524,17 @@ function CartoWater() {
     d: await cartoFetchWaterOne(loc), err:'' }));
   const d = st.data;
   const rows = d ? (city.st.row ? [...d.list, city.st.row] : d.list) : [];
+  const sel = useCartoPick(rows);   // ⚠ après `rows` (piège 2)
   return (
     <CartoCard title="💧 QUALITÉ DE L'EAU" site={CARTO_SITES_BY.water} st={st} card={card} onReload={load}>
       <CartoCitySearch city={city} placeholder="Chercher une autre commune…" />
-      {rows.map((x, i) => <CartoWaterRow key={x.key} x={x} first={i === 0} />)}
+      {rows.map((x, i) => <CartoWaterRow key={x.key} x={x} first={i === 0}
+        on={sel.pick === x.key} onPick={() => sel.toggle(x.key)} />)}
       {/* LA CARTE, SOUS les villes (demande utilisateur) : la couleur du marqueur est celle du
           verdict — un lieu non lu reste ORANGE, jamais vert par défaut. La ville cherchée y
           entre comme les autres, et la carte se rend dessus. */}
-      {d && <CartoWaterAirMap
-        focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null}
+      {d && <CartoWaterAirMap pick={sel.pick}
+        focus={sel.focus || (city.st.row ? [city.st.row.lat, city.st.row.lon] : null)}
         rows={rows.map(x => {
           const w = x.d ? waterState(x.d.concl) : { label:'⚠ non lu', color:'#e0a040' };
           return { key:x.key, lat:x.lat, lon:x.lon, color:w.color, label:`${x.name} — ${w.label}` };
@@ -29546,22 +29587,26 @@ function CartoAir() {
   const city = useCartoCity(async loc => (await cartoAirRows([loc]))[0]);
   const d = st.data;
   const rows = d ? (city.st.row ? [...d.list, city.st.row] : d.list) : [];
+  const sel = useCartoPick(rows);   // ⚠ après `rows` (piège 2)
   return (
     <CartoCard title="🌫️ QUALITÉ DE L'AIR" site={CARTO_SITES_BY.air} st={st} card={card} onReload={load}>
       <CartoCitySearch city={city} placeholder="Chercher une autre commune…" />
       {rows.map((x, i) => {
         const b = aqiBand(x.aqi);
+        const on = sel.pick === x.key;
         return (
-          <CartoRow key={x.key} first={i === 0} label={x.name} value={x.aqi != null ? cartoNum(x.aqi) : '—'} color={b[1]}
-            sub={[b[2],
-                  x.pm25 != null ? 'PM2,5 ' + cartoNum(x.pm25, 1) : null,
-                  x.pm10 != null ? 'PM10 ' + cartoNum(x.pm10, 1) : null,
-                  x.no2  != null ? 'NO₂ ' + cartoNum(x.no2, 0) : null,
-                  x.o3   != null ? 'O₃ ' + cartoNum(x.o3, 0) : null].filter(Boolean).join(' · ')} />
+          <CartoPickRow key={x.key} on={on} onClick={() => sel.toggle(x.key)}>
+            <CartoRow first={i === 0} label={on ? `📍 ${x.name}` : x.name} value={x.aqi != null ? cartoNum(x.aqi) : '—'} color={b[1]}
+              sub={[b[2],
+                    x.pm25 != null ? 'PM2,5 ' + cartoNum(x.pm25, 1) : null,
+                    x.pm10 != null ? 'PM10 ' + cartoNum(x.pm10, 1) : null,
+                    x.no2  != null ? 'NO₂ ' + cartoNum(x.no2, 0) : null,
+                    x.o3   != null ? 'O₃ ' + cartoNum(x.o3, 0) : null].filter(Boolean).join(' · ')} />
+          </CartoPickRow>
         );
       })}
-      {d && <CartoWaterAirMap
-        focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null}
+      {d && <CartoWaterAirMap pick={sel.pick}
+        focus={sel.focus || (city.st.row ? [city.st.row.lat, city.st.row.lon] : null)}
         rows={rows.map(x => ({ key:x.key, lat:x.lat, lon:x.lon,
           color: aqiBand(x.aqi)[1],
           label: `${x.name} — indice ${x.aqi != null ? cartoNum(x.aqi) : '—'} · ${aqiBand(x.aqi)[2]}` }))} />}
@@ -30250,24 +30295,31 @@ function CartoSante() {
   const city = useCartoCity(async loc => (await cartoPollenRows([loc]))[0]);
   const d = st.data;
   const rows = d ? (city.st.row ? [...d.list, city.st.row] : d.list) : [];
+  // ⚠ Déclaré APRÈS `rows` (piège 2) : le hook le lit pour retrouver la ligne choisie.
+  const sel = useCartoPick(rows);
   return (
     <CartoCard title="🤧 POLLENS & ALLERGIES" site={CARTO_SITES_BY.sante} st={st} card={card} onReload={load}>
       <CartoCitySearch city={city} placeholder="Chercher une autre commune…" />
       {rows.map((x, i) => {
         const b = pollenBand(x.pire ? x.pire.v : null);
+        const on = sel.pick === x.key;
         return (
-          <CartoRow key={x.key} first={i === 0} label={x.name}
-            value={x.pire ? cartoNum(x.pire.v, 1) : '—'} color={b[1]}
-            sub={x.pire
-              ? [`${b[2]} · ${x.pire.lab}`,
-                 ...x.autres.filter(a => a.v > 0).map(a => `${a.lab} ${cartoNum(a.v, 1)}`)].join(' · ')
-              : 'aucune mesure pour ce lieu'} />
+          <CartoPickRow key={x.key} on={on} onClick={() => sel.toggle(x.key)}>
+            <CartoRow first={i === 0} label={on ? `📍 ${x.name}` : x.name}
+              value={x.pire ? cartoNum(x.pire.v, 1) : '—'} color={b[1]}
+              sub={x.pire
+                ? [`${b[2]} · ${x.pire.lab}`,
+                   ...x.autres.filter(a => a.v > 0).map(a => `${a.lab} ${cartoNum(a.v, 1)}`)].join(' · ')
+                : 'aucune mesure pour ce lieu'} />
+          </CartoPickRow>
         );
       })}
       {/* LA CARTE, après les villes (demande utilisateur) : même gabarit que 💧 Eau et 🌫️ Air,
-          couleur = le risque du pollen le plus présent, et la ville cherchée s'y ajoute. */}
-      {d && <CartoWaterAirMap
-        focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null}
+          couleur = le risque du pollen le plus présent, et la ville cherchée s'y ajoute.
+          ⚠ Le recadrage de la ligne TOUCHÉE passe avant celui de la ville cherchée : le
+          dernier geste gagne, sinon toucher une ligne renverrait la carte sur la recherche. */}
+      {d && <CartoWaterAirMap pick={sel.pick}
+        focus={sel.focus || (city.st.row ? [city.st.row.lat, city.st.row.lon] : null)}
         rows={rows.map(x => {
         const b = pollenBand(x.pire ? x.pire.v : null);
         return { key:x.key, lat:x.lat, lon:x.lon, color:b[1],
