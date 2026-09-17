@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.15.9';
+const APP_VERSION = '13.16.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28557,11 +28557,140 @@ const cartoWhen = ts => {
 const cartoNum = (v, dec) => (v == null || !isFinite(v)) ? '—'
   : Number(v).toLocaleString('fr-FR', { minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0 });
 
+// ── 🗺️ LA PETITE CARTE DES FICHES (13.16.0) ──────────────────────────────────────
+// Chaque fiche de Cartographie parle d'un LIEU (une commune, trois villes, un réseau, un
+// ovale auroral) et ne montrait que des chiffres. `CartoMiniMap` est la carte Leaflet
+// commune à toutes : mêmes tuiles sombres que Maps, même chargement LAZY (`loadLeaflet`).
+// ⚠ `scrollWheelZoom:false` : ces cartes vivent DANS un panneau qui défile — la molette
+// doit continuer à faire défiler la page, sinon on reste piégé sur la carte au passage.
+// ⚠ `markers` et `overlay` sont relus à CHAQUE rendu : le tableau est reconstruit par
+// l'appelant, donc la comparaison porte sur une SIGNATURE (`sig`) et non sur la référence —
+// sans elle, la surcouche serait rebâtie en boucle (et la carte clignoterait).
+// ⚠ Instance détruite au démontage : un collapse replié démonte ses enfants (piège 5).
+const CARTO_MAP_H = 190;
+function cartoMarkSig(markers) {
+  return (markers || []).map(m => [m.lat, m.lon, m.label, m.color, m.r].join('~')).join('|');
+}
+function CartoMiniMap({ markers, center, zoom, fit, height, overlay, overlaySig }) {
+  const [status, setStatus] = React.useState(window.L ? 'ready' : 'loading');
+  const divRef = React.useRef(null), mapRef = React.useRef(null), layRef = React.useRef(null);
+  const sig = cartoMarkSig(markers) + '#' + (overlaySig || '');
+  React.useEffect(() => {
+    let dead = false;
+    loadLeaflet().then(() => { if (!dead) setStatus('ready'); }).catch(() => { if (!dead) setStatus('error'); });
+    return () => { dead = true; };
+  }, []);
+  React.useEffect(() => {
+    if (status !== 'ready' || !divRef.current || mapRef.current) return;
+    const map = L.map(divRef.current, { zoomControl: true, scrollWheelZoom: false, attributionControl: false });
+    map.setView(center || [46.6, 2.4], zoom == null ? 5 : zoom);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      { maxZoom: 16, className: 'maps-dark-tiles', attribution: '© OpenStreetMap' }).addTo(map);
+    mapRef.current = map;
+    setTimeout(() => { try { map.invalidateSize(); } catch {} }, 80);
+  }, [status]);
+  React.useEffect(() => () => {
+    try { if (mapRef.current) mapRef.current.remove(); } catch {}
+    mapRef.current = null; layRef.current = null;
+  }, []);
+  // Contenu : marqueurs + surcouche, entièrement remplacés dès que la signature change.
+  React.useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (layRef.current) { try { map.removeLayer(layRef.current); } catch {} layRef.current = null; }
+    const grp = L.layerGroup().addTo(map);
+    layRef.current = grp;
+    for (const m of (markers || [])) {
+      if (!isFinite(m.lat) || !isFinite(m.lon)) continue;
+      const c = L.circleMarker([m.lat, m.lon], { radius: m.r || 7, color: m.color || ACTU_COLOR,
+        weight: 2, fillColor: m.color || ACTU_COLOR, fillOpacity: 0.45 }).addTo(grp);
+      if (m.label) c.bindPopup(mapsEsc(m.label));   // ⚠ jamais de HTML brut dans un popup
+    }
+    if (overlay) { try { overlay(grp, map); } catch {} }
+    // Cadrage : sur les marqueurs quand on le demande, sinon la vue posée à la création.
+    if (fit) {
+      const pts = (markers || []).filter(m => isFinite(m.lat) && isFinite(m.lon)).map(m => [m.lat, m.lon]);
+      if (pts.length === 1) map.setView(pts[0], zoom == null ? 12 : zoom);
+      else if (pts.length > 1) { try { map.fitBounds(L.latLngBounds(pts).pad(0.25)); } catch {} }
+    }
+    setTimeout(() => { try { map.invalidateSize(); } catch {} }, 60);
+  }, [status, sig]);
+  if (status === 'error') return (
+    <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ Carte indisponible (Leaflet n'a pas pu être chargé).</div>
+  );
+  return (
+    <div ref={divRef} style={{ height: height || CARTO_MAP_H, width:'100%', borderRadius:9,
+      overflow:'hidden', border:`1px solid ${C.border}`, background:'#0b0b0b' }} />
+  );
+}
+
 // ── 🌌 AURORES BORÉALES — indice Kp (NOAA SWPC) ───────────────────────────────────
 // Le site affichait une IMAGE de l'oval auroral ; ce qui décide vraiment « est-ce que je
 // peux en voir ce soir », c'est l'indice Kp planétaire — 0 (calme) à 9 (orage extrême) —
 // et c'est le seul chiffre à regarder depuis la France (latitude ≈ 49°).
 const AURORA_KP_URL = 'https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json';
+// ── 🗺️ L'OVALE AURORAL EN DIRECT (13.16.0, demande utilisateur) ──────────────────
+// Un Kp ne DIT pas où regarder : l'utilisateur veut « une carte plate avec des zones vertes
+// là où il y a des aurores actuellement ». C'est exactement ce que publie le modèle OVATION
+// du NOAA — une probabilité de voir une aurore, 0 à 100, pour CHAQUE degré de la planète.
+// ⚠ Ce n'est pas une photo du ciel mais un nowcast : la carte le dit, avec son heure.
+const AURORA_OVATION_URL = 'https://services.swpc.noaa.gov/json/ovation_aurora_latest.json';
+const AURORA_MIN_PROB = 2;                  // en dessous, c'est le plancher du modèle
+const AURORA_MERC_LAT = 85.0511287798066;   // bord du monde en Mercator sphérique
+// La grille brute (65 160 triplets) pèse près de 2 Mo en mémoire et serait gardée 15 min par
+// `_cartoSum` : elle est rendue en IMAGE tout de suite, et c'est l'image qu'on garde.
+// ⚠ L'image est DÉJÀ PROJETÉE EN MERCATOR : `L.imageOverlay` étire son contenu linéairement
+// dans la projection de la carte — une image équirectangulaire se poserait aux mauvaises
+// latitudes (l'ovale auroral tomberait des centaines de kilomètres trop au sud).
+function auroraImage(coords) {
+  if (!Array.isArray(coords) || !coords.length) return null;
+  const g = new Uint8Array(360 * 181);
+  let hi = 0;
+  for (const c of coords) {
+    if (!c || c.length < 3) continue;
+    const lon = ((Math.round(c[0]) % 360) + 360) % 360;
+    const lat = Math.round(c[1]);
+    if (!isFinite(lat) || lat < -90 || lat > 90) continue;
+    const v = Math.max(0, Math.min(100, Math.round(c[2])));
+    g[lon * 181 + (lat + 90)] = v;
+    if (v > hi) hi = v;
+  }
+  if (!hi) return null;                     // grille toute à zéro = rien à montrer
+  const N = 512;
+  const cv = document.createElement('canvas'); cv.width = N; cv.height = N;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return null;
+  const im = ctx.createImageData(N, N), d = im.data;
+  for (let y = 0; y < N; y++) {
+    const lat = Math.round(Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 0.5) / N))) * 180 / Math.PI);
+    const row = Math.max(0, Math.min(180, lat + 90));
+    for (let x = 0; x < N; x++) {
+      const lon = ((Math.round((x + 0.5) / N * 360) % 360) + 360) % 360;
+      const v = g[lon * 181 + row];
+      const o = (y * N + x) * 4;
+      if (v < AURORA_MIN_PROB) { d[o + 3] = 0; continue; }
+      const t = Math.min(1, v / 45);
+      d[o]     = Math.round(40 + 200 * t * t);    // vert franc → jaune quand ça monte
+      d[o + 1] = 240;
+      d[o + 2] = Math.round(110 * (1 - t));
+      d[o + 3] = Math.round(70 + 165 * Math.min(1, v / 25));
+    }
+  }
+  ctx.putImageData(im, 0, 0);
+  return { url: cv.toDataURL('image/png'), hi };
+}
+// ⚠ L'ovale est un BONUS : son échec ne doit pas emporter le Kp, qui est l'information
+// principale de la fiche (d'où le `catch` qui rend `null` au lieu de jeter).
+async function auroraOval() {
+  try {
+    const r = await fetchTimeout(AURORA_OVATION_URL, 20000, { cache:'no-store' });
+    if (!r || !r.ok) return null;
+    const j = await r.json();
+    const img = auroraImage(j && j.coordinates);
+    if (!img) return null;
+    return { url: img.url, hi: img.hi, at: j['Observation Time'] || j['Forecast Time'] || null };
+  } catch { return null; }
+}
 // Seuil Kp → ce que ça veut dire POUR NOUS. Trié décroissant, premier seuil atteint gagne.
 const AURORA_LEVELS = [
   [8, '#e0407a', 'Orage sévère à extrême', 'aurores possibles jusqu’au sud de la France'],
@@ -28574,6 +28703,8 @@ const AURORA_LEVELS = [
 ];
 const auroraLevel = kp => AURORA_LEVELS.find(l => kp >= l[0]) || AURORA_LEVELS[AURORA_LEVELS.length - 1];
 async function cartoFetchAurora() {
+  // Les deux partent ensemble : l'ovale est lourd (une grille au degré), le Kp est immédiat.
+  const oval = auroraOval();
   const r = await fetchTimeout(AURORA_KP_URL, 12000, { cache:'no-store' });
   if (!r.ok) throw new Error('NOAA a répondu ' + r.status + '.');
   const rows = await r.json();
@@ -28610,7 +28741,7 @@ async function cartoFetchAurora() {
   const next = pts.filter(p => p.t > now && p.t <= now + 72 * 3600000);
   let peak = null;
   for (const p of next) if (!peak || p.kp > peak.kp) peak = p;
-  return { cur, mesure: !!(cur && cur.obs), peak, n: pts.length, at: Date.now() };
+  return { cur, mesure: !!(cur && cur.obs), peak, n: pts.length, oval: await oval, at: Date.now() };
 }
 // Kp est publié en entiers dans ce flux : afficher « 5,00 » suggérait une précision qui
 // n'existe pas. On ne met des décimales que s'il y en a vraiment.
@@ -28623,6 +28754,22 @@ function CartoAurora() {
     <CartoCard title="🌌 AURORES BORÉALES" site={CARTO_SITES_BY.aurora} st={st} onReload={load}
       note="Kp = indice planétaire 0-9 de la perturbation du champ magnétique terrestre. Il faut Kp ≥ 6 pour espérer voir quelque chose depuis le nord de la France, et un ciel sans nuage ni lune.">
       {d && <>
+        {/* LA CARTE — zones vertes = probabilité de voir une aurore MAINTENANT (OVATION).
+            ⚠ Posée avant les chiffres : c'est elle qu'on vient regarder. */}
+        {d.oval
+          ? <div style={{ display:'flex', flexDirection:'column', gap:4, marginBottom:8 }}>
+              <CartoMiniMap height={220} center={[55, 0]} zoom={1} overlaySig={d.oval.url.length + '|' + (d.oval.at || '')}
+                overlay={grp => L.imageOverlay(d.oval.url,
+                  [[-AURORA_MERC_LAT, -180], [AURORA_MERC_LAT, 180]],
+                  { opacity: 0.72, interactive: false }).addTo(grp)} />
+              <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+                Plus c'est vert, plus l'aurore est probable au-dessus de ce point · pointe à {cartoNum(d.oval.hi)} %
+                {d.oval.at ? ' · relevé du ' + cartoWhen(Date.parse(d.oval.at)) : ''}
+              </div>
+            </div>
+          : <div style={{ fontSize:9.5, color:C.dim, fontStyle:'italic', marginBottom:8, lineHeight:1.5 }}>
+              La carte de l'ovale auroral (modèle OVATION du NOAA) n'a pas pu être lue — les chiffres ci-dessous, eux, viennent du flux Kp.
+            </div>}
         {d.cur
           ? <CartoRow first label="Maintenant" value={auroraKp(d.cur.kp)} color={lc[1]}
               sub={`${lc[2]} · ${lc[3]} · ${d.mesure ? 'relevé' : 'estimation'} de ${cartoWhen(d.cur.t)}`} />
