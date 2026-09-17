@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.4';
+const APP_VERSION = '13.16.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29447,6 +29447,37 @@ function CartoPhoto() {
 // le seul chemin depuis une page. L'origine directe est quand même en CSP : `corsFetchText`
 // tente le direct en dernier recours, et sans elle cette tentative serait bloquée en silence.
 const SPACE_BOXSCORE = 'https://celestrak.org/satcat/boxscore.php';
+// ── La carte de la fiche : un cercle par PAYS D'ORIGINE ──────────────────────────
+// ⚠ CE N'EST PAS UNE POSITION EN ORBITE, et la fiche le dit : le SATCAT ne publie pas de
+// position exploitable ici (il faudrait propager des TLE), mais il dit QUI a mis quoi
+// là-haut. C'est donc une carte thématique — un cercle posé sur le pays de lancement, large
+// comme le nombre d'objets encore en orbite.
+// ⚠ Seules coordonnées écrites en dur de tout Cartographie, et assumées : un pays n'a pas
+// d'API de centroïde, et celui d'une agence (ESA) n'aurait aucun sens géographique de toute
+// façon. Un intitulé non reconnu n'est PAS placé — il garde sa ligne, il perd son cercle.
+const SPACE_ORIGINS = [
+  [/united states|u\.?s\.?a|^us$/i,                'États-Unis',        39.8,  -98.6],
+  [/china|^prc$|people.s republic/i,               'Chine',             35.9,  104.2],
+  [/cis|soviet|ussr|russia/i,                      'Russie / CEI',      61.5,  105.3],
+  [/japan/i,                                       'Japon',             36.2,  138.3],
+  [/india/i,                                       'Inde',              22.4,   78.7],
+  [/european space agency|^esa$|european/i,        'Europe (ESA)',      48.9,    2.4],
+  [/france/i,                                      'France',            46.6,    2.4],
+  [/united kingdom|^uk$|britain/i,                 'Royaume-Uni',       54.0,   -2.0],
+  [/germany/i,                                     'Allemagne',         51.2,   10.4],
+  [/italy/i,                                       'Italie',            42.8,   12.6],
+  [/canada/i,                                      'Canada',            56.1, -106.3],
+  [/korea/i,                                       'Corée du Sud',      36.5,  127.9],
+  [/brazil/i,                                      'Brésil',           -14.2,  -51.9],
+  [/argentina/i,                                   'Argentine',        -38.4,  -63.6],
+  [/australia/i,                                   'Australie',        -25.3,  133.8],
+  [/israel/i,                                      'Israël',            31.0,   34.9],
+  [/spain/i,                                       'Espagne',           40.4,   -3.7],
+  [/turkey|t\u00fcrkiye/i,                          'Turquie',           39.0,   35.2],
+  [/indonesia/i,                                   'Indonésie',         -2.5,  118.0],
+  [/luxembourg/i,                                  'Luxembourg',        49.8,    6.1],
+];
+const spaceOrigin = nom => SPACE_ORIGINS.find(o => o[0].test(String(nom || '')));
 async function cartoFetchSpace() {
   const html = await corsFetchText(SPACE_BOXSCORE);
   if (!html) throw new Error('Celestrak injoignable (relais publics et accès direct).');
@@ -29474,9 +29505,14 @@ async function cartoFetchSpace() {
   const total = iTot >= 0 ? lignes[iTot] : lignes.reduce((a, l) => (
     { nom:'TOTAL (recomposé)', payl:a.payl + l.payl, deb:a.deb + l.deb, tot:a.tot + l.tot }
   ), { nom:'TOTAL (recomposé)', payl:0, deb:0, tot:0 });
-  const pays = lignes.filter((l, i) => i !== iTot && !/^total/i.test(l.nom))
-    .sort((a, b) => b.tot - a.tot).slice(0, 6);
-  return { total, pays, exact: iTot >= 0, at: Date.now() };
+  const tous = lignes.filter((l, i) => i !== iTot && !/^total/i.test(l.nom)).sort((a, b) => b.tot - a.tot);
+  const pays = tous.slice(0, 6);
+  // Tout ce qu'on sait PLACER, pas seulement le podium : la carte montre la répartition.
+  const carte = tous.map(l => {
+    const o = spaceOrigin(l.nom);
+    return o ? { nom:o[1], lat:o[2], lon:o[3], tot:l.tot, payl:l.payl, deb:l.deb } : null;
+  }).filter(Boolean);
+  return { total, pays, carte, exact: iTot >= 0, at: Date.now() };
 }
 function CartoSpace() {
   const [st, load, card] = useCartoSummary('space', cartoFetchSpace);
@@ -29486,6 +29522,31 @@ function CartoSpace() {
     <CartoCard title="🛰️ POLLUTION SPATIALE" site={CARTO_SITES_BY.space} st={st} card={card} onReload={load}
       note="Boxscore du catalogue SATCAT : tout ce qui est suivi au radar et encore en orbite, par pays d'origine. « Débris » regroupe les étages de fusée et les fragments — c'est la part qui ne sert plus à rien et qu'on ne peut pas piloter.">
       {d && <>
+        {/* LA CARTE (demande utilisateur) : un cercle par pays de lancement, large comme le
+            nombre d'objets encore en orbite. ⚠ Ce n'est PAS une position en orbite — c'est
+            dit sous la carte, sinon le cercle se lirait comme un nuage de débris au-dessus
+            du pays, ce qu'il n'est pas. */}
+        {d.carte && d.carte.length > 0 && (
+          <div style={{ marginBottom:8 }}>
+            <CartoMiniMap height={210} center={[28, 10]} zoom={1} overlaySig={'space' + d.carte.length + '|' + d.total.tot}
+              overlay={grp => {
+                const max = d.carte.reduce((m, x) => Math.max(m, x.tot), 0) || 1;
+                for (const x of d.carte) {
+                  // Rayon en RACINE du compte : c'est l'AIRE du cercle qui doit être
+                  // proportionnelle, sinon les États-Unis écrasent toute la carte.
+                  const r = 4 + 26 * Math.sqrt(x.tot / max);
+                  const part = x.tot ? (x.deb / x.tot) * 100 : 0;
+                  L.circleMarker([x.lat, x.lon], { radius:r, color:'#e05050', weight:1.5,
+                    fillColor:'#e05050', fillOpacity:0.28 })
+                    .bindPopup(mapsEsc(`${x.nom} — ${cartoNum(x.tot)} objets en orbite · ${cartoNum(x.payl)} satellites · ${cartoNum(x.deb)} débris (${cartoNum(part, 0)} %)`))
+                    .addTo(grp);
+                }
+              }} />
+            <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.5 }}>
+              Un cercle par pays de LANCEMENT, large comme ce qu'il a encore en orbite — ce n'est pas la position des objets, que le catalogue ne publie pas ici.
+            </div>
+          </div>
+        )}
         <CartoRow first label="Objets encore en orbite" value={cartoNum(d.total.tot)} color="#e05050"
           sub={`${cartoNum(d.total.payl)} satellites · ${cartoNum(d.total.deb)} débris et étages${d.exact ? '' : ' · total recomposé'}`} />
         {part != null && (
