@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.18.4';
+const APP_VERSION = '13.18.5';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29071,7 +29071,9 @@ function CartoQuakes() {
 // de la recherche.
 const GEOAPI_COMMUNES = 'https://geo.api.gouv.fr/communes';
 const CARTO_COMMUNE_DEFAUT = 'Massy';
-async function cartoSearchCommunes(q) {
+// ⚠ 13.18.5 — La LECTURE seule, sans enrichissement : c'est elle que l'auto-complétion
+// appelle à chaque frappe (l'altitude n'a rien à faire dans une liste de suggestions).
+async function cartoCommunesRaw(q) {
   const nom = String(q || '').trim();
   if (nom.length < 2) throw new Error('Tape au moins deux lettres.');
   // ⚠ `centre` n'est pas décoratif : c'est LUI qui permet à 📸 Lieux les plus photographiés
@@ -29101,9 +29103,14 @@ async function cartoSearchCommunes(q) {
       lon: coords ? coords[0] : null, lat: coords ? coords[1] : null };
   }).filter(Boolean);
   if (!list.length) throw new Error(`Aucune commune ne s'appelle « ${nom} ».`);
+  return list;
+}
+async function cartoSearchCommunes(q) {
+  const nom = String(q || '').trim();
+  const list = await cartoCommunesRaw(nom);
   // ⚠ ENRICHISSEMENT DE LA SEULE COMMUNE EN TÊTE : la recherche en rend jusqu'à huit, les
-  // enrichir toutes ferait seize requêtes pour sept lignes qu'on ne lit pas. Les deux
-  // sources sont facultatives — un échec laisse la fiche telle qu'elle était.
+  // enrichir toutes ferait huit requêtes pour sept lignes qu'on ne lit pas. La source est
+  // facultative — un échec laisse la fiche telle qu'elle était.
   const top = list[0];
   const alt = (top.lat != null && top.lon != null) ? await communeElevation(top.lat, top.lon) : null;
   return { q: nom, list, alt, at: Date.now() };
@@ -29126,15 +29133,79 @@ async function communeElevation(lat, lon) {
 // ⚠ 13.17.6 — LE RÉSUMÉ WIKIPÉDIA A ÉTÉ RETIRÉ (demande utilisateur) : la fiche redevient un
 // relevé de chiffres, et `communeWiki` avec lui — une requête pour un paragraphe qu'on ne lit
 // pas n'a pas à partir. Rien d'autre ne l'appelait.
+// ── 🔤 AUTO-COMPLÉTION DES COMMUNES (13.18.5, demande utilisateur) ───────────────
+// « boulogne » doit proposer « Boulogne-Billancourt » : geo.api.gouv.fr rend déjà les huit
+// meilleures correspondances, il suffisait de les MONTRER.
+// ⚠ Débounce obligatoire : sans lui, chaque frappe partait en requête. Et un jeton (`run`)
+// écarte une réponse lente arrivée APRÈS une saisie plus récente — sinon la liste affichée
+// ne correspondrait plus à ce qui est tapé.
+// ⚠ Le menu se pose en `position:absolute` avec un z-index AU-DESSUS des couches Leaflet
+// (qui montent à 800) : ces barres sont juste au-dessus d'une carte, il passerait dessous.
+const SUGGEST_MIN   = 3;      // en dessous, tout le pays répond
+const SUGGEST_DELAY = 300;    // ms
+const SUGGEST_MAX   = 6;
+function useCommuneSuggest(q) {
+  const [list, setList] = React.useState([]);
+  const [hidden, setHidden] = React.useState(true);
+  const run = React.useRef(0);
+  // ⚠ Le nom CHOISI est mémorisé : le choisir remplit le champ, donc `q` change, donc l'effet
+  // repart — et le menu se rouvrait aussitôt sur la commune qu'on venait de retenir.
+  const taken = React.useRef('');
+  React.useEffect(() => {
+    const nom = String(q || '').trim();
+    if (nom.length < SUGGEST_MIN || nom === taken.current) { setList([]); return; }
+    const tok = ++run.current;
+    const t = setTimeout(() => {
+      cartoCommunesRaw(nom)
+        .then(l => { if (tok === run.current) { setList(l.slice(0, SUGGEST_MAX)); setHidden(false); } })
+        .catch(() => { if (tok === run.current) setList([]); });
+    }, SUGGEST_DELAY);
+    return () => clearTimeout(t);
+  }, [q]);
+  return {
+    list: hidden ? [] : list,
+    hide: v => { run.current++; if (typeof v === 'string') taken.current = v; setHidden(true); setList([]); },
+    show: () => { taken.current = ''; setHidden(false); },
+  };
+}
+function CommuneSuggest({ sug, onPick }) {
+  if (!sug.list.length) return null;
+  return (
+    <div style={{ position:'absolute', top:'100%', left:0, right:0, zIndex:1200, marginTop:2,
+      background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, overflow:'hidden',
+      boxShadow:'0 8px 24px rgba(0,0,0,0.55)' }}>
+      {sug.list.map(c => (
+        // ⚠ `onMouseDown` et non `onClick` : le clic ferait d'abord perdre le focus au champ,
+        // et un menu fermé sur le blur ne recevrait jamais le clic.
+        <div key={c.code} onMouseDown={e => { e.preventDefault(); onPick(c); }}
+          style={{ padding:'6px 9px', fontSize:11, color:C.text, cursor:'pointer',
+            borderTop:`1px solid ${C.border}`, display:'flex', alignItems:'baseline', gap:6 }}>
+          <span style={{ flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.nom}</span>
+          <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', flexShrink:0 }}>
+            {[c.cp ? c.cp.split(' · ')[0] : null, c.dep].filter(Boolean).join(' · ')}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 // Champ de recherche partagé par les deux cartes communales.
 function CartoCommuneInput({ value, onChange, onGo, busy }) {
+  const sug = useCommuneSuggest(value);
+  // ⚠ `onGo(nom)` prend le nom EN ARGUMENT : `onChange` ne met pas à jour le `value` capturé
+  // par cette closure, un `onGo()` nu juste après un clic aurait cherché le terme PRÉCÉDENT.
+  const pick = c => { sug.hide(c.nom); onChange(c.nom); onGo(c.nom); };
   return (
-    <div style={{ display:'flex', gap:6, marginBottom:8 }}>
-      <input value={value} onChange={e => onChange(e.target.value)}
-        onKeyDown={e => { if (e.key === 'Enter') onGo(); }} placeholder="Nom de commune"
-        style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
-          padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
-      <button onClick={onGo} disabled={busy}
+    <div style={{ display:'flex', gap:6, marginBottom:8, position:'relative' }}>
+      <div style={{ flex:1, minWidth:0, position:'relative' }}>
+        <input value={value} onChange={e => { sug.show(); onChange(e.target.value); }}
+          onKeyDown={e => { if (e.key === 'Enter') { sug.hide(); onGo(); } if (e.key === 'Escape') sug.hide(); }}
+          onBlur={sug.hide} placeholder="Nom de commune"
+          style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${C.border}`, borderRadius:6,
+            padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+        <CommuneSuggest sug={sug} onPick={pick} />
+      </div>
+      <button onClick={() => { sug.hide(); onGo(); }} disabled={busy}
         style={{ background:'none', border:`1px solid ${busy ? C.border : ACTU_COLOR + '66'}`, borderRadius:6,
           color: busy ? C.dim : ACTU_COLOR, fontSize:11, fontWeight:700, padding:'5px 11px',
           cursor: busy ? 'default' : 'pointer', flexShrink:0, fontFamily:'inherit' }}>🔍</button>
@@ -29153,7 +29224,8 @@ function CartoInsee() {
   return (
     <CartoCard title="📊 CARTE INSEE" site={CARTO_SITES_BY.insee} st={st} card={card}
       onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}>
-      <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
+      <CartoCommuneInput value={q} onChange={setQ} busy={st.loading}
+        onGo={v => load(true, (typeof v === 'string' && v) || q || CARTO_COMMUNE_DEFAUT)} />
       {d && d.list.map((c, i) => (
         <CartoRow key={c.code} first={i === 0} label={`${c.nom}${c.cp ? ' · ' + c.cp : ''}`}
           value={c.pop != null ? cartoNum(c.pop) + ' hab.' : '—'} color={ACTU_COLOR}
@@ -29279,8 +29351,8 @@ function CartoWaterRow({ x, first }) {
 function useCartoCity(fetchOne, pre) {
   const [q, setQ] = React.useState('');
   const [st, setSt] = React.useState({ busy:false, err:'', row:null });
-  const run = async () => {
-    const nom = q.trim();
+  const run = async (nom0) => {
+    const nom = String(nom0 !== undefined && typeof nom0 === 'string' ? nom0 : q).trim();
     if (!nom || st.busy) return;
     const local = pre ? pre(nom) : null;
     if (local) { setSt({ busy:false, err:'', row: local }); return; }
@@ -29297,20 +29369,28 @@ function useCartoCity(fetchOne, pre) {
   return { q, setQ, st, run, clear };
 }
 function CartoCitySearch({ city, placeholder }) {
+  const sug = useCommuneSuggest(city.q);
+  // Même précaution : le nom choisi est passé à `run`, jamais relu dans l'état.
+  const pick = c => { sug.hide(c.nom); city.setQ(c.nom); city.run(c.nom); };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:4, marginBottom:8 }}>
       <div style={{ display:'flex', gap:6 }}>
-        <input value={city.q} onChange={e => city.setQ(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') city.run(); }}
-          placeholder={placeholder || 'Chercher une autre ville…'}
-          style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${city.q.trim() ? ACTU_COLOR + '66' : C.border}`,
-            borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+        <div style={{ flex:1, minWidth:0, position:'relative' }}>
+          <input value={city.q} onChange={e => { sug.show(); city.setQ(e.target.value); }}
+            onKeyDown={e => { if (e.key === 'Enter') { sug.hide(); city.run(); } if (e.key === 'Escape') sug.hide(); }}
+            onBlur={sug.hide}
+            placeholder={placeholder || 'Chercher une autre ville…'}
+            style={{ width:'100%', boxSizing:'border-box', background:'#111',
+              border:`1px solid ${city.q.trim() ? ACTU_COLOR + '66' : C.border}`,
+              borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
+          <CommuneSuggest sug={sug} onPick={pick} />
+        </div>
         {city.st.row && (
           <button onClick={city.clear} title="Retirer cette ville"
             style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.dim,
               fontSize:12, padding:'5px 9px', cursor:'pointer', flexShrink:0, fontFamily:'inherit' }}>×</button>
         )}
-        <button onClick={city.run} disabled={city.st.busy}
+        <button onClick={() => { sug.hide(); city.run(); }} disabled={city.st.busy}
           style={{ background:'none', border:`1px solid ${city.st.busy ? C.border : ACTU_COLOR + '66'}`, borderRadius:6,
             color: city.st.busy ? C.dim : ACTU_COLOR, fontSize:11, fontWeight:700, padding:'5px 11px',
             cursor: city.st.busy ? 'default' : 'pointer', flexShrink:0, fontFamily:'inherit' }}>{city.st.busy ? '…' : '🔍'}</button>
@@ -29700,7 +29780,8 @@ function CartoPhoto() {
   return (
     <CartoCard title="📸 LIEUX LES PLUS PHOTOGRAPHIÉS" site={CARTO_SITES_BY.photo} st={st} card={card}
       onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}>
-      <CartoCommuneInput value={q} onChange={setQ} busy={st.loading} onGo={() => load(true, q || CARTO_COMMUNE_DEFAUT)} />
+      <CartoCommuneInput value={q} onChange={setQ} busy={st.loading}
+        onGo={v => load(true, (typeof v === 'string' && v) || q || CARTO_COMMUNE_DEFAUT)} />
       {/* LA CARTE, entre la barre et les lignes (demande utilisateur). Deux couches : le
           NUAGE de toutes les photos lues — c'est lui qui montre où les gens photographient —
           et les huit sujets les plus photographiés, marqués et nommés au clic. */}
