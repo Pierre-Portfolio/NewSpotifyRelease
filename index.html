@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.16.2';
+const APP_VERSION = '13.16.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29255,6 +29255,31 @@ function CartoWar() {
 // autorisations de tournage délivrées — le vrai registre, adresse par adresse. C'est plus
 // étroit (Paris seulement) et bien plus fiable : on le dit au lieu de faire croire au monde.
 const SCENE_API = 'https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/lieux-de-tournage-a-paris/records';
+// ⚠ Un portail Opendatasoft rend son point tantôt en objet `{lon, lat}`, tantôt en tableau
+// `[lat, lon]`, tantôt en chaîne « lat, lon », tantôt en géométrie GeoJSON `[lon, lat]` —
+// selon le millésime du portail et du jeu de données. Les quatre sont acceptés ici, et tout
+// ce qui n'est pas une coordonnée plausible est JETÉ : un marqueur au mauvais endroit est
+// pire que pas de marqueur.
+function odsPoint(p) {
+  if (!p) return null;
+  const ok = (lat, lon) => (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180
+    && !(lat === 0 && lon === 0)) ? { lat, lon } : null;
+  if (Array.isArray(p)) return p.length >= 2 ? ok(Number(p[0]), Number(p[1])) : null;
+  if (typeof p === 'string') {
+    const m = p.split(',');
+    return m.length >= 2 ? ok(parseFloat(m[0]), parseFloat(m[1])) : null;
+  }
+  if (typeof p === 'object') {
+    const lat = Number(p.lat != null ? p.lat : p.latitude);
+    const lon = Number(p.lon != null ? p.lon : (p.lng != null ? p.lng : p.longitude));
+    const direct = ok(lat, lon);
+    if (direct) return direct;
+    // GeoJSON : [longitude, latitude] — DANS CET ORDRE.
+    const c = p.coordinates || (p.geometry && p.geometry.coordinates);
+    if (Array.isArray(c) && c.length >= 2 && isFinite(Number(c[0]))) return ok(Number(c[1]), Number(c[0]));
+  }
+  return null;
+}
 async function cartoFetchScene(q) {
   const cherche = String(q || '').trim();
   // ⚠ `search(champ, "texte")` veut des guillemets DOUBLES : on retire ceux de la saisie,
@@ -29273,6 +29298,8 @@ async function cartoFetchScene(q) {
     an: (x && x.annee_tournage) != null ? String(x.annee_tournage) : '',
     adr: String((x && x.adresse_lieu) || ''),
     ardt: String((x && x.ardt_lieu) || ''),
+    // La position du tournage : le registre la publie, on ne géocode donc rien.
+    pt: odsPoint(x && (x.geo_point_2d || x.geo_shape)),
   })).filter(x => x.nom);
   if (!list.length) {
     throw new Error(cherche ? `Aucun tournage déclaré à Paris pour « ${cherche} ».`
@@ -29298,6 +29325,17 @@ function CartoScene() {
             color: st.loading ? C.dim : ACTU_COLOR, fontSize:11, fontWeight:700, padding:'5px 11px',
             cursor: st.loading ? 'default' : 'pointer', flexShrink:0, fontFamily:'inherit' }}>🔍</button>
       </div>
+      {/* LA CARTE, entre la barre et les lignes (demande utilisateur) : un tournage, c'est
+          une ADRESSE — la lire sur un plan vaut mieux que de la lire en toutes lettres.
+          ⚠ Affichée seulement si le registre a publié des coordonnées : jamais de géocodage
+          maison, qui poserait des marqueurs approximatifs sans le dire. */}
+      {d && d.list.some(x => x.pt) && (
+        <div style={{ marginBottom:8 }}>
+          <CartoMiniMap fit zoom={13} height={200}
+            markers={d.list.filter(x => x.pt).map(x => ({ lat:x.pt.lat, lon:x.pt.lon, r:6,
+              label: [x.nom, x.an, x.adr].filter(Boolean).join(' · ') }))} />
+        </div>
+      )}
       {d && <>
         {d.tot != null && (
           <CartoRow first label={d.q ? `Tournages « ${d.q} »` : 'Tournages au registre'} value={cartoNum(d.tot)}
