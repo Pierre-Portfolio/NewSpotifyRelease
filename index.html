@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.19.9';
+const APP_VERSION = '13.20.0';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29483,6 +29483,9 @@ async function cartoCommunesRaw(q) {
       dep: (c.departement && c.departement.nom) || '', reg: (c.region && c.region.nom) || '',
       depCode: (c.departement && c.departement.code) || '', regCode: (c.region && c.region.code) || '',
       epci: (c.epci && c.epci.nom) || '', siren: c.siren ? String(c.siren) : '',
+      // Le CODE de l'intercommunalité vient du même champ `epci` : rien de plus à demander,
+      // et c'est lui qui permet d'aller compter les communes du groupement.
+      epciCode: (c.epci && c.epci.code) ? String(c.epci.code) : '',
       zone: COMMUNE_ZONES[String(c.zone || '')] || '',
       // GeoJSON = [longitude, latitude] — dans CET ordre, l'inverser enverrait 📸 ailleurs.
       lon: coords ? coords[0] : null, lat: coords ? coords[1] : null };
@@ -29490,15 +29493,14 @@ async function cartoCommunesRaw(q) {
   if (!list.length) throw new Error(`Aucune commune ne s'appelle « ${nom} ».`);
   return list;
 }
+// ⚠ 13.20.0 — UNE RECHERCHE, RIEN D'AUTRE. L'enrichissement de la commune de tête vivait ICI
+// et était donc payé par TOUS les appelants : 💧 Eau, 📸 Photos et `useCartoCity` n'appellent
+// cette fonction que pour un code INSEE ou un centre, et lui achetaient des requêtes dont ils
+// ne lisaient pas le résultat. Il est passé dans `cartoInseeCommune`, que seule 📊 INSEE appelle.
 async function cartoSearchCommunes(q) {
   const nom = String(q || '').trim();
   const list = await cartoCommunesRaw(nom);
-  // ⚠ ENRICHISSEMENT DE LA SEULE COMMUNE EN TÊTE : la recherche en rend jusqu'à huit, les
-  // enrichir toutes ferait huit requêtes pour sept lignes qu'on ne lit pas. La source est
-  // facultative — un échec laisse la fiche telle qu'elle était.
-  const top = list[0];
-  const alt = (top.lat != null && top.lon != null) ? await communeElevation(top.lat, top.lon) : null;
-  return { q: nom, list, alt, at: Date.now() };
+  return { q: nom, list, at: Date.now() };
 }
 // Ce que geo.api.gouv.fr appelle `zone`, en français.
 const COMMUNE_ZONES = { metro:'France métropolitaine', dom:'Département d\'outre-mer',
@@ -29514,6 +29516,52 @@ async function communeElevation(lat, lon) {
     const e = j && Array.isArray(j.elevation) ? j.elevation[0] : null;
     return typeof e === 'number' ? Math.round(e) : null;
   } catch { return null; }
+}
+// ── CE QUE LA COMMUNE PÈSE AUTOUR D'ELLE (13.20.0, demande utilisateur) ────────
+// ⚠ geo.api.gouv.fr ne publie NI population d'EPCI NI population de département : on les
+// CALCULE en additionnant les communes du lot, et un lot muet fait disparaître les lignes
+// concernées — jamais un total approché ni un rang deviné.
+// ⚠ `fields` réduit au strict nécessaire (code, population, surface) : un département compte
+// jusqu'à ~900 communes et on n'a besoin d'aucun nom. `surface` est en HECTARES (/100).
+// ⚠ Non vérifiable côté agent (piège 32) : geo.api.gouv.fr n'est pas joignable d'ici, d'où un
+// parsing défensif de bout en bout et un `null` à la moindre surprise.
+const GEOAPI_DEPS = 'https://geo.api.gouv.fr/departements';
+async function communeGroupe(url, code) {
+  try {
+    const r = await fetchTimeout(url, 13000, { cache:'no-store' });
+    if (!r || !r.ok) return null;
+    const j = await r.json();
+    const list = (Array.isArray(j) ? j : []).map(x => ({
+      code: String((x && x.code) || ''),
+      pop: typeof (x && x.population) === 'number' ? x.population : null,
+      km2: typeof (x && x.surface) === 'number' ? x.surface / 100 : null,
+    })).filter(x => x.code);
+    if (!list.length) return null;
+    const i = list.filter(x => x.pop != null).sort((a, b) => b.pop - a.pop).findIndex(x => x.code === code);
+    return {
+      n: list.length,
+      pop: list.reduce((t, x) => t + (x.pop || 0), 0) || null,
+      km2: list.reduce((t, x) => t + (x.km2 || 0), 0) || null,
+      rang: i < 0 ? null : i + 1,
+    };
+  } catch { return null; }
+}
+// ⚠ ENRICHISSEMENT DE LA SEULE COMMUNE EN TÊTE : la recherche en rend jusqu'à huit, les
+// enrichir toutes ferait des dizaines de requêtes pour sept lignes qu'on ne lit pas. Les trois
+// sources sont FACULTATIVES et parallèles — un échec retire sa ligne, il n'emporte pas la fiche.
+async function cartoInseeCommune(q) {
+  const base = await cartoSearchCommunes(q);
+  const top = base.list[0];
+  const [alt, epci, dep] = await Promise.all([
+    (top.lat != null && top.lon != null) ? communeElevation(top.lat, top.lon) : Promise.resolve(null),
+    top.epciCode
+      ? communeGroupe(GEOAPI_COMMUNES + '?codeEpci=' + encodeURIComponent(top.epciCode) + '&fields=code,population,surface', top.code)
+      : Promise.resolve(null),
+    top.depCode
+      ? communeGroupe(GEOAPI_DEPS + '/' + encodeURIComponent(top.depCode) + '/communes?fields=code,population,surface', top.code)
+      : Promise.resolve(null),
+  ]);
+  return { ...base, alt, epci, dep, at: Date.now() };
 }
 // ⚠ 13.17.6 — LE RÉSUMÉ WIKIPÉDIA A ÉTÉ RETIRÉ (demande utilisateur) : la fiche redevient un
 // relevé de chiffres, et `communeWiki` avec lui — une requête pour un paragraphe qu'on ne lit
@@ -29535,7 +29583,11 @@ function useCommuneSuggest(q) {
   const run = React.useRef(0);
   // ⚠ Le nom CHOISI est mémorisé : le choisir remplit le champ, donc `q` change, donc l'effet
   // repart — et le menu se rouvrait aussitôt sur la commune qu'on venait de retenir.
-  const taken = React.useRef('');
+  // ⚠ Et il part de la valeur DÉJÀ dans le champ : 📊 INSEE arrive avec « Massy » écrit, donc
+  // l'effet partait au montage et le menu s'ouvrait TOUT SEUL par-dessus les premières lignes
+  // de la fiche — en redemandant au passage une liste qu'on venait de charger. Personne n'a
+  // rien tapé : il n'y a rien à suggérer tant qu'on ne touche pas au champ.
+  const taken = React.useRef(String(q || '').trim());
   React.useEffect(() => {
     const nom = String(q || '').trim();
     if (nom.length < SUGGEST_MIN || nom === taken.current) { setList([]); return; }
@@ -29600,8 +29652,55 @@ function CartoCommuneInput({ value, onChange, onGo, busy }) {
 // Densité moyenne de la France métropolitaine, en hab./km². Sert UNIQUEMENT à donner une
 // échelle (« × la moyenne ») : un chiffre de densité seul ne dit rien à personne.
 const FRANCE_DENS = 106;
+const communeRang = n => (n === 1 ? '1er' : n + 'e');
+// ⚠ 13.20.0 — LA COMMUNE DE TÊTE SE LIT LIGNE PAR LIGNE (demande utilisateur : « rajoute
+// toutes les infos que tu trouves » + « supprime les textes explicatifs en dessous des infos »).
+// Avant, TOUT était entassé dans le sous-titre d'une seule ligne, en 9 px, séparé par des
+// points médians, avec des tournures du genre « × 52,9 la moyenne française » : illisible dès
+// qu'on ajoutait un chiffre. Chaque donnée a donc SA ligne étiquetée, et plus une seule
+// n'est commandée par une phrase — l'étiquette dit ce que c'est, la valeur dit combien.
+// ⚠ Une donnée absente n'a pas de ligne : `add` ignore `null` et `''`. Jamais un « — », jamais
+// un 0 de remplissage — sur une fiche de recensement, un zéro inventé se lit comme un fait.
+function CartoInseeDetail({ c, d }) {
+  const rows = [];
+  const add = (label, value) => { if (value != null && value !== '') rows.push({ label, value }); };
+  add('Superficie', c.km2 ? cartoNum(c.km2, 2) + ' km²' : null);
+  add('Densité', c.dens ? cartoNum(c.dens) + ' hab./km²' : null);
+  add('Densité / moyenne française', c.dens ? '× ' + cartoNum(c.dens / FRANCE_DENS, 1) : null);
+  add('Altitude', d.alt != null ? cartoNum(d.alt) + ' m' : null);
+  add('Coordonnées', c.lat != null ? cartoNum(c.lat, 4) + '° N · ' + cartoNum(c.lon, 4) + '° E' : null);
+  add(c.nCp > 1 ? `Codes postaux (${c.nCp})` : 'Code postal', c.cp);
+  add('Code INSEE', c.code);
+  add('SIREN', c.siren);
+  add('Département', c.dep ? c.dep + (c.depCode ? ' (' + c.depCode + ')' : '') : null);
+  add('Région', c.reg ? c.reg + (c.regCode ? ' (' + c.regCode + ')' : '') : null);
+  add('Territoire', c.zone);
+  add('Intercommunalité', c.epci);
+  const g = d.epci, dp = d.dep;
+  if (g) {
+    add('Communes de l\'intercommunalité', cartoNum(g.n));
+    add('Population de l\'intercommunalité', g.pop ? cartoNum(g.pop) + ' hab.' : null);
+    add('Part de l\'intercommunalité', (g.pop && c.pop != null) ? cartoNum(c.pop / g.pop * 100, 1) + ' %' : null);
+    add('Rang dans l\'intercommunalité', g.rang ? communeRang(g.rang) + ' / ' + cartoNum(g.n) : null);
+  }
+  if (dp) {
+    const dens = (dp.pop && dp.km2) ? dp.pop / dp.km2 : null;
+    add('Communes du département', cartoNum(dp.n));
+    add('Population du département', dp.pop ? cartoNum(dp.pop) + ' hab.' : null);
+    add('Part du département', (dp.pop && c.pop != null) ? cartoNum(c.pop / dp.pop * 100, 2) + ' %' : null);
+    add('Rang dans le département', dp.rang ? communeRang(dp.rang) + ' / ' + cartoNum(dp.n) : null);
+    add('Densité du département', dens ? cartoNum(dens) + ' hab./km²' : null);
+    add('Densité / département', (dens && c.dens) ? '× ' + cartoNum(c.dens / dens, 1) : null);
+  }
+  return (
+    <React.Fragment>
+      <CartoRow first label={c.nom} value={c.pop != null ? cartoNum(c.pop) + ' hab.' : '—'} color={ACTU_COLOR} />
+      {rows.map(r => <CartoRow key={r.label} label={r.label} value={r.value} />)}
+    </React.Fragment>
+  );
+}
 function CartoInsee() {
-  const [st, load, card] = useCartoSummary('commune', cartoSearchCommunes, CARTO_COMMUNE_DEFAUT);
+  const [st, load, card] = useCartoSummary('commune', cartoInseeCommune, CARTO_COMMUNE_DEFAUT);
   // Le collapse démonte ses enfants : au retour, le champ doit rappeler la commune dont les
   // chiffres sont affichés, pas repartir sur le défaut.
   const [q, setQ] = React.useState(() => (_cartoSum.commune && _cartoSum.commune.d && _cartoSum.commune.d.q) || CARTO_COMMUNE_DEFAUT);
@@ -29611,20 +29710,12 @@ function CartoInsee() {
       onReload={() => load(true, q || CARTO_COMMUNE_DEFAUT)}>
       <CartoCommuneInput value={q} onChange={setQ} busy={st.loading}
         onGo={v => load(true, (typeof v === 'string' && v) || q || CARTO_COMMUNE_DEFAUT)} />
-      {d && d.list.map((c, i) => (
-        <CartoRow key={c.code} first={i === 0} label={`${c.nom}${c.cp ? ' · ' + c.cp : ''}`}
-          value={c.pop != null ? cartoNum(c.pop) + ' hab.' : '—'} color={ACTU_COLOR}
-          sub={[c.km2 ? cartoNum(c.km2, 2) + ' km²' : null,
-               c.dens ? cartoNum(c.dens) + ' hab./km² (× ' + cartoNum(c.dens / FRANCE_DENS, 1) + ' la moyenne française)' : null,
-               c.epci,
-               [c.dep && c.dep + (c.depCode ? ' (' + c.depCode + ')' : ''), c.reg].filter(Boolean).join(', '),
-               c.zone,
-               'INSEE ' + c.code,
-               c.siren ? 'SIREN ' + c.siren : null,
-               // Altitude et coordonnées ne sont cherchées que pour la commune de tête.
-               i === 0 && d.alt != null ? cartoNum(d.alt) + ' m d\'altitude' : null,
-               i === 0 && c.lat != null ? cartoNum(c.lat, 4) + '° N · ' + cartoNum(c.lon, 4) + '° E' : null,
-              ].filter(Boolean).join(' · ')} />
+      {d && d.list.map((c, i) => i === 0 ? <CartoInseeDetail key={c.code} c={c} d={d} /> : (
+        // ⚠ Les homônymes gardent UNE ligne : ce sont des candidats à chercher, pas des
+        // fiches. Seule celle de tête est enrichie — les enrichir toutes ferait sept fois
+        // trois requêtes pour des lignes qu'on ne lit pas.
+        <CartoRow key={c.code} label={c.nom} value={c.pop != null ? cartoNum(c.pop) + ' hab.' : '—'}
+          sub={[c.cp, c.dep && c.dep + (c.depCode ? ' (' + c.depCode + ')' : '')].filter(Boolean).join(' · ')} />
       ))}
     </CartoCard>
   );
