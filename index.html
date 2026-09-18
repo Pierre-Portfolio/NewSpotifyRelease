@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.0';
+const APP_VERSION = '13.21.1';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -38650,8 +38650,13 @@ function ytLateCount(item) {
 
 // Épisodes d'une saison (fiche série dépliée) — 1 requête /tv/{id}/season/{n} PAR SAISON,
 // uniquement au 1er dépliage, puis cache localStorage 7 j (+ cache mémoire session).
-// Retourne [{ e, name, still }] ou null (erreur réseau / clé absente — le caller génère
-// alors des épisodes placeholder pour que les coches restent utilisables hors-ligne).
+// Retourne [{ e, name, still, date, ov }] ou null (erreur réseau / clé absente — le caller
+// génère alors des épisodes placeholder pour que les coches restent utilisables hors-ligne).
+// ⚠ `ov` = le RÉSUMÉ de l'épisode, déplié au clic sur sa ligne : il arrive dans la MÊME
+// réponse que les titres et les vignettes, donc il ne coûte aucune requête de plus.
+// ⚠ `TV_EPS_V` versionne le format d'une entrée : l'INCRÉMENTER dès qu'un champ d'épisode
+// s'ajoute, sinon les saisons déjà en cache resteraient 7 jours sans ce champ.
+const TV_EPS_V = 2;
 const _tvEpsCache = {};   // mémoire session — évite de re-parser le localStorage à chaque render
 async function tvFetchSeasonEps(tvId, n) {
   const key = `${tvId}:${n}`;
@@ -38659,12 +38664,12 @@ async function tvFetchSeasonEps(tvId, n) {
   let store = {};
   try { store = JSON.parse(localStorage.getItem(TVTIME_EPS_LS)) || {}; } catch {}
   const hit = store[key];
-  if (hit && Date.now() - (hit.at || 0) < TV_EPS_TTL) { _tvEpsCache[key] = hit.eps; return hit.eps; }
+  if (hit && hit.v === TV_EPS_V && Date.now() - (hit.at || 0) < TV_EPS_TTL) { _tvEpsCache[key] = hit.eps; return hit.eps; }
   const d = await tmdbGet(`/tv/${tvId}/season/${n}`);
   if (!d || !Array.isArray(d.episodes)) return (hit && hit.eps) || null;  // échec → cache périmé plutôt que rien
-  const eps = d.episodes.map(ep => ({ e: ep.episode_number, name: ep.name || '', still: ep.still_path || null, date: ep.air_date || null }));
+  const eps = d.episodes.map(ep => ({ e: ep.episode_number, name: ep.name || '', still: ep.still_path || null, date: ep.air_date || null, ov: ep.overview || '' }));
   _tvEpsCache[key] = eps;
-  store[key] = { at: Date.now(), eps };
+  store[key] = { at: Date.now(), v: TV_EPS_V, eps };
   // Éviction des saisons les plus anciennes si le cache grossit trop
   const keys = Object.keys(store);
   if (keys.length > TV_EPS_CACHE_MAX) {
@@ -38673,6 +38678,24 @@ async function tvFetchSeasonEps(tvId, n) {
   }
   try { localStorage.setItem(TVTIME_EPS_LS, JSON.stringify(store)); } catch {}
   return eps;
+}
+
+// Résumés en VO d'une saison — REPLI quand TMDB n'a aucune traduction française (`overview`
+// vide, très fréquent sur les séries peu connues : l'API ne retombe pas d'elle-même sur l'anglais).
+// Retourne { <n° d'épisode>: résumé } ou null.
+// ⚠ UNE SEULE requête par saison et par session (cache mémoire seul, jamais localStorage : le
+// cache fr pèse déjà et ce repli ne sert qu'à quelques épisodes), déclenchée UNIQUEMENT au clic
+// sur un épisode dépourvu de résumé — jamais au dépliage d'une saison.
+const _tvEpsEnCache = {};
+async function tvFetchSeasonEpsEn(tvId, n) {
+  const key = `${tvId}:${n}`;
+  if (_tvEpsEnCache[key]) return _tvEpsEnCache[key];
+  const d = await tmdbGet(`/tv/${tvId}/season/${n}`, { language: 'en-US' });
+  if (!d || !Array.isArray(d.episodes)) return null;
+  const map = {};
+  d.episodes.forEach(ep => { if (ep.overview) map[ep.episode_number] = ep.overview; });
+  _tvEpsEnCache[key] = map;
+  return map;
 }
 
 // Statut de production TMDB → libellé FR pour la fiche série
@@ -39222,6 +39245,22 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
       setEpsLoading(null);
     }
   };
+  // Résumé d'un épisode (clic sur sa ligne) — UN SEUL déplié à la fois, comme les saisons.
+  // Le texte est déjà là (`ep.ov`, venu avec la saison) ; on ne part en réseau QUE si TMDB
+  // n'a pas de version française, et alors une seule fois pour toute la saison (VO).
+  const [openEp, setOpenEp]   = React.useState(null);   // clé "S{n}E{e}"
+  const [epOvEn, setEpOvEn]   = React.useState({});     // résumés de repli (VO) par clé
+  const [epOvLoad, setEpOvLoad] = React.useState(null);
+  const toggleEp = async (sn, ep) => {
+    const k = `S${sn}E${ep.e}`;
+    if (openEp === k) { setOpenEp(null); return; }
+    setOpenEp(k);
+    if (ep.ov || epOvEn[k] !== undefined) return;
+    setEpOvLoad(k);
+    const map = await tvFetchSeasonEpsEn(item.id, sn);
+    setEpOvEn(m => ({ ...m, [k]: (map && map[ep.e]) || '' }));
+    setEpOvLoad(null);
+  };
   const nextKey  = tvNextToWatch(item);   // 1er épisode non vu (clé "S{n}E{e}") ou null
   const nextM    = nextKey && nextKey.match(/^S(\d+)E(\d+)$/);   // → [_, saison, épisode]
   const allSeen = counted > 0 && watched >= counted;
@@ -39399,14 +39438,23 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
                             // coché reste décochable, cf. 8.7.1).
                             const unaired = !s.special && tvEpLocked(ep.date, item, s.n, ep.e);
                             const lock = !seen && unaired;
+                            // Résumé (9.0.0) : la LIGNE entière déplie le résumé de l'épisode.
+                            // ⚠ Les deux boutons de droite (🙈 et la coche) doivent donc STOPPER
+                            // la propagation, sinon cocher un épisode déplierait son résumé.
+                            const epKey  = `S${s.n}E${ep.e}`;
+                            const epOpen = openEp === epKey;
+                            const epOv   = ep.ov || epOvEn[epKey] || '';
                             return (
-                              <div key={ep.e} style={{ display:'flex', alignItems:'center', gap:10, background: s.special ? '#0a0a0a' : '#111', borderRadius:8, padding:6, minHeight:52, opacity: ign ? 0.55 : 1 }}>
+                              <div key={ep.e} style={{ background: s.special ? '#0a0a0a' : '#111', borderRadius:8, opacity: ign ? 0.55 : 1 }}>
+                              <div onClick={() => toggleEp(s.n, ep)} title={epOpen ? 'Replier le résumé' : `Résumé de S${s.n}E${ep.e}`}
+                                style={{ display:'flex', alignItems:'center', gap:10, padding:6, minHeight:52, cursor:'pointer' }}>
                                 {ep.still
                                   ? <img src={TMDB_STILL + ep.still} alt="" loading="lazy" style={{ width:82, height:46, borderRadius:6, objectFit:'cover', flexShrink:0, background:'#1a1a1a', filter: ign ? 'grayscale(1)' : 'none' }} />
                                   : <div style={{ width:82, height:46, borderRadius:6, background:'#1a1a1a', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0 }}>📺</div>}
                                 <div style={{ flex:1, minWidth:0 }}>
                                   <div style={{ fontSize:13, fontWeight:900, fontFamily:'DM Mono,monospace', color: ign ? C.dim : C.text, textDecoration: ign ? 'line-through' : 'none' }}>
                                     S{String(s.n).padStart(2, '0')} | E{String(ep.e).padStart(2, '0')}
+                                    <span style={{ fontSize:9, fontWeight:700, color:C.dim, marginLeft:6, display:'inline-block', transform: epOpen ? 'rotate(90deg)' : 'none', transition:'transform 0.15s' }}>▶</span>
                                   </div>
                                   {ep.name && <div style={{ fontSize:10, color:C.muted, marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', textDecoration: ign ? 'line-through' : 'none' }}>{ep.name}</div>}
                                   {ign && <div style={{ fontSize:9, color:TV_IGNORED_COLOR, fontFamily:'DM Mono,monospace', marginTop:2 }}>🙈 ignoré · hors progression</div>}
@@ -39430,19 +39478,30 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
                                   )}
                                 </div>
                                 {ign && onUnignoreEp && (
-                                  <button onClick={() => onUnignoreEp(s.n, ep.e)} title={`Ne plus ignorer S${s.n}E${ep.e} — le remet dans la progression (sans le marquer vu)`}
+                                  <button onClick={e => { e.stopPropagation(); onUnignoreEp(s.n, ep.e); }} title={`Ne plus ignorer S${s.n}E${ep.e} — le remet dans la progression (sans le marquer vu)`}
                                     style={{ width:24, height:24, borderRadius:'50%', flexShrink:0, cursor:'pointer', background:'none',
                                       border:`1px solid ${TV_IGNORED_COLOR}88`, color:TV_IGNORED_COLOR, fontSize:11, lineHeight:1, padding:0 }}>🙈</button>
                                 )}
                                 <Check done={seen} locked={lock}
-                                  onClick={() => s.special
+                                  onClick={e => { e.stopPropagation(); s.special
                                     ? onSetSpecials(seen ? spSeen.filter(n => n !== ep.e) : [...spSeen, ep.e])
-                                    : onToggleEp(s.n, ep.e, seen)}
+                                    : onToggleEp(s.n, ep.e, seen); }}
                                   title={lock
                                     ? `S${s.n}E${ep.e} n'est pas encore diffusé — la coche s'ouvrira 24 h avant sa sortie`
                                     : s.special
                                       ? (seen ? `Décocher le spécial E${ep.e}` : `Cocher le spécial E${ep.e}`)
                                       : (seen ? `Décocher S${s.n}E${ep.e}` : `Cocher S${s.n}E${ep.e}`)} />
+                              </div>
+                              {epOpen && (
+                                <div style={{ borderTop:`1px solid ${C.border}`, margin:'0 6px', padding:'7px 2px 8px', fontSize:10, lineHeight:1.6 }}>
+                                  {ep.name && <div style={{ fontSize:11, fontWeight:800, color:C.text, marginBottom:4 }}>{ep.name}</div>}
+                                  {epOvLoad === epKey
+                                    ? <div style={{ color:C.dim, fontStyle:'italic', fontFamily:'DM Mono,monospace' }}>Chargement du résumé…</div>
+                                    : epOv
+                                      ? <div style={{ color:C.muted, whiteSpace:'pre-wrap' }}>{epOv}</div>
+                                      : <div style={{ color:C.dim, fontStyle:'italic' }}>Aucun résumé pour cet épisode sur TMDB.</div>}
+                                </div>
+                              )}
                               </div>
                             );
                           })}
