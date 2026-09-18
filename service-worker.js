@@ -189,7 +189,7 @@
 // (essai direct en en-tête d'abord, case à cocher ensuite) ; cours boursiers relayés
 // contrôlés et leur provenance affichée ; redirections bornées à http/https côté Action ;
 // origine vérifiée sur les messages du lecteur YouTube.
-const CACHE  = 'spotifyplus-v649';          // app shell — bumpé à chaque déploiement
+const CACHE  = 'spotifyplus-v650';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
@@ -200,7 +200,7 @@ const VENDOR = 'spotifyplus-vendor-v2';
 // finissant par '/' part de toute façon dans la branche app shell).
 // + les deux scripts chargés à la demande par l'app (moteur Doodle, catalogue Sport) : ils
 // changent avec index.html, ils vivent donc dans SON cache, pas dans le vendor immuable.
-const ASSETS = ['./index.html', './vendor/doodle.js', './vendor/sport-data.js'];
+const ASSETS = ['./index.html', './vendor/doodle.js', './vendor/sport-data.js', './vendor/dobble-art.js'];
 // Fichiers immuables et légers du shell, précachés avec le vendor : sans eux, une PWA
 // lancée hors ligne n'a ni manifeste ni icône — et `notify()` affiche ses notifications
 // sans le moindre visuel (elle demande ./icon-192.png, qui n'était nulle part en cache).

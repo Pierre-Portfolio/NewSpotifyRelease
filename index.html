@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.1';
+const APP_VERSION = '13.21.2';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5140,6 +5140,7 @@ const GAMES = [
   { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
   { id:'cdl',        label:'Des chiffres et des lettres', min:1, max:8 },
+  { id:'dobble',     label:'Dobble',          min:2, max:2 },
   { id:'doodle',     label:'Doodle Jump',     min:1, max:1 },
   { id:'findcolor',  label:'Find Color',      min:2, max:8 },
   { id:'findflag',   label:'Find the Flag',   min:1, max:1 },
@@ -5252,6 +5253,7 @@ function GameHost({ game, label }) {
     case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
     case 'cdl':        return <GameChiffresLettres />;
+    case 'dobble':     return <GameDobble />;
     case 'doodle':     return <GameDoodle />;
     case 'findcolor':  return <GameFindColor />;
     case 'findflag':   return <GameFindFlag />;
@@ -7133,6 +7135,232 @@ function VendorLoading({ label, err, retry, color, src }) {
           </React.Fragment>
         : <div style={{ fontSize:12, color:C.muted }}>⏳ Chargement {label}…</div>}
     </div>
+  );
+}
+
+// ════════ Dobble (2 joueurs, un seul écran) ════════
+// Un téléphone posé à plat entre deux joueurs : la zone du HAUT est tournée à 180° (elle est
+// à l'endroit pour celui d'en face), celle du BAS à l'endroit, et la carte du MILIEU est
+// partagée. Chacun a sa pile de DOB_HAND tuiles ; on touche sur SA carte le symbole qu'elle
+// partage avec celle du milieu, la carte jouée DEVIENT le milieu, et le premier qui vide sa
+// pile gagne (règle du « puits »). Une erreur bloque son auteur DOB_PENALTY_MS.
+//
+// ⚠ LES CARTES NE SONT PAS TIRÉES AU HASARD. `dobbleDeck()` construit le plan projectif
+// d'ordre 7 : 57 cartes de 8 symboles où DEUX cartes quelconques ont EXACTEMENT un symbole
+// commun. Un tirage aléatoire donnerait des paires à 0 ou 2 symboles communs — il n'y aurait
+// plus de jeu. Le nombre d'objets (57), la taille d'une carte (8) et p = 7 sont UN SEUL
+// réglage : `57 = 7² + 7 + 1` et `8 = 7 + 1`, on n'en change pas un sans les autres.
+// ⚠ 41 cartes sont distribuées (1 + 2 × 20) sur les 57 : le reste dort, c'est normal.
+//
+// ⚠ Les 57 objets vivent dans `vendor/dobble-art.js` (43 Ko, 3 dessins A/B/C chacun), chargé
+// à la demande : personne ne le paie sans ouvrir Dobble. `DOB_PICK` dit quelle version est
+// retenue objet par objet — TABLE VIDE = A partout (le choix des dessins est en cours côté
+// utilisateur ; y écrire `{ cookie:'B' }` suffit à basculer un objet, rien d'autre à toucher).
+const loadDobbleArt = () => loadVendorScript('./vendor/dobble-art.js', () => !!window.DOBBLE_ART_READY);
+const DOB_PICK = {};                 // { id objet : 'A' | 'B' | 'C' } — absent ⇒ DOB_VAR_DEF
+const DOB_VAR_DEF = 'A';
+const DOB_HAND = 20;                 // tuiles par joueur
+const DOB_PENALTY_MS = 1500;         // blocage après une erreur
+const DOB_P = 7;                     // ordre du plan projectif (NE PAS toucher seul, cf. plus haut)
+const dobVar = o => (DOB_PICK[o.id] && o[DOB_PICK[o.id]]) ? DOB_PICK[o.id] : DOB_VAR_DEF;
+
+function dobbleDeck() {
+  const p = DOB_P, cards = [];
+  let c = [];
+  for (let i = 0; i <= p; i++) c.push(i);
+  cards.push(c);
+  for (let i = 0; i < p; i++) { c = [0]; for (let j = 0; j < p; j++) c.push((p + 1) + p * i + j); cards.push(c); }
+  for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) {
+    c = [i + 1];
+    for (let k = 0; k < p; k++) c.push((p + 1) + p * k + ((i * k + j) % p));
+    cards.push(c);
+  }
+  return cards;
+}
+// PRNG déterministe (mulberry32). ⚠ La disposition d'une carte est tirée de son INDEX et non
+// de `Math.random()` : sinon les 8 symboles sauteraient de place à chaque re-render.
+function dobRng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function dobShuffle(arr, rnd) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; }
+  return a;
+}
+// 1 symbole au centre + 7 en couronne, tailles, angles et rotations tirés de la graine
+// (demande utilisateur : « tailles différentes et emplacement différent » d'une carte à
+// l'autre). Coordonnées en % du diamètre de la carte.
+function dobLayout(seed) {
+  const rnd = dobRng(seed * 2654435761 + 12345);
+  const out = [{ x:50 + (rnd() - 0.5) * 7, y:50 + (rnd() - 0.5) * 7, s:21 + rnd() * 6, r:rnd() * 360 }];
+  const a0 = rnd() * Math.PI * 2;
+  for (let i = 0; i < 7; i++) {
+    const ang = a0 + (i * 2 * Math.PI) / 7 + (rnd() - 0.5) * 0.3;
+    const rad = 32 + (rnd() - 0.5) * 4;
+    out.push({ x:50 + Math.cos(ang) * rad, y:50 + Math.sin(ang) * rad, s:18 + rnd() * 8, r:rnd() * 360 });
+  }
+  return out;
+}
+// Une forme du catalogue → un élément SVG. ⚠ Aucun `dangerouslySetInnerHTML` (piège 29) :
+// `vendor/dobble-art.js` ne contient que des nombres et des couleurs, jamais de balisage.
+function dobShape(s, i) {
+  const t = s[0];
+  if (t === 'c') return <circle key={i} cx={s[1]} cy={s[2]} r={s[3]} fill={s[4] || 'none'} stroke={s[5]} strokeWidth={s[6]} />;
+  if (t === 'e') return <ellipse key={i} cx={s[1]} cy={s[2]} rx={s[3]} ry={s[4]} fill={s[5] || 'none'} stroke={s[6]} strokeWidth={s[7]} />;
+  if (t === 'r') return <rect key={i} x={s[1]} y={s[2]} width={s[3]} height={s[4]} rx={s[5]} fill={s[6] || 'none'} stroke={s[7]} strokeWidth={s[8]} />;
+  if (t === 'p') return <path key={i} d={s[1]} fill={s[2] || 'none'} stroke={s[3]} strokeWidth={s[4]} />;
+  if (t === 'l') return <line key={i} x1={s[1]} y1={s[2]} x2={s[3]} y2={s[4]} stroke={s[5] || '#000'} strokeWidth={s[6] || 2} />;
+  return null;
+}
+const DobSymbol = React.memo(function DobSymbol({ obj }) {
+  const shapes = obj[dobVar(obj)] || obj.A;
+  return (
+    <svg viewBox="0 0 100 100" width="100%" height="100%" strokeLinecap="round" strokeLinejoin="round"
+      style={{ display:'block', pointerEvents:'none' }}>{shapes.map(dobShape)}</svg>
+  );
+});
+// Une carte ronde. ⚠ `key` = l'index du SYMBOLE (unique sur la carte), jamais la position
+// (piège 4) : un remontage ferait clignoter les 8 SVG à chaque coup joué.
+function DobCard({ syms, seed, objs, tone, onPick }) {
+  const lay = React.useMemo(() => dobLayout(seed), [seed]);
+  return (
+    <div style={{ position:'relative', width:'100%', height:'100%', borderRadius:'50%', background:'#fff',
+      border:`3px solid ${tone}`, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', overflow:'hidden' }}>
+      {syms.map((sym, i) => {
+        const L = lay[i];
+        return (
+          <button key={sym} onClick={onPick ? () => onPick(sym) : undefined} disabled={!onPick}
+            title={objs[sym].nom}
+            style={{ position:'absolute', left:`${L.x - L.s / 2}%`, top:`${L.y - L.s / 2}%`, width:`${L.s}%`, height:`${L.s}%`,
+              transform:`rotate(${L.r}deg)`, background:'none', border:'none', padding:0, outline:'none',
+              cursor:onPick ? 'pointer' : 'default', touchAction:'manipulation' }}>
+            <DobSymbol obj={objs[sym]} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+function dobDeal() {
+  const rnd = dobRng((Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0);
+  const order = dobShuffle(dobbleDeck().map((syms, i) => ({ id:i, syms:dobShuffle(syms, rnd) })), rnd);
+  return { center:order[0], hands:[order.slice(1, 1 + DOB_HAND), order.slice(1 + DOB_HAND, 1 + 2 * DOB_HAND)], winner:null };
+}
+// Garde du chargement paresseux (gabarit de `GameDoodle` / `SportPanel`).
+function GameDobble() {
+  const [ready, setReady] = React.useState(() => !!window.DOBBLE_ART_READY);
+  const [err, setErr] = React.useState(null);
+  const load = () => { setErr(null); loadDobbleArt().then(() => setReady(true)).catch(e => setErr(e && e.reason === 'stale' ? 'stale' : 'net')); };
+  React.useEffect(() => { if (!ready) load(); }, []);
+  if (!ready) return <VendorLoading label="des dessins" err={err} retry={load} color={GAMES_COLOR} src="./vendor/dobble-art.js" />;
+  return <GameDobbleInner />;
+}
+const DOB_TONES = ['#e8503a', '#3d8ede'];
+function GameDobbleInner() {
+  useHidePlayerBar(true);
+  const objs = window.DOBBLE_ART.objects;
+  const [g, setG] = React.useState(dobDeal);
+  const [phase, setPhase] = React.useState('ready');   // ready | playing | over
+  const [pen, setPen] = React.useState([0, 0]);        // fin du blocage de chaque joueur (ms)
+  const [msg, setMsg] = React.useState(null);          // dernier coup : { p, nom, ok }
+  const timers = React.useRef([]);
+  React.useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  // ⚠ Refs anti-closure (piège 6) : `pick` est passée aux 8 boutons de chaque carte.
+  const gRef = React.useRef(g); React.useEffect(() => { gRef.current = g; }, [g]);
+  const penRef = React.useRef(pen); React.useEffect(() => { penRef.current = pen; }, [pen]);
+  const phaseRef = React.useRef(phase); React.useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  const start = () => { setG(dobDeal()); setPen([0, 0]); setMsg(null); setPhase('playing'); };
+  const pick = (p, sym) => {
+    const cur = gRef.current;
+    if (phaseRef.current !== 'playing' || cur.winner !== null) return;
+    if (penRef.current[p] > Date.now()) return;
+    const hand = cur.hands[p];
+    if (!hand.length) return;
+    if (cur.center.syms.indexOf(sym) >= 0) {
+      const hands = cur.hands.map((h, i) => (i === p ? h.slice(1) : h));
+      const win = hands[p].length ? null : p;
+      setG({ center:hand[0], hands:hands, winner:win });
+      setMsg({ p:p, nom:objs[sym].nom, ok:true });
+      if (win !== null) setPhase('over');
+    } else {
+      const until = Date.now() + DOB_PENALTY_MS;
+      setPen(x => { const n = x.slice(); n[p] = until; return n; });
+      setMsg({ p:p, nom:objs[sym].nom, ok:false });
+      timers.current.push(setTimeout(() => setPen(x => { const n = x.slice(); if (n[p] === until) n[p] = 0; return n; }), DOB_PENALTY_MS));
+    }
+  };
+
+  // ⚠ Les TROIS cartes doivent tenir dans l'écran sans défilement : un joueur qui fait
+  // défiler la page pour voir sa carte a déjà perdu la manche. D'où des tailles bornées
+  // à la fois par la largeur (vw) et par la hauteur (vh) — 20 + 15 + 20 vh + les libellés,
+  // le reste étant pris par le titre du module, le conseil et la barre de score.
+  const CARD = 'min(62vw, 20vh)';
+  const MID = 'min(44vw, 15vh)';
+  // ⚠ Zone rendue par un APPEL de fonction et non comme un composant déclaré ici : un
+  // composant défini dans le corps du parent change d'identité à chaque rendu, React
+  // démonterait les deux cartes à chaque coup joué.
+  const zone = (p, flip) => {
+    const hand = g.hands[p];
+    const blocked = pen[p] > Date.now();
+    const tone = DOB_TONES[p];
+    return (
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:5, transform:flip ? 'rotate(180deg)' : undefined }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:11.5, fontWeight:800, color:tone }}>
+          <span>Joueur {p + 1}</span>
+          <span style={{ color:C.muted, fontWeight:600 }}>{hand.length} tuile{hand.length > 1 ? 's' : ''}</span>
+          {blocked && <span style={{ color:'#e05050' }}>⏳ raté</span>}
+          {g.winner === p && <span style={{ color:'#4caf50' }}>🏆 gagné</span>}
+        </div>
+        <div style={{ width:CARD, height:CARD, position:'relative', opacity:blocked ? 0.55 : 1, transition:'opacity 0.2s' }}>
+          {hand.length
+            ? <DobCard syms={hand[0].syms} seed={hand[0].id} objs={objs} tone={tone}
+                onPick={phase === 'playing' && !blocked ? (s => pick(p, s)) : null} />
+            : <div style={{ width:'100%', height:'100%', borderRadius:'50%', border:`3px dashed ${tone}66`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:30 }}>🏆</div>}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <GameWrap
+      hint="Téléphone posé à plat entre les deux joueurs. Touche SUR TA CARTE le seul symbole qu'elle partage avec celle du milieu : ta carte devient le milieu. Premier à vider ses 20 tuiles. Erreur = 1,5 s bloqué."
+      bar={<>
+        <span style={{ fontSize:12, color:C.muted }}>
+          Pile <b style={{ color:DOB_TONES[0] }}>{g.hands[0].length}</b> · <b style={{ color:DOB_TONES[1] }}>{g.hands[1].length}</b>
+        </span>
+        <button onClick={start} style={gameBtn()}>{phase === 'ready' ? '▶ Commencer' : '↻ Rejouer'}</button>
+      </>}>
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6, userSelect:'none' }}>
+        {zone(0, true)}
+        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <div style={{ width:MID, height:MID, position:'relative' }}>
+            <DobCard syms={g.center.syms} seed={g.center.id} objs={objs} tone={GAMES_COLOR} onPick={null} />
+            {phase !== 'playing' && (
+              <div style={{ position:'absolute', inset:0, borderRadius:'50%', background:'rgba(12,14,20,0.82)', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:6, textAlign:'center', padding:10 }}>
+                <div style={{ fontSize:22 }}>{phase === 'over' ? '🏆' : '🎴'}</div>
+                <div style={{ fontSize:12, fontWeight:800, color:phase === 'over' ? DOB_TONES[g.winner] : GAMES_COLOR }}>
+                  {phase === 'over' ? `Joueur ${g.winner + 1} gagne !` : 'Prêts ?'}
+                </div>
+                <button onClick={start} style={gameBtn({ padding:'5px 11px', fontSize:11.5 })}>
+                  {phase === 'over' ? '↻ Rejouer' : '▶ Commencer'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{ minHeight:16, fontSize:11.5, fontWeight:700, color:msg ? (msg.ok ? '#4caf50' : '#e05050') : 'transparent' }}>
+          {msg ? `${msg.ok ? '✔' : '✖'} J${msg.p + 1} · ${msg.nom}` : '—'}
+        </div>
+        {zone(1, false)}
+      </div>
+    </GameWrap>
   );
 }
 
