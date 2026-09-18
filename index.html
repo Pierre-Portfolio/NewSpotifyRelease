@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.19.7';
+const APP_VERSION = '13.19.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30039,19 +30039,31 @@ function odsPoint(p) {
   }
   return null;
 }
+// ⚠ « LES 10 PLUS RÉCENTS » se trie sur la DATE DE DÉBUT, pas sur `annee_tournage` : une
+// année entière ne départage pas dix tournages, on rendait dix lignes au hasard dans 2026.
+// Le nom du champ de date a changé sur le portail → CASCADE, et l'année reste le dernier
+// repli : un `order_by` sur un champ inexistant rend un 400, jamais une liste.
+const SCENE_ORDERS = ['date_debut desc', 'date_de_debut desc', 'annee_tournage desc'];
+// ⚠ 13.19.8 — LE TRI DU PORTAIL NE SUFFIT PAS À GARANTIR « LES PLUS RÉCENTS » (demande
+// utilisateur) : sur le dernier repli il ne connaît que l'ANNÉE, et même sur `date_debut` un
+// enregistrement sans date remonte où le portail veut. On demande donc un VIVIER plus large
+// que ce qu'on montre, et c'est NOTRE tri sur la date lue ligne par ligne qui désigne les
+// dix retenus — un tournage sans date ne peut plus passer devant un tournage daté.
+const SCENE_POOL = 40;   // lignes demandées au registre
+const SCENE_KEEP = 10;   // lignes gardées après notre tri
+// Clé de tri : 'YYYY-MM-DD' quand le registre publie le jour, sinon 'YYYY' — qui se compare
+// justement comme un début d'année, donc une ligne sans jour passe DERRIÈRE les lignes
+// datées de la même année. Sans date du tout ⇒ '' ⇒ bonne dernière, jamais en tête.
+const sceneKey = x => x.jour || x.an || '';
 async function cartoFetchScene(q) {
   const cherche = String(q || '').trim();
   // ⚠ `search(champ, "texte")` veut des guillemets DOUBLES : on retire ceux de la saisie,
   // sinon la clause est coupée en deux et l'API rend un 400.
   const where = cherche ? '&where=' + encodeURIComponent(`search(nom_tournage,"${cherche.replace(/"/g, '')}")`) : '';
-  // ⚠ « LES 10 PLUS RÉCENTS » se trie sur la DATE DE DÉBUT, pas sur `annee_tournage` : une
-  // année entière ne départage pas dix tournages, on rendait dix lignes au hasard dans 2026.
-  // Le nom du champ de date a changé sur le portail → CASCADE, et l'année reste le dernier
-  // repli : un `order_by` sur un champ inexistant rend un 400, jamais une liste.
-  let j = null, r = null;
-  for (const tri of ['date_debut desc', 'date_de_debut desc', 'annee_tournage desc']) {
-    r = await fetchTimeout(SCENE_API + '?limit=10&order_by=' + encodeURIComponent(tri) + where, 14000, { cache:'no-store' });
-    if (r.ok) { j = await r.json(); break; }
+  let j = null, r = null, tri = '';
+  for (const o of SCENE_ORDERS) {
+    r = await fetchTimeout(SCENE_API + '?limit=' + SCENE_POOL + '&order_by=' + encodeURIComponent(o) + where, 14000, { cache:'no-store' });
+    if (r.ok) { j = await r.json(); tri = o; break; }
   }
   if (!j) throw new Error('opendata.paris.fr a répondu ' + (r ? r.status : '—') + '.');
   const rows = Array.isArray(j && j.results) ? j.results : [];
@@ -30072,8 +30084,13 @@ async function cartoFetchScene(q) {
     throw new Error(cherche ? `Aucun tournage déclaré à Paris pour « ${cherche} ».`
                             : 'Aucun tournage renvoyé par opendata.paris.fr.');
   }
+  // Notre tri, puis la coupe : l'ordre affiché est celui des dates qu'on MONTRE.
+  list.sort((a, b) => { const ka = sceneKey(a), kb = sceneKey(b); return kb < ka ? -1 : kb > ka ? 1 : 0; });
+  const top = list.slice(0, SCENE_KEEP);
   const tot = (j && typeof j.total_count === 'number') ? j.total_count : null;
-  return { list, tot, q: cherche, at: Date.now() };
+  // `jour` absent partout ⇒ le registre n'a rendu que l'année : on le DIT plutôt que de
+  // laisser croire à un classement au jour près.
+  return { list: top, tot, q: cherche, jours: top.some(x => x.jour), tri, at: Date.now() };
 }
 // Couleur du point CHOISI dans la liste — la même partout où une ligne commande un marqueur.
 const CARTO_PICK = '#f0a93c';
@@ -30119,12 +30136,15 @@ function CartoScene() {
           <CartoRow first label={d.q ? `Tournages « ${d.q} »` : 'Tournages au registre'} value={cartoNum(d.tot)}
             color={ACTU_COLOR} sub={d.q ? 'correspondances au registre parisien' : 'autorisations délivrées à Paris depuis 2016'} />
         )}
-        {/* ⚠ Sans recherche, la liste EST « les dix plus récents » (`limit=10` + tri sur la date
-            de début) : on le DIT, sinon dix lignes sur des milliers ressemblent à un extrait
-            arbitraire. Avec une recherche, ce sont les dix meilleures correspondances. */}
+        {/* ⚠ Sans recherche, la liste EST « les dix plus récents » : on le DIT, sinon dix lignes
+            sur des milliers ressemblent à un extrait arbitraire. Avec une recherche, ce sont les
+            dix correspondances les plus récentes. ⚠ Et on dit AUSSI sur quoi le classement a
+            pu se faire : le registre ne publie pas toujours le jour, et « plus récent » à
+            l'année près n'est pas la même promesse qu'« au jour près ». */}
         <div style={{ fontSize:9, fontFamily:'DM Mono,monospace', letterSpacing:'.1em',
           textTransform:'uppercase', color:C.dim, marginTop:8 }}>
           {d.q ? `Correspondances · ${d.list.length}` : `Les ${d.list.length} tournages les plus récents à Paris`}
+          {d.jours ? ' · triés sur la date de début' : ' · le registre n\'a rendu que l\'année'}
         </div>
         {d.list.map((x, i) => {
           const on = x.id === pick;
@@ -30133,10 +30153,12 @@ function CartoScene() {
               style={{ cursor: x.pt ? 'pointer' : 'default',
                 background: on ? `${CARTO_PICK}14` : 'none', borderRadius: on ? 8 : 0,
                 margin: on ? '0 -6px' : 0, padding: on ? '0 6px 4px' : 0 }}>
+              {/* ⚠ La DATE est la valeur de la ligne, pas une mention perdue dans le sous-titre :
+                  c'est elle qui justifie « les plus récents », elle doit se lire en diagonale. */}
               <CartoRow first={d.tot == null && i === 0} label={on ? `📍 ${x.nom}` : x.nom}
-                value={x.an || '—'} color={on ? CARTO_PICK : undefined}
-                sub={[x.jour ? 'tournage du ' + x.jour.split('-').reverse().join('/') : null,
-                      x.type, x.real, [x.adr, x.ardt].filter(Boolean).join(', ')].filter(Boolean).join(' · ')} />
+                value={x.jour ? x.jour.split('-').reverse().join('/') : (x.an || '—')}
+                color={on ? CARTO_PICK : undefined}
+                sub={[x.type, x.real, [x.adr, x.ardt].filter(Boolean).join(', ')].filter(Boolean).join(' · ')} />
             </div>
           );
         })}
