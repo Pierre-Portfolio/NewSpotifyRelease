@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.20.6';
+const APP_VERSION = '13.20.7';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -27034,7 +27034,7 @@ function lsuScan() {
 // de renvoyer l'utilisateur vers un « IndexedDB » opaque de plusieurs centaines de Mo.
 // ⚠ Curseur et non `getAll()` sur les médias : un seul enregistrement en RAM à la fois.
 async function lsuIdbScan() {
-  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0 };
+  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0, cardsBy:{} };
   try { const raw = await idbGet(IDB_KEY); out.db = (raw && (raw.byteLength || raw.length)) || 0; } catch {}
   // TV Time : sa base ne range pas une chaîne mais des OBJETS (clonage structuré), dont la
   // taille sur disque n'est exposée par aucune API — on la mesure à sa sérialisation JSON,
@@ -27050,7 +27050,11 @@ async function lsuIdbScan() {
   try {
     for (const s of CARD_SUBS) {
       const l = await cardsIdbGet(s);
-      if (Array.isArray(l)) { out.cards += JSON.stringify(l).length; out.cardsN += l.length; }
+      if (Array.isArray(l)) {
+        const b = JSON.stringify(l).length;
+        out.cards += b; out.cardsN += l.length;
+        out.cardsBy[s] = { bytes:b, n:l.length };   // ventilation 🟣 Magic / 🔴 Pokémon
+      }
     }
   } catch {}
   try {
@@ -27121,6 +27125,47 @@ function lsuTvSplit(keys) {
   }
   return buckets.map(b => out[b.id]).filter(b => b.bytes > 0);
 }
+// Ventilation INTERNE de Collection (13.20.7, demande utilisateur) — même principe et même
+// code couleur que TV Time. Les deux sous-collections de CARTES ont leur propre base
+// (`spotifyplus_cards_db`, une entrée chacune, donc déjà pesées une par une par
+// `lsuIdbScan`) ; tout le reste — Displate, Pop, montres, vins, pierres, jeux — tient dans
+// la seule clé `spotifyplus_collection` et ne se découpe pas, d'où un unique « Autre ».
+// ⚠ FONCTION et non const (piège 2) : `COLL_CATS` et les couleurs vivent plus bas.
+function lsuCollSplit(lsBytes, idb) {
+  const by = (idb && idb.cardsBy) || {};
+  const out = [
+    { id:'magic',   icon:'🟣', label:'Magic',   color:'#9b6bd6' },
+    { id:'pokemon', icon:'🔴', label:'Pokémon', color:'#f5b942' },
+  ].map(b => ({ ...b, bytes:(by[b.id] && by[b.id].bytes) || 0, n:(by[b.id] && by[b.id].n) || 0 }));
+  out.push({ id:'other', icon:'📦', label:'Autre', color:C.dim, bytes:lsBytes || 0, n:0 });
+  return out.filter(b => b.bytes > 0);
+}
+// Ventilation INTERNE de Musique (13.20.7, demande utilisateur). Le gros poste du module est
+// la base SQLite, et ce qui la remplit est un feed de titres : ceux qui restent à écouter et
+// ceux qui le sont. Chaque titre est pesé à la taille RÉELLE de ses colonnes texte
+// (`LENGTH(CAST(… AS BLOB))` = des octets, pas des caractères) ; ce que ces deux comptes ne
+// couvrent pas — index, autres tables, pages SQLite, plus les clés localStorage du module —
+// tombe dans « Autre ». ⚠ Aucun chiffre n'est extrapolé : « Autre » est un RESTE mesuré,
+// jamais une règle de trois sur le poids de la base.
+// ⚠ Base pas encore ouverte (`_db` nul, entrée hors ligne) ⇒ tableau vide : la ligne garde
+// alors son trait uni, plutôt qu'une ventilation inventée.
+const LSU_TRACK_COLS = ['spotify_uri', 'artist_name', 'title', 'release_title', 'release_type', 'release_date', 'cover_url'];
+function lsuMusiqueSplit(lsBytes, dbBytes) {
+  let rows = [];
+  try {
+    const sum = LSU_TRACK_COLS.map(c => `LENGTH(CAST(COALESCE(${c},'') AS BLOB))`).join(' + ');
+    rows = dbAll(`SELECT listened AS l, COUNT(*) AS n, SUM(${sum}) AS b FROM tracks GROUP BY listened`);
+  } catch { return []; }
+  const pick = v => rows.find(r => (r.l ? 1 : 0) === v) || { n:0, b:0 };
+  const wait = pick(0), done = pick(1);
+  const out = [
+    { id:'wait', icon:'⏳', label:'En attente', color:'#1ed760', bytes:Number(wait.b) || 0, n:Number(wait.n) || 0 },
+    { id:'done', icon:'🎧', label:'Écoutés',    color:'#8a6bf0', bytes:Number(done.b) || 0, n:Number(done.n) || 0 },
+  ];
+  const rest = Math.max(0, (dbBytes || 0) - out[0].bytes - out[1].bytes) + (lsBytes || 0);
+  out.push({ id:'other', icon:'⚙️', label:'Autre', color:C.dim, bytes:rest, n:0 });
+  return out.filter(b => b.bytes > 0);
+}
 // Plafond restant, mesuré : dichotomie sur la taille d'une clé jetable, à 64 Ko près.
 // ⚠ La clé sonde est retirée dans un `finally` — une sonde réussie qu'on oublie squatterait
 // plusieurs Mo, soit exactement le problème qu'on cherche à diagnostiquer.
@@ -27158,17 +27203,24 @@ function DataLimitPanel() {
     try { navigator.storage?.estimate?.().then(r => { if (alive && r) setEst(r); }, () => {}); } catch {}
     return () => { alive = false; };
   }, [run]);
-  // Ventilation de TV Time. ⚠ Calculée APRÈS le premier rendu (`setTimeout` 0) et non
-  // pendant : reparcourir une clé de plusieurs Mo est le seul coût lourd du panneau, il ne
-  // doit pas retarder l'affichage du reste. Le trait segmenté se colore une fraction de
-  // seconde plus tard, personne ne voit la différence.
-  const [tvSplit, setTvSplit] = React.useState(null);
+  // Ventilations internes — TV Time, Collection et Musique. ⚠ Calculées APRÈS le premier
+  // rendu (`setTimeout` 0) et non pendant : reparcourir une clé de plusieurs Mo et interroger
+  // la base sont les seuls coûts lourds du panneau, ils ne doivent pas retarder l'affichage
+  // du reste. Les traits segmentés se colorent une fraction de seconde plus tard, personne ne
+  // voit la différence.
+  // ⚠ Collection et Musique dépendent d'`idb` (poids des bases), TV Time non : les trois sont
+  // recalculées ensemble dès que l'une des deux mesures arrive.
+  const [splits, setSplits] = React.useState({});
   React.useEffect(() => {
     if (!scan) return;
-    const keys = (scan.rows.find(r => r.id === 'tvtime') || {}).keys;
-    const t = setTimeout(() => setTvSplit(lsuTvSplit(keys || [])), 0);
+    const rowOf = id => scan.rows.find(r => r.id === id) || { keys:[], ls:0 };
+    const t = setTimeout(() => setSplits({
+      tvtime:     lsuTvSplit(rowOf('tvtime').keys || []),
+      collection: lsuCollSplit(rowOf('collection').ls, idb),
+      musique:    lsuMusiqueSplit(rowOf('musique').ls, idb ? idb.db : 0),
+    }), 0);
     return () => clearTimeout(t);
-  }, [scan]);
+  }, [scan, idb]);
   if (!scan) return (
     <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>
       Le stockage local est inaccessible (navigation privée ou données de site bloquées) : rien ne peut être mesuré, et rien ne peut être enregistré non plus.
@@ -27233,8 +27285,10 @@ function DataLimitPanel() {
         {rows.map(r => {
           const p = grand ? Math.round(r.tot / grand * 100) : 0;
           const isOpen = open === r.id;
-          // Seul TV Time a une ventilation interne (cf. lsuTvSplit) : ailleurs, trait uni.
-          const seg = (r.id === 'tvtime' && tvSplit && tvSplit.length) ? tvSplit : null;
+          // Trois modules ont une ventilation interne (TV Time, Collection, Musique) :
+          // ailleurs, trait uni.
+          const sp = splits[r.id];
+          const seg = (sp && sp.length) ? sp : null;
           const segTot = seg ? seg.reduce((n, t) => n + t.bytes, 0) : 0;
           return (
             <div key={r.id} style={{ display:'flex', flexDirection:'column', gap:3 }}>
@@ -27269,14 +27323,14 @@ function DataLimitPanel() {
               )}
               {isOpen && (
                 <div style={{ display:'flex', flexDirection:'column', gap:2, padding:'4px 0 4px 20px' }}>
-                  {r.id === 'tvtime' && tvSplit && tvSplit.map(t => {
+                  {seg && seg.map(t => {
                     const tp = r.tot ? Math.round(t.bytes / r.tot * 100) : 0;
                     return (
                       <div key={t.id} style={{ display:'flex', flexDirection:'column', gap:2, marginBottom:3 }}>
                         <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:10.5 }}>
                           <span>{t.icon}</span>
                           <span style={{ flex:1, minWidth:0, color:C.text, fontWeight:600 }}>{t.label}</span>
-                          {t.n > 0 && <span style={{ color:C.dim, fontSize:9.5 }}>{t.n} fiche{t.n > 1 ? 's' : ''}</span>}
+                          {t.n > 0 && <span style={{ color:C.dim, fontSize:9.5 }}>{t.n} {(r.id === 'collection' ? 'carte' : r.id === 'musique' ? 'titre' : 'fiche')}{t.n > 1 ? 's' : ''}</span>}
                           <span style={{ color:t.color, fontWeight:700, fontVariantNumeric:'tabular-nums' }}>{lsuFmt(t.bytes)}</span>
                         </div>
                         <div style={{ height:5, borderRadius:3, background:'#ffffff10', overflow:'hidden' }}>
