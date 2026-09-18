@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.19.8';
+const APP_VERSION = '13.19.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29206,7 +29206,12 @@ function CartoMiniMap({ markers, center, zoom, fit, height, overlay, overlaySig,
         weight: 2, fillColor: m.color || ACTU_COLOR, fillOpacity: 0.45 }).addTo(grp);
       if (m.label) c.bindPopup(mapsEsc(m.label));   // ⚠ jamais de HTML brut dans un popup
     }
-    if (overlay) { try { overlay(grp, map); } catch {} }
+    // ⚠ Une surcouche peut ANIMER ce qu'elle a posé (les rames simulées du réseau) : elle
+    // rend alors une fonction de NETTOYAGE, appelée avant la reconstruction suivante et au
+    // démontage. Sans elle, un intervalle survivrait à la fiche repliée et déplacerait des
+    // marqueurs déjà détruits. Les surcouches statiques ne rendent rien : rien ne change.
+    let stop = null;
+    if (overlay) { try { stop = overlay(grp, map); } catch {} }
     // Cadrage : sur les marqueurs quand on le demande, sinon la vue posée à la création.
     if (fit) {
       const pts = (markers || []).filter(m => isFinite(m.lat) && isFinite(m.lon)).map(m => [m.lat, m.lon]);
@@ -29214,6 +29219,7 @@ function CartoMiniMap({ markers, center, zoom, fit, height, overlay, overlaySig,
       else if (pts.length > 1) { try { map.fitBounds(L.latLngBounds(pts).pad(0.25)); } catch {} }
     }
     setTimeout(() => { try { map.invalidateSize(); } catch {} }, 60);
+    return () => { if (typeof stop === 'function') { try { stop(); } catch {} } };
   }, [status, sig]);
   // ⚠ RECADRAGE, effet SÉPARÉ et posé APRÈS celui du contenu : `fit` cadre sur l'ensemble des
   // marqueurs à chaque changement de signature, `focus` amène la carte sur CELUI qu'on vient
@@ -30411,7 +30417,8 @@ const IDFM_GARES_MAX  = 120;   // marqueurs posés : au-delà, la carte devient 
 const IDFM_MODE_COLORS = { metro:'#f0a93c', rail:'#7ecbff', rer:'#7ecbff', train:'#7ecbff',
   transilien:'#7ecbff', tram:'#a8d13f', tramway:'#a8d13f', bus:'#e0a040', funicular:'#d98ae0',
   cable:'#d98ae0', ferry:'#5fd35f' };
-const idfmGareColor = m => IDFM_MODE_COLORS[String(m || '').toLowerCase().replace(/[^a-z]/g, '')] || ACTU_COLOR;
+const idfmModeKey = m => String(m || '').toLowerCase().replace(/[^a-z]/g, '');
+const idfmGareColor = m => IDFM_MODE_COLORS[idfmModeKey(m)] || ACTU_COLOR;
 // ── 28) LE PLAN LUI-MÊME, autant qu'on puisse l'avoir (demande utilisateur) ──────
 // ⚠ On ne peut PAS embarquer la carte du site : aucune page tierce n'est plus embarquée
 // (piège 27), et un plan RATP/IDFM est une application, pas une image. Ce qu'IDFM publie en
@@ -30426,6 +30433,92 @@ const IDFM_TRACE_SETS = ['traces-du-reseau-ferre-idf', 'traces-du-reseau-ferre-i
 // recadre ensuite sur les gares dès qu'il y en a ; ce centre est le filet, pas le cadrage.
 const IDFM_PARIS_LL = [48.8566, 2.3522];
 const IDFM_TRACE_MAX  = 100;
+// ── 🚦 LES POINTS QUI BOUGENT SUR LE PLAN (13.19.9, demande utilisateur) ────────
+// « tu peux pas afficher la carte du site direct avec les points en direct ? Ou simuler les
+// points comme le site si vraiment ». La carte du site : NON, aucune page tierce n'est
+// embarquée (piège 27) et un plan IDFM est une application, pas une image. Le trafic RÉEL :
+// non plus, il est derrière une clé PRIM. Reste la seconde option, prise au mot : des rames
+// qui parcourent les tracés qu'on a DÉJÀ téléchargés.
+// ⚠ C'EST UNE SIMULATION, et ça ne doit jamais avoir l'air d'autre chose : répartition
+// régulière, vitesse commerciale MOYENNE du mode, aucun horaire, aucune rame réelle derrière.
+// La note sous la carte le dit en toutes lettres et le compte est annoncé comme simulé.
+// ⚠ Aucune requête de plus : tout part des `traces` déjà en mémoire.
+const IDFM_SIM_MAX   = 110;   // rames à l'écran — au-delà, la carte devient une bouillie
+const IDFM_SIM_TICK  = 700;   // ms entre deux pas
+// ⚠ À vitesse réelle et au zoom 11, une rame de métro avance d'un pixel toutes les onze
+// secondes : la carte paraîtrait FIGÉE, donc cassée. Le temps est accéléré, et le facteur
+// est ÉCRIT dans la note — un chiffre qu'on affiche, pas un trucage.
+const IDFM_SIM_BOOST = 8;
+// Vitesses commerciales moyennes (km/h), arrêts compris.
+const IDFM_SIM_KMH = { metro:25, rail:50, rer:50, train:50, transilien:50, tram:18, bus:15,
+  funicular:10, cable:12, ferry:14, coach:30 };
+// ⚠ Distance en mètres SANS Leaflet (approximation équirectangulaire, largement assez à
+// l'échelle d'une ligne francilienne) : la flotte se construit dans un `useMemo`, donc
+// peut-être avant que Leaflet ne soit chargé — `L.latLng()` y lèverait.
+function idfmMetres(a, b) {
+  const k = Math.PI / 180, R = 6371000;
+  const dy = (b[0] - a[0]) * k * R;
+  const dx = (b[1] - a[1]) * k * R * Math.cos((a[0] + b[0]) / 2 * k);
+  return Math.sqrt(dx * dx + dy * dy);
+}
+// Polyligne + distances cumulées : de quoi placer un point à `d` mètres du départ.
+function idfmPath(line) {
+  const cum = [0];
+  for (let i = 1; i < line.length; i++) cum.push(cum[i - 1] + idfmMetres(line[i - 1], line[i]));
+  return { line, cum, len: cum[cum.length - 1] };
+}
+function idfmAt(p, d) {
+  const { line, cum, len } = p;
+  if (!(len > 0)) return line[0];
+  const x = Math.max(0, Math.min(len, d));
+  let i = 1;
+  while (i < cum.length - 1 && cum[i] < x) i++;
+  const a = line[i - 1], b = line[i], seg = cum[i] - cum[i - 1];
+  const t = seg > 0 ? (x - cum[i - 1]) / seg : 0;
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+// ⚠ La flotte est un objet MUTABLE (chaque rame porte sa position et son sens) mémorisé par
+// `useMemo` : une reconstruction de la surcouche (une ville cherchée, l'animation coupée puis
+// reprise) retrouve les rames OÙ ELLES ÉTAIENT, au lieu de toutes les téléporter au départ.
+function idfmSimFleet(traces) {
+  const paths = [];
+  for (const t of (traces || [])) {
+    for (const l of (t.lines || [])) {
+      if (!Array.isArray(l) || l.length < 2) continue;
+      const p = idfmPath(l);
+      if (p.len > 400) paths.push({ p, color: t.color || idfmGareColor(t.mode), nom: t.nom, mode: t.mode });
+    }
+  }
+  paths.sort((a, b) => b.p.len - a.p.len);
+  const fleet = [];
+  // ⚠ D'abord UNE rame par tracé, du plus long au plus court : avec une répartition au
+  // prorata, les petites lignes n'en auraient aucune et paraîtraient à l'arrêt. La seconde
+  // passe ne sert les longs tracés, EN SENS INVERSE, que s'il reste de la place.
+  const born = (q, i, dir) => {
+    // Position de départ en suite à faible discrépance (nombre d'or) : déterministe, et les
+    // rames ne s'alignent pas toutes au même endroit de leur ligne comme le ferait un pas fixe.
+    const frac = (i * 0.6180339887498949) % 1;
+    const kmh = IDFM_SIM_KMH[idfmModeKey(q.mode)] || 25;
+    fleet.push({ q, pos: q.p.len * frac, dir, mps: kmh * 1000 / 3600 * IDFM_SIM_BOOST });
+  };
+  for (let i = 0; i < paths.length && fleet.length < IDFM_SIM_MAX; i++) born(paths[i], i, 1);
+  for (let i = 0; i < paths.length && fleet.length < IDFM_SIM_MAX; i++) {
+    if (paths[i].p.len < 12000) break;
+    born(paths[i], i + 0.5, -1);
+  }
+  return fleet;
+}
+// Un pas de simulation : chaque rame avance, et REBROUSSE au terminus (elle ne se téléporte
+// pas au départ, ce qui se verrait comme un saut).
+function idfmSimStep(fleet, dots, dt) {
+  for (let i = 0; i < fleet.length; i++) {
+    const v = fleet[i];
+    v.pos += v.dir * v.mps * dt;
+    if (v.pos >= v.q.p.len) { v.pos = v.q.p.len; v.dir = -1; }
+    else if (v.pos <= 0) { v.pos = 0; v.dir = 1; }
+    try { dots[i].setLatLng(idfmAt(v.q.p, v.pos)); } catch {}
+  }
+}
 // Extrait les polylignes d'une géométrie GeoJSON, en [lat, lon] (le fichier est en [lon, lat]).
 function odsLines(g) {
   const geo = (g && (g.geometry || g)) || null;
@@ -30512,6 +30605,12 @@ const cartoNorm = v => String(v == null ? '' : v).toLowerCase().normalize('NFD')
 function CartoTransport() {
   const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
   const d = st.data;
+  // ⚠ Les rames simulées tournent dès l'ouverture (c'est CE qu'on est venu voir), et le
+  // bouton les fige. Rien ne tourne fiche repliée : le collapse démonte la carte (piège 5),
+  // qui appelle alors le nettoyage rendu par la surcouche.
+  const [sim, setSim] = React.useState(true);
+  // ⚠ Déclaré APRÈS `d` (piège 2) : un `useMemo` listé avant sa dépendance la fige à `undefined`.
+  const fleet = React.useMemo(() => idfmSimFleet(d && d.traces ? d.traces.list : []), [d]);
   // ⚠ Une GARE déjà chargée répond sans aucune requête ; à défaut, la commune (le réseau est
   // francilien, mais rien n'interdit de chercher ailleurs — la carte s'y rendra, vide).
   const city = useCartoCity(null, nom => {
@@ -30529,7 +30628,8 @@ function CartoTransport() {
           <div style={{ marginBottom:9 }}>
             <CartoMiniMap fit zoom={11} height={230} center={IDFM_PARIS_LL}
               focus={city.st.row ? [city.st.row.lat, city.st.row.lon] : null} focusZoom={14}
-              overlaySig={'idfm' + ((d.traces && d.traces.list.length) || 0) + '|' + (city.st.row ? city.st.row.key : '')}
+              overlaySig={'idfm' + ((d.traces && d.traces.list.length) || 0) + '|' + (city.st.row ? city.st.row.key : '')
+                + '|' + (sim ? 'sim' + fleet.length : '')}
               overlay={grp => {
                 if (!d.traces) return;
                 for (const t of d.traces.list) {
@@ -30538,6 +30638,24 @@ function CartoTransport() {
                       .bindPopup(mapsEsc([t.nom, t.mode].filter(Boolean).join(' · '))).addTo(grp);
                   }
                 }
+                if (!sim || !fleet.length) return;
+                // Les rames : un point clair cerclé de blanc, POSÉ SUR son tracé et à sa
+                // couleur — on doit voir à quelle ligne il appartient sans ouvrir le popup.
+                const dots = fleet.map(v => L.circleMarker(idfmAt(v.q.p, v.pos), { radius:3.4,
+                  color:'#ffffff', weight:1.2, fillColor: v.q.color, fillOpacity:1, interactive:true })
+                  .bindPopup(mapsEsc([v.q.nom, 'position simulée, pas le trafic réel'].filter(Boolean).join(' · ')))
+                  .addTo(grp));
+                let last = Date.now();
+                const id = setInterval(() => {
+                  const now = Date.now();
+                  // ⚠ Pas borné : un onglet caché bride les minuteurs, et au retour un `dt` de
+                  // plusieurs minutes enverrait toutes les rames au terminus d'un coup.
+                  const dt = Math.min(3, (now - last) / 1000);
+                  last = now;
+                  idfmSimStep(fleet, dots, dt);
+                }, IDFM_SIM_TICK);
+                // Le nettoyage que `CartoMiniMap` rappelle : sans lui, l'intervalle survit.
+                return () => clearInterval(id);
               }}
               markers={[
                 ...(d.gares ? d.gares.list : []).map(g => ({ lat:g.lat, lon:g.lon, r:4.5, color: idfmGareColor(g.mode),
@@ -30547,13 +30665,31 @@ function CartoTransport() {
                 ...(city.st.row ? [{ lat:city.st.row.lat, lon:city.st.row.lon, r:9, color:'#ffffff',
                   label: city.st.row.name + (city.st.row.gare ? ' (gare)' : '') }] : []),
               ]} />
-            <div style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.5 }}>
-              {d.traces
-                ? `${cartoNum(d.traces.list.length)} tracés du réseau ferré à leur couleur officielle (open data IDFM)`
-                : 'tracés indisponibles'}
-              {d.gares ? ` · ${cartoNum(d.gares.list.length)} gares posées${d.gares.tot ? ` sur ${cartoNum(d.gares.tot)}` : ''}` : ''}
-              {city.st.row ? ` · ${city.st.row.gare ? 'gare' : 'commune'} « ${city.st.row.name} » en blanc` : ''}
-              {' · le plan du site lui-même n\'est pas embarquable, c\'est le même réseau redessiné ici'}
+            <div style={{ display:'flex', alignItems:'flex-start', gap:6, marginTop:4 }}>
+              {/* ⚠ Le bouton fige / relance les rames SIMULÉES. Il n'existe que s'il y a des
+                  tracés à parcourir : sans eux, il ne commanderait rien. */}
+              {fleet.length > 0 && (
+                <button onClick={() => setSim(v => !v)}
+                  title={sim ? 'Figer les rames simulées' : 'Relancer les rames simulées'}
+                  style={{ background:'none', border:`1px solid ${sim ? ACTU_COLOR + '66' : C.border}`, borderRadius:6,
+                    color: sim ? ACTU_COLOR : C.dim, fontSize:9, fontWeight:700, padding:'3px 7px',
+                    cursor:'pointer', flexShrink:0, fontFamily:'inherit', lineHeight:1.4 }}>
+                  {sim ? '⏸ Trafic simulé' : '▶ Trafic simulé'}
+                </button>
+              )}
+              <div style={{ flex:1, minWidth:0, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
+                {d.traces
+                  ? `${cartoNum(d.traces.list.length)} tracés du réseau ferré à leur couleur officielle (open data IDFM)`
+                  : 'tracés indisponibles'}
+                {d.gares ? ` · ${cartoNum(d.gares.list.length)} gares posées${d.gares.tot ? ` sur ${cartoNum(d.gares.tot)}` : ''}` : ''}
+                {city.st.row ? ` · ${city.st.row.gare ? 'gare' : 'commune'} « ${city.st.row.name} » en blanc` : ''}
+                {' · le plan du site lui-même n\'est pas embarquable, c\'est le même réseau redessiné ici'}
+                {/* ⚠ Le mot SIMULÉES et le facteur d'accélération sont écrits : le trafic réel
+                    demande une clé PRIM, ces points ne sont personne. */}
+                {fleet.length > 0 && (sim
+                  ? ` · ${cartoNum(fleet.length)} rames SIMULÉES — vitesse commerciale moyenne accélérée ×${IDFM_SIM_BOOST}, ce n'est pas le trafic réel (il demande une clé PRIM)`
+                  : ' · rames simulées figées')}
+              </div>
             </div>
           </div>
         ) : null}
