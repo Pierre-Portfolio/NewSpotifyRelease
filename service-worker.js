@@ -63,7 +63,7 @@
 // v73 : bump de cache — Finance : la section CRYPTO affiche « PEPE = X % d'un BTC » (position PEPE cachée) au lieu du badge EUR/USD.
 // v74 : bump de cache — nouveau module « API » (liste de toutes les API + export JSON des cochées).
 // v75 : bump de cache — Note : espace « Note crypté » séparé (mot de passe global, clic sur le titre), plus de mdp par note.
-// v76 : bump de cache — TV Time YouTube : tag « garder uniquement les Shorts » (affiche/notifie que les Shorts) + demande à l'ajout d'une chaine 100% Shorts.
+// v76 : bump de cache — TV Time YouTube : tag « garder uniquement les Shorts » (affiche/notifie que les Shorts) + demande à l'ajout d'une chaîne 100% Shorts.
 // v84 : bump de cache — Actu : collapse « Cartographie » (au-dessus des fuites) regroupant Réseaux de Transport Paris + Feux de forêt + Guerre + Qualité de l'air.
 // v85 : bump de cache — Cartographie : chaque carte a un bouton « ⛶ Plein écran » (overlay) + bouton « ← Retour » (Échap) pour revenir.
 // v86 : bump de cache — Cartographie : « Feux de forêt » (EFFIS, ne s'affichait pas) remplacé par « Catastrophes naturelles » (GDACS, multi-aléas mondial).
