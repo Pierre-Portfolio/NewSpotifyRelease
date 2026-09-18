@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.20.7';
+const APP_VERSION = '13.20.8';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1107,21 +1107,129 @@ async function gdriveDeleteFile(token, fileId) {
   const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
   if (!r.ok && r.status !== 404) throw new Error('HTTP ' + r.status);
 }
+// ── 🖼️ CACHE LOCAL DES PHOTOS DRIVE (13.20.8, demande utilisateur) ───────────────
+// « Rajoute les photos à la prochaine connexion, puis ne plus s'y connecter pour aller les
+// chercher. » Chaque photo affichée (Vêtement, Collection, Revente) était re-téléchargée au
+// Bearer à CHAQUE ouverture de la page : sans Drive connecté, aucune image ; avec, une
+// requête par vignette et par session.
+// ⚠ PAS dans la base SQLite ni dans le localStorage (pièges 15 et 20, et « ne rien mettre de
+// lourd » dans sql.js : `saveDB()` réexporte TOUTE la base à chaque écoute marquée — y ranger
+// des photos multiplierait ce coût par leur poids). Une base IndexedDB DÉDIÉE, une entrée par
+// fileId Drive, valeur = le Blob tel quel (clonage structuré, aucun encodage base64).
+// ⚠ Volontairement HORS SAUVEGARDE : c'est un cache, Drive fait toujours autorité et tout est
+// re-téléchargeable. L'alourdir d'images était exactement ce que le piège 15 interdit.
+// ⚠ CONTREPARTIE ASSUMÉE : une photo remplacée depuis un AUTRE appareil garde ici son ancienne
+// image (revalider imposerait l'appel Drive qu'on cherche justement à éviter). Le remplacement
+// fait DEPUIS le Hub, lui, passe par `gdriveBlobForget`, qui purge les deux caches — et le
+// bouton « ↻ Re-télécharger » de Vêtement vide la base d'un coup.
+const PHOTOCACHE_DB = 'spotifyplus_photo_cache', PHOTOCACHE_STORE = 'blobs';
+const PHOTOCACHE_MAX = 4000;   // garde-fou : au-delà, les entrées les plus anciennes sautent
+let _photoCacheIdb = null;
+function photoCacheOpen() {
+  if (_photoCacheIdb) return _photoCacheIdb;
+  _photoCacheIdb = new Promise((res, rej) => {
+    const req = indexedDB.open(PHOTOCACHE_DB, 1);
+    req.onupgradeneeded = e => { const db = e.target.result; if (!db.objectStoreNames.contains(PHOTOCACHE_STORE)) db.createObjectStore(PHOTOCACHE_STORE); };
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = e => { _photoCacheIdb = null; rej(e); };
+  });
+  return _photoCacheIdb;
+}
+function _photoCacheReq(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function photoCacheGet(fileId) {
+  const db = await photoCacheOpen();
+  return _photoCacheReq(db.transaction(PHOTOCACHE_STORE, 'readonly').objectStore(PHOTOCACHE_STORE).get(fileId));
+}
+async function photoCachePut(fileId, blob) {
+  const db = await photoCacheOpen();
+  await _photoCacheReq(db.transaction(PHOTOCACHE_STORE, 'readwrite').objectStore(PHOTOCACHE_STORE).put({ blob, at: Date.now() }, fileId));
+  // Élagage paresseux : on ne compte qu'après écriture, et on ne supprime que le surplus.
+  try {
+    const st = db.transaction(PHOTOCACHE_STORE, 'readonly').objectStore(PHOTOCACHE_STORE);
+    const n = await _photoCacheReq(st.count());
+    if (n > PHOTOCACHE_MAX) await photoCachePrune(n - PHOTOCACHE_MAX);
+  } catch {}
+}
+async function photoCacheDel(fileId) {
+  const db = await photoCacheOpen();
+  return _photoCacheReq(db.transaction(PHOTOCACHE_STORE, 'readwrite').objectStore(PHOTOCACHE_STORE).delete(fileId));
+}
+// Supprime les `n` entrées les plus anciennes (curseur : une seule en RAM à la fois).
+async function photoCachePrune(n) {
+  const db = await photoCacheOpen();
+  const rows = [];
+  await new Promise(res => {
+    const req = db.transaction(PHOTOCACHE_STORE, 'readonly').objectStore(PHOTOCACHE_STORE).openCursor();
+    req.onsuccess = e => {
+      const c = e.target.result; if (!c) return res();
+      // ⚠ Jamais un index : il ne pèse rien et le reperdre rendrait les photos invisibles
+      // hors connexion, c'est-à-dire exactement ce que ce cache existe pour éviter.
+      if (String(c.key).slice(0, 6) !== 'index:') rows.push([c.key, (c.value && c.value.at) || 0]);
+      c.continue();
+    };
+    req.onerror = () => res();
+  });
+  rows.sort((a, b) => a[1] - b[1]);
+  for (const [k] of rows.slice(0, Math.max(0, n))) { try { await photoCacheDel(k); } catch {} }
+}
+// L'index « id de fiche → fileId Drive » d'un dossier, rangé dans la MÊME base sous une clé
+// réservée. ⚠ Sans lui, le cache des images ne servirait à rien Drive déconnecté : les
+// fileId ne sont connus que du listing Drive, et une vignette sans fileId ne s'affiche pas.
+// ⚠ Clé préfixée `index:` — un fileId Drive ne contient pas de « : », aucune collision.
+// ⚠ C'est un CACHE, pas une source : le listing Drive écrase cet index dès qu'il répond,
+// Drive reste la seule autorité sur le lien fiche ↔ photo (porté par le NOM du fichier).
+async function photoIndexGet(sub) {
+  try {
+    const rec = await photoCacheGet('index:' + sub);
+    return (rec && rec.map && typeof rec.map === 'object') ? rec.map : null;
+  } catch { return null; }
+}
+async function photoIndexPut(sub, map) {
+  try {
+    const db = await photoCacheOpen();
+    await _photoCacheReq(db.transaction(PHOTOCACHE_STORE, 'readwrite').objectStore(PHOTOCACHE_STORE).put({ map, at: Date.now() }, 'index:' + sub));
+  } catch {}
+}
+// Vide toute la base (bouton « ↻ Re-télécharger les photos »). Rend le nombre d'entrées jetées.
+async function photoCacheClear() {
+  const db = await photoCacheOpen();
+  const st = db.transaction(PHOTOCACHE_STORE, 'readwrite').objectStore(PHOTOCACHE_STORE);
+  const n = await _photoCacheReq(st.count());
+  await _photoCacheReq(st.clear());
+  for (const u of _gdriveBlobUrls.values()) { try { URL.revokeObjectURL(u); } catch {} }
+  _gdriveBlobUrls.clear();
+  return n;
+}
+
 // Un fichier Drive privé n'a PAS d'URL affichable : on le télécharge avec le Bearer puis on
 // en fait une URL blob: (d'où `blob:` dans img-src de la CSP). Cache mémoire par fileId
-// (durée de vie = la page) + dédoublonnage des requêtes simultanées.
+// (durée de vie = la page) + cache DISQUE (ci-dessus, durée de vie = jusqu'à purge) +
+// dédoublonnage des requêtes simultanées.
+// ⚠ Ordre obligatoire : mémoire → base locale → Drive. Dès que la base répond, AUCUNE requête
+// ne part — c'est tout l'intérêt, et c'est aussi ce qui fait marcher les photos hors ligne.
 const _gdriveBlobUrls    = new Map();
 const _gdriveBlobPending = new Map();
 function gdriveBlobUrl(fileId) {
   if (_gdriveBlobUrls.has(fileId))    return Promise.resolve(_gdriveBlobUrls.get(fileId));
   if (_gdriveBlobPending.has(fileId)) return _gdriveBlobPending.get(fileId);
   const p = (async () => {
+    let rec = null;
+    try { rec = await photoCacheGet(fileId); } catch {}
+    if (rec && rec.blob) {
+      const u = URL.createObjectURL(rec.blob);
+      _gdriveBlobUrls.set(fileId, u);
+      return u;
+    }
     const token = gdriveToken();
     if (!token) throw new Error('Google Drive non connecté');
     const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, { headers: { Authorization: `Bearer ${token}` } });
     if (res.status === 401) { gdriveLogout(); throw new Error('Session Google expirée'); }
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const url = URL.createObjectURL(await res.blob());
+    const blob = await res.blob();
+    // ⚠ L'écriture en base ne doit JAMAIS retarder l'affichage ni le faire échouer : un
+    // quota IndexedDB plein garde une app qui marche, simplement sans cache.
+    photoCachePut(fileId, blob).catch(() => {});
+    const url = URL.createObjectURL(blob);
     _gdriveBlobUrls.set(fileId, url);
     return url;
   })();
@@ -1130,11 +1238,13 @@ function gdriveBlobUrl(fileId) {
   return p;
 }
 // Invalide le cache d'un fichier (photo remplacée sur le MÊME id, ou supprimée).
+// ⚠ LES DEUX caches : oublier la base laisserait l'ancienne image revenir au rechargement.
 function gdriveBlobForget(fileId) {
   if (!fileId) return;
   const u = _gdriveBlobUrls.get(fileId);
   if (u) { try { URL.revokeObjectURL(u); } catch {} }
   _gdriveBlobUrls.delete(fileId);
+  photoCacheDel(fileId).catch(() => {});
 }
 
 // ════════════════════════════════════════════════
@@ -16002,10 +16112,19 @@ function VetementPanel() {
   };
 
   // ── Drive : retrouve/crée HUB_Pierre/Vetement et indexe les photos par ID de fiche ──
-  const syncDrive = React.useCallback(async () => {
-    if (!gdriveConfigured()) { setDrive('off'); setDriveMsg('Google Drive non configuré (GDRIVE_CLIENT_ID vide).'); return; }
+  // ⚠ 13.20.8 — L'INDEX LOCAL EST LU EN PREMIER, ET IL SUFFIT. Les photos déjà téléchargées
+  // vivent dans `spotifyplus_photo_cache` : avec l'index, elles s'affichent sans Drive, donc
+  // hors ligne et sans consentement Google. Le listing Drive ne sert plus qu'à découvrir ce
+  // qui a changé — et à réparer l'index, qu'il écrase dès qu'il répond.
+  const syncDrive = React.useCallback(async (opts) => {
+    const cached = await photoIndexGet(VET_DRIVE_SUB);
+    if (cached && Object.keys(cached).length) { setPhotos(cached); setDrive('cache'); }
+    if (!gdriveConfigured()) { if (!cached) setDrive('off'); setDriveMsg('Google Drive non configuré (GDRIVE_CLIENT_ID vide).'); return; }
     const token = gdriveToken();
-    if (!token) { setDrive('off'); setDriveMsg('Connecte Google Drive pour voir et enregistrer tes photos.'); return; }
+    if (!token) { if (!cached) setDrive('off'); setDriveMsg(cached ? '' : 'Connecte Google Drive pour voir et enregistrer tes photos.'); return; }
+    // Index déjà en poche et rafraîchissement non demandé ⇒ AUCUNE requête (demande
+    // utilisateur : « ne plus s'y connecter pour aller les chercher une fois que c'est fait »).
+    if (cached && Object.keys(cached).length && !(opts && opts.force)) return;
     setDrive('loading'); setDriveMsg('');
     try {
       const folder = await gdriveHubSubfolder(token, VET_DRIVE_SUB);
@@ -16013,15 +16132,29 @@ function VetementPanel() {
       const map = {};
       files.forEach(f => { map[vetIdFromName(f.name)] = f.id; });
       setPhotos(map); setDrive('ready');
+      photoIndexPut(VET_DRIVE_SUB, map);
     } catch (e) {
       // Dossier caché disparu → on oublie l'id et on laissera la prochaine tentative le recréer.
       gdriveHubFolderReset(VET_DRIVE_SUB);
-      setDrive('error'); setDriveMsg(e && e.message ? e.message : 'Erreur Google Drive');
+      if (!cached) { setDrive('error'); setDriveMsg(e && e.message ? e.message : 'Erreur Google Drive'); }
     }
   }, []);
+  // Vide le cache d'images + l'index, puis relit Drive : le seul moyen de rattraper une photo
+  // remplacée depuis un autre appareil.
+  const [reloading, setReloading] = React.useState(false);
+  const reloadPhotos = async () => {
+    setReloading(true); setDriveMsg('');
+    try {
+      const n = await photoCacheClear();
+      setPhotoRev(r => r + 1);
+      setDriveMsg(`✓ ${n} photo(s) oubliée(s) localement — retéléchargement depuis Drive.`);
+      await syncDrive({ force:true });
+    } catch { setDriveMsg('✗ Cache photos illisible.'); }
+    finally { setReloading(false); }
+  };
 
   // Demande d'accès Google automatique (même consentement que Actu/À propos) + 1re synchro.
-  React.useEffect(() => { gdriveAutoLogin(); syncDrive(); }, [syncDrive]);
+  React.useEffect(() => { gdriveAutoLogin(); syncDrive(); }, [syncDrive]);   // sans `force` : l'index local suffit
 
   // Migration one-shot : les photos encore stockées en data URL (ancien format localStorage)
   // partent sur Drive, puis SEULES celles réellement uploadées sont retirées du localStorage.
@@ -16067,7 +16200,7 @@ function VetementPanel() {
         fid = await gdriveUploadMedia(token, { name: vetPhotoName(id, blob.type), parentId: folder2, blob });
       }
       gdriveBlobForget(photos[id]); gdriveBlobForget(fid);   // l'ancienne image ne doit pas rester en cache
-      setPhotos(p => ({ ...p, [id]: fid }));
+      setPhotos(p => { const n = { ...p, [id]: fid }; photoIndexPut(VET_DRIVE_SUB, n); return n; });
       setPhotoRev(r => r + 1);
       setDrive('ready');
     } catch (e) { setDriveMsg('✗ Envoi impossible : ' + ((e && e.message) || 'erreur')); }
@@ -16082,7 +16215,7 @@ function VetementPanel() {
     try {
       await gdriveDeleteFile(token, fid);
       gdriveBlobForget(fid);
-      setPhotos(p => { const n = { ...p }; delete n[id]; return n; });
+      setPhotos(p => { const n = { ...p }; delete n[id]; photoIndexPut(VET_DRIVE_SUB, n); return n; });
     } catch (e) { if (!silent) setDriveMsg('✗ Suppression impossible : ' + ((e && e.message) || 'erreur')); }
     finally { if (!silent) setBusyPhoto(null); }
   };
@@ -16186,12 +16319,23 @@ function VetementPanel() {
         <span style={{ fontSize:11.5, color:C.muted, flex:1, minWidth:160 }}>
           📁 Photos stockées dans <b style={{ color:VETEMENT_COLOR }}>Google Drive · {GDRIVE_HUB_FOLDER}/{VET_DRIVE_SUB}</b>
           {drive === 'ready'   && ` — ${nPhotos} photo${nPhotos > 1 ? 's' : ''}.`}
+          {drive === 'cache'   && ` — ${nPhotos} photo${nPhotos > 1 ? 's' : ''}, lues depuis cet appareil (aucun appel à Drive).`}
           {drive === 'loading' && ' — lecture en cours…'}
           {driveMsg && <span style={{ display:'block', color: driveMsg[0] === '✗' ? '#ff8a8a' : C.dim, marginTop:3 }}>{driveMsg}</span>}
         </span>
+        {/* ⚠ « ↻ Re-télécharger » n'est PAS « ↻ Rafraîchir » : une fois les photos gardées sur
+            l'appareil, plus rien ne repart vers Drive tout seul — une photo remplacée depuis
+            un autre appareil ne se rattrape que par ce bouton. */}
+        {(drive === 'cache' || drive === 'ready') && (
+          <button onClick={reloadPhotos} disabled={reloading}
+            title="Oublier les photos gardées sur cet appareil et les retélécharger depuis Drive"
+            style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:6, padding:'5px 12px', fontSize:11, cursor: reloading ? 'default' : 'pointer', opacity: reloading ? 0.5 : 1 }}>
+            {reloading ? '…' : '↻ Re-télécharger'}
+          </button>
+        )}
         {drive === 'off' && gdriveConfigured()
           ? <button onClick={gdriveLogin} style={{ background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:6, padding:'5px 12px', fontSize:11, fontWeight:700, cursor:'pointer' }}>Connecter Google Drive</button>
-          : <button onClick={syncDrive} disabled={drive === 'loading'} style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:6, padding:'5px 12px', fontSize:11, cursor: drive === 'loading' ? 'default' : 'pointer', opacity: drive === 'loading' ? 0.5 : 1 }}>↻ Rafraîchir</button>}
+          : <button onClick={() => syncDrive({ force:true })} disabled={drive === 'loading'} style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:6, padding:'5px 12px', fontSize:11, cursor: drive === 'loading' ? 'default' : 'pointer', opacity: drive === 'loading' ? 0.5 : 1 }}>↻ Rafraîchir</button>}
       </div>
 
       {/* Mes vêtements — SEUL collapse depuis 8.3.7 (l'Inventaire a été retiré, « Mes
@@ -26997,6 +27141,10 @@ const LSU_RULES = [
     re:/^spotifyplus_(steam|lol|chess|cr$|cr_|github_stats|dependabot)/ },
   { mod:null, id:'keys', icon:'🔐', label:'Clés & jetons API', color:'#6a78f2',
     re:/^(spotifyplus_(.*_key|.*_token|api_|gcse_|cf_|pcloud_|tmdb|gemini|groq|mistral|cerebras|zai|cohere|openrouter)|spotify_|dropbox|gdrive|ytg_|pcloud_)/ },
+  // Cache local des photos Drive : aucune clé localStorage (tout est en base), mais un poste
+  // bien réel — et le seul qu'on puisse vider sans rien perdre. Regex qui ne matche JAMAIS :
+  // la ligne n'existe que pour porter le poids de sa base.
+  { mod:null, id:'photocache', icon:'🖼️', label:'Cache photos Drive', color:'#f59a2e', re:/^__jamais__$/ },
   { mod:null, id:'prefs', icon:'⚙️', label:'Réglages du Hub', color:'#8ab4ff',
     re:/^spotifyplus_(modules|home_modules|module_ai|playerbar|backup_|active_|layout_hint|auth_error|boot_|vendor_heal|tabs|last_backup|oauth_return)/ },
 ];
@@ -27034,7 +27182,7 @@ function lsuScan() {
 // de renvoyer l'utilisateur vers un « IndexedDB » opaque de plusieurs centaines de Mo.
 // ⚠ Curseur et non `getAll()` sur les médias : un seul enregistrement en RAM à la fois.
 async function lsuIdbScan() {
-  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0, cardsBy:{} };
+  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0, cardsBy:{}, photos:0, photosN:0 };
   try { const raw = await idbGet(IDB_KEY); out.db = (raw && (raw.byteLength || raw.length)) || 0; } catch {}
   // TV Time : sa base ne range pas une chaîne mais des OBJETS (clonage structuré), dont la
   // taille sur disque n'est exposée par aucune API — on la mesure à sa sérialisation JSON,
@@ -27056,6 +27204,22 @@ async function lsuIdbScan() {
         out.cardsBy[s] = { bytes:b, n:l.length };   // ventilation 🟣 Magic / 🔴 Pokémon
       }
     }
+  } catch {}
+  // Cache des photos Drive : poids RÉEL des Blobs (`size`), curseur pour n'en garder qu'un
+  // en RAM. Les entrées `index:` ne sont pas des images et ne se comptent pas comme telles.
+  try {
+    const db = await photoCacheOpen();
+    await new Promise(res => {
+      const req = db.transaction(PHOTOCACHE_STORE, 'readonly').objectStore(PHOTOCACHE_STORE).openCursor();
+      req.onsuccess = e => {
+        const c = e.target.result;
+        if (!c) return res();
+        const v = c.value || {};
+        if (v.blob && typeof v.blob.size === 'number') { out.photos += v.blob.size; out.photosN++; }
+        c.continue();
+      };
+      req.onerror = () => res();
+    });
   } catch {}
   try {
     const st = await _noteMediaTx('readonly');
@@ -27242,8 +27406,8 @@ function DataLimitPanel() {
   // Ventilation finale : le localStorage de chaque module + sa part de base IndexedDB.
   const rows = scan.rows.map(r => ({
     ...r,
-    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : r.id === 'collection' ? idb.cards : 0,
-    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : r.id === 'collection' ? `base Cartes — ${idb.cardsN} carte${idb.cardsN > 1 ? 's' : ''} (Pokémon, Magic)` : '',
+    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : r.id === 'collection' ? idb.cards : r.id === 'photocache' ? idb.photos : 0,
+    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : r.id === 'collection' ? `base Cartes — ${idb.cardsN} carte${idb.cardsN > 1 ? 's' : ''} (Pokémon, Magic)` : r.id === 'photocache' ? `${idb.photosN} photo${idb.photosN > 1 ? 's' : ''} gardée${idb.photosN > 1 ? 's' : ''} sur cet appareil — Drive fait toujours autorité` : '',
   })).map(r => ({ ...r, tot: r.ls + r.idb }))
      .filter(r => r.tot > 0)
      .sort((a, b) => b.tot - a.tot);
