@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.20.2';
+const APP_VERSION = '13.20.3';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -45371,6 +45371,17 @@ const TODO_BUCKETS = [
   ['cecile', 'Activité avec Cécile', '💞'],
 ];
 const TODO_LS_KEY = 'spotifyplus_todos';
+// ── 📍 LE TAG « MASSY » (13.20.3, demande utilisateur) ────────────────────
+// Un seul tag, posé par un DOUBLE TAP sur le libellé : la tâche passe en bleu, et le bouton
+// 📍 de l'en-tête ne garde plus qu'elles. Aucune nouvelle clé de stockage — c'est un booléen
+// sur la tâche, donc `spotifyplus_todos` le porte déjà, sauvegarde comprise.
+// ⚠ Le filtre n'est PAS persisté : on arrive toujours sur TOUTES les tâches (demande
+// utilisateur). Une liste ouverte filtrée sans qu'on l'ait demandé se lit comme une perte.
+const TODO_MASSY = 'Massy';
+const TODO_MASSY_BLUE = '#5aa9ff';
+// Deux appuis dans cette fenêtre = un double tap. 320 ms : au-dessus, deux clics distincts
+// sur deux tâches voisines commençaient à se confondre à l'usage.
+const TODO_TAP_MS = 320;
 // Appui long sur le libellé d'une tâche « Quotidien » → proposition de supprimer la récurrence.
 // 3 s (et non 450 ms comme Sport/Santé) : l'action est destructive, un appui accidentel ne doit
 // jamais l'atteindre. Même gabarit que l'édition de tag du coffre (MDP_TAG_HOLD_MS).
@@ -45465,7 +45476,7 @@ function todoTrashLoad() {
 // tâche faite (croix ×). Absent pour un arrêt de récurrence, qui n'est pas une complétion.
 function todoTrashPush(t, how, doneTs) {
   if (!t || !t.text) return todoTrashLoad();
-  const next = [{ text: t.text, bucket: t.bucket, fav: !!t.fav, how, at: Date.now(), doneTs }, ...todoTrashLoad()].slice(0, TODO_TRASH_MAX);
+  const next = [{ text: t.text, bucket: t.bucket, fav: !!t.fav, massy: !!t.massy, how, at: Date.now(), doneTs }, ...todoTrashLoad()].slice(0, TODO_TRASH_MAX);
   lsSet(TODO_TRASH_LS, JSON.stringify(next));
   return next;
 }
@@ -45486,6 +45497,7 @@ function TodoPanel() {
   const [todos, setTodos]       = React.useState(loadTodos);
   const [trash, setTrash]       = React.useState(todoTrashLoad);
   const [trashOpen, setTrashOpen] = React.useState(false);
+  const [massyOnly, setMassyOnly] = React.useState(false);
   const [bucketIdx, setBucketIdx] = React.useState(0);
   const [text, setText]         = React.useState('');
   const [, forceTick]           = React.useReducer(x => x + 1, 0);
@@ -45506,7 +45518,9 @@ function TodoPanel() {
   const add = () => {
     const v = text.trim();
     if (!v) return;
-    update([...todos, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: v, bucket: bucket[0], fav: false }]);
+    // ⚠ Vue 📍 active ⇒ la tâche naît taguée. Sinon elle disparaîtrait à la seconde où on
+    // l'écrit, et on la croirait perdue.
+    update([...todos, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: v, bucket: bucket[0], fav: false, massy: massyOnly }]);
     setText('');
   };
   const remove = id => {
@@ -45516,6 +45530,22 @@ function TodoPanel() {
   };
   // Étoile favorite
   const toggleFav = id => update(todos.map(t => t.id === id ? { ...t, fav: !t.fav } : t));
+  // ── 📍 DOUBLE TAP SUR LE LIBELLÉ = poser / retirer le tag Massy ──────────────
+  // ⚠ Une ref et non un état : le premier appui ne doit RIEN re-rendre, sinon la ligne
+  // clignote à chaque simple clic (piège 6, même raison que l'appui long).
+  // ⚠ `holdRef.current.fired` neutralise le clic qui suit un appui long de 3 s dans le
+  // Quotidien (piège 11) : arrêter une récurrence ne doit pas taguer au passage.
+  const tapRef = React.useRef({ id: null, at: 0 });
+  const tapLabel = t => {
+    if (holdRef.current.fired) { holdRef.current.fired = false; return; }
+    const now = Date.now(), r = tapRef.current;
+    if (r.id === t.id && now - r.at < TODO_TAP_MS) {
+      tapRef.current = { id: null, at: 0 };
+      update(todos.map(x => x.id === t.id ? { ...x, massy: !x.massy } : x));
+      return;
+    }
+    tapRef.current = { id: t.id, at: now };
+  };
   // Quotidien : valide la tâche pour aujourd'hui (elle repart active demain à 00h) → compte dans les stats
   const validateDaily = id => update(todos.map(t => {
     if (t.id !== id || t.doneDate === today) return t;
@@ -45558,7 +45588,7 @@ function TodoPanel() {
   const restoreTrash = (e, i) => {
     const bi = TODO_BUCKETS.findIndex(b => b[0] === e.bucket);
     const dest = bi >= 0 ? bi : TODO_BUCKETS.findIndex(b => b[0] === 'today');
-    update([...todos, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: e.text, bucket: TODO_BUCKETS[dest][0], fav: !!e.fav }]);
+    update([...todos, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: e.text, bucket: TODO_BUCKETS[dest][0], fav: !!e.fav, massy: !!e.massy }]);
     todoDoneUndo(e.doneTs);
     setTrash(todoTrashRemove(i));
     setBucketIdx(dest);
@@ -45587,7 +45617,13 @@ function TodoPanel() {
     }, TODO_HOLD_MS);
   };
 
-  let items = todos.filter(t => t.bucket === bucket[0]);
+  // ⚠ Le filtre 📍 s'applique DANS la rubrique courante, pas en travers du carrousel : c'est
+  // l'échéance qui range les tâches, le tag ne fait que restreindre ce qu'on en voit. Le
+  // compte des tâches Massy des AUTRES rubriques est annoncé sous la liste, pour qu'une
+  // rubrique vide ne se lise pas « il n'y en a nulle part ».
+  const massyAll = todos.filter(t => t.massy).length;
+  let items = todos.filter(t => t.bucket === bucket[0] && (!massyOnly || t.massy));
+  const massyElse = massyAll - todos.filter(t => t.bucket === bucket[0] && t.massy).length;
   // Cécile : les activités faites descendent en bas de liste (ordre de saisie préservé sinon)
   if (isCecile) items = [...items.filter(t => !t.done), ...items.filter(t => t.done)];
   const doneCount = isCecile ? items.filter(t => t.done).length : 0;
@@ -45655,6 +45691,17 @@ function TodoPanel() {
           que ce bouton sert justement à RÉCUPÉRER ce qui a été jeté. */}
       <div style={{ display:'flex', alignItems:'center', gap:8 }}>
         <div style={{ flex:1, fontSize:10, fontWeight:700, color:TODO_GREEN, letterSpacing:'0.07em' }}>TO DO</div>
+        {/* ⚠ À GAUCHE du ♻️ (demande utilisateur), même gabarit que lui — ni fond ni bordure
+            teintés tant qu'il est au repos. Son libellé dit CE QUI EST AFFICHÉ, pas ce que le
+            clic fera : c'est un état, comme le ♻️ qui s'allume quand la corbeille est ouverte. */}
+        <button onClick={() => setMassyOnly(v => !v)}
+          title={massyOnly ? `Afficher toutes les tâches` : `Afficher seulement les tâches « ${TODO_MASSY} » (double tap sur une tâche pour la taguer)`}
+          aria-pressed={massyOnly}
+          style={{ background:'none', border:`1px solid ${massyOnly ? TODO_MASSY_BLUE + '66' : C.border}`, borderRadius:6,
+            color: massyOnly ? TODO_MASSY_BLUE : C.dim, fontSize:10, fontWeight:700, lineHeight:1.4,
+            padding:'3px 8px', cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap' }}>
+          {massyOnly ? `📍 ${TODO_MASSY}` : '📍 Toutes'}
+        </button>
         <button onClick={() => setTrashOpen(o => !o)}
           title="Récupérer une des 3 dernières tâches supprimées"
           aria-label="Récupérer une des 3 dernières tâches supprimées"
@@ -45692,7 +45739,7 @@ function TodoPanel() {
         <div style={{ flex:1, textAlign:'center', minWidth:0 }}>
           <div style={{ fontSize:13, fontWeight:800, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{bucket[2]} {bucket[1]}</div>
           <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
-            {items.length} tâche{items.length > 1 ? 's' : ''}{doneCount > 0 ? ` · ${doneCount} faite${doneCount > 1 ? 's' : ''}` : ''}
+            {items.length} tâche{items.length > 1 ? 's' : ''}{massyOnly ? ' ' + TODO_MASSY : ''}{doneCount > 0 ? ` · ${doneCount} faite${doneCount > 1 ? 's' : ''}` : ''}
           </div>
         </div>
         <button onClick={() => goBucket(1)} style={arrowBtn} title="Échéance suivante">›</button>
@@ -45714,7 +45761,11 @@ function TodoPanel() {
       </div>
       {/* Liste */}
       {items.length === 0 ? (
-        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucune tâche ici</div>
+        <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>
+          {massyOnly
+            ? `Aucune tâche ${TODO_MASSY} ici` + (massyElse > 0 ? ` · ${massyElse} dans les autres rubriques` : '')
+            : 'Aucune tâche ici'}
+        </div>
       ) : (
         <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
           {items.map(t => {
@@ -45735,14 +45786,23 @@ function TodoPanel() {
                            flexShrink:0, touchAction:'none', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }}>⠿</span>
                 <button onClick={() => toggleFav(t.id)} title={t.fav ? 'Retirer des favorites' : 'Marquer comme favorite'}
                   style={{ background:'none', border:'none', color: t.fav ? '#f5c518' : C.dim, fontSize:15, lineHeight:1, padding:'2px 4px', cursor:'pointer', flexShrink:0 }}>{t.fav ? '★' : '☆'}</button>
+                {/* ⚠ Le libellé porte MAINTENANT un clic : double tap = poser / retirer le tag
+                    📍 Massy, et le texte passe en bleu. `touchAction:'manipulation'` désactive le
+                    zoom au double tap du navigateur sur CETTE zone — sans lui, taguer une tâche
+                    grossirait la page (la balise viewport laisse le zoom, et c'est voulu). */}
                 <div
+                  onClick={() => tapLabel(t)}
                   onPointerDown={isDaily ? () => holdStart(t) : undefined}
                   onPointerUp={isDaily ? holdClear : undefined}
                   onPointerLeave={isDaily ? holdClear : undefined}
                   onPointerCancel={isDaily ? holdClear : undefined}
                   onContextMenu={isDaily ? (e => e.preventDefault()) : undefined}
-                  title={isDaily ? 'Maintenir 3 s pour supprimer la récurrence' : undefined}
-                  style={{ flex:1, minWidth:0, fontSize:11, color: faded ? C.muted : C.text, wordBreak:'break-word', textDecoration: faded ? 'line-through' : 'none',
+                  title={`Double tap : ${t.massy ? 'retirer' : 'poser'} le tag « ${TODO_MASSY} »${isDaily ? ' · maintenir 3 s : supprimer la récurrence' : ''}`}
+                  style={{ flex:1, minWidth:0, fontSize:11,
+                           color: faded ? C.muted : (t.massy ? TODO_MASSY_BLUE : C.text),
+                           fontWeight: t.massy ? 700 : 400,
+                           wordBreak:'break-word', textDecoration: faded ? 'line-through' : 'none',
+                           cursor:'pointer', touchAction:'manipulation',
                            userSelect: isDaily ? 'none' : 'auto', WebkitUserSelect: isDaily ? 'none' : 'auto', WebkitTouchCallout:'none' }}>{t.text}</div>
                 <button onClick={() => move(t.id, -1)} disabled={bi === 0} title="Échéance plus proche"
                   style={{ background:'none', border:`1px solid ${bi === 0 ? C.border : TODO_GREEN + '55'}`, borderRadius:7, color: bi === 0 ? C.dim : TODO_GREEN, fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 10px', cursor: bi === 0 ? 'default' : 'pointer', flexShrink:0 }}>‹</button>
@@ -45763,6 +45823,12 @@ function TodoPanel() {
           ⠿ glisse une tâche pour changer son ordre dans la rubrique
         </div>
       )}
+      {/* Le tag ne s'invente pas : le geste est dit une fois, là où on lit la liste. */}
+      <div style={{ fontSize:9, color: massyOnly ? TODO_MASSY_BLUE : C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+        {massyOnly
+          ? `📍 ${TODO_MASSY} seulement` + (massyElse > 0 ? ` · ${massyElse} ailleurs dans le carrousel` : '') + ' · une tâche ajoutée ici est taguée'
+          : `double tap sur une tâche = tag « ${TODO_MASSY} » (elle passe en bleu)` + (massyAll > 0 ? ` · ${massyAll} taguée${massyAll > 1 ? 's' : ''}` : '')}
+      </div>
       {isDaily && (
         <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
           × = valider pour aujourd’hui · repart à 00h · maintenir 3 s sur une tâche = supprimer la récurrence
