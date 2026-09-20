@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.5';
+const APP_VERSION = '13.21.6';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28615,6 +28615,31 @@ const YTSUB_CACHE_V      = 4;                            // v4 = `channelId` sur
 // seulement au bout : « si j'ai vu 50% de la video depuis actu => met la dans le hub tv time ».
 const ACTU_SEEN_RATIO    = 0.5;
 
+// ⚠ 13.21.6 (demande utilisateur) — repère « Fin des nouveautés » : un trait rouge posé LÀ
+// où se trouvait la 1re vidéo de l'onglet la dernière fois que la section a été OUVERTE.
+// Ce qui est mémorisé est un ID de vidéo, jamais un rang : entre deux visites la liste
+// s'allonge par le haut, un rang ne désignerait plus la même vidéo. Un objet
+// { video, short } — chaque onglet a sa propre tête de liste. Hors sauvegarde (re-dérivable
+// d'un simple passage, et propre à cet appareil).
+const YTSUB_TOP_LS = 'spotifyplus_yt_top_seen';
+function loadYtTopSeen() {
+  try { return JSON.parse(lsGet(YTSUB_TOP_LS)) || {}; } catch { return {}; }
+}
+function saveYtTopSeen(tab, id) {
+  if (!tab || !id) return;
+  const cur = loadYtTopSeen();
+  if (cur[tab] === id) return;
+  lsSet(YTSUB_TOP_LS, JSON.stringify({ ...cur, [tab]: id }));
+}
+// Enregistre la tête de liste du moment. ⚠ Rendu en ENFANT du collapse : `StatsCollapse`
+// démonte ses enfants repliés (piège 5), donc la visite n'est comptée que si la section a
+// vraiment été dépliée. Le repère AFFICHÉ, lui, est figé au montage de la section — il ne
+// bouge donc pas sous les yeux pendant qu'on défile.
+function YtTopSeenRecorder({ tab, id }) {
+  React.useEffect(() => { saveYtTopSeen(tab, id); }, [tab, id]);
+  return null;
+}
+
 let _ytSubsCache;
 function loadYtSubs() {
   if (_ytSubsCache !== undefined) return _ytSubsCache;
@@ -29135,6 +29160,10 @@ function ActuYoutubeSection() {
   const [err, setErr]         = React.useState('');
   const [visible, setVisible] = React.useState(YTSUB_PAGE);
   const [ytTab, setYtTab]     = React.useState('video');   // 'video' (≥ 3 min) | 'short' (< 3 min)
+  // Tête de liste de la DERNIÈRE visite, par onglet (13.21.6) : figée au montage pour que
+  // le trait « Fin des nouveautés » ne se déplace pas pendant qu'on défile, alors même que
+  // `YtTopSeenRecorder` note déjà la tête d'aujourd'hui pour la visite suivante.
+  const [topSeen]             = React.useState(loadYtTopSeen);
   const [connected]           = React.useState(() => ytgConnected());   // jeton YouTube dédié (7.6.67)
   // Id de la playlist « à regarder » (lien du pied de section). ⚠ Lu par `lsGet` et UNE fois
   // par montage : la lecture directe de `localStorage` en plein JSX levait quand les données
@@ -29180,6 +29209,13 @@ function ActuYoutubeSection() {
     () => all.filter(v => ytSubIsShort(v) === (ytTab === 'short')),
     [data, ytTab]);
   const total    = list.length;
+  // Rang de la vidéo qui ouvrait la liste la dernière fois : tout ce qui est AU-DESSUS est
+  // nouveau. -1 (vidéo sortie du cache, ou 1re visite) ⇒ pas de trait du tout, jamais un
+  // repère planté au hasard.
+  const markIdx  = React.useMemo(() => {
+    const id = topSeen[ytTab];
+    return id ? list.findIndex(v => v.id === id) : -1;
+  }, [list, topSeen, ytTab]);
 
   // Changement d'onglet → on repart de la 1re page
   const pickTab = (t) => { if (t !== ytTab) { setYtTab(t); setVisible(YTSUB_PAGE); } };
@@ -29336,6 +29372,15 @@ function ActuYoutubeSection() {
     );
   };
 
+  // Trait rouge « Fin des nouveautés » — posé AU-DESSUS de la vidéo qui était en tête à la
+  // visite précédente : ce qui le surplombe est arrivé depuis.
+  const newMark = (
+    <div style={{ display:'flex', alignItems:'center', gap:8, padding:'12px 0 2px' }}>
+      <span style={{ flex:1, height:2, background:YT_COLOR, borderRadius:2 }} />
+      <span style={{ fontSize:9.5, fontWeight:700, color:YT_COLOR, letterSpacing:.5, textTransform:'uppercase', whiteSpace:'nowrap' }}>Fin des nouveautés</span>
+      <span style={{ flex:1, height:2, background:YT_COLOR, borderRadius:2 }} />
+    </div>
+  );
   const shown = list.slice(0, Math.min(visible, total));
   // Sélecteur Vidéo / Short — 40% de large par bouton
   const tabBtn = (key, label, n) => (
@@ -29391,7 +29436,13 @@ function ActuYoutubeSection() {
         {!loading && !total && !err && <div style={{ fontSize:11, color:C.dim, padding:'4px 0' }}>
           {ytTab === 'short' ? 'Aucun Short récent.' : 'Aucune vidéo récente trouvée.'}
         </div>}
-        {shown.map(v => vidCard(v, added.has(v.id), () => addWL(v), YT_COLOR, wlBusy === v.id))}
+        <YtTopSeenRecorder tab={ytTab} id={list.length ? list[0].id : ''} />
+        {shown.map((v, i) => (
+          <React.Fragment key={v.id}>
+            {i === markIdx && newMark}
+            {vidCard(v, added.has(v.id), () => addWL(v), YT_COLOR, wlBusy === v.id)}
+          </React.Fragment>
+        ))}
         {/* Sentinelle : le bouton reste cliquable (repli), mais il se déclenche SEUL dès
             qu'il est à l'écran — d'où le libellé au présent. */}
         {visible < total && <div ref={sentinelRef} style={{ padding:'8px 0', textAlign:'center' }}>
