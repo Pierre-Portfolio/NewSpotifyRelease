@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.8';
+const APP_VERSION = '13.21.9';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -46620,6 +46620,26 @@ function safeHref(url) {
 // l'app vit (survit au changement d'onglet mobile), effacée au reload (verrouillage auto).
 let _mdpSession = { unlocked:false, pw:null, entries:null };
 
+// ── Deux espaces dans UN coffre : Perso / Pro (13.21.9, demande utilisateur) ──
+// Le bandeau « 🔓 Coffre chiffré déverrouillé » a laissé la place à un bouton qui porte le
+// NOM de l'espace courant et bascule à chaque clic. Une entrée porte `space` ; toute la vue
+// (recherche, criticité, tags, liste, check-up) est filtrée dessus, et une entrée ajoutée
+// naît dans l'espace affiché — sinon elle disparaîtrait en s'enregistrant.
+// ⚠ `space` ABSENT ⇒ Perso : c'est ce que portent toutes les entrées d'avant 13.21.9, et
+// aucune migration ne les réécrit (un coffre chiffré ne se migre qu'à l'ouverture, donc
+// jamais pour qui ne déverrouille pas). Toujours lire par `mdpSpaceOf`, jamais `e.space` nu.
+// ⚠ Le blob chiffré reste UNIQUE ({entries, tags}) : rien à changer aux sauvegardes, et
+// l'espace n'est PAS un cloisonnement de sécurité — c'est un rangement. Les deux espaces
+// s'ouvrent avec le même mot de passe maître, et le croisement avec les fuites de données
+// (`syncLeakVaultTodos`) les voit tous les deux, comme il le doit.
+// ⚠ Module-level et SANS clé de stockage : le coffre se reverrouille au reload, l'espace
+// repart donc à Perso — mais il survit au démontage du panneau (changement d'onglet).
+const MDP_SPACES = [['perso', 'Perso'], ['pro', 'Pro']];
+let _mdpSpace = 'perso';
+const mdpSpaceOf = e => ((e && e.space) === 'pro' ? 'pro' : 'perso');
+const mdpSpaceLabel = sp => (MDP_SPACES.find(x => x[0] === sp) || MDP_SPACES[0])[1];
+const mdpSpaceNext = sp => MDP_SPACES[(MDP_SPACES.findIndex(x => x[0] === sp) + 1) % MDP_SPACES.length][0];
+
 // ── Verrouillage auto après inactivité ──
 // Le coffre déchiffré reste en mémoire même quand GestionMdpPanel est démonté (autre onglet).
 // Un timer MODULE-LEVEL (indépendant du montage du panneau) reverrouille _mdpSession après
@@ -47082,6 +47102,8 @@ function GestionMdpPanel() {
   const [phase, setPhase] = React.useState(
     () => _mdpSession.unlocked ? 'unlocked' : (loadVaultBlob() ? 'locked' : 'setup'));
   const [entries, setEntries] = React.useState(() => _mdpSession.entries || []);
+  // Espace affiché (Perso / Pro) — repris du module-level pour survivre au démontage.
+  const [space, setSpace]     = React.useState(() => _mdpSpace);
   const [tags, setTags]       = React.useState(() => _mdpSession.tags || []);      // [{id,name,color}]
   const [pw, setPw]           = React.useState('');     // saisie mot de passe maître (setup/unlock)
   const [pw2, setPw2]         = React.useState('');     // confirmation (setup)
@@ -47112,6 +47134,15 @@ function GestionMdpPanel() {
   const fileRef   = React.useRef(null);
   const entriesRef = React.useRef(entries);             // miroir des entrées (drop de drag & drop)
   React.useEffect(() => { entriesRef.current = entries; }, [entries]);
+  // ⚠ `entries` reste la liste COMPLÈTE (les deux espaces) : c'est elle qu'on rechiffre.
+  // `spaceEntries` est la vue de l'espace courant — tout ce qui s'AFFICHE part d'elle.
+  const spaceEntries = entries.filter(e => mdpSpaceOf(e) === space);
+  const switchSpace = () => {
+    mdpBumpActivity();
+    const next = mdpSpaceNext(space);
+    _mdpSpace = next; setSpace(next);
+    setEditId(null); setShown({}); setQuery(''); setTagFilter(null); setCritFilter(''); setReport(null);
+  };
 
   // Verrouillage auto après inactivité : on s'abonne au timer module-level (qui tourne même
   // panneau démonté) et on bascule l'UI en « verrouillé » quand il se déclenche. Si le coffre
@@ -47172,12 +47203,15 @@ function GestionMdpPanel() {
 
   // 🩺 Lance le check-up. ⚠ `entriesRef` et non `entries` : le bouton peut être cliqué depuis
   // un rendu figé, et on veut le coffre TEL QU'IL EST au moment du clic.
+  // ⚠ Il ne porte que sur l'espace AFFICHÉ : le bilan désigne des lignes de la liste, il
+  // parlerait d'entrées invisibles sinon (et le compteur N/N ne collerait plus).
   const runCheckup = async () => {
     mdpBumpActivity();
-    setChecking({ done: 0, total: entriesRef.current.length });
+    const scope = entriesRef.current.filter(e => mdpSpaceOf(e) === space);
+    setChecking({ done: 0, total: scope.length });
     setReport(null);
     try {
-      const r = await mdpCheckup(entriesRef.current, {
+      const r = await mdpCheckup(scope, {
         withSites,
         onProgress: (done, total) => setChecking({ done, total }),
       });
@@ -47211,7 +47245,8 @@ function GestionMdpPanel() {
   const add = () => {
     const f = { titre: form.titre.trim(), identifiant: form.identifiant.trim(), mdp: form.mdp, url: form.url.trim(), expire: form.expire || '', crit: form.crit || '', comment: form.comment.trim(), tags: form.tags || [] };
     if (!f.titre && !f.identifiant && !f.mdp && !f.url) return;
-    persist([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), ...f }, ...entries]);
+    // ⚠ L'entrée naît dans l'espace AFFICHÉ, sinon elle disparaîtrait en s'enregistrant.
+    persist([{ id: Date.now() + '_' + Math.random().toString(36).slice(2), space, ...f }, ...entries]);
     setForm({ titre:'', identifiant:'', mdp:'', url:'', expire:'', crit:'', comment:'', tags:[] });
   };
   // Suppression d'une entrée : CONFIRMATION obligatoire (un × mal cliqué faisait perdre
@@ -47450,7 +47485,15 @@ function GestionMdpPanel() {
     // onClick/onKeyDown Capture : toute interaction dans le coffre réarme le verrouillage auto
     <div style={card} onClickCapture={mdpBumpActivity} onKeyDownCapture={mdpBumpActivity}>
       <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-        <div style={{ flex:1, fontSize:9.5, color:MDP_AMBER, fontFamily:'DM Mono,monospace' }}>🔓 Coffre chiffré déverrouillé</div>
+        {/* 13.21.9 — à la place du bandeau « 🔓 Coffre chiffré déverrouillé » : le bouton
+            d'espace. Il porte le nom de l'espace AFFICHÉ et bascule à chaque clic. */}
+        <button onClick={switchSpace}
+          title={`Espace ${mdpSpaceLabel(space)} — clique pour passer à ${mdpSpaceLabel(mdpSpaceNext(space))}`}
+          style={{ background:`${MDP_AMBER}22`, border:`1px solid ${MDP_AMBER}`, borderRadius:6, color:MDP_AMBER,
+            fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace', padding:'3px 14px', cursor:'pointer' }}>
+          {mdpSpaceLabel(space)}
+        </button>
+        <div style={{ flex:1 }} />
         <button onClick={lock} title="Verrouiller" style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:9.5, padding:'3px 7px', cursor:'pointer' }}>🔒 Verrouiller</button>
       </div>
       {msg && <div style={{ fontSize:9.5, color:MDP_AMBER }}>{msg}</div>}
@@ -47458,10 +47501,10 @@ function GestionMdpPanel() {
       {/* 🩺 CHECK-UP (13.8.8, demande utilisateur) — juste sous la ligne « déverrouillé ».
           ⚠ Il ne s'exécute JAMAIS tout seul : c'est un clic, parce qu'il parle au réseau. */}
       <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-        <button onClick={runCheckup} disabled={!!checking || entries.length === 0}
+        <button onClick={runCheckup} disabled={!!checking || spaceEntries.length === 0}
           style={{ ...bigBtn, flex:'0 0 auto', padding:'7px 14px',
-            opacity: checking || entries.length === 0 ? 0.5 : 1,
-            cursor: checking || entries.length === 0 ? 'default' : 'pointer' }}>
+            opacity: checking || spaceEntries.length === 0 ? 0.5 : 1,
+            cursor: checking || spaceEntries.length === 0 ? 'default' : 'pointer' }}>
           {checking ? `🩺 Analyse… ${checking.done}/${checking.total}` : '🩺 Check-up'}
         </button>
         <label title="Une requête d'image vers le favicon de chaque site, envoyée DIRECTEMENT chez lui — jamais par un relais. Un site qui ne répond pas n'est pas forcément fermé."
@@ -47491,14 +47534,14 @@ function GestionMdpPanel() {
         </div>
       )}
       {/* Recherche */}
-      {entries.length > 0 && (
+      {spaceEntries.length > 0 && (
         <input type="text" value={query} placeholder="🔍 Rechercher…"
           onChange={e => setQuery(e.target.value)}
           style={{ width:'100%', boxSizing:'border-box', background:'#111', border:`1px solid ${query ? MDP_AMBER : C.border}`, borderRadius:6, padding:'5px 10px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit' }} />
       )}
       {/* 🎚 Filtre par criticité — sa propre ligne, au-dessus des tags : les deux se
           COMBINENT (un tag ET une criticité), ils ne se remplacent pas. */}
-      {entries.some(e => e.crit) && (
+      {spaceEntries.some(e => e.crit) && (
         <div style={{ display:'flex', alignItems:'center', gap:6 }}>
           <span style={{ fontSize:10, color:C.dim, flexShrink:0 }}>Criticité :</span>
           <select value={critFilter} onChange={e => setCritFilter(e.target.value)}
@@ -47511,7 +47554,7 @@ function GestionMdpPanel() {
         </div>
       )}
       {/* Barre de filtre par tag + création (petit +) */}
-      {entries.length > 0 && (
+      {spaceEntries.length > 0 && (
         <div style={{ display:'flex', alignItems:'center', gap:4, flexWrap:'wrap' }}>
           <button onClick={() => setTagFilter(null)} style={{ background: tagFilter ? 'none' : `${MDP_AMBER}22`, border:`1px solid ${tagFilter ? C.border : MDP_AMBER}`, color: tagFilter ? C.dim : MDP_AMBER, borderRadius:12, padding:'2px 9px', fontSize:10, fontWeight:700, cursor:'pointer' }}>Tous</button>
           {sortedTags.map(t => {
@@ -47560,7 +47603,7 @@ function GestionMdpPanel() {
       )}
       {(() => {
         const q = query.trim().toLowerCase();
-        const list = entries.filter(e => {
+        const list = spaceEntries.filter(e => {
           if (tagFilter && !(e.tags || []).includes(tagFilter)) return false;
           if (critFilter && (e.crit || '') !== critFilter) return false;
           if (!q) return true;
@@ -47569,8 +47612,8 @@ function GestionMdpPanel() {
             (e.url || '').toLowerCase().includes(q) ||
             (e.comment || '').toLowerCase().includes(q);
         });
-        if (entries.length === 0) return (
-          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun identifiant enregistré</div>
+        if (spaceEntries.length === 0) return (
+          <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun identifiant enregistré dans l'espace {mdpSpaceLabel(space)}</div>
         );
         if (list.length === 0) return (
           <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>Aucun résultat</div>
