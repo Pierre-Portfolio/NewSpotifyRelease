@@ -431,6 +431,24 @@ def fetch_cyber():
     ])
 
 
+def fetch_sport():
+    """Sport (repli : topic SPORTS éditorial)."""
+    return fetch_gnews([
+        gn_search('football OR rugby OR tennis OR basket OR "Ligue 1" '
+                  'OR "Coupe du monde" OR Formule 1'),
+        "https://news.google.com/rss/headlines/section/topic/SPORTS?hl=fr&gl=FR&ceid=FR:fr",
+    ])
+
+
+def fetch_esport():
+    """E-sport — recherche SÉPARÉE du sport (repli : EN)."""
+    return fetch_gnews([
+        gn_search('esport OR e-sport OR "League of Legends" OR Valorant '
+                  'OR "Counter-Strike" OR LEC OR "Karmine Corp"'),
+        gn_search('esports OR "competitive gaming"'),
+    ])
+
+
 def fetch_insolite():
     """Actualité Insolite."""
     return fetch_gnews([gn_search("insolite")])
@@ -609,6 +627,8 @@ def main():
         "linkedin": fetch_linkedin,
         "bourse":   fetch_bourse,
         "cyber":    fetch_cyber,
+        "sport":    fetch_sport,
+        "esport":   fetch_esport,
         "jeux":     fetch_jeux,
         "insolite": fetch_insolite,
     }
@@ -650,7 +670,7 @@ def main():
     links_old = existing.get("links") or {}
     links_new = {}
     budget = [IMG_BUDGET]
-    for key in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite"):
+    for key in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "sport", "esport", "jeux", "insolite"):
         if isinstance(out.get(key), list):
             enrich_images(out[key], old_cache, new_cache, budget, links_old, links_new)
     # LinkedIn : on veut atterrir sur linkedin.com, pas sur la redirection Google News.
@@ -664,8 +684,8 @@ def main():
     out["links"] = links_new
     # Provenance par section : {} = tout a été lu en direct (cf. ActuViaNotice côté app).
     out["via"] = via
-    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite"))
-    withimg = sum(1 for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "jeux", "insolite")
+    total = sum(len(out.get(k) or []) for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "sport", "esport", "jeux", "insolite"))
+    withimg = sum(1 for k in ("presse", "monde", "regional", "linkedin", "bourse", "cyber", "sport", "esport", "jeux", "insolite")
                   for a in (out.get(k) or []) if a.get("image"))
     print(f"images: {withimg}/{total} articles illustrés ({IMG_BUDGET - budget[0]} décodages ce run)")
 
