@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.11';
+const APP_VERSION = '13.21.12';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7166,7 +7166,12 @@ const DOB_PICK = {
 };
 const DOB_VAR_DEF = 'A';
 const DOB_HAND = 20;                 // tuiles par joueur
-const DOB_PENALTY_MS = 1500;         // blocage après une erreur
+// ⚠ Deux malus, JAMAIS les deux à la fois : une erreur coûte une TUILE de plus, piochée au
+// talon — sauf si la carte du milieu vient de changer (moins de `DOB_GRACE_MS`), auquel cas
+// on visait l'ancienne et ce n'est pas une faute : le joueur est seulement bloqué
+// `DOB_PENALTY_MS`, le temps de relire le nouveau milieu.
+const DOB_PENALTY_MS = 2000;         // blocage quand le milieu vient de changer
+const DOB_GRACE_MS = 1000;           // « le milieu vient de changer »
 const DOB_P = 7;                     // ordre du plan projectif (NE PAS toucher seul, cf. plus haut)
 const dobVar = o => (DOB_PICK[o.id] && o[DOB_PICK[o.id]]) ? DOB_PICK[o.id] : DOB_VAR_DEF;
 
@@ -7258,10 +7263,41 @@ function DobCard({ syms, seed, objs, tone, onPick }) {
     </div>
   );
 }
+// La carte qu'un joueur a DEVANT lui : rectangulaire, 4 symboles par ligne sur 2 lignes,
+// tous debout et à la même taille. ⚠ Aucun tirage de mise en page ici (contrairement à
+// `DobCard`) : c'est sa propre carte, il doit la lire d'un coup d'œil, pas la déchiffrer.
+// L'orientation « face au joueur » vient du parent (`zone(0)` est tourné à 180°).
+function DobHandCard({ syms, objs, tone, onPick }) {
+  return (
+    <div style={{ width:'100%', height:'100%', borderRadius:14, background:'#fff',
+      border:`3px solid ${tone}`, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', overflow:'hidden', boxSizing:'border-box',
+      display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gridTemplateRows:'repeat(2, 1fr)', gap:4, padding:6 }}>
+      {syms.map(sym => (
+        <button key={sym} onClick={onPick ? () => onPick(sym) : undefined} disabled={!onPick}
+          title={objs[sym].nom}
+          style={{ display:'block', minWidth:0, minHeight:0, background:'none', border:'none', padding:0, outline:'none',
+            cursor:onPick ? 'pointer' : 'default', touchAction:'manipulation' }}>
+          <DobSymbol obj={objs[sym]} />
+        </button>
+      ))}
+    </div>
+  );
+}
 function dobDeal() {
   const rnd = dobRng((Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0);
   const order = dobShuffle(dobbleDeck().map((syms, i) => ({ id:i, syms:dobShuffle(syms, rnd) })), rnd);
-  return { center:order[0], hands:[order.slice(1, 1 + DOB_HAND), order.slice(1 + DOB_HAND, 1 + 2 * DOB_HAND)], winner:null };
+  return { center:order[0], centerAt:Date.now(), hands:[order.slice(1, 1 + DOB_HAND), order.slice(1 + DOB_HAND, 1 + 2 * DOB_HAND)],
+    pile:order.slice(1 + 2 * DOB_HAND), winner:null };
+}
+// La tuile de malus vient du TALON (les 16 cartes que la donne ne distribue pas). ⚠ Il
+// s'épuise : au-delà on remélange un jeu neuf plutôt que de laisser le malus sans effet —
+// deux cartes identiques en jeu ne cassent rien (elles partagent leurs 8 symboles, donc au
+// moins un avec le milieu).
+function dobDraw(pile) {
+  if (pile && pile.length) return [pile[0], pile.slice(1)];
+  const rnd = dobRng((Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0);
+  const fresh = dobShuffle(dobbleDeck().map((syms, i) => ({ id:i, syms:dobShuffle(syms, rnd) })), rnd);
+  return [fresh[0], fresh.slice(1)];
 }
 // Garde du chargement paresseux (gabarit de `GameDoodle` / `SportPanel`).
 function GameDobble() {
@@ -7297,14 +7333,22 @@ function GameDobbleInner() {
     if (cur.center.syms.indexOf(sym) >= 0) {
       const hands = cur.hands.map((h, i) => (i === p ? h.slice(1) : h));
       const win = hands[p].length ? null : p;
-      setG({ center:hand[0], hands:hands, winner:win });
+      setG({ ...cur, center:hand[0], centerAt:Date.now(), hands:hands, winner:win });
       setMsg({ p:p, nom:objs[sym].nom, ok:true });
       if (win !== null) setPhase('over');
-    } else {
+    } else if (Date.now() - (cur.centerAt || 0) < DOB_GRACE_MS) {
+      // Le milieu a changé il y a moins d'une seconde : le joueur visait l'ancien, il ne
+      // paie pas de tuile — on lui prend le temps de relire, et lui seul est bloqué.
       const until = Date.now() + DOB_PENALTY_MS;
       setPen(x => { const n = x.slice(); n[p] = until; return n; });
-      setMsg({ p:p, nom:objs[sym].nom, ok:false });
+      setMsg({ p:p, nom:objs[sym].nom, ok:false, wait:true });
       timers.current.push(setTimeout(() => setPen(x => { const n = x.slice(); if (n[p] === until) n[p] = 0; return n; }), DOB_PENALTY_MS));
+    } else {
+      // ⚠ La tuile de malus se glisse SOUS la pile : la carte en cours ne bouge pas, sinon
+      // l'erreur offrirait un tirage neuf au lieu de coûter quelque chose.
+      const [card, rest] = dobDraw(cur.pile);
+      setG({ ...cur, hands:cur.hands.map((h, i) => (i === p ? h.concat([card]) : h)), pile:rest });
+      setMsg({ p:p, nom:objs[sym].nom, ok:false });
     }
   };
 
@@ -7318,8 +7362,13 @@ function GameDobbleInner() {
   // donc SOUSTRAITE, et ce qui reste est partagé : une part pour chaque joueur, une demie
   // pour le milieu. ⚠ La carte du MILIEU est la petite, et c'est voulu : on ne la touche
   // jamais, on ne fait que la LIRE — tout ce qu'on lui reprend va aux cartes qu'on vise.
-  const CARD = 'min(92vw, calc(36vh - 70px))';
-  const MID = 'min(46vw, calc(18vh - 35px))';
+  // ⚠ Les cartes des joueurs sont RECTANGULAIRES (4 symboles × 2 lignes) : leur hauteur
+  // vaut la MOITIÉ de leur largeur. La part verticale d'un joueur (36vh - 70px) devient
+  // donc une largeur de 72vh - 140px, plafonnée par la largeur de l'écran — et comme deux
+  // rectangles tiennent dans la hauteur de deux disques, le milieu peut prendre 10 px.
+  const PW = 'min(96vw, calc(72vh - 140px))';
+  const PH = 'calc(min(96vw, calc(72vh - 140px)) / 2)';
+  const MID = 'calc(min(46vw, calc(18vh - 35px)) + 10px)';
   // ⚠ Zone rendue par un APPEL de fonction et non comme un composant déclaré ici : un
   // composant défini dans le corps du parent change d'identité à chaque rendu, React
   // démonterait les deux cartes à chaque coup joué.
@@ -7332,14 +7381,14 @@ function GameDobbleInner() {
         <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:11.5, fontWeight:800, color:tone }}>
           <span>Joueur {p + 1}</span>
           <span style={{ color:C.muted, fontWeight:600 }}>{hand.length} tuile{hand.length > 1 ? 's' : ''}</span>
-          {blocked && <span style={{ color:'#e05050' }}>⏳ raté</span>}
+          {blocked && <span style={{ color:'#e05050' }}>⏳ patiente</span>}
           {g.winner === p && <span style={{ color:'#4caf50' }}>🏆 gagné</span>}
         </div>
-        <div style={{ width:CARD, height:CARD, position:'relative', opacity:blocked ? 0.55 : 1, transition:'opacity 0.2s' }}>
+        <div style={{ width:PW, height:PH, position:'relative', opacity:blocked ? 0.55 : 1, transition:'opacity 0.2s' }}>
           {hand.length
-            ? <DobCard syms={hand[0].syms} seed={hand[0].id} objs={objs} tone={tone}
+            ? <DobHandCard syms={hand[0].syms} objs={objs} tone={tone}
                 onPick={phase === 'playing' && !blocked ? (s => pick(p, s)) : null} />
-            : <div style={{ width:'100%', height:'100%', borderRadius:'50%', border:`3px dashed ${tone}66`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:30 }}>🏆</div>}
+            : <div style={{ width:'100%', height:'100%', borderRadius:14, border:`3px dashed ${tone}66`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:30 }}>🏆</div>}
         </div>
       </div>
     );
@@ -7370,7 +7419,7 @@ function GameDobbleInner() {
             déjà écrits sous chaque joueur, et coûtait 40 px de diamètre aux deux cartes. */}
         <div style={{ display:'flex', alignItems:'center', gap:10, minHeight:18 }}>
           <span style={{ fontSize:11.5, fontWeight:700, color:msg ? (msg.ok ? '#4caf50' : '#e05050') : 'transparent' }}>
-            {msg ? `${msg.ok ? '✔' : '✖'} J${msg.p + 1} · ${msg.nom}` : '—'}
+            {msg ? `${msg.ok ? '✔' : '✖'} J${msg.p + 1} · ${msg.nom}${msg.ok ? '' : (msg.wait ? ' · ⏳ 2 s' : ' · +1 tuile')}` : '—'}
           </span>
           <button onClick={start} style={gameBtn({ padding:'3px 9px', fontSize:11 })}>
             {phase === 'ready' ? '▶' : '↻'}
