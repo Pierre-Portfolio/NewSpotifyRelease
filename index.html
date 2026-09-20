@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.10';
+const APP_VERSION = '13.21.11';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -16922,6 +16922,21 @@ function VetementPanel() {
 // Sport — séances d'après le matériel réellement présent en Basic-Fit France.
 const SPORT_COLOR = '#c3d93f';   // lime (entre Santé et To Do dans l'arc-en-ciel)
 const SPORT_LS = 'spotifyplus_sport';
+// ── 🏃 Chronos de course (13.21.11, demande utilisateur) : rendus dans Stats → 🏋️ SPORT ──
+// Une ligne par distance, un temps SAISI À LA MAIN (aucun calcul, aucune requête) : c'est
+// un carnet de records, pas une mesure. Champ LIBRE (« 28:30 », « 1h05 », « ~52 min ») —
+// valider une saisie chronométrique ferait perdre ce qu'on est en train de taper.
+// ⚠ Clé de stockage PROPRE (`spotifyplus_sport_times`) et non `spotifyplus_sport`, qui
+// porte la map {groupe:{exercice:true}} des exercices cochés — et donc à ajouter à la
+// sauvegarde (section « Sport », à côté des exercices cochés).
+const SPORT_TIMES_LS = 'spotifyplus_sport_times';
+const SPORT_RUN_KM   = [5, 10, 15, 20, 40];
+function sportTimesLoad() {
+  // ⚠ `lsGet` et non `localStorage.getItem` (piège 14) : lu depuis un initialiseur useState.
+  try { const d = JSON.parse(lsGet(SPORT_TIMES_LS)); if (d && typeof d === 'object') return d; } catch {}
+  return {};
+}
+function sportTimesSave(d) { return lsSet(SPORT_TIMES_LS, JSON.stringify(d)); }
 // Un sous-collapse par partie du corps ; chaque exo est une « tuile-image » qu'on grise
 // au clic (= fait) ; le bouton ↺ de la partie réinitialise les grisés de cette partie.
 // APPUI LONG sur la vignette (SPORT_HOLD_MS) → fiche : machine Basic-Fit, muscles
@@ -24349,8 +24364,9 @@ function buildBackup() {
     // Emploi : TOUS les critères de recherche (métiers, lieux, salaire, fraîcheur, contrat,
     // exclusions, LinkedIn, résumé de profil) — une seule clé, donc un nouveau critère voyage seul
     emploi: lsJson('spotifyplus_emploi') || null,
-    // Sport : exercices cochés par partie du corps
+    // Sport : exercices cochés par partie du corps + les chronos de course saisis à la main
     sport: lsJson('spotifyplus_sport') || null,
+    sport_times: lsJson(SPORT_TIMES_LS) || null,
     // Clés / config d'API (chaînes brutes, comme tmdb_key/yt_key) — pour ne pas les re-saisir
     gemini_key: lsRaw('spotifyplus_gemini_key'),
     groq_key: lsRaw(GROQ_LS), cerebras_key: lsRaw(CEREBRAS_LS), zai_key: lsRaw(ZAI_LS),
@@ -24399,7 +24415,7 @@ const EXPORT_SECTIONS = [
   { key:'collection', label:'Collection',  icon:'🗃️', hint:'cartes, Displate, Pop, jeux… (références, pas les images)', fields:['collection'] },
   { key:'histoire', label:'Histoire',     icon:'🏛️', hint:"fiches d'œuvres (résumé + lien avec la ville)", fields:['histoire'] },
   { key:'emploi',   label:'Emploi',       icon:'💼', hint:'critères de recherche + profil', fields:['emploi'] },
-  { key:'sport',    label:'Sport',        icon:'🏋️', hint:'exercices cochés',           fields:['sport'] },
+  { key:'sport',    label:'Sport',        icon:'🏋️', hint:'exercices cochés + chronos',  fields:['sport', 'sport_times'] },
   { key:'note',     label:'Note',         icon:'🗒️', hint:'notes + pièces jointes (cryptées incluses, telles quelles)', fields:['notes', 'notes_enc_check'] },
   { key:'mdp',      label:'Mot de passe', icon:'🔑', hint:'coffre chiffré',             fields:['mdp_vault'] },
   { key:'remember', label:'Alertes',      icon:'🔔', hint:'rappels fixes + persos + garanties + anniversaires (dates & heures)', fields:['rappels', 'rappels_time', 'rappels_notes', 'remembers', 'garanties', 'annivs'] },
@@ -24869,6 +24885,7 @@ function applyBackup(data) {
   if (data.frigo && typeof data.frigo === 'object')  put('spotifyplus_frigo', data.frigo);
   if (data.emploi && typeof data.emploi === 'object') put('spotifyplus_emploi', data.emploi);
   if (data.sport && typeof data.sport === 'object')  put('spotifyplus_sport', data.sport);
+  if (data.sport_times && typeof data.sport_times === 'object') put(SPORT_TIMES_LS, data.sport_times);
   // Collection — FUSION par sous-collection puis par id : le LOCAL gagne sur un id déjà
   // présent (sa quantité et ses métadonnées sont à jour), les références absentes sont
   // ajoutées. Aucune image n'est concernée : l'export n'en contient pas, juste des URLs.
@@ -27032,6 +27049,42 @@ function CollectionStatsSection() {
   );
 }
 
+// ════════ Stats → 🏋️ SPORT — chronos de course (13.21.11, demande utilisateur) ════════
+// Une ligne par distance de `SPORT_RUN_KM`, un champ de temps LIBRE en face. Rien n'est
+// calculé ni comparé : le Hub ne mesure pas une course, il garde ce qu'on lui dit.
+// ⚠ `StatsCollapse` démonte ses enfants à la fermeture (piège 5) : l'état est relu du
+// localStorage au montage (initialiseur paresseux) et écrit à chaque frappe — il n'y a donc
+// rien à préserver module-level.
+// ⚠ `lsSet` rend `false` quand le stockage est plein (piège 14) : on le DIT, sinon la saisie
+// s'afficherait comme enregistrée alors que rien n'a été écrit.
+function SportTimesSection() {
+  const [times, setTimes] = React.useState(sportTimesLoad);
+  const [full, setFull]   = React.useState(false);
+  const setKm = (km, v) => {
+    const next = { ...times };
+    if (v.trim()) next[km] = v; else delete next[km];
+    setTimes(next);
+    setFull(!sportTimesSave(next));
+  };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      <div style={{ fontSize:10, color:C.dim, lineHeight:1.5 }}>
+        Ton temps pour chaque distance, écrit comme tu veux (« 28:30 », « 1h05 »). Rien n'est calculé : c'est ton carnet.
+      </div>
+      {SPORT_RUN_KM.map(km => (
+        <label key={km} style={{ display:'flex', alignItems:'center', gap:8 }}>
+          <span style={{ flex:'0 0 62px', fontSize:12, fontWeight:800, color:SPORT_COLOR, fontFamily:'DM Mono,monospace' }}>{km} km</span>
+          <input type="text" value={times[km] || ''} placeholder="— temps —"
+            onChange={e => setKm(km, e.target.value)}
+            style={{ flex:1, minWidth:0, boxSizing:'border-box', background:'#111', border:`1px solid ${times[km] ? SPORT_COLOR : C.border}`,
+              borderRadius:6, padding:'5px 10px', fontSize:12, color:C.text, outline:'none', fontFamily:'DM Mono,monospace' }} />
+        </label>
+      ))}
+      {full && <div style={{ fontSize:10, color:'#e05050' }}>⚠ Stockage local saturé — ce temps n'a PAS été enregistré.</div>}
+    </div>
+  );
+}
+
 function StatsPanel() {
   const { listenStats: ls } = useStore();
   const now = useNow();
@@ -27279,6 +27332,11 @@ function StatsPanel() {
         <StatsCollapse title="⚖️ POIDS" color={FOOD_COLOR}>
           <WeightStatsSection />
         </StatsCollapse>
+      </StatsCollapse>
+      {/* Sport — ENTRE Santé et To do (demande utilisateur, et l'ordre alphabétique des
+          titres de Stats y mène tout seul) */}
+      <StatsCollapse title="🏋️ SPORT" color={SPORT_COLOR}>
+        <SportTimesSection />
       </StatsCollapse>
       <StatsCollapse title="✅ TO DO" color={TODO_GREEN}>
         {todoCards.map(renderCard)}
