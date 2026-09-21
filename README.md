@@ -9,7 +9,7 @@
 
 ## Aperçu
 
-Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrapé depuis sa propre date de dernier scan ; la toute première fois, il rapporte sa dernière année de sorties. Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
+Application web **PWA sans backend** : elle scanne tes artistes Spotify suivis, détecte leurs nouvelles sorties et stocke tout **localement sur l'appareil** (sql.js + IndexedDB). Chaque artiste est scrapé depuis sa propre date de dernier scan ; la toute première fois, il rapporte **toute sa discographie** (le journal indique alors combien d'artistes ce scan a coûté sur le quota du jour). Tu explores ton feed, écoutes les titres un par un et les valides — aucun ajout automatique en playlist.
 
 Au-delà de la musique, c'est un **hub perso** regroupant des modules activables/désactivables.
 
@@ -29,7 +29,7 @@ Au-delà de la musique, c'est un **hub perso** regroupant des modules activables
 - **Un artiste jamais scrapé rapporte sa dernière ANNÉE de sorties** (fenêtre glissante, une seule requête comme un scan normal) — les scans suivants redeviennent incrémentaux
 - **Pause / reprise**, reprise après fermeture (bouton « ↩ Reprendre »)
 - **Protection rate-limit** : dès le 1er 429 tout s'arrête 15 min minimum (persiste au rechargement)
-- **Quota de 100 artistes / 24 h glissantes** avec compte à rebours, réinitialisable dans À propos
+- **Quota de 100 artistes / 24 h glissantes** avec compte à rebours, réinitialisable dans À propos — un premier scan compte pour autant d'artistes qu'il a lu de pages de sorties
 - **🤖 Scraping automatique** : au lancement, s'il reste du quota le scan part tout seul et continue même si tu navigues ailleurs. Une passe par jour, reprise là où il s'était arrêté. Interrupteur dans **À propos → 🤖 Lancement automatique**
 - **🎵 Masquer le bandeau de lecture** (**À propos → ⚙️ Paramétrage**) : seuls les boutons du bas disparaissent, la lecture et le marquage continuent
 - **⌄ Replier le lecteur** (bouton à droite de la boucle, sur mobile) : il ne reste qu'une ligne — pochette, titre et lecture/pause — et le ⌃ le redéploie ; le repli est mémorisé
