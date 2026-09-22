@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.18';
+const APP_VERSION = '13.21.19';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -42967,46 +42967,87 @@ Réponds UNIQUEMENT en JSON, sans texte autour :
 {"nom":"nom court en français","kcal":nombre,"glucides":grammes,"proteines":grammes,"graisses":grammes,"note":"précision courte (variété, cuisson, marque type) en moins de 60 caractères"}
 Valeurs pour 100 g, nombres seuls (pas d'unité), arrondies à l'entier ou au dixième. Si l'aliment est inconnu ou n'est pas un aliment, renvoie {"nom":""}.`;
 }
+// Une saisie « pâtes + poulet + salade » (ou une photo d'assiette, ou d'une ADDITION de
+// restaurant) désigne PLUSIEURS aliments : ils reviennent en autant de résultats, ajoutés
+// en autant de LIGNES de repas (demande utilisateur) — une ligne fusionnée ne se corrige ni
+// ne se retire élément par élément. Le découpage du texte est fait ICI sur « + » (l'IA ne
+// décide pas du nombre d'éléments) ; celui d'une photo, l'IA seule peut le faire.
+const foodSplitPlus = q => String(q || '').split('+').map(x => x.trim()).filter(x => x.length >= 2);
+const foodAiNum = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : null; };
+function foodAiMultiPrompt(parts) {
+  return `Tu es un nutritionniste. Voici un repas composé de ${parts.length} éléments :
+${parts.map((x, i) => `${i + 1}. ${x}`).join('\n')}
+Pour CHACUN de ces ${parts.length} éléments, dans le MÊME ordre, sans en fusionner ni en oublier aucun, donne la valeur nutritionnelle MOYENNE pour 100 g (ou 100 ml si c'est une boisson) et la portion en grammes : celle écrite dans le texte si elle y est (convertis « 2 œufs », « 1 bol », « 1 verre » en grammes), sinon une portion habituelle.
+Réponds UNIQUEMENT en JSON, sans texte autour :
+{"elements":[{"nom":"nom court en français","portion_g":grammes,"kcal":kcal pour 100 g,"glucides":g pour 100 g,"proteines":g pour 100 g,"graisses":g pour 100 g,"note":"précision courte en moins de 60 caractères"}]}
+Nombres seuls (pas d'unité). Un élément inconnu ou qui n'est pas un aliment : {"nom":""} à sa place.`;
+}
+// Renvoie une LISTE de résultats (vide ⇒ rien de reconnu). `multi` marque les éléments
+// d'une addition : les ajouter un par un ne doit pas effacer les autres (cf. addFromResult).
 async function foodAiSuggest(q) {
+  const parts = foodSplitPlus(q);
+  if (parts.length > 1) {
+    const raw = await aiGenerate('food', [{ text: foodAiMultiPrompt(parts) }]);
+    const j = geminiExtract(raw, '{', '}');
+    const els = j && Array.isArray(j.elements) ? j.elements : [];
+    const meta = aiMeta();
+    return els.slice(0, 12).map((e, i) => {
+      const kcal = e && e.nom ? foodAiNum(e.kcal) : null;
+      if (!kcal) return null;
+      const pg = foodAiNum(e.portion_g);
+      return {
+        name: String(e.nom).slice(0, 80), brand: '', kcal100: Math.round(kcal),
+        c100: foodAiNum(e.glucides), p100: foodAiNum(e.proteines), f100: foodAiNum(e.graisses),
+        ...meta, multi: true, portionG: pg && pg >= 1 && pg <= 3000 ? Math.round(pg) : 100,
+        note: e.note ? String(e.note).slice(0, 80) : (parts[i] || ''),
+      };
+    }).filter(Boolean);
+  }
   const raw = await aiGenerate('food', [{ text: foodAiPrompt(q) }]);
   const j = geminiExtract(raw, '{', '}');
-  if (!j || !j.nom) return null;
-  const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : null; };
-  const kcal = num(j.kcal);
-  if (!kcal) return null;
-  return {
+  if (!j || !j.nom) return [];
+  const kcal = foodAiNum(j.kcal);
+  if (!kcal) return [];
+  return [{
     name: String(j.nom).slice(0, 80), brand: '', kcal100: Math.round(kcal),
-    c100: num(j.glucides), p100: num(j.proteines), f100: num(j.graisses),
+    c100: foodAiNum(j.glucides), p100: foodAiNum(j.proteines), f100: foodAiNum(j.graisses),
     ...aiMeta(), note: j.note ? String(j.note).slice(0, 80) : '',
-  };
+  }];
 }
 
-const FOOD_PHOTO_PROMPT = `Tu es un nutritionniste. Voici la photo d'un plat / d'une assiette.
-Identifie le plat et estime, POUR LA PORTION VISIBLE SUR LA PHOTO (pas pour 100 g) : son poids en grammes, ses calories et ses macronutriments.
+const FOOD_PHOTO_PROMPT = `Tu es un nutritionniste. Voici une photo : soit une assiette / un plateau / un repas (un ou plusieurs aliments), soit une ADDITION ou un ticket de restaurant.
+- Repas : liste SÉPARÉMENT chaque aliment distinct visible (ex. « steak », « frites », « salade » — jamais un seul « steak frites »), chacun avec SA portion visible.
+- Addition / ticket : liste chaque plat ou boisson commandé (un élément par article ; quantité 2 ⇒ ajoute « ×2 » au nom et double la portion), avec une portion habituelle de restaurant. Ignore prix, taxes, couverts et pourboire.
+Pour CHAQUE élément, POUR SA PORTION (pas pour 100 g) : son poids en grammes, ses calories et ses macronutriments.
 Réponds UNIQUEMENT en JSON, sans texte autour :
-{"plat":"nom court du plat en français","portion_g":poids estimé de la portion en grammes,"kcal":calories de cette portion,"glucides":grammes,"proteines":grammes,"graisses":grammes,"aliments":["aliment visible 1","aliment visible 2"],"note":"hypothèse de préparation en moins de 60 caractères"}
-Nombres seuls, sans unité. Estime au mieux même si la photo est imparfaite (dis ton hypothèse dans "note"). Si la photo ne montre aucun aliment, renvoie {"plat":""}.`;
+{"type":"repas|addition","elements":[{"nom":"nom court en français","portion_g":grammes,"kcal":calories de cette portion,"glucides":grammes,"proteines":grammes,"graisses":grammes}],"note":"hypothèse de préparation en moins de 60 caractères"}
+Nombres seuls, sans unité. Estime au mieux même si la photo est imparfaite (dis ton hypothèse dans "note"). Si la photo ne montre aucun aliment ni aucune addition, renvoie {"elements":[]}.`;
 // img = { mimeType, data(base64) } tel que produit par frigoPhotoData.
+// Renvoie { list, note, bill } — `list` vide ⇒ rien de reconnu.
 async function foodPhotoAnalyze(img) {
   const raw = await aiGenerate('food', [{ text: FOOD_PHOTO_PROMPT }, { inline_data: { mime_type: img.mimeType, data: img.data } }]);
   const j = geminiExtract(raw, '{', '}');
-  if (!j || !j.plat) return null;
-  const num = v => { const n = parseFloat(String(v).replace(',', '.')); return isFinite(n) && n >= 0 ? n : null; };
-  const kcal = num(j.kcal);
-  if (!kcal) return null;
-  // Poids de la portion : sert à ramener les valeurs à 100 g (format attendu par
-  // FoodResultRow) ET à pré-remplir le champ « grammes ». Estimation aberrante ou absente
-  // → 250 g (assiette moyenne), l'utilisateur corrige le champ, tout se recalcule.
-  const pg  = num(j.portion_g);
-  const por = pg && pg >= 10 && pg <= 3000 ? Math.round(pg) : 250;
-  const per100 = v => (v == null ? null : Math.round(v / por * 100 * 10) / 10);
-  const items = Array.isArray(j.aliments) ? j.aliments.map(x => String(x)).filter(Boolean).slice(0, 8) : [];
-  return {
-    name: String(j.plat).slice(0, 80), brand: '', kcal100: Math.round(kcal / por * 100),
-    c100: per100(num(j.glucides)), p100: per100(num(j.proteines)), f100: per100(num(j.graisses)),
-    ...aiMeta(), photo: true, portionG: por, items,
-    note: [j.note ? String(j.note) : '', items.join(' + ')].filter(Boolean).join(' · ').slice(0, 140),
-  };
+  if (!j) return { list: [], note: '', bill: false };
+  // Ancien format mono-plat ({plat, portion_g, …}) : un modèle qui l'aurait gardé reste lu.
+  const els = Array.isArray(j.elements) ? j.elements : j.plat ? [{ ...j, nom: j.plat }] : [];
+  const meta = aiMeta();
+  const list = els.slice(0, 15).map(e => {
+    const kcal = e && e.nom ? foodAiNum(e.kcal) : null;
+    if (!kcal) return null;
+    // Poids de la portion : sert à ramener les valeurs à 100 g (format attendu par
+    // FoodResultRow) ET à pré-remplir le champ « grammes ». Estimation aberrante ou absente
+    // → 100 g, les kcal de la portion restant celles affichées ; l'utilisateur corrige.
+    const pg  = foodAiNum(e.portion_g);
+    const por = pg && pg >= 1 && pg <= 3000 ? Math.round(pg) : 100;
+    const per100 = v => (v == null ? null : Math.round(v / por * 100 * 10) / 10);
+    return {
+      name: String(e.nom).slice(0, 80), brand: '', kcal100: Math.round(kcal / por * 100),
+      c100: per100(foodAiNum(e.glucides)), p100: per100(foodAiNum(e.proteines)), f100: per100(foodAiNum(e.graisses)),
+      ...meta, photo: true, portionG: por,
+    };
+  }).filter(Boolean);
+  if (list.length > 1) list.forEach(r => { r.multi = true; });
+  return { list, note: j.note ? String(j.note).slice(0, 120) : '', bill: j.type === 'addition' };
 }
 
 // ── 🖼️ CAPTURE D'UNE SÉANCE (Strava & co) → CALORIES BRÛLÉES (13.11.4) ──────────
@@ -43064,8 +43105,11 @@ async function foodStravaAnalyze(img, profile) {
 // direct, bouton + ajoute le repas dans la catégorie sélectionnée.
 // `defaultGrams` : portion pré-remplie (photo de plat → poids estimé par l'IA ; défaut 100 g).
 // `onFav` (facultatif) : ⭐ épingler / retirer des favoris — `fav` dit l'état courant.
-function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav }) {
-  const [grams, setGrams] = React.useState(String(defaultGrams || 100));
+// `onGrams` (facultatif) : la quantité saisie remonte au parent, que « Tout ajouter »
+// d'une addition respecte au lieu de repartir de la portion estimée.
+function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav, onGrams }) {
+  const [grams, setGramsSt] = React.useState(String(defaultGrams || 100));
+  const setGrams = v => { setGramsSt(v); if (onGrams) onGrams(r, parseInt(v, 10) || 0); };
   const g = parseInt(grams, 10) || 0;
   const kcal = Math.round(r.kcal100 * g / 100);
   const scale = k => (r[k] == null ? null : Math.round(r[k] * g / 100 * 10) / 10);
@@ -43575,9 +43619,16 @@ function NourriturePanel() {
     providers.forEach(p => {
       foodAiSuggest(q)
         // `prov` = le fournisseur qui a RÉELLEMENT répondu (Gemini a pu tomber en repli).
-        .then(d => setAiRows(rows => rows.map(r => r.provider === p ? { ...r, state: d ? 'ok' : 'none', data: d, prov: aiLastProvider() } : r)))
+        .then(d => setAiRows(rows => rows.map(r => r.provider === p ? { ...r, state: d.length ? 'ok' : 'none', data: d, prov: aiLastProvider() } : r)))
         .catch(e => setAiRows(rows => rows.map(r => r.provider === p ? { ...r, state:'err', err: String((e && e.message) || e).slice(0, 90) } : r)));
     });
+    // ⚠ Une addition (« a + b ») n'est PAS cherchée telle quelle dans Open Food Facts : la
+    // chaîne entière n'y désigne aucun produit et ne renverrait que du bruit. L'IA la découpe.
+    if (foodSplitPlus(q).length > 1) {
+      setSearching(false);
+      if (!providers.length) setSearchErr('Plusieurs aliments (« + ») : il faut une clé IA pour les séparer (module API) — ou cherche-les un par un.');
+      return;
+    }
     try {
       const list = await foodSearchNutrition(q);
       setResults(list);
@@ -43618,20 +43669,73 @@ function NourriturePanel() {
     }
     providers.forEach(p => {
       foodPhotoAnalyze(img)
-        .then(d => setPhotoRows(rows => rows.map(r => r.provider === p ? { ...r, state: d ? 'ok' : 'none', data: d, prov: aiLastProvider() } : r)))
+        .then(d => setPhotoRows(rows => rows.map(r => r.provider === p ? { ...r, state: d.list.length ? 'ok' : 'none', data: d.list, note: d.note, bill: d.bill, prov: aiLastProvider() } : r)))
         .catch(e => setPhotoRows(rows => rows.map(r => r.provider === p ? { ...r, state:'err', err: String((e && e.message) || e).slice(0, 90) } : r)));
     });
   };
 
   // Ajoute directement un résultat (portion en grammes → kcal ET macros calculées).
-  const addFromResult = (r, grams, kcalVal, macros) => {
+  const mealFromResult = (r, grams, kcalVal, macros) => {
     const label = grams && grams !== 100 ? `${r.name} (${grams} g)` : r.name;
     const entry = { id: Date.now() + '_' + Math.random().toString(36).slice(2), name: label, kcal: kcalVal, cat };
     if (grams > 0) entry.g = grams;   // ⚠ la quantité est GARDÉE : c'est la référence du produit en croix à l'édition
     FOOD_MACROS.forEach(m => { const v = macros && macros[m.key]; if (v != null) entry[m.key] = v; });
     if (r.ai) entry.ai = r.ai;   // trace : valeurs estimées par une IA, pas mesurées
-    commitMeals({ ...meals, [selDay]: [...dayMeals, entry] });
+    return entry;
+  };
+  // Élément d'une addition (`r.multi`) : on ne retire QUE lui des résultats, les autres
+  // restent à ajouter ; la recherche n'est effacée qu'une fois le dernier ajouté.
+  const addFromResult = (r, grams, kcalVal, macros) => {
+    commitMeals({ ...meals, [selDay]: [...dayMeals, mealFromResult(r, grams, kcalVal, macros)] });
+    setKcal('');
+    const left = [...aiRows, ...photoRows].reduce((n, row) => n + (Array.isArray(row.data) ? row.data.filter(x => x !== r).length : 0), 0);
+    if (!r.multi || !left) { clearSearch(); return; }
+    const drop = rows => rows.map(row => (Array.isArray(row.data) ? { ...row, data: row.data.filter(x => x !== r) } : row));
+    setAiRows(drop); setPhotoRows(drop);
+  };
+  // ➕ Tout ajouter : UNE ligne de repas par élément, en une seule écriture. La quantité
+  // retenue est celle du champ de la ligne si on l'a touchée, sinon la portion estimée.
+  const resGramsRef = React.useRef(new WeakMap());
+  const onResGrams = (r, g) => resGramsRef.current.set(r, g);
+  const addAllResults = (list) => {
+    const entries = list.map(r => {
+      const g = resGramsRef.current.has(r) ? resGramsRef.current.get(r) : (r.portionG || 100);
+      const kc = Math.round(r.kcal100 * g / 100);
+      if (!(g > 0) || !(kc > 0)) return null;
+      const sc = k => (r[k] == null ? null : Math.round(r[k] * g / 100 * 10) / 10);
+      return mealFromResult(r, g, kc, { c: sc('c100'), p: sc('p100'), f: sc('f100') });
+    }).filter(Boolean);
+    if (!entries.length) return;
+    commitMeals({ ...meals, [selDay]: [...dayMeals, ...entries] });
     setKcal(''); clearSearch();
+  };
+  // Résultats IA (texte ou photo) : une FoodResultRow par élément, et au-dessus de plusieurs
+  // éléments le bouton qui les verse tous d'un coup, chacun sur sa ligne.
+  const renderResList = (row) => {
+    const list = row.data;
+    const multi = list.length > 1;
+    return (
+      <div key={row.provider} style={{ display:'flex', flexDirection:'column', gap:4 }}>
+        {(multi || row.note) && (
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <div style={{ flex:1, minWidth:0, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.35 }}>
+              {multi ? `${row.bill ? '🧾 Addition' : '➕ Repas'} : ${list.length} éléments, ajoutés chacun sur sa ligne` : ''}
+              {multi && row.note ? ' · ' : ''}{row.note || ''}
+            </div>
+            {multi && (
+              <button onClick={() => addAllResults(list)} title="Ajouter tous les éléments, un par ligne"
+                style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:10, fontWeight:700, padding:'3px 8px', cursor:'pointer', flexShrink:0 }}>
+                ➕ Tout ajouter ({list.length})
+              </button>
+            )}
+          </div>
+        )}
+        {list.map((r, i) => (
+          <FoodResultRow key={i + '|' + r.name} r={r} onAdd={addFromResult} defaultGrams={r.portionG} onGrams={onResGrams}
+            fav={favSet.has(foodFavId(r))} onFav={toggleFav} />
+        ))}
+      </div>
+    );
   };
 
   // ⭐ Épingler / retirer — l'écriture localStorage est validée AVANT de toucher l'état
@@ -43865,13 +43969,13 @@ function NourriturePanel() {
             {photoRows.map(row => {
               const tint = '#8b7bf5';
               const nom  = aiLabel(row.prov || ((aiChain(true)[0] || {}).id));
-              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} defaultGrams={row.data.portionG} fav={favSet.has(foodFavId(row.data))} onFav={toggleFav} />;
+              if (row.state === 'ok' && row.data) return renderResList(row);
               return (
                 <div key={row.provider} style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: row.state === 'err' ? C.dim : tint,
                   background:C.surfaceHigh, border:`1px solid ${row.state === 'err' ? C.border : tint + '44'}`, borderRadius:8, padding:'5px 8px' }}>
                   {row.provider === 'none' ? `📷 Analyse impossible — ${row.err}`
                     : row.state === 'loading' ? `⏳ ${nom} regarde la photo…`
-                    : row.state === 'none' ? `✨ ${nom} : aucun plat reconnu sur la photo.`
+                    : row.state === 'none' ? `✨ ${nom} : aucun plat ni addition reconnu sur la photo.`
                     : `✨ ${nom} indisponible — ${row.err || 'erreur'}`}
                 </div>
               );
@@ -43884,7 +43988,7 @@ function NourriturePanel() {
             {aiRows.map(row => {
               const tint = '#8b7bf5';
               const nom = aiLabel(row.prov || ((aiChain(false)[0] || {}).id));
-              if (row.state === 'ok' && row.data) return <FoodResultRow key={row.provider} r={row.data} onAdd={addFromResult} fav={favSet.has(foodFavId(row.data))} onFav={toggleFav} />;
+              if (row.state === 'ok' && row.data) return renderResList(row);
               return (
                 <div key={row.provider} style={{ fontSize:9.5, fontFamily:'DM Mono,monospace', color: row.state === 'err' ? C.dim : tint,
                   background:C.surfaceHigh, border:`1px solid ${row.state === 'err' ? C.border : tint + '44'}`, borderRadius:8, padding:'5px 8px' }}>
