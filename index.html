@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.20';
+const APP_VERSION = '13.21.21';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3123,18 +3123,10 @@ function StoreProvider({ children }) {
   const setModuleOnHome = React.useCallback((id, on) => {
     setHomeModules(prev => { const next = { ...prev, [id]: !!on }; saveHomeModules(next); return next; });
   }, []);
-  // Quelle IA a le droit de servir quel module (bouton 🤖 du Paramétrage) — persisté en
-  // localStorage. ⚠ L'état du store n'est là QUE pour redessiner la pop-up : les appels IA,
-  // eux, relisent `loadModuleAi()` (cache module-level), donc un module déjà monté prend le
-  // nouveau réglage sans remontage.
-  const [moduleAi, setModuleAiState] = React.useState(() => loadModuleAi());
-  const setModuleAiProvider = React.useCallback((modId, provId, on) => {
-    setModuleAiState(prev => {
-      const next = { ...prev, [modId]: { ...(prev[modId] || {}), [provId]: !!on } };
-      saveModuleAi(next);
-      return next;
-    });
-  }, []);
+  // Ordre de rang des IA (Paramétrage → 🤖 ORDRE DES IA). ⚠ L'état n'est là QUE pour redessiner
+  // la liste : les appels IA relisent `loadAiOrder()` (cache module-level).
+  const [aiOrder, setAiOrderState] = React.useState(() => loadAiOrder());
+  const setAiOrder = React.useCallback(arr => { saveAiOrder(arr); setAiOrderState(loadAiOrder()); }, []);
   const feedRef                   = React.useRef([]);
   const prevPositionRef           = React.useRef(0);
   const prevDurationRef           = React.useRef(0);
@@ -4695,7 +4687,7 @@ function StoreProvider({ children }) {
     setLikedTracks(loadLikedTracksFromDB());
     setModuleToggles(loadModuleToggles()); // reflète un éventuel paramétrage restauré sans reload
     setHomeModules(loadHomeModules());     // idem pour la visibilité accueil (bouton 🏠)
-    moduleAiInvalidate(); setModuleAiState(loadModuleAi()); // idem pour le choix d'IA par module (bouton 🤖)
+    aiOrderInvalidate(); setAiOrderState(loadAiOrder()); // idem pour l'ordre des IA
     return res;
   }, [dbReady]);
 
@@ -4777,7 +4769,7 @@ function StoreProvider({ children }) {
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
-    moduleAi, setModuleAiProvider,
+    aiOrder, setAiOrder,
     dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
@@ -4795,7 +4787,7 @@ function StoreProvider({ children }) {
     loopEnabled, setLoopEnabled,
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
-    moduleAi, setModuleAiProvider,
+    aiOrder, setAiOrder,
     dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoToast, undoRemove, clearUndo,
@@ -14363,84 +14355,49 @@ function aiProviderKey(p) { return aiLs(p.ls); }
 // ⚠ Un fournisseur à 2 champs n'est utilisable que si les DEUX sont renseignés.
 function aiProviderReady(p) { return !!aiProviderKey(p) && (!p.ls2 || !!aiLs(p.ls2)); }
 
-// ── ⚙ QUELLE IA POUR QUEL MODULE (11.3.4, demande utilisateur) ────────────────
-// Chaque module qui parle à l'IA déclare LESQUELS des fournisseurs ci-dessus il a le droit
-// d'appeler (« À propos → ⚙️ PARAMÉTRAGE », bouton 🤖 de la ligne du module).
-// ⚠ Ce n'est PAS un sélecteur « une IA par module » mais un FILTRE sur la chaîne de replis :
-// les fournisseurs cochés sont essayés dans l'ordre de `AI_PROVIDERS`, avec le même repli
-// automatique qu'avant. Changer d'IA ne peut donc pas casser un module : c'est toujours la
-// même façade (`aiGenerate`) qui envoie les mêmes `parts`, normalise la réponse en texte et
-// la fait relire par `geminiExtract` — rien de spécifique à un fournisseur ne remonte
-// jusqu'aux modules.
-// ⚠ Clé absente = TOUT est autorisé (comportement d'origine) ; seul `false` retire un
-// fournisseur — même convention que `moduleEnabled` / `moduleOnHome`.
-const MODULE_AI_LS = 'spotifyplus_module_ai';
-// ⚠ C'est ICI, et nulle part ailleurs, qu'un module est déclaré « parlant à l'IA » : le bouton
-// 🤖 du Paramétrage est GRISÉ pour tout module absent de cette table. Ajouter un appel
-// `aiGenerate` sans ajouter sa ligne ici = un module impossible à configurer.
-// ⚠ `why` = ce que la pop-up affiche AVANT la liste des IA (11.4.3, demande utilisateur) :
-// à quoi sert l'IA ici, et POURQUOI il en faut une — c'est-à-dire ce qu'aucune API ni base
-// de données ne sait faire à sa place. C'est le seul endroit où cette réponse est écrite :
-// la garder juste évite de décocher une IA sans voir ce qu'on éteint.
-const AI_MODULES = {
-  actu: { label:"Résumé de l'actu de la veille · résumé des vidéos YouTube",
-    why:"« 🤖 Actu résumé par IA » relit les titres rapatriés et en tire 5 puces sur le monde et 5 sur la France : aucun flux RSS ne rend une synthèse, seulement des titres bruts. Et le bouton ✨ du lecteur fait REGARDER une vidéo d'abonnement par l'IA pour en sortir les points clés horodatés — YouTube ne publie ni résumé ni transcription exploitable." },
-  compare: { label:'Recherche « Tous produits »',
-    why:"CheapShark couvre les jeux PC, et rien d'autre : aucune API gratuite ne compare les prix du reste. Pour « Tous produits », l'IA fait la recherche web et rend un tableau de prix — depuis une page sans serveur, c'est la seule source possible." },
-  collection: { label:'Recherche Pop · photo → objet · scan',
-    why:"Aucun catalogue interrogeable n'existe pour les figurines Funko Pop, les pierres, les montres ni les vins (Pokémon et Magic, eux, ont leur vraie API). L'IA tient lieu de catalogue, et sait en plus reconnaître l'objet et estimer son prix depuis une photo." },
-  emploi: { label:'Recherche en langage libre · tri des offres par pertinence',
-    why:"Les cinq sources d'offres rendent des listes brutes, chacune dans son coin : aucune ne sait qu'un « développeur front senior à Lyon, pas de management » colle mieux qu'un autre. L'IA relit les offres DÉJÀ rapatriées avec tes critères et ton profil, les classe et dit en une phrase ce qui colle ou ce qui cloche. Elle sait aussi convertir une demande écrite d'une traite (« CDI dev React à Lyon, 45 k mini, cette semaine ») en critères de recherche, ce qu'aucune de ces APIs ne comprend. Dans les deux cas elle ne cherche rien elle-même : les offres viennent des sources, sans elle l'ordre reste celui du score local et la recherche part du formulaire." },
-  frigo: { label:'Photo → ingrédients · recettes',
-    why:"Photographier une étagère et en sortir la liste des aliments, puis croiser ça avec des recettes réalisables : aucune base d'aliments ne fait ni l'un ni l'autre. Sans IA, il ne reste que la saisie à la main." },
-  histoire: { label:"Fiche d'œuvre · fil de questions",
-    why:"Wikipédia ne répond pas à « qu'est-ce que ce bâtiment sur ma photo ». L'IA identifie l'œuvre à partir de la ville et des photos, la résume et explique son lien avec la ville ; le fil de questions sous la fiche s'appuie sur la même IA." },
-  musique: { label:'Delta → 🤖 IA : artistes et titres à découvrir',
-    why:"Spotify a retiré /recommendations et les « artistes similaires » de son API (nov. 2024) : plus aucune source ne dit ce qui pourrait te plaire. La base locale, elle, ne connaît que ce que tu écoutes DÉJÀ. L'IA relit tes titres likés, tes abonnements et tes genres, et propose 10 artistes que tu ne suis pas et 10 titres — chaque ligne étant ensuite recherchée dans le catalogue Spotify pour écarter l'inventé." },
-  revente: { label:'Rédaction des annonces',
-    why:"L'IA rédige titre, description et prix conseillé à partir de tes photos et des infos de l'article, un texte par plateforme (Vinted, Leboncoin, eBay) avec leurs codes. ⚠ Publier automatiquement reste impossible : aucune de ces plateformes n'ouvre d'API de dépôt." },
-  food: { label:'Calories · photo du plat',
-    why:"Open Food Facts ne connaît que les produits à code-barres : un plat maison ou un plat de restaurant n'y est pas. L'IA en estime alors les calories et les macros, et sait lire une photo d'assiette — ce qu'aucune base de données ne fait." },
-  tvtime: { label:'Résumé des vidéos YouTube',
-    why:"Le bouton ✨ du lecteur fait regarder la vidéo par l'IA, en sort un résumé horodaté, puis répond à tes questions dessus sans quitter le lecteur. YouTube ne publie ni résumé ni transcription exploitable." },
-  vetement: { label:'Recherche par image',
-    why:"Tu photographies un vêtement et l'IA dit ce que c'est, puis le retrouve dans ton inventaire. Aucune API de mode gratuite ne fait de la reconnaissance d'image." },
-};
-// Modules dont les requêtes IA embarquent une PHOTO (voir `needVision` dans geminiGenerate) :
-// ce sont eux dont le repli automatique mérite l'avertissement le plus net.
-const AI_MODULES_VISION = ['collection', 'frigo', 'histoire', 'revente', 'food', 'vetement'];
-function moduleHasAi(id) { return !!AI_MODULES[id]; }
-function aiModuleLabel(id) { const m = AI_MODULES[id]; return (m && m.label) || ''; }
-function aiModuleWhy(id)   { const m = AI_MODULES[id]; return (m && m.why) || ''; }
-// ⚠ Cache module-level : `aiChain` part à CHAQUE rendu des panneaux IA (gate `aiAnyKey`) —
-// reparser le JSON à chaque fois coûterait pour rien. Invalidé par `saveModuleAi`, et par
-// `moduleAiInvalidate()` après une restauration de sauvegarde.
-let _modAiCache = null;
-function loadModuleAi() {
-  if (_modAiCache) return _modAiCache;
+// ── 🤖 ORDRE DES IA — UN SEUL, POUR TOUTE L'APPLI (demande utilisateur) ─────────
+// Plus aucun choix par module : TOUTES les IA qui ont une clé servent PARTOUT, essayées dans
+// l'ordre de rang réglé dans « À propos → ⚙️ PARAMÉTRAGE → 🤖 ORDRE DES IA ». La n° 1 répond
+// tant qu'elle peut ; dès qu'elle refuse (plus de jetons, clé morte, réseau) la requête repart
+// telle quelle chez la n° 2, et ainsi de suite.
+// `spotifyplus_ai_order` = tableau d'ids de fournisseurs. ⚠ Absent, incomplet ou périmé ⇒
+// l'ordre de `AI_PROVIDERS` complète : un fournisseur ajouté plus tard se range en fin de
+// liste, un id inconnu est ignoré — la liste lue contient TOUJOURS chaque fournisseur une fois.
+const AI_ORDER_LS = 'spotifyplus_ai_order';
+let _aiOrderCache = null;
+function aiOrderNormalize(arr) {
+  const known = AI_PROVIDERS.map(p => p.id), out = [];
+  (Array.isArray(arr) ? arr : []).forEach(id => { if (known.includes(id) && !out.includes(id)) out.push(id); });
+  known.forEach(id => { if (!out.includes(id)) out.push(id); });
+  return out;
+}
+function loadAiOrder() {
+  if (_aiOrderCache) return _aiOrderCache;
   let o = null;
-  try { o = JSON.parse(localStorage.getItem(MODULE_AI_LS)); } catch {}
-  _modAiCache = (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
-  return _modAiCache;
+  try { o = JSON.parse(localStorage.getItem(AI_ORDER_LS)); } catch {}
+  _aiOrderCache = aiOrderNormalize(o);
+  return _aiOrderCache;
 }
-function moduleAiInvalidate() { _modAiCache = null; }
-function saveModuleAi(v) { _modAiCache = (v && typeof v === 'object') ? v : {}; return lsSet(MODULE_AI_LS, JSON.stringify(_modAiCache)); }
-function moduleAiAllowed(cfg, modId, provId) { const m = cfg && cfg[modId]; return !m || m[provId] !== false; }
-// Message d'une chaîne VIDE alors que des clés existent : rien à voir avec les clés, ça se
-// règle dans le Paramétrage — d'où un message distinct de `NO_KEY`.
-const AI_OFF_MSG = 'Aucune IA cochée pour ce module — ouvre « À propos → ⚙️ PARAMÉTRAGE » et clique sur le 🤖 de sa ligne.';
+function aiOrderInvalidate() { _aiOrderCache = null; }
+function saveAiOrder(arr) { _aiOrderCache = aiOrderNormalize(arr); return lsSet(AI_ORDER_LS, JSON.stringify(_aiOrderCache)); }
+// ⚠ « Plus de jetons » : une IA qui vient de répondre 429 (quota) est RELÉGUÉE en fin de chaîne
+// pendant `AI_QUOTA_REST_MS` — sinon chaque appel suivant lui redemanderait d'abord, pour
+// rien. Reléguée, pas retirée : si toutes les autres échouent, on la retente quand même.
+// Mémoire de session seule (un rechargement lui redonne sa place).
+const AI_QUOTA_REST_MS = 15 * 60 * 1000;
+const _aiQuotaUntil = {};
+function aiIsQuotaErr(e) { return /quota|429/i.test(String((e && e.message) || '')); }
 
-// Fournisseurs utilisables ici, DANS L'ORDRE de AI_PROVIDERS (Gemini d'abord).
-// `modId` (facultatif) restreint la chaîne aux fournisseurs cochés pour ce module.
-function aiChain(needVision, modId) {
-  const cfg = modId ? loadModuleAi() : null;
-  return AI_PROVIDERS.filter(p => (!needVision || p.vision) && aiProviderReady(p)
-    && (!modId || moduleAiAllowed(cfg, modId, p.id)));
+// Fournisseurs utilisables, DANS L'ORDRE DE RANG (`loadAiOrder`), les épuisés en dernier.
+function aiChain(needVision) {
+  const now = Date.now(), rank = loadAiOrder();
+  const ok = rank.map(id => AI_PROVIDERS.find(p => p.id === id))
+    .filter(p => p && (!needVision || p.vision) && aiProviderReady(p));
+  const tired = p => (_aiQuotaUntil[p.id] || 0) > now;
+  return ok.filter(p => !tired(p)).concat(ok.filter(tired));
 }
-// Gate d'UI : remplace les anciens `!!geminiKey()`, sinon un utilisateur qui n'a QUE Groq
-// verrait tous les boutons IA grisés. `modId` = le module appelant, pour que décocher toutes
-// ses IA grise aussi ses boutons au lieu de les laisser échouer au clic.
-function aiAnyKey(needVision, modId) { return aiChain(!!needVision, modId).length > 0; }
+// Gate d'UI : un utilisateur qui n'a QUE Groq ne doit pas voir les boutons IA grisés.
+function aiAnyKey(needVision) { return aiChain(!!needVision).length > 0; }
 // Fournisseur qui a réellement servi le dernier appel — l'UI le nomme (badge ✨).
 let _aiLast = 'gemini';
 function aiLastProvider() { return _aiLast; }
@@ -14448,8 +14405,7 @@ function aiLastProvider() { return _aiLast; }
 // fournisseur suivant quand le premier refuse (quota, clé morte, réseau) — y compris pour une
 // requête qui porte une PHOTO (frigo, assiette, vêtement, façade). Ces fournisseurs ne
 // relèvent ni des mêmes juridictions ni des mêmes politiques de rétention : le repli ne doit
-// pas rester silencieux. Le décochage dans « À propos → ⚙️ PARAMÉTRAGE → 🤖 » reste le seul
-// moyen d'interdire définitivement un fournisseur pour un module.
+// pas rester silencieux. Pour écarter un fournisseur : retirer sa clé du module 🔌 API.
 let _aiFellBack = null;
 function aiLastFallback() { return _aiFellBack; }
 function aiLabel(id) { const p = AI_PROVIDERS.find(x => x.id === id); return p ? p.name : 'IA'; }
@@ -14459,7 +14415,7 @@ function aiLabel(id) { const p = AI_PROVIDERS.find(x => x.id === id); return p ?
 // était un `console.warn`. Or c'est l'information la plus sensible de toute la chaîne — le
 // fournisseur choisi n'a pas répondu, la requête (LA PHOTO comprise : frigo, assiette,
 // vêtement, façade d'immeuble) est repartie chez un autre, qui n'a ni la même juridiction
-// ni la même politique de conservation. `ModuleAiModal` le dit en général ; ce badge le dit
+// ni la même politique de conservation. `AiOrderList` le dit en général ; ce badge le dit
 // pour CE résultat-là.
 // ⚠ `aiMeta()` capture fournisseur ET repli AU MÊME INSTANT, juste après l'appel : les deux
 // sont des variables module-level que l'appel IA suivant écrase.
@@ -14470,7 +14426,7 @@ function AiFallbackBadge({ fb }) {
   return (
     <span title={`${from} n'a pas répondu (quota, clé refusée ou réseau) — la requête est repartie telle quelle chez ${to}.`
         + (fb.vision ? ` ⚠ Elle contenait une PHOTO : c'est ${to} qui l'a reçue, pas ${from}.` : '')
-        + ' Pour interdire définitivement un fournisseur : À propos → ⚙️ Paramétrage → 🤖.'}
+        + ' Ordre des IA : À propos → ⚙️ Paramétrage → 🤖 ORDRE DES IA.'}
       style={{ display:'inline-flex', alignItems:'center', gap:3, fontSize:9, fontWeight:700, whiteSpace:'nowrap',
         color:'#e0a050', background:'#e0a05018', border:'1px solid #e0a05055', borderRadius:5,
         padding:'1px 5px', marginLeft:5, fontFamily:'DM Mono,monospace', cursor:'help', verticalAlign:'middle' }}>
@@ -14596,26 +14552,20 @@ async function geminiCall(parts, opts) {
 // Essaie chaque fournisseur configuré dans l'ordre et renvoie la 1re réponse obtenue.
 async function geminiGenerate(parts, opts) {
   const needVision = parts.some(p => p && p.inline_data);
-  // `opts.module` = le module appelant (posé par `aiGenerate`) : il restreint la chaîne aux
-  // fournisseurs cochés pour lui. Absent ⇒ tous les fournisseurs configurés, comme avant.
-  const modId = (opts && opts.module) || null;
-  const chain = aiChain(needVision, modId);
+  const chain = aiChain(needVision);
   // ⚠ NO_KEY ne veut plus dire « pas de clé Gemini » mais « AUCUNE clé, nulle part » :
   // c'est ce que testent les appelants pour dire à l'utilisateur d'en renseigner une.
   if (!chain.length) {
-    // ⚠ Deux causes très différentes → deux messages : « aucune clé nulle part » (NO_KEY, que
-    // les appelants testent pour renvoyer vers le module API) et « tout décoché pour CE
-    // module », qui se règle dans le Paramétrage et n'a rien à voir avec les clés.
-    if (modId && aiChain(needVision).length) throw new Error(AI_OFF_MSG);
     throw new Error('NO_KEY');
   }
-  // ⚠ La recherche web ancrée n'existe QUE chez Gemini. Sans lui, on remonte une erreur
-  // qui n'est PAS NO_KEY : les 3 appelants concernés (Bon Plan, Pop, Histoire) la
-  // rattrapent déjà, posent `grounded = false` et rejouent SANS outil — et c'est ce
-  // 2e essai qui traverse la chaîne de replis. Répondre ici via un repli marquerait la
-  // fiche « ancrée sur le web » alors qu'elle ne l'est pas.
+  // ⚠ La recherche web ancrée n'existe QUE chez Gemini : elle part donc chez lui QUEL QUE
+  // SOIT son rang. Sans lui (ou s'il refuse), les 3 appelants concernés (Bon Plan, Pop,
+  // Histoire) rattrapent l'erreur, posent `grounded = false` et rejouent SANS outil — et
+  // c'est ce 2e essai qui traverse la chaîne dans l'ordre de rang. Répondre ici via un
+  // repli marquerait la fiche « ancrée sur le web » alors qu'elle ne l'est pas.
+  const hasGemini = chain.some(p => p.id === 'gemini');
   if (opts && opts.tools) {
-    if (chain[0].id !== 'gemini') throw new Error('NO_GROUNDING');
+    if (!hasGemini) throw new Error('NO_GROUNDING');
     _aiLast = 'gemini';
     return await geminiCall(parts, opts);
   }
@@ -14624,7 +14574,7 @@ async function geminiGenerate(parts, opts) {
   // laisserait tomber la partie `file_data` EN SILENCE — le modèle inventerait alors un résumé
   // d'une vidéo qu'il n'a jamais vue, ce qui est pire que pas de résumé du tout.
   if (parts.some(p => p && p.file_data)) {
-    if (chain[0].id !== 'gemini') throw new Error('NO_YOUTUBE');
+    if (!hasGemini) throw new Error('NO_YOUTUBE');
     _aiLast = 'gemini';
     return await geminiCall(parts, null);
   }
@@ -14643,18 +14593,21 @@ async function geminiGenerate(parts, opts) {
         else console.info(msg + '.');
       }
       return txt;
-    } catch (e) { last = e; }          // quota, clé morte, réseau → au suivant
+    } catch (e) {                      // quota, clé morte, réseau → au suivant
+      last = e;
+      if (aiIsQuotaErr(e)) _aiQuotaUntil[p.id] = Date.now() + AI_QUOTA_REST_MS;
+    }
   }
   throw last || new Error('Erreur IA.');
 }
 
 // ── FAÇADE À UTILISER DANS UN MODULE ───────────────────────────────────
-// Même signature que `geminiGenerate`, avec le SCOPE en premier argument. C'est le seul point
-// d'entrée des modules : la sélection d'IA, l'ordre des replis, la conversion des `parts` et
-// la lecture de la réponse restent entièrement de ce côté-ci de la façade.
-// ⚠ Le `modId` doit exister dans `AI_MODULES`, sinon son réglage sera inatteignable dans l'UI.
+// Même signature que `geminiGenerate`, avec le module appelant en premier argument (purement
+// indicatif depuis l'ordre unique des IA). C'est le seul point d'entrée des modules : l'ordre
+// des replis, la conversion des `parts` et la lecture de la réponse restent entièrement de ce
+// côté-ci de la façade.
 function aiGenerate(modId, parts, opts) {
-  return geminiGenerate(parts, Object.assign({}, opts || null, { module: modId }));
+  return geminiGenerate(parts, opts);
 }
 
 // ════════ 9.2.0 — RÉSUMÉ D'UNE VIDÉO YOUTUBE PAR GEMINI ════════
@@ -15331,7 +15284,7 @@ function ReventePanel() {
   const photosRef = React.useRef(photos); photosRef.current = photos;
   const dataRef   = React.useRef(data);   dataRef.current   = data;
 
-  const hasKey = aiAnyKey(false, 'revente');
+  const hasKey = aiAnyKey(false);
 
   const persist = next => { setData(next); revSave(next); };
   const setAnnonces = list => persist({ ...dataRef.current, annonces: list });
@@ -16547,7 +16500,7 @@ function VetementPanel() {
   // localStorage ni envoyé sur Drive (même règle que la photo de plat de Santé, 7.6.83).
   const aiSearch = async file => {
     if (!file) return;
-    if (!aiAnyKey(true, 'vetement')) {
+    if (!aiAnyKey(true)) {
       setAiRes({ err:"Aucune clé IA avec vision (Gemini ou Groq) — ajoute-la dans le module API." });
       return;
     }
@@ -19128,7 +19081,7 @@ function popAiPrompt(q) {
   ].join(' ');
 }
 async function popSearch(q) {
-  if (!aiAnyKey(false, 'collection')) throw new Error("Aucune clé IA : la recherche de Pop passe par l'IA (aucune API Funko gratuite n'existe). Renseigne une clé dans le module API — ou ajoute la figurine à la main ci-dessous.");
+  if (!aiAnyKey(false)) throw new Error("Aucune clé IA : la recherche de Pop passe par l'IA (aucune API Funko gratuite n'existe). Renseigne une clé dans le module API — ou ajoute la figurine à la main ci-dessous.");
   const prompt = popAiPrompt(q);
   const tools = [{ google_search: {} }];
   const run = async t => aiGenerate('collection', [{ text: prompt }], t ? { tools: t } : null);
@@ -19616,7 +19569,7 @@ function CollPhotoEstimate({ kind, onAdd }) {
   const blobRef = React.useRef(null);
   const photos = useCollPhotos();
   const [pick2, setPick2] = React.useState(false);   // pop-up « Photos / Galerie » ouverte
-  const hasKey = aiAnyKey(true, 'collection');   // photo → fournisseur avec vision obligatoire
+  const hasKey = aiAnyKey(true);   // photo → fournisseur avec vision obligatoire
   const drop = () => { if (urlRef.current) { try { URL.revokeObjectURL(urlRef.current); } catch {} urlRef.current = ''; } setPrev(''); };
   React.useEffect(() => drop, []);
   // Reçoit le fichier choisi dans la pop-up (appareil photo ou galerie) et lance l'analyse.
@@ -20532,7 +20485,7 @@ function CollectionScanModal({ onClose }) {
   const blobRef = React.useRef(null);
   const photos = useCollPhotos();
   const pname = aiLabel(aiChain(true)[0] ? aiChain(true)[0].id : 'gemini');
-  const hasKey = aiAnyKey(true, 'collection');   // photo → fournisseur avec vision obligatoire
+  const hasKey = aiAnyKey(true);   // photo → fournisseur avec vision obligatoire
   const all = collAllSubs();
   const chosen = all.find(x => x.sub.id === subId);
   const drop = () => { if (urlRef.current) { try { URL.revokeObjectURL(urlRef.current); } catch {} urlRef.current = ''; } setPrev(''); };
@@ -22161,7 +22114,7 @@ function EmploiOffersSection({ crit }) {
   // relire `critRef` ici aurait fait juger les offres d'une phrase libre sur le formulaire.
   const rank = React.useCallback(async (list, useCrit) => {
     setAi(null); setAiErr('');
-    if (!list.length || !aiAnyKey(false, 'emploi')) return;
+    if (!list.length || !aiAnyKey(false)) return;
     setRanking(true);
     try {
       const r = await emploiAiRank(useCrit, list);
@@ -22199,7 +22152,6 @@ function EmploiOffersSection({ crit }) {
     catch (e) {
       const m = String((e && e.message) || '');
       setQErr(m.includes('NO_KEY') ? "Aucune IA disponible : coche-en une dans 🔌 API, ou utilise le bouton « 🔎 avec mes critères »."
-        : m === AI_OFF_MSG ? m
         : 'Recherche par IA impossible (' + (m || 'erreur IA') + ').');
     }
     setQLoading(false);
@@ -22529,7 +22481,7 @@ function HistoireChat({ f, onPatch }) {
   const [q, setQ]       = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [err, setErr]   = React.useState('');
-  const hasKey = aiAnyKey(false, 'histoire');
+  const hasKey = aiAnyKey(false);
   const chat   = Array.isArray(f.chat) ? f.chat : [];
   const ready  = !!q.trim() && !busy && hasKey;
 
@@ -22692,7 +22644,7 @@ function HistoirePanel() {
   const [list, setList]     = React.useState(histLoad);
   const [res, setRes]       = React.useState(() => histLoad()[0] || null);
   const [imgMsg, setImgMsg] = React.useState('');    // '' | 'busy' | message d'erreur
-  const hasKey = aiAnyKey(false, 'histoire');   // la photo est FACULTATIVE ici (recherche par ville)
+  const hasKey = aiAnyKey(false);   // la photo est FACULTATIVE ici (recherche par ville)
   const imgOn  = gimgConfigured();
   // ⚠ Les aperçus sont des object URL : on les révoque au démontage, sinon le navigateur
   // garde les images en mémoire tant que la page vit.
@@ -24402,8 +24354,8 @@ function buildBackup() {
     modules: lsJson(MODULES_LS_KEY) || {},
     // Paramétrage : visibilité de chaque module sur l'accueil (bouton 🏠 du Paramétrage)
     home_modules: lsJson(HOME_MODULES_LS_KEY) || {},
-    // Paramétrage : IA autorisées pour chaque module (bouton 🤖 du Paramétrage)
-    module_ai: lsJson(MODULE_AI_LS) || {},
+    // Paramétrage : ordre de rang des IA, unique pour toute l'appli
+    ai_order: lsJson(AI_ORDER_LS) || [],
     // Journal persistant des écoutes (graphique Écoutes/jour) — survit à la purge
     listens: lsJson(LISTEN_LOG_KEY) || [],
     // API : nombre d'appels par API depuis toujours (compteur du wrapper de fetch, cf. plus
@@ -24496,7 +24448,7 @@ const EXPORT_SECTIONS = [
   { key:'comptes',  label:'Comptes & clés',icon:'🔐', hint:'clés/pseudos API (IA, Google Images, GitHub, Adzuna, LoL, chess, speedrun)', fields:['gemini_key','groq_key','cerebras_key','zai_key','openrouter_key','mistral_key','cohere_key','cf_key','cf_account','gcse_key','gcse_cx','github_token','adzuna_id','adzuna_key','chess_user','speedrun_user','lol'] },
   { key:'api',      label:'API',          icon:'🔌', hint:"nombre d'appels par API (depuis toujours)", fields:['api_calls'] },
   { key:'stats',    label:'Stats',        icon:'📊', hint:"compteurs d'écoute + graphique + records de jeux", fields:['stats', 'listens', 'games'] },
-  { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil + IA par module + préférences', fields:['modules','home_modules','module_ai','prefs'] },
+  { key:'modules',  label:'Paramétrage',  icon:'⚙️', hint:'modules activés/désactivés + accueil + ordre des IA + préférences', fields:['modules','home_modules','ai_order','prefs'] },
 ];
 // Télécharge la sauvegarde en JSON. `section` = entrée d'EXPORT_SECTIONS (défaut : Tous).
 // Retourne l'objet (réutilisé par la proposition hebdo).
@@ -24922,10 +24874,10 @@ function applyBackup(data) {
   if (data.modules && typeof data.modules === 'object' && !Array.isArray(data.modules)) put(MODULES_LS_KEY, data.modules);
   // Visibilité des modules sur l'accueil (bouton 🏠) — REMPLACÉ si présent
   if (data.home_modules && typeof data.home_modules === 'object' && !Array.isArray(data.home_modules)) put(HOME_MODULES_LS_KEY, data.home_modules);
-  // IA autorisées par module (bouton 🤖) — REMPLACÉ si présent. ⚠ Le cache module-level est
+  // Ordre des IA — REMPLACÉ si présent. ⚠ Le cache module-level est
   // invalidé DANS TOUS LES CAS : le prochain appel IA doit relire le disque, pas la mémoire.
-  if (data.module_ai && typeof data.module_ai === 'object' && !Array.isArray(data.module_ai)) put(MODULE_AI_LS, data.module_ai);
-  moduleAiInvalidate();
+  if (Array.isArray(data.ai_order) && data.ai_order.length) put(AI_ORDER_LS, aiOrderNormalize(data.ai_order));
+  aiOrderInvalidate();
   // Finance : historique local des prix — FUSIONNÉ (pas remplacé) : union par série,
   // tri par date, densité bornée (≥ 30 min entre 2 points), cap FIN_HIST_MAX_PTS.
   // Un backup d'un autre appareil COMPLÈTE donc l'historique local sans l'écraser.
@@ -27425,87 +27377,56 @@ function StatsPanel() {
 const AUTO_COLOR = '#4ec9b0';
 
 // À PROPOS — export / restauration / Dropbox / réinit quota / purge / version.
-// ════════ 🤖 QUELLE IA POUR CE MODULE (11.3.4) ════════
-// Pop-up du bouton 🤖 de chaque ligne du Paramétrage. Elle liste les fournisseurs d'IA DANS
-// L'ORDRE où ils seront essayés (celui d'`AI_PROVIDERS`) et laisse cocher ceux que ce module
-// a le droit d'appeler.
-// ⚠ `createPortal(document.body)` obligatoire : la pop-up est rendue depuis un StatsCollapse,
-// et un ancêtre `transform` piégerait le `position:fixed` (piège n° 9).
-// ⚠ On affiche AUSSI les fournisseurs sans clé, cochables : le réglage est conservé et devient
-// effectif le jour où la clé est renseignée dans le module 🔌 API.
-function ModuleAiModal({ modId, cfg, onToggle, onClose }) {
-  React.useEffect(() => {
-    const k = e => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
-    window.addEventListener('keydown', k, true);
-    const ov = document.body.style.overflow; document.body.style.overflow = 'hidden';
-    return () => { window.removeEventListener('keydown', k, true); document.body.style.overflow = ov; };
-  }, [onClose]);
-  const mod   = TOGGLE_MODULES.find(m => m.id === modId) || { label: modId, icon:'🤖', color:'#8ab4ff' };
-  const chain = aiChain(false, modId);          // ce qui partirait RÉELLEMENT, clés comprises
-  return ReactDOM.createPortal(
-    <div onClick={onClose} style={{ position:'fixed', inset:0, zIndex:450, background:'rgba(0,0,0,0.72)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
-      <div onClick={e => e.stopPropagation()}
-        style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, width:'min(460px, 100%)', maxHeight:'84vh', display:'flex', flexDirection:'column' }}>
-        <div style={{ display:'flex', alignItems:'center', gap:9, padding:'12px 14px', borderBottom:`1px solid ${C.border}` }}>
-          <span style={{ fontSize:18 }}>{mod.icon}</span>
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.06em', color: mod.color }}>IA DE « {String(mod.label).toUpperCase()} »</div>
-            <div style={{ fontSize:11, color:C.dim, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{aiModuleLabel(modId)}</div>
+// ════════ 🤖 ORDRE DES IA (Paramétrage) ════════
+// Une seule liste pour toute l'appli : ↑/↓ changent le rang, la n° 1 est essayée d'abord
+// PARTOUT, puis la suivante dès qu'elle ne répond plus (voir `aiChain`).
+// ⚠ Les fournisseurs sans clé restent listés et rangeables : leur rang vaut dès que la clé
+// est renseignée dans le module 🔌 API.
+function AiOrderList({ order, onChange }) {
+  const move = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= order.length) return;
+    const next = order.slice(); [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+  const live = aiChain(false);
+  const arrow = (on, onClick, lbl, t) => (
+    <button onClick={onClick} disabled={!on} title={t} aria-label={t}
+      style={{ width:24, height:22, borderRadius:6, border:`1px solid ${C.border}`, background:'transparent', color: on ? C.text : C.dim, opacity: on ? 1 : 0.3, cursor: on ? 'pointer' : 'default', padding:0, fontSize:11, lineHeight:1, flexShrink:0 }}>{lbl}</button>
+  );
+  return (
+    <div>
+      {order.map((id, i) => {
+        const pv = AI_PROVIDERS.find(p => p.id === id);
+        if (!pv) return null;
+        const hasKey = aiProviderReady(pv);
+        return (
+          <div key={id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 4px', borderBottom:`1px solid ${C.border}`, opacity: hasKey ? 1 : 0.5 }}>
+            <span style={{ fontFamily:'DM Mono,monospace', fontSize:11, color:'#8ab4ff', width:18, textAlign:'right', flexShrink:0 }}>{i + 1}.</span>
+            <span style={{ flex:1, minWidth:0 }}>
+              <span style={{ fontSize:12, fontWeight:600, color: hasKey ? C.text : C.dim }}>{pv.name}</span>
+              <span style={{ display:'block', fontSize:9.5, color:C.dim, marginTop:1 }}>
+                {hasKey ? (pv.vision ? '👁 lit les photos' : 'texte seul — sautée pour une photo') : 'clé absente → module 🔌 API'}
+              </span>
+            </span>
+            {arrow(i > 0, () => move(i, -1), '↑', 'Monter')}
+            {arrow(i < order.length - 1, () => move(i, 1), '↓', 'Descendre')}
           </div>
-          <button onClick={onClose} title="Fermer (Échap)" aria-label="Fermer"
-            style={{ background:'none', border:'1px solid #e0505066', borderRadius:8, color:'#e05050', fontSize:14, lineHeight:1, padding:'3px 9px', cursor:'pointer' }}>✕</button>
-        </div>
-        <div style={{ padding:'10px 14px', overflowY:'auto' }}>
-          {/* ⚠ AVANT la config (demande utilisateur) : à quoi sert l'IA ici et pourquoi il en
-              faut une. On ne décoche pas à l'aveugle ce qu'on n'a pas vu décrit. */}
-          {aiModuleWhy(modId) && (
-            <div style={{ background:C.surfaceHigh, borderRadius:10, padding:'9px 11px', marginBottom:10 }}>
-              <div style={{ fontSize:9, fontWeight:800, letterSpacing:'0.06em', color: mod.color, marginBottom:4 }}>POURQUOI DE L'IA ICI</div>
-              <div style={{ fontSize:11, color:C.text, lineHeight:1.55 }}>{aiModuleWhy(modId)}</div>
-            </div>
-          )}
-          <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:9 }}>
-            Les IA cochées sont essayées <strong>de haut en bas</strong> jusqu'à ce que l'une réponde : décocher n'enlève jamais une fonction, ça raccourcit seulement la liste de secours.
-          </div>
-          {/* ⚠ CONSENTEMENT ÉCLAIRÉ : le repli est AUTOMATIQUE et SILENCIEUX à l'écran. Si le
-              premier fournisseur refuse (quota, clé morte), la requête — photo comprise —
-              repart telle quelle chez le suivant. C'est ici, et nulle part ailleurs, qu'on
-              peut l'empêcher. */}
-          <div style={{ fontSize:10, color:'#c8956c', background:'#1a1208', border:'1px solid #3a2a10', borderRadius:8, padding:'7px 9px', lineHeight:1.5, marginBottom:10 }}>
-            ⚠ Le repli est <b>automatique</b>{AI_MODULES_VISION.includes(modId) ? <> : si la première IA refuse, <b>ta photo repart telle quelle</b> chez la suivante</> : <> : la requête repart telle quelle chez la suivante</>}. Ces fournisseurs n'ont ni la même juridiction ni la même politique de conservation — <b>décocher ici est le seul moyen</b> d'en écarter un pour de bon.
-          </div>
-          {AI_PROVIDERS.map(pv => {
-            const ok      = moduleAiAllowed(cfg, modId, pv.id);
-            const hasKey  = aiProviderReady(pv);
-            const rank    = chain.findIndex(c => c.id === pv.id);
-            return (
-              <div key={pv.id} onClick={() => onToggle(modId, pv.id, !ok)}
-                style={{ display:'flex', alignItems:'center', gap:9, padding:'8px 2px', borderBottom:`1px solid ${C.border}`, cursor:'pointer', opacity: hasKey ? 1 : 0.5 }}>
-                <span aria-hidden="true" style={{ width:18, height:18, flexShrink:0, borderRadius:5, border:`1px solid ${ok ? mod.color : C.border}`, background: ok ? mod.color : 'transparent', color:'#0b0b0b', fontSize:12, lineHeight:'17px', textAlign:'center', fontWeight:800 }}>{ok ? '✓' : ''}</span>
-                <span style={{ flex:1, minWidth:0 }}>
-                  <span style={{ fontSize:12, fontWeight:600, color: ok && hasKey ? C.text : C.dim }}>
-                    {rank >= 0 ? <span style={{ fontFamily:'DM Mono,monospace', fontSize:10, color: mod.color, marginRight:5 }}>{rank + 1}.</span> : null}
-                    {pv.name}
-                  </span>
-                  <span style={{ display:'block', fontSize:9.5, color:C.dim, marginTop:1 }}>
-                    {hasKey ? (pv.vision ? '👁 lit les photos' : 'texte seul — sauté pour une photo')
-                            : 'clé absente → module 🔌 API'}
-                  </span>
-                </span>
-              </div>
-            );
-          })}
-          <div style={{ fontSize:10, color: chain.length ? C.dim : '#e05050', lineHeight:1.5, marginTop:10 }}>
-            {chain.length
-              ? <>Ordre d'appel ici : <strong style={{ color:C.muted }}>{chain.map(c => c.name).join(' → ')}</strong>.</>
-              : <>Aucune IA utilisable pour ce module : coche-en une (et renseigne sa clé dans le module 🔌 API), sinon ses fonctions IA resteront grisées.</>}
-          </div>
-          <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5, marginTop:7 }}>
-            ⚠ Deux fonctions n'existent que chez <strong>Gemini</strong> : la recherche web ancrée (Bon Plan, Histoire, Pop) et le résumé de vidéo YouTube. Sans lui, la première se rejoue sans le web chez l'IA suivante, la seconde ne part pas.
-          </div>
-        </div>
+        );
+      })}
+      <div style={{ fontSize:10, color: live.length ? C.dim : '#e05050', lineHeight:1.5, marginTop:8, padding:'0 4px' }}>
+        {live.length
+          ? <>Ordre d'appel actuel : <strong style={{ color:C.muted }}>{live.map(c => c.name).join(' → ')}</strong>. Une IA à court de jetons (quota) passe en dernier pendant 15 min.</>
+          : <>Aucune IA utilisable : renseigne au moins une clé dans le module 🔌 API.</>}
       </div>
-    </div>, document.body);
+      <div style={{ fontSize:10, color:'#c8956c', background:'#1a1208', border:'1px solid #3a2a10', borderRadius:8, padding:'7px 9px', lineHeight:1.5, marginTop:7 }}>
+        ⚠ Le repli est <b>automatique</b> : si une IA refuse, la requête — <b>photo comprise</b> — repart telle quelle chez la suivante. Ces fournisseurs n'ont ni la même juridiction ni la même politique de conservation ; pour en écarter un, retire sa clé du module 🔌 API.
+      </div>
+      <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5, marginTop:7, padding:'0 4px' }}>
+        ⚠ Deux fonctions n'existent que chez <strong>Gemini</strong>, qui les sert donc quel que soit son rang : la recherche web ancrée (Bon Plan, Histoire, Pop) et le résumé de vidéo YouTube. Sans lui, la première se rejoue sans le web dans l'ordre ci-dessus, la seconde ne part pas.
+      </div>
+    </div>
+  );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -27726,7 +27647,7 @@ const LSU_RULES = [
   // la ligne n'existe que pour porter le poids de sa base.
   { mod:null, id:'photocache', icon:'🖼️', label:'Cache photos Drive', color:'#f59a2e', re:/^__jamais__$/ },
   { mod:null, id:'prefs', icon:'⚙️', label:'Réglages du Hub', color:'#8ab4ff',
-    re:/^spotifyplus_(modules|home_modules|module_ai|playerbar|backup_|active_|layout_hint|auth_error|boot_|vendor_heal|tabs|last_backup|oauth_return)/ },
+    re:/^spotifyplus_(modules|home_modules|ai_order|playerbar|backup_|active_|layout_hint|auth_error|boot_|vendor_heal|tabs|last_backup|oauth_return)/ },
 ];
 // Résolution icône/libellé/couleur : TOGGLE_MODULES fait autorité pour les modules.
 // ⚠ Lecture au NIVEAU MODULE d'une const déclarée plus haut (piège 2) — TOGGLE_MODULES est
@@ -28131,9 +28052,7 @@ function DataLimitPanel() {
 }
 
 function VosEcoutesPanel() {
-  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, moduleAi, setModuleAiProvider, logout } = useStore();
-  // Module dont la pop-up 🤖 « quelle IA pour ce module » est ouverte (null = aucune).
-  const [aiCfgMod, setAiCfgMod] = React.useState(null);
+  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, aiOrder, setAiOrder, logout } = useStore();
   // Affichage de la barre de lecture Spotify (bas de l'écran) — préférence persistée.
   const [barOn, setBarOn] = React.useState(playerBarPref);
   const toggleBar = () => { const on = !barOn; playerBarSet(on); setBarOn(on); };
@@ -28201,7 +28120,7 @@ function VosEcoutesPanel() {
       {/* Ordre : Paramétrage → Autorisations → Lancement automatique → Limite data → Exporter → Sauvegardes cloud → Restaurations (JSON puis cloud) → quota → purge */}
       <StatsCollapse title="⚙️ PARAMÉTRAGE" color="#8ab4ff">
         <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
-          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Le bouton 🏠 affiche/masque le module sur l'accueil (desktop &amp; mobile), le bouton 🤖 choisit <strong>quelles IA</strong> ce module a le droit d'appeler (grisé si le module ne fait pas appel à l'IA). Ces réglages sont inclus dans l'export/import de tes données.
+          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Le bouton 🏠 affiche/masque le module sur l'accueil (desktop &amp; mobile). L'ordre des IA, en bas, vaut pour toute l'appli. Ces réglages sont inclus dans l'export/import de tes données.
         </div>
         {TOGGLE_MODULES.map(m => {
           const on   = moduleEnabled(moduleToggles, m.id);
@@ -28213,14 +28132,6 @@ function VosEcoutesPanel() {
               <span style={{ fontSize:12, fontWeight:600, color: on ? m.color : C.dim, display:'flex', alignItems:'center', gap:7, minWidth:0, flex:1 }}>
                 <span style={{ opacity: on ? 1 : 0.4 }}>{m.icon}</span> {m.label}
               </span>
-              {/* 🤖 Quelle IA pour ce module — grisé si le module n'appelle jamais l'IA */}
-              <button onClick={() => on && moduleHasAi(m.id) && setAiCfgMod(m.id)} disabled={!on || !moduleHasAi(m.id)}
-                title={!moduleHasAi(m.id) ? 'Ce module ne fait pas appel à l’IA'
-                  : !on ? 'Active le module pour choisir ses IA'
-                  : 'Choisir les IA autorisées pour ce module (' + aiModuleLabel(m.id) + ')'}
-                style={{ width:26, height:22, borderRadius:7, border:`1px solid ${on && moduleHasAi(m.id) ? m.color : C.border}`, cursor: (on && moduleHasAi(m.id)) ? 'pointer' : 'default', flexShrink:0, padding:0, fontSize:12, lineHeight:1, background:'transparent', color: on && moduleHasAi(m.id) ? m.color : C.dim, opacity: (on && moduleHasAi(m.id)) ? 1 : 0.3, transition:'all 0.15s' }}>
-                🤖
-              </button>
               <button onClick={() => on && setModuleOnHome(m.id, !moduleOnHome(homeModules, m.id))} disabled={!on}
                 title={!on ? 'Active le module pour l’afficher sur l’accueil' : (home ? 'Affiché sur l’accueil — cliquer pour masquer' : 'Masqué de l’accueil — cliquer pour afficher')}
                 aria-pressed={home}
@@ -28254,7 +28165,11 @@ function VosEcoutesPanel() {
             ? 'Le bandeau du bas (pochette, lecture/pause, précédent/suivant) est affiché dès que Spotify joue.'
             : 'Bandeau masqué. La lecture, le marquage des écoutes et l\'auto-avance continuent normalement — seuls les boutons disparaissent.'}
         </div>
-        {aiCfgMod && <ModuleAiModal modId={aiCfgMod} cfg={moduleAi} onToggle={setModuleAiProvider} onClose={() => setAiCfgMod(null)} />}
+        <div style={{ fontSize:10, fontWeight:800, letterSpacing:'0.06em', color:'#8ab4ff', padding:'12px 4px 4px', borderTop:`1px solid ${C.border}`, marginTop:6 }}>🤖 ORDRE DES IA</div>
+        <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, padding:'0 4px 4px' }}>
+          Toutes les IA qui ont une clé servent <strong>partout</strong> dans l'appli : la n° 1 d'abord, puis la n° 2 dès que la première ne répond plus (plus de jetons, clé refusée, réseau), et ainsi de suite.
+        </div>
+        <AiOrderList order={aiOrder} onChange={setAiOrder} />
       </StatsCollapse>
       {/* 🔐 AUTORISATIONS — juste SOUS le Paramétrage : la liste EXHAUSTIVE, en cases à
           cocher, et le SEUL endroit où elle vit (les modules en avaient chacun un extrait,
@@ -31996,12 +31911,12 @@ function ActuAiSummary({ data }) {
     if (!_actuIa.loaded) { _actuIa.loaded = true; actuIaLoad(); }
     // Génération AUTOMATIQUE à l'ouverture du collapse, une seule fois par jour :
     // ouvrir la section EST le geste de l'utilisateur, et le cache du jour la rend gratuite ensuite.
-    if (!actuIaFresh() && !_actuIa.busy && aiAnyKey(false, 'actu')) actuIaRun(dataRef.current);
+    if (!actuIaFresh() && !_actuIa.busy && aiAnyKey(false)) actuIaRun(dataRef.current);
     return () => { _actuIa.subs.delete(force); };
   }, []);
 
   const { busy, err, monde, france, at, ai, fb } = _actuIa;
-  const hasKey = aiAnyKey(false, 'actu');
+  const hasKey = aiAnyKey(false);
   const has = monde.length > 0 || france.length > 0;
   const bloc = (title, list) => (
     <div>
@@ -33920,7 +33835,7 @@ function CompareDenicheur() {
   const [loading, setLoading] = React.useState(false);
   const [showPrompt, setSP]   = React.useState(false);
   const searchUrl = query => 'https://ledenicheur.fr/search?search=' + encodeURIComponent(query);
-  const hasKey = aiAnyKey(false, 'compare');
+  const hasKey = aiAnyKey(false);
 
   const search = async () => {
     const query = q.trim();
@@ -40901,7 +40816,7 @@ function YtSummarySheet({ video, mod, split, onSplit, onClose }) {
   // ↕ 11.5.1 — Glissé de la barre de séparation. `drag` sert AUSSI de repère visuel (la
   // poignée s'éclaire) ; le partage lui-même appartient au lecteur (prop `onSplit`).
   const [drag, setDrag] = React.useState(false);
-  const hasKey = aiAnyKey(false, mod || 'tvtime');
+  const hasKey = aiAnyKey(false);
   const run = React.useCallback(async (force) => {
     setSt({ state:'loading', txt:'', cached:false, err:'' });
     setChat([]);
@@ -43190,7 +43105,7 @@ function FoodSportSection({ day, dayLabel, isToday, weight, profile, list, onCha
     if (!file) return;
     // ⚠ Vision obligatoire : une capture envoyée à un fournisseur sans vision se ferait
     // inventer une séance (piège de la chaîne IA). `aiAnyKey(true,…)` tranche avant l'appel.
-    if (!aiAnyKey(true, 'food')) {
+    if (!aiAnyKey(true)) {
       setShotPrev('');
       return setShot({ state:'err', err:'aucune clé IA avec vision (Gemini ou Groq) — module API.' });
     }
@@ -43614,7 +43529,7 @@ function NourriturePanel() {
     const q = name.trim();
     if (q.length < 2 || searching) return;
     setSearching(true); setSearchErr(''); setResults(null);
-    const providers = aiAnyKey(false, 'food') ? ['ia'] : [];
+    const providers = aiAnyKey(false) ? ['ia'] : [];
     setAiRows(providers.map(p => ({ provider:p, state:'loading' })));
     providers.forEach(p => {
       foodAiSuggest(q)
@@ -43654,7 +43569,7 @@ function NourriturePanel() {
   React.useEffect(() => () => { if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current); }, []);
   const analyzeDish = async (file) => {
     if (!file) return;
-    const providers = aiAnyKey(true, 'food') ? ['ia'] : [];
+    const providers = aiAnyKey(true) ? ['ia'] : [];
     if (!providers.length) {
       setPreview('');
       setPhotoRows([{ provider:'none', state:'err', err:'aucune clé IA avec vision (Gemini ou Groq) — module API.' }]);
@@ -51375,7 +51290,6 @@ async function deltaAiRun(data, artists) {
     const m = String(e?.message || e || '');
     deltaAiSet({ state:'err', progress:'', err:
       m === 'NO_KEY'      ? 'Aucune clé d\'IA enregistrée — ouvre le module API pour en ajouter une.'
-      : m === 'AI_OFF'    ? AI_OFF_MSG
       : m === 'EMPTY_TASTE' ? 'L\'analyse n\'a trouvé ni titre liké ni abonnement : il n\'y a rien à partir de quoi suggérer.'
       : 'Suggestions impossibles : ' + (m || 'erreur') + '.' });
   }
@@ -51427,9 +51341,7 @@ function DeltaAiPanel({ data }) {
   const { state, progress, err } = _deltaAi;
   const res = _deltaAi.data;
   const loading = state === 'loading';
-  // ⚠ Chaîne vide alors que des clés existent = décoché dans le Paramétrage : message
-  // distinct de « aucune clé » (AI_OFF_MSG), sinon on cherche une clé qu'on a déjà.
-  const hasAi = aiAnyKey(false, 'musique');
+  const hasAi = aiAnyKey(false);
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
@@ -51453,7 +51365,7 @@ function DeltaAiPanel({ data }) {
       </div>
       {!hasAi && (
         <div style={{ fontSize:10.5, color:'#e0a050', background:'#e0a05012', border:'1px solid #e0a05044', borderRadius:8, padding:'8px 10px', lineHeight:1.5 }}>
-          {aiAnyKey(false) ? AI_OFF_MSG : 'Aucune clé d\'IA enregistrée — ajoute-en une dans le module API.'}
+          Aucune clé d'IA enregistrée — ajoute-en une dans le module API.
         </div>
       )}
       {loading && <div style={{ fontSize:11, color:C.muted, fontFamily:'DM Mono,monospace' }}>{progress}</div>}
