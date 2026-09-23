@@ -225,7 +225,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.26';
+const APP_VERSION = '13.21.27';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4235,6 +4235,9 @@ function StoreProvider({ children }) {
             setStatus('Quota 24h atteint', 'error');
             notify('Spotify+ — Session terminée', `100 artistes scrapés. Prochaine synchro le ${when}.`);
             await endSync('daily_limit');
+            // ☁︎ Sauvegarde Dropbox automatique (case de « Sauvegarder sur Dropbox ») — APRÈS
+            // endSync, donc après le saveDB final : la base envoyée contient tout le lot.
+            dropboxAutoQuotaSave().then(r => { if (r) log(r, r.startsWith('✓') ? 'ok' : r.startsWith('✗') ? 'error' : 'warn'); });
             return;
           }
           const artist = artists[i];
@@ -25821,11 +25824,31 @@ function MapsPanel() {
 // mode='save' (défaut) : Connecter / Sauvegarder + Déconnecter. mode='restore' : bouton
 // Restaurer seul (rien si non connecté). Permet de placer sauvegarde et restauration à des
 // endroits différents d'À propos (les saves groupés, puis les restores groupés).
+// ── ☁︎ Sauvegarde Dropbox au quota (demande utilisateur) ── Case à cocher du bouton
+// « Sauvegarder sur Dropbox » : chaque fois que le scraping s'arrête sur les 100 artistes
+// du quota, une sauvegarde complète part sur Dropbox. ⚠ Absent = désactivée, seule 'on'
+// l'active. ⚠ Le chiffrement reste la règle : si la sauvegarde est chiffrée (défaut), la
+// phrase de passe est DEMANDÉE à ce moment-là (elle n'est stockée nulle part) — l'annuler
+// suit le chemin de `backupSeal` (export en clair seulement sur accord explicite, sinon rien).
+// Rend le message à journaliser, ou '' quand rien n'est tenté.
+const DBX_AUTO_QUOTA_LS = 'spotifyplus_dbx_auto_quota';
+async function dropboxAutoQuotaSave() {
+  if (lsGet(DBX_AUTO_QUOTA_LS) !== 'on' || !dropboxConfigured() || !dropboxConnected()) return '';
+  try {
+    const sealed = await backupSeal(await buildBackupFull());
+    if (sealed === null) return '☁︎ Sauvegarde Dropbox automatique annulée (phrase de passe non saisie).';
+    await dropboxUpload(sealed);
+    try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
+    return '✓ Sauvegarde Dropbox automatique faite (quota de 100 artistes atteint).';
+  } catch (e) { return '✗ Sauvegarde Dropbox automatique échouée : ' + ((e && e.message) || 'erreur'); }
+}
 function DropboxSync({ mode = 'save' }) {
   const { restoreBackup } = useStore();
   const [connected, setConnected] = React.useState(dropboxConnected);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
+  const [autoQuota, setAutoQuota] = React.useState(() => lsGet(DBX_AUTO_QUOTA_LS) === 'on');
+  const toggleAutoQuota = on => { lsSet(DBX_AUTO_QUOTA_LS, on ? 'on' : 'off'); setAutoQuota(on); };
   // Sauvegarder = vert, Restaurer = bleu (demande utilisateur — couleur par action, pas par provider)
   const btn        = { background:'#34a85315', border:'1px solid #34a85355', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#57c973', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
   const restoreBtn = { ...btn, background:'#4ea3f515', border:'1px solid #4ea3f555', color:'#4ea3f5' };
@@ -25870,6 +25893,10 @@ function DropboxSync({ mode = 'save' }) {
       {connected ? (
         <>
           <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>☁︎ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Dropbox'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(tout, écrase la dernière version)</span>}</button>
+          <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:10.5, color:C.muted, cursor:'pointer', padding:'0 2px' }}>
+            <input type="checkbox" checked={autoQuota} onChange={e => toggleAutoQuota(e.target.checked)} />
+            Sauvegarder automatiquement quand le scraping atteint les 100 artistes du quota
+          </label>
           <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Dropbox</button>
         </>
       ) : (
