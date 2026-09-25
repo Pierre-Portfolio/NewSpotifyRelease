@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.52';
+const APP_VERSION = '13.21.53';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -46248,8 +46248,8 @@ function NoteAttachment({ att, onDelete, onZoom }) {
             {att.kind === 'audio' && att.dur ? noteFmtDur(att.dur) + ' · ' : ''}{noteFmtSize(att.size)}{att.locked ? ' · 🔒 verrouillé' : ''}
           </div>
         </div>
-        <button onClick={() => onDelete(att)} title="Supprimer cette pièce jointe"
-          style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+        {onDelete && <button onClick={() => onDelete(att)} title="Supprimer cette pièce jointe"
+          style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>}
       </div>
       {att.kind === 'audio' && att.data && (
         <audio controls preload="none" src={att.data} style={{ width:'100%', height:32 }} />
@@ -46291,6 +46291,13 @@ function NotePanel() {
   // Déverrouillage per-note LEGACY (anciennes notes chiffrées avec un mdp individuel)
   const [askId, setAskId]   = React.useState(null);
   const [askPw, setAskPw]   = React.useState('');
+
+  // 👁️ Vue LECTURE SEULE (bouton à droite de ✏️) : texte complet + pièces jointes, sans
+  // éditeur — donc sans sauvegarde automatique ni risque de modifier la note.
+  // `viewSeq` écarte un chargement de pièces jointes arrivé après un changement de note.
+  const [viewId, setViewId]   = React.useState(null);
+  const [viewAtt, setViewAtt] = React.useState([]);
+  const viewSeq = React.useRef(0);
 
   // Bascule public ⇄ privé depuis l'éditeur : quand on passe une note EN CLAIR en privé et
   // qu'aucune session cryptée n'est ouverte, la porte s'ouvre pour récupérer le mdp global
@@ -46527,28 +46534,41 @@ function NotePanel() {
     } catch { setGErr('Erreur de chiffrement.'); }
     setGBusy(false);
   };
-  const leaveEnc = () => { setMode('normal'); setGpw(''); setDec({}); closeEditor(); setAskId(null); setAskPw(''); setErr(''); setMsg(''); };
+  const leaveEnc = () => { setMode('normal'); setGpw(''); setDec({}); closeEditor(); closeView(); setAskId(null); setAskPw(''); setErr(''); setMsg(''); };
 
   // ── Ouvrir / éditer ──
   // Charge (et déchiffre) les pièces jointes déclarées par une note. ⚠ Une pièce jointe
   // illisible est CONSERVÉE dans la liste avec `data: null` (« 🔒 verrouillé ») au lieu
   // d'être écartée : la faire disparaître de l'écran reviendrait à la supprimer de la note
   // à la première sauvegarde automatique — donc à perdre l'enregistrement pour de bon.
-  const loadAtt = React.useCallback(async (n, pw) => {
-    const refs = noteMediaRefs(n);
-    if (!refs.length) { setAtt([]); attRef.current = []; return; }
+  const readAtt = async (n, pw) => {
     const out = [];
-    for (const r of refs) {
+    for (const r of noteMediaRefs(n)) {
       const m = await noteMediaRead(r.id, pw);
       out.push(m ? { id:r.id, kind: m.kind || r.kind, mime:m.mime, name:m.name, dur:m.dur, size:m.size, data:m.data, locked:false }
                  : { id:r.id, kind: r.kind, data:null, locked:true });
     }
+    return out;
+  };
+  const loadAtt = React.useCallback(async (n, pw) => {
+    if (!noteMediaRefs(n).length) { setAtt([]); attRef.current = []; return; }
+    const out = await readAtt(n, pw);
     setAtt(out); attRef.current = out;
   }, []);
 
+  const closeView = () => { viewSeq.current++; setViewId(null); setViewAtt([]); };
+  const viewNote = async n => {
+    if (viewId === n.id) { closeView(); return; }
+    const seq = ++viewSeq.current;
+    setViewId(n.id); setViewAtt([]);
+    if (!noteMediaRefs(n).length) return;
+    const out = await readAtt(n, isNoteEnc(n) ? gpw : '');
+    if (viewSeq.current === seq) setViewAtt(out);
+  };
+
   const openNew = k => { closeEditor(); setMsg(''); setEditId('new'); beforeRef.current = null; setAtt([]); attRef.current = []; setPane(k || null); };
   const openNote = async n => {
-    setErr(''); setMsg(''); setPane(null);
+    setErr(''); setMsg(''); setPane(null); closeView();
     if (mode === 'normal') { beforeRef.current = n; setEditId(n.id); setTitle(n.title || ''); setText(n.text || ''); loadAtt(n, ''); return; }
     const d = dec[n.id];
     if (d) { beforeRef.current = n; setEditId(n.id); setTitle(d.title || ''); setText(d.text || ''); loadAtt(n, gpw); return; }
@@ -46622,6 +46642,7 @@ function NotePanel() {
     const label = mode === 'enc' ? ((dec[n.id] && dec[n.id].title) || 'cette note cryptée') : (n.title || 'Sans titre');
     if (!window.confirm(`Supprimer la note « ${label} » ?`)) return;
     if (editId === n.id) closeEditor();
+    if (viewId === n.id) closeView();
     if (askId === n.id) { setAskId(null); setAskPw(''); }
     commit(notes.filter(x => x.id !== n.id));
     // Ses pièces jointes n'ont plus de propriétaire → supprimées de la base des médias
@@ -46812,10 +46833,23 @@ function NotePanel() {
               </div>
               <button onClick={() => openNote(n)} title={legacy ? 'Déverrouiller (ancien mot de passe)' : 'Éditer'}
                 style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:11, padding:'3px 8px', cursor:'pointer', flexShrink:0 }}>{legacy ? '🔓' : '✏️'}</button>
+              {!legacy && !loading && (
+                <button onClick={() => viewNote(n)} title={viewId === n.id ? 'Fermer la vue' : 'Voir la note (lecture seule)'}
+                  style={{ background: viewId === n.id ? `${accent}22` : 'none', border:`1px solid ${viewId === n.id ? accent + '66' : C.border}`, borderRadius:6, color: viewId === n.id ? accent : C.muted, fontSize:11, padding:'3px 8px', cursor:'pointer', flexShrink:0 }}>👁️</button>
+              )}
               <button onClick={() => deleteNote(n)} title="Supprimer"
                 style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
             </div>
-            {preview && editId !== n.id && (
+            {viewId === n.id && editId !== n.id ? (
+              <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:C.text, wordBreak:'break-word' }}>{shownTitle}</div>
+                {preview
+                  ? <div style={{ fontSize:11, color:C.text, lineHeight:1.5, whiteSpace:'pre-wrap', wordBreak:'break-word', userSelect:'text' }}>{preview}</div>
+                  : <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Note vide.</div>}
+                {noteMediaRefs(n).length > 0 && viewAtt.length === 0 && <div style={{ fontSize:10, color:C.dim }}>⏳ Chargement des pièces jointes…</div>}
+                {viewAtt.map(a => <NoteAttachment key={a.id} att={a} onZoom={setZoomAtt} />)}
+              </div>
+            ) : preview && editId !== n.id && (
               <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.45, overflow:'hidden', display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', whiteSpace:'pre-wrap' }}>{preview}</div>
             )}
             {/* Déverrouillage per-note LEGACY */}
