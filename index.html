@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.40';
+const APP_VERSION = '13.21.41';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -25036,11 +25036,32 @@ const BACKUP_ENC_LS = 'spotifyplus_backup_enc';   // absent = chiffrer ; 'off' =
 function backupEncOn() { try { return localStorage.getItem(BACKUP_ENC_LS) !== 'off'; } catch { return true; } }
 function backupEncSet(on) { return lsSet(BACKUP_ENC_LS, on ? 'on' : 'off'); }
 function isSealedBackup(d) { return !!(d && d.encrypted && isVaultBlob(d.enc)); }
+// ── 🔐 Clé de sauvegarde mémorisée (À propos → Paramétrage) ──
+// Si elle est renseignée, elle REMPLACE la phrase de passe demandée à chaque export : les 4
+// sorties (fichier, Dropbox, Drive, pCloud) — et la sauvegarde Dropbox automatique au quota,
+// qui n'a plus besoin de personne — sont chiffrées avec elle sans rien demander.
+// ⚠ Stockée sur CET appareil et JAMAIS dans la sauvegarde (`buildBackup` a une liste
+// explicite : ne pas l'y ajouter) : elle protège les fichiers qui QUITTENT l'appareil. Elle
+// ne protège rien sur l'appareil lui-même — quiconque la lit y lit déjà les données en clair.
+// ⚠ Sur un nouvel appareil, la restauration la demande (ou l'ancienne phrase de passe d'un
+// fichier plus vieux) : d'où le conseil de la garder aussi dans le coffre.
+const BACKUP_KEY_LS  = 'spotifyplus_backup_key';
+const BACKUP_KEY_MIN = 8;
+function backupKeyGet() { return lsGet(BACKUP_KEY_LS); }
+function backupKeySet(k) {
+  if (!k) { try { localStorage.removeItem(BACKUP_KEY_LS); return true; } catch { return false; } }
+  return lsSet(BACKUP_KEY_LS, k);
+}
 // Scelle une sauvegarde si l'option est active. Renvoie l'objet TEL QUEL si elle ne l'est
 // pas, ou si l'utilisateur annule la saisie — un export en clair reste un export valide,
 // mieux vaut ça que pas de sauvegarde du tout.
 async function backupSeal(data) {
   if (!backupEncOn()) return data;
+  const stored = backupKeyGet();
+  if (stored) {
+    const enc = await mdpEncrypt(stored, data);
+    return { app: data.app || 'spotifyplus', version: data.version, exported_at: data.exported_at, scope: data.scope, encrypted: true, enc };
+  }
   let pw = null;
   try { pw = prompt('🔒 Phrase de passe de la sauvegarde\n\nElle protège le fichier (clés d\'API, jeton GitHub, coffre…).\n⚠ Oubliée = sauvegarde définitivement illisible. Aucun moyen de la retrouver.\n\n(Annuler = proposer un export EN CLAIR.)'); } catch {}
   if (!pw) {
@@ -25061,6 +25082,10 @@ async function backupSeal(data) {
 // anciens fichiers restent restaurables sans condition.
 async function backupOpen(data) {
   if (!isSealedBackup(data)) return data;
+  // Clé mémorisée d'abord, sans rien demander ; un fichier scellé avec une AUTRE phrase de
+  // passe (ancienne sauvegarde, autre appareil) retombe sur la saisie.
+  const stored = backupKeyGet();
+  if (stored) { try { return await mdpDecrypt(stored, data.enc); } catch {} }
   for (let tries = 0; tries < 3; tries++) {
     let pw = null;
     try { pw = prompt(tries ? 'Phrase de passe incorrecte. Réessaie :' : '🔒 Cette sauvegarde est chiffrée.\n\nPhrase de passe :'); } catch {}
@@ -25068,6 +25093,50 @@ async function backupOpen(data) {
     try { return await mdpDecrypt(pw, data.enc); } catch {}
   }
   throw new Error('Phrase de passe incorrecte — la sauvegarde n\'a pas pu être déchiffrée.');
+}
+
+// Champ « 🔐 Clé de sauvegarde » (À propos → Paramétrage, en tête). Enregistrée seulement
+// au clic (jamais à la frappe : une clé à moitié tapée chiffrerait une sauvegarde).
+function BackupKeyField() {
+  const [saved, setSaved] = React.useState(() => !!backupKeyGet());
+  const [val, setVal]     = React.useState('');
+  const [show, setShow]   = React.useState(false);
+  const [msg, setMsg]     = React.useState('');
+  const col = '#4ea3f5';
+  const save = () => {
+    const k = val.trim();
+    if (k.length < BACKUP_KEY_MIN) { setMsg(`⚠ ${BACKUP_KEY_MIN} caractères minimum.`); return; }
+    if (saved && !confirm('Remplacer la clé de sauvegarde ?\n\nLes sauvegardes déjà faites restent chiffrées avec l\'ANCIENNE clé : garde-la pour pouvoir les restaurer.')) return;
+    if (!backupKeySet(k)) { setMsg('⚠ Stockage plein : clé non enregistrée.'); return; }
+    setSaved(true); setVal(''); setShow(false);
+    setMsg('✓ Clé enregistrée. Copie-la aussi dans ton coffre 🔑 : sans elle, tes sauvegardes sont illisibles.');
+  };
+  const clear = () => {
+    if (!confirm('Effacer la clé de sauvegarde de cet appareil ?\n\nLa phrase de passe te sera de nouveau demandée à chaque export. Les sauvegardes déjà faites restent chiffrées avec cette clé.')) return;
+    backupKeySet(''); setSaved(false); setMsg('Clé effacée de cet appareil.');
+  };
+  const inp = { flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, padding:'7px 9px', color:C.text, fontSize:12, fontFamily:'DM Mono,monospace', outline:'none' };
+  const btn = { background:`${col}18`, border:`1px solid ${col}55`, color:col, borderRadius:8, padding:'6px 10px', fontSize:11, fontWeight:700, cursor:'pointer', flexShrink:0 };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'2px 4px 10px', borderBottom:`1px solid ${C.border}`, marginBottom:2 }}>
+      <div style={{ fontSize:12, fontWeight:700, color:col }}>
+        🔐 Clé de sauvegarde {saved && <span style={{ fontSize:10, fontWeight:600, color:'#57c973' }}>· ✓ mémorisée sur cet appareil</span>}
+      </div>
+      <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+        <input type={show ? 'text' : 'password'} value={val} onChange={e => { setVal(e.target.value); setMsg(''); }}
+          onKeyDown={e => { if (e.key === 'Enter') save(); }}
+          placeholder={saved ? 'Nouvelle clé (remplace l’actuelle)' : `Clé de chiffrement (${BACKUP_KEY_MIN} caractères min.)`}
+          autoComplete="new-password" spellCheck={false} style={inp} />
+        <button onClick={() => setShow(v => !v)} title={show ? 'Masquer' : 'Afficher'} style={{ ...btn, padding:'6px 8px' }}>{show ? '🙈' : '👁'}</button>
+        <button onClick={save} disabled={!val.trim()} style={{ ...btn, opacity: val.trim() ? 1 : 0.5 }}>Enregistrer</button>
+        {saved && <button onClick={clear} title="Effacer la clé de cet appareil" style={{ ...btn, color:'#e05050', borderColor:'#e0505055', background:'#e0505012', padding:'6px 8px' }}>✕</button>}
+      </div>
+      <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>
+        Chiffre automatiquement tes sauvegardes (fichier, Dropbox, Drive, pCloud) sans rien te demander. Gardée sur cet appareil, jamais dans la sauvegarde — ⚠ copie-la dans ton coffre : elle sera demandée pour restaurer sur un autre appareil.
+      </div>
+      {msg && <div style={{ fontSize:10, color: msg.startsWith('⚠') ? '#e05050' : '#57c973', lineHeight:1.4 }}>{msg}</div>}
+    </div>
+  );
 }
 
 // Interrupteur « chiffrer la sauvegarde » (À propos → ↧ Exporter). Vaut pour les 4 sorties :
@@ -25097,7 +25166,9 @@ function BackupEncryptToggle() {
         </div>
         <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5, marginTop:2 }}>
           {on
-            ? "Phrase de passe demandée à chaque export et à chaque restauration (AES-GCM 256, PBKDF2 600k — la même mécanique que le coffre). ⚠ Oubliée = fichier illisible."
+            ? (backupKeyGet()
+                ? "Chiffrées automatiquement avec ta clé de sauvegarde (À propos → Paramétrage), sans rien demander. AES-GCM 256, PBKDF2 600k — la même mécanique que le coffre."
+                : "Phrase de passe demandée à chaque export et à chaque restauration (AES-GCM 256, PBKDF2 600k — la même mécanique que le coffre) — ou renseigne une clé de sauvegarde dans le Paramétrage. ⚠ Oubliée = fichier illisible.")
             : "Le fichier contient EN CLAIR ton jeton GitHub et toutes tes clés d'API, et il part sur Dropbox / Drive / pCloud. Touche pour le chiffrer."}
         </div>
       </div>
@@ -26345,7 +26416,8 @@ function MapsPanel() {
 // « Sauvegarder sur Dropbox » : chaque fois que le scraping s'arrête sur les 100 artistes
 // du quota, une sauvegarde complète part sur Dropbox. ⚠ Absent = désactivée, seule 'on'
 // l'active. ⚠ Le chiffrement reste la règle : si la sauvegarde est chiffrée (défaut), la
-// phrase de passe est DEMANDÉE à ce moment-là (elle n'est stockée nulle part) — l'annuler
+// clé de sauvegarde mémorisée sert sans rien demander ; sans elle, la phrase de passe est
+// DEMANDÉE à ce moment-là — l'annuler
 // suit le chemin de `backupSeal` (export en clair seulement sur accord explicite, sinon rien).
 // Rend le message à journaliser, ou '' quand rien n'est tenté.
 const DBX_AUTO_QUOTA_LS = 'spotifyplus_dbx_auto_quota';
@@ -28782,9 +28854,8 @@ function VosEcoutesPanel() {
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
       {/* Ordre : Paramétrage → Autorisations → Lancement automatique → Limite data → Exporter → Sauvegardes cloud → Restaurations (JSON puis cloud) → quota → purge */}
       <StatsCollapse title="⚙️ PARAMÉTRAGE" color="#8ab4ff">
-        <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
-          Active ou désactive les modules. Un module désactivé disparaît des onglets (desktop &amp; mobile). Le bouton IA+ ouvre ou ferme le module à « ✨ Demander à l'IA » (🔑 Mot de passe et 🔌 API ne lui sont jamais ouverts). Le bouton 🏠 affiche/masque le module sur l'accueil (desktop &amp; mobile). L'ordre des IA, en bas, vaut pour toute l'appli. Ces réglages sont inclus dans l'export/import de tes données.
-        </div>
+        {/* 🔐 Clé de sauvegarde — à la place du texte d'explication des modules (demande utilisateur). */}
+        <BackupKeyField />
         {TOGGLE_MODULES.map(m => {
           const on   = moduleEnabled(moduleToggles, m.id);
           // « Afficher sur l'accueil » : coloré si activé ET souhaité, grisé sinon (module
