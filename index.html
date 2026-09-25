@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.44';
+const APP_VERSION = '13.21.45';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -46479,6 +46479,7 @@ const TODO_BUCKETS = [
   ['today',  "Aujourd'hui",     '📌'],
   ['week',   'Dans la semaine', '🗓'],
   ['month',  'Dans le mois',    '📆'],
+  ['quarter','Dans les 3 mois', '🗂'],
   ['year',   "Dans l'année",    '🎯'],
   ['someday','À faire un jour', '💭'],
   // Dernière rubrique du carrousel, APRÈS « À faire un jour » (demande utilisateur 7.6.53)
@@ -46508,6 +46509,25 @@ function todoTagDef(id) { return TODO_TAGS.find(x => x.id === id) || null; }
 function todoTagNext(id) {
   const i = TODO_TAGS.findIndex(x => x.id === id);
   return i < 0 ? TODO_TAGS[0].id : (TODO_TAGS[i + 1] ? TODO_TAGS[i + 1].id : '');
+}
+// ── 🔔 LES ALERTES DANS LE CARROUSEL (demande utilisateur) ─────────────────────────
+// Toute alerte datée du module Alertes (`rememberAllWithDelta`) s'affiche dans la rubrique
+// de son échéance — en LECTURE SEULE : elle se gère dans Alertes, rien n'est écrit ici.
+// ⚠ Une alerte déjà recopiée en vraie tâche (`rememberKey`, par `syncRemembersToTodos`)
+// n'est pas redoublée. En retard ⇒ « Aujourd'hui ».
+function todoAlertBucket(days) {
+  return days <= 0 ? 'today' : days <= 7 ? 'week' : days <= 31 ? 'month'
+       : days <= 92 ? 'quarter' : days <= 365 ? 'year' : 'someday';
+}
+// Vue « ⏳ Courtes » : alertes du jour, de la semaine et du mois seulement.
+const TODO_ALERT_SHORT = new Set(['today', 'week', 'month']);
+// Bouton de filtre de l'en-tête : ⏳ Courtes (défaut) → 💼 Travail → 📍 Massy → 🏷️ Toutes.
+// ⚠ Courtes et Toutes montrent TOUTES les tâches, seules les alertes diffèrent ; un filtre
+// de tag ne montre que ses tâches (une alerte n'a pas de tag). Jamais persisté.
+const TODO_VIEWS = ['short', 'travail', 'massy', 'all'];
+const TODO_ALERT_COLOR = '#6f7bf5';   // couleur du module Alertes
+function todoAlertWhen(d) {
+  return d < 0 ? `en retard de ${-d} j` : d === 0 ? "aujourd'hui" : d === 1 ? 'demain' : `dans ${d} j`;
 }
 // Deux appuis dans cette fenêtre = un double tap. 320 ms : au-dessus, deux clics distincts
 // sur deux tâches voisines commençaient à se confondre à l'usage.
@@ -46627,7 +46647,8 @@ function TodoPanel() {
   const [todos, setTodos]       = React.useState(loadTodos);
   const [trash, setTrash]       = React.useState(todoTrashLoad);
   const [trashOpen, setTrashOpen] = React.useState(false);
-  const [tagOnly, setTagOnly] = React.useState('');   // '' = toutes · sinon l'id du tag affiché
+  const [view, setView] = React.useState('short');   // cf. TODO_VIEWS
+  const tagOnly = TODO_TAGS.some(g => g.id === view) ? view : '';   // '' = pas de filtre de tag
   const [bucketIdx, setBucketIdx] = React.useState(0);
   const [text, setText]         = React.useState('');
   const [, forceTick]           = React.useReducer(x => x + 1, 0);
@@ -46758,6 +46779,18 @@ function TodoPanel() {
   const taggedElse = taggedAll - todos.filter(t => t.bucket === bucket[0] && todoTagOf(t) === tagOnly).length;
   // Compte par tag, affiché sous la liste quand aucun filtre n'est actif.
   const tagCounts = TODO_TAGS.map(g => [g, todos.filter(t => todoTagOf(t) === g.id).length]);
+  // 🔔 Alertes de la rubrique (lecture seule), cf. `todoAlertBucket`.
+  const alertRows = React.useMemo(() => {
+    const copied = new Set(todos.map(t => t.rememberKey).filter(Boolean));
+    let all = [];
+    try { all = rememberAllWithDelta(); } catch {}
+    return all.filter(r => r.date && r.days != null && !copied.has(r.key))
+      .map(r => ({ ...r, bucket: todoAlertBucket(r.days) }))
+      .sort((a, b) => a.days - b.days);
+  }, [todos, today]);
+  const bucketAlerts = tagOnly ? []
+    : alertRows.filter(r => r.bucket === bucket[0] && (view === 'all' || TODO_ALERT_SHORT.has(r.bucket)));
+  const hiddenLong = view === 'short' ? alertRows.filter(r => !TODO_ALERT_SHORT.has(r.bucket)).length : 0;
   // Cécile : les activités faites descendent en bas de liste (ordre de saisie préservé sinon)
   if (isCecile) items = [...items.filter(t => !t.done), ...items.filter(t => t.done)];
   const doneCount = isCecile ? items.filter(t => t.done).length : 0;
@@ -46828,14 +46861,15 @@ function TodoPanel() {
         {/* ⚠ À GAUCHE du ♻️ (demande utilisateur), même gabarit que lui — ni fond ni bordure
             teintés tant qu'il est au repos. Son libellé dit CE QUI EST AFFICHÉ, pas ce que le
             clic fera : c'est un état, comme le ♻️ qui s'allume quand la corbeille est ouverte. */}
-        <button onClick={() => setTagOnly(v => todoTagNext(v))}
-          title={tagDef ? `Tâches « ${tagDef.label} » seulement — cliquer pour le tag suivant`
-                        : `Toutes les tâches — cliquer pour ne garder qu'un tag (double tap sur une tâche pour la taguer)`}
+        <button onClick={() => setView(v => TODO_VIEWS[(TODO_VIEWS.indexOf(v) + 1) % TODO_VIEWS.length])}
+          title={tagDef ? `Tâches « ${tagDef.label} » seulement — cliquer pour la vue suivante`
+               : view === 'short' ? 'Toutes les tâches, alertes du jour, de la semaine et du mois seulement — cliquer pour la vue suivante'
+               : 'Toutes les tâches et toutes les alertes — cliquer pour la vue suivante'}
           aria-pressed={!!tagOnly}
           style={{ background:'none', border:`1px solid ${tagDef ? tagDef.color + '66' : C.border}`, borderRadius:6,
             color: tagDef ? tagDef.color : C.dim, fontSize:10, fontWeight:700, lineHeight:1.4,
             padding:'3px 8px', cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap' }}>
-          {tagDef ? `${tagDef.icon} ${tagDef.label}` : '🏷️ Toutes'}
+          {tagDef ? `${tagDef.icon} ${tagDef.label}` : view === 'short' ? '⏳ Courtes' : '🏷️ Toutes'}
         </button>
         <button onClick={() => setTrashOpen(o => !o)}
           title="Récupérer une des 3 dernières tâches supprimées"
@@ -46874,7 +46908,7 @@ function TodoPanel() {
         <div style={{ flex:1, textAlign:'center', minWidth:0 }}>
           <div style={{ fontSize:13, fontWeight:800, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{bucket[2]} {bucket[1]}</div>
           <div style={{ fontSize:9, color:C.muted, fontFamily:'DM Mono,monospace' }}>
-            {items.length} tâche{items.length > 1 ? 's' : ''}{tagDef ? ' ' + tagDef.label : ''}{doneCount > 0 ? ` · ${doneCount} faite${doneCount > 1 ? 's' : ''}` : ''}
+            {items.length} tâche{items.length > 1 ? 's' : ''}{tagDef ? ' ' + tagDef.label : ''}{doneCount > 0 ? ` · ${doneCount} faite${doneCount > 1 ? 's' : ''}` : ''}{bucketAlerts.length > 0 ? ` · ${bucketAlerts.length} alerte${bucketAlerts.length > 1 ? 's' : ''}` : ''}
           </div>
         </div>
         <button onClick={() => goBucket(1)} style={arrowBtn} title="Échéance suivante">›</button>
@@ -46895,7 +46929,7 @@ function TodoPanel() {
         <button onClick={add} style={{ background:`${TODO_GREEN}22`, border:`1px solid ${TODO_GREEN}66`, borderRadius:6, color:TODO_GREEN, fontSize:16, lineHeight:1, padding:'0 11px', cursor:'pointer', flexShrink:0 }}>+</button>
       </div>
       {/* Liste */}
-      {items.length === 0 ? (
+      {items.length === 0 && bucketAlerts.length > 0 ? null : items.length === 0 ? (
         <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'6px 0', fontFamily:'DM Mono,monospace' }}>
           {tagDef
             ? `Aucune tâche ${tagDef.label} ici` + (taggedElse > 0 ? ` · ${taggedElse} dans les autres rubriques` : '')
@@ -46953,6 +46987,26 @@ function TodoPanel() {
               </div>
             );
           })}
+        </div>
+      )}
+      {bucketAlerts.length > 0 && (
+        <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+          {bucketAlerts.map(r => (
+            <div key={r.key} title="Alerte — se gère dans le module Alertes"
+              style={{ display:'flex', alignItems:'center', gap:8, background:C.surfaceHigh, borderLeft:`3px solid ${TODO_ALERT_COLOR}`, borderRadius:8, padding:'6px 8px' }}>
+              <span style={{ fontSize:13, flexShrink:0 }}>🔔</span>
+              <div style={{ flex:1, minWidth:0, fontSize:11, color:C.text, wordBreak:'break-word' }}>{r.label}{r.time ? ` (${r.time})` : ''}</div>
+              <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', flexShrink:0, textAlign:'right',
+                             color: r.days < 0 ? '#e05050' : r.days === 0 ? '#f5a623' : TODO_ALERT_COLOR }}>
+                {todoAlertWhen(r.days)}<br />{r.date.slice(8, 10)}/{r.date.slice(5, 7)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {hiddenLong > 0 && (
+        <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace' }}>
+          ⏳ {hiddenLong} alerte{hiddenLong > 1 ? 's' : ''} à plus d'un mois masquée{hiddenLong > 1 ? 's' : ''} · 🏷️ Toutes pour les voir
         </div>
       )}
       {items.length > 1 && (
