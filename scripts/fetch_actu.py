@@ -15,9 +15,11 @@ Les formats de sortie sont EXACTEMENT ceux des fetchers client de index.html
 tels quels et garde ses fetchers client en repli si le JSON est périmé (> 24 h).
 """
 import html as htmllib
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import time
 import unicodedata
@@ -207,12 +209,30 @@ def gn_decode(link, art_id):
 MAX_REDIRECTS = 4
 
 
+# ⚠ Et vers Internet SEULEMENT : une adresse choisie par un tiers ne doit pas pouvoir viser
+# le runner lui-même ni son réseau (127.0.0.1, 169.254.169.254 = métadonnées du cloud,
+# 10.x…). Toutes les adresses du nom doivent être publiques, à l'appel comme à chaque
+# redirection. (Reste le cas d'un DNS qui change de réponse entre ce test et la connexion :
+# hors de portée d'urllib, et le jeton du dépôt n'est de toute façon pas présent ici.)
+def _public_url(url):
+    try:
+        u = urllib.parse.urlparse(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return False
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+        addrs = {ipaddress.ip_address(i[4][0].split("%")[0]) for i in infos}
+        return bool(addrs) and all(a.is_global and not a.is_multicast for a in addrs)
+    except (OSError, ValueError):
+        return False
+
+
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     max_redirections = MAX_REDIRECTS
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlparse(newurl).scheme not in ("http", "https"):
-            return None      # schéma refusé → urllib lève, l'appelant retente au prochain run
+        if not _public_url(newurl):
+            return None      # schéma ou adresse refusés → urllib lève, l'appelant retente au prochain run
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -221,7 +241,7 @@ _SAFE_OPENER = urllib.request.build_opener(_SafeRedirect())
 
 def og_image(article_url):
     """og:image / twitter:image de la page article (None si absente)."""
-    if urllib.parse.urlparse(article_url).scheme not in ("http", "https"):
+    if not _public_url(article_url):
         return None
     req = urllib.request.Request(article_url, headers={
         "User-Agent": UA, "Accept": "text/html", "Accept-Language": "fr-FR,fr;q=0.9",
