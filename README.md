@@ -40,7 +40,7 @@
 | **🧊 Frigo** | Contenu + péremptions, photo → ingrédients, recettes par IA |
 | **🏛️ Histoire** | Ville + photo → l'IA identifie l'œuvre et la raconte, fil de questions |
 | **🤖 IA** | **« ✨ Demander à l'IA »** (accueil) : tu écris ou dictes ce que tu veux faire, l'IA prépare, **tu vois l'aperçu et tu valides**. 5 actions et 1 suppression max par demande, 10 dernières demandes annulables. Jamais : Mot de passe, API, notes cryptées |
-| **🎮 Jeux** | 27 mini-jeux hors ligne (2048, Dobble à deux, Doodle Jump, Motus, Des chiffres et des lettres, Osu, Puissance 4…) et **Flip 7**, le tableau des scores de la partie de cartes (export CSV) |
+| **🎮 Jeux** | 27 mini-jeux hors ligne (2048, Dobble à deux en 4 modes, Doodle Jump, Motus, Des chiffres et des lettres, Osu, Puissance 4…) et **Flip 7**, le tableau des scores de la partie de cartes (export CSV) |
 | **🗺️ Maps** | Historique Google Timeline sur une carte, et **📸 Trouver un lieu par photo** : 1 à 4 photos → coordonnées et lien Google Maps (position GPS de la photo si elle l'a gardée, sinon estimation de l'IA avec sa confiance) |
 | **🌤️ Météo** | 3 lieux, prévisions 3 ou 7 jours, **notification de pluie dans les 2 h** |
 | **🔐 Mot de passe** | Coffre chiffré (AES-GCM, PBKDF2 600 000), espaces **Perso / Pro**, criticité, expiration, verrouillage après 10 min. **🩺 Check-up** : réutilisations, faiblesses, fuites connues (seuls 5 caractères de l'empreinte sortent), sites piratés. ⚠ Mot de passe maître oublié = coffre perdu |
