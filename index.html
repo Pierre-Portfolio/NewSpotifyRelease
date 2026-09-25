@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.49';
+const APP_VERSION = '13.21.50';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5290,16 +5290,19 @@ const GAME_GROUPS = [
   { title:'Multijoueur', test: g => g.max > 2 },
 ];
 const GAMES_LAST_LS = 'spotifyplus_games_last';
-// Modes de Dobble, choisis dans l'en-tête du module (même ligne que « JEUX »). `color` :
-// chaque objet change de teinte d'une carte à l'autre (`dobHue`) — le symbole commun n'a
-// donc JAMAIS la même couleur au milieu et chez le joueur, on le reconnaît à sa forme seule.
-// `move` : les objets du milieu dérivent en se cognant (`DobCard`) et ceux des joueurs
-// tournent sur eux-mêmes (`DobHandCard`). Les règles, elles, ne changent pas.
+// Modes de Dobble, choisis dans l'en-tête du module (même ligne que « JEUX »), CUMULATIFS
+// de haut en bas. `sizes` : les objets des joueurs n'ont plus tous la même taille
+// (`dobHandScale`). `move` : les objets du milieu dérivent en se cognant (`DobCard`) et ceux
+// des joueurs tournent sur eux-mêmes (`DobHandCard`). `color` : chaque objet change de
+// teinte d'une carte à l'autre (`dobHue`) — le symbole commun n'a JAMAIS la même couleur au
+// milieu et chez le joueur. `pulse` : en plus, toutes les tailles gonflent et dégonflent
+// lentement (`dobPulse`). Les règles, elles, ne changent pas.
 const DOB_MODES = [
   { id:'classic',     label:'Classique' },
-  { id:'normal',      label:'Normal',             color:true },
-  { id:'tourni',      label:'Tournicoti',         move:true },
-  { id:'tourniColor', label:'Tournicoti couleur', move:true, color:true },
+  { id:'normal',      label:'Normal',             sizes:true },
+  { id:'tourni',      label:'Tournicoti',         sizes:true, move:true },
+  { id:'tourniColor', label:'Tournicoti couleur', sizes:true, move:true, color:true },
+  { id:'chaos',       label:'Chaos',              sizes:true, move:true, color:true, pulse:true },
 ];
 const DOB_MODE_LS = 'spotifyplus_dobble_mode';
 // Petit menu déroulant du mode Dobble (gabarit du choix de jeu juste à côté).
@@ -7435,24 +7438,29 @@ function dobHue(cardId, sym, center) {
 // taille. ⚠ Positions écrites DIRECTEMENT dans le DOM par la boucle rAF (piège 6) : un
 // `setState` à 60 Hz re-rendrait tout le plateau. L'effet repart donc TOUJOURS de `lay`
 // (React ne réécrit `left`/`top` que si la prop change, pas si le DOM a bougé).
-function DobCard({ syms, seed, objs, tone, onPick, color, move }) {
+// Mode Chaos (`pulse`) : la taille oscille aussi (`dobPulse`), rayon de collision compris.
+function DobCard({ syms, seed, objs, tone, onPick, color, move, pulse }) {
   const lay = React.useMemo(() => dobLayout(seed), [seed]);
   const refs = React.useRef([]);
   React.useEffect(() => {
     const els = refs.current;
-    const place = (i, x, y) => { const el = els[i]; if (el) { el.style.left = `${x - lay[i].s / 2}%`; el.style.top = `${y - lay[i].s / 2}%`; } };
-    syms.forEach((_, i) => place(i, lay[i].x, lay[i].y));
+    const place = (i, x, y, sz) => { const el = els[i]; if (el) {
+      el.style.left = `${x - sz / 2}%`; el.style.top = `${y - sz / 2}%`; el.style.width = `${sz}%`; el.style.height = `${sz}%`; } };
+    syms.forEach((_, i) => place(i, lay[i].x, lay[i].y, lay[i].s));
     if (!move) return;
     const rnd = dobRng(seed * 7 + 99);
-    const b = syms.map((_, i) => {
+    const b = syms.map((sym, i) => {
       const a = rnd() * Math.PI * 2, v = 4 + rnd() * 3;
-      return { x:lay[i].x, y:lay[i].y, r:lay[i].s * 0.44, vx:Math.cos(a) * v, vy:Math.sin(a) * v };
+      return { x:lay[i].x, y:lay[i].y, s:lay[i].s, r:lay[i].s * 0.44, vx:Math.cos(a) * v, vy:Math.sin(a) * v, pu:dobPulse(seed, sym, true) };
     });
     const R = 48;
-    let raf = 0, last = 0;
+    let raf = 0, last = 0, t0 = 0;
     const step = ts => {
       const dt = last ? Math.min(0.05, (ts - last) / 1000) : 0;
       last = ts;
+      if (!t0) t0 = ts;
+      const t = (ts - t0) / 1000;
+      b.forEach((o, i) => { o.s = lay[i].s * (pulse ? o.pu(t) : 1); o.r = o.s * 0.44; });
       for (const o of b) { o.x += o.vx * dt; o.y += o.vy * dt; }
       for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) {
         const p = b[i], q = b[j];
@@ -7470,13 +7478,13 @@ function DobCard({ syms, seed, objs, tone, onPick, color, move }) {
           o.x = 50 + nx * (R - o.r); o.y = 50 + ny * (R - o.r);
           if (vn > 0) { o.vx -= 2 * vn * nx; o.vy -= 2 * vn * ny; }
         }
-        place(i, o.x, o.y);
+        place(i, o.x, o.y, o.s);
       });
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [move, lay, syms, seed]);
+  }, [move, pulse, lay, syms, seed]);
   return (
     <div style={{ position:'relative', width:'100%', height:'100%', borderRadius:'50%', background:'#fff',
       border:`3px solid ${tone}`, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', overflow:'hidden' }}>
@@ -7495,30 +7503,41 @@ function DobCard({ syms, seed, objs, tone, onPick, color, move }) {
     </div>
   );
 }
+// Modes à tailles (`sizes`) : échelle d'un objet sur une carte de joueur, 0,5 à 1.
+function dobHandScale(cardId, sym) { return 0.5 + dobRng((cardId * 613 + sym * 53 + 3) >>> 0)() * 0.5; }
+// Mode Chaos : facteur de taille en fonction du temps, ±22 %, période 3 à 6 s propre à
+// chaque objet (déphasées : les objets ne respirent pas tous ensemble).
+function dobPulse(cardId, sym, center) {
+  const r = dobRng((cardId * 389 + sym * 17 + (center ? 5003 : 11)) >>> 0);
+  const per = 3 + r() * 3, ph = r() * Math.PI * 2;
+  return t => 1 + 0.22 * Math.sin((2 * Math.PI * t) / per + ph);
+}
 // La carte qu'un joueur a DEVANT lui : rectangulaire, 4 symboles par ligne sur 2 lignes,
-// tous debout et à la même taille. ⚠ Aucun tirage de mise en page ici (contrairement à
-// `DobCard`) : c'est sa propre carte, il doit la lire d'un coup d'œil, pas la déchiffrer.
+// tous debout (et à la même taille en Classique). ⚠ Aucun tirage de position ici
+// (contrairement à `DobCard`) : c'est sa propre carte, il doit la lire d'un coup d'œil.
 // L'orientation « face au joueur » vient du parent (`zone(0)` est tourné à 180°).
 // Mode Tournicoti (`spin`) : chaque objet tourne sur lui-même, sens horaire ou anti-horaire,
 // 10 à 30°/s selon la carte et l'objet — lent exprès. Même boucle rAF sans `setState` que
-// `DobCard` ; le bouton ne bouge pas, seule l'enveloppe du dessin tourne.
-function DobHandCard({ syms, objs, tone, onPick, cardId, color, spin }) {
+// `DobCard` ; le bouton ne bouge pas, seule l'enveloppe du dessin tourne (et change d'échelle).
+function DobHandCard({ syms, objs, tone, onPick, cardId, color, spin, sizes, pulse }) {
   const refs = React.useRef([]);
   React.useEffect(() => {
     const els = refs.current;
-    syms.forEach((_, i) => { if (els[i]) els[i].style.transform = ''; });
-    if (!spin) return;
-    const w = syms.map(sym => { const r = dobRng((cardId * 977 + sym * 31 + 7) >>> 0); return (r() < 0.5 ? -1 : 1) * (10 + r() * 20); });
+    const sc = syms.map(sym => (sizes ? dobHandScale(cardId, sym) : 1));
+    syms.forEach((_, i) => { if (els[i]) els[i].style.transform = sc[i] !== 1 ? `scale(${sc[i]})` : ''; });
+    if (!spin && !pulse) return;
+    const w = syms.map(sym => { const r = dobRng((cardId * 977 + sym * 31 + 7) >>> 0); return spin ? (r() < 0.5 ? -1 : 1) * (10 + r() * 20) : 0; });
+    const pu = syms.map(sym => dobPulse(cardId, sym, false));
     let raf = 0, t0 = 0;
     const step = ts => {
       if (!t0) t0 = ts;
       const t = (ts - t0) / 1000;
-      w.forEach((v, i) => { if (els[i]) els[i].style.transform = `rotate(${(v * t) % 360}deg)`; });
+      w.forEach((v, i) => { if (els[i]) els[i].style.transform = `rotate(${(v * t) % 360}deg) scale(${sc[i] * (pulse ? pu[i](t) : 1)})`; });
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [spin, syms, cardId]);
+  }, [spin, sizes, pulse, syms, cardId]);
   return (
     <div style={{ width:'100%', height:'100%', borderRadius:14, background:'#fff',
       border:`3px solid ${tone}`, boxShadow:'0 4px 16px rgba(0,0,0,0.4)', overflow:'hidden', boxSizing:'border-box',
@@ -7644,7 +7663,7 @@ function GameDobbleInner({ mode }) {
         </div>
         <div style={{ width:PW, height:PH, position:'relative', opacity:blocked ? 0.55 : 1, transition:'opacity 0.2s' }}>
           {hand.length
-            ? <DobHandCard syms={hand[0].syms} objs={objs} tone={tone} cardId={hand[0].id} color={!!M.color} spin={!!M.move}
+            ? <DobHandCard syms={hand[0].syms} objs={objs} tone={tone} cardId={hand[0].id} color={!!M.color} spin={!!M.move} sizes={!!M.sizes} pulse={!!M.pulse}
                 onPick={phase === 'playing' && !blocked ? (s => pick(p, s)) : null} />
             : <div style={{ width:'100%', height:'100%', borderRadius:14, border:`3px dashed ${tone}66`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:30 }}>🏆</div>}
         </div>
@@ -7658,7 +7677,7 @@ function GameDobbleInner({ mode }) {
         {zone(0, true)}
         <div style={{ display:'flex', alignItems:'center', gap:10 }}>
           <div style={{ width:MID, height:MID, position:'relative' }}>
-            <DobCard syms={g.center.syms} seed={g.center.id} objs={objs} tone={GAMES_COLOR} onPick={null} color={!!M.color} move={!!M.move} />
+            <DobCard syms={g.center.syms} seed={g.center.id} objs={objs} tone={GAMES_COLOR} onPick={null} color={!!M.color} move={!!M.move} pulse={!!M.pulse} />
             {phase !== 'playing' && (
               <div style={{ position:'absolute', inset:0, borderRadius:'50%', background:'rgba(12,14,20,0.82)', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:6, textAlign:'center', padding:10 }}>
                 <div style={{ fontSize:22 }}>{phase === 'over' ? '🏆' : '🎴'}</div>
