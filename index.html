@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.55';
+const APP_VERSION = '13.21.56';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -547,15 +547,16 @@ async function dropboxToken() {
   }
   return lsGet('dropbox_access') || null; // dernier token connu (peut être expiré → l'upload renverra 401)
 }
-// Upload (overwrite) de la sauvegarde JSON dans le dossier de l'app Dropbox
-async function dropboxUpload(dataObj) {
+// Upload (overwrite) de la sauvegarde JSON dans le dossier de l'app Dropbox (`path` : autre
+// fichier du même dossier, ex. le registre des appareils `DBX_DEVICES_PATH`)
+async function dropboxUpload(dataObj, path = DBX_BACKUP_PATH) {
   const token = await dropboxToken();
   if (!token) throw new Error('Dropbox non connecté');
   const res = await fetch('https://content.dropboxapi.com/2/files/upload', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
-      'Dropbox-API-Arg': JSON.stringify({ path: DBX_BACKUP_PATH, mode: 'overwrite', mute: true }),
+      'Dropbox-API-Arg': JSON.stringify({ path, mode: 'overwrite', mute: true }),
       'Content-Type': 'application/octet-stream',
     },
     body: JSON.stringify(dataObj),
@@ -565,14 +566,14 @@ async function dropboxUpload(dataObj) {
 }
 // Télécharge la dernière sauvegarde depuis Dropbox (pour la RESTAURATION). Retourne l'objet
 // buildBackup() parsé, ou throw. 409 = fichier absent (jamais sauvegardé).
-async function dropboxDownload() {
+async function dropboxDownload(path = DBX_BACKUP_PATH) {
   const token = await dropboxToken();
   if (!token) throw new Error('Dropbox non connecté');
   const res = await fetch('https://content.dropboxapi.com/2/files/download', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Dropbox-API-Arg': JSON.stringify({ path: DBX_BACKUP_PATH }) },
+    headers: { Authorization: `Bearer ${token}`, 'Dropbox-API-Arg': JSON.stringify({ path }) },
   });
-  if (res.status === 409) throw new Error('Aucune sauvegarde trouvée sur Dropbox');
+  if (res.status === 409) { const e = new Error('Aucune sauvegarde trouvée sur Dropbox'); e.status = 409; throw e; }
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return JSON.parse(await res.text());
 }
@@ -26811,11 +26812,78 @@ const DBX_AUTO_LS     = 'spotifyplus_dbx_auto_quota';
 const DBX_AUTO_DAY_LS = 'spotifyplus_dbx_auto_day';
 function dbxAutoOn()     { return lsGet(DBX_AUTO_LS) === 'on'; }
 function dbxAutoSet(on)  { return lsSet(DBX_AUTO_LS, on ? 'on' : 'off'); }
+
+// ── 📱 Appareil par défaut (Configuration → Configuration de module, en tête) ──
+// SEUL l'appareil par défaut fait la sauvegarde Dropbox automatique : sinon chaque téléphone /
+// ordinateur écraserait tour à tour le même fichier avec SA copie des données.
+// ⚠ Le choix doit être vu de TOUS les appareils ⇒ il vit dans un petit fichier du dossier
+// Dropbox de l'app (`DBX_DEVICES_PATH`), pas en localStorage : { default, devices:{id:{name,seen}} }.
+// Chaque appareil s'y inscrit quand il le lit (`dbxDevicesUpdate`, écriture seulement si
+// quelque chose change). Aucun appareil par défaut ⇒ aucune sauvegarde automatique.
+// ⚠ `DEVICE_ID_LS` / `DEVICE_NAME_LS` : propres à l'appareil, JAMAIS dans `buildBackup` (une
+// restauration donnerait à un 2e appareil l'identité du 1er).
+const DBX_DEVICES_PATH = '/spotifyplus-appareils.json';
+const DEVICE_ID_LS     = 'spotifyplus_device_id';
+const DEVICE_NAME_LS   = 'spotifyplus_device_name';
+const DEVICE_SEEN_MS   = 24 * 3600 * 1000;   // « vu le » rafraîchi au plus 1×/jour (pas une écriture par lecture)
+const DBX_DEV_TTL_MS   = 30 * 60 * 1000;     // relecture du registre par la sauvegarde auto
+let _deviceIdMem = '';
+function deviceId() {
+  let id = lsGet(DEVICE_ID_LS) || _deviceIdMem;
+  if (!/^[A-Za-z0-9]{8,64}$/.test(id || '')) { id = generateRandomString(20).replace(/[^A-Za-z0-9]/g, 'x'); lsSet(DEVICE_ID_LS, id); }
+  _deviceIdMem = id;
+  return id;
+}
+function deviceGuessName() {
+  const u = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  const os = /Android/i.test(u) ? 'Android' : /iPhone/i.test(u) ? 'iPhone' : /iPad/i.test(u) ? 'iPad' : /Windows/i.test(u) ? 'Windows'
+    : /Mac OS X|Macintosh/i.test(u) ? 'Mac' : /Linux/i.test(u) ? 'Linux' : 'Appareil';
+  const br = /Edg\//.test(u) ? 'Edge' : /Firefox\//.test(u) ? 'Firefox' : /Chrome\//.test(u) ? 'Chrome' : /Safari\//.test(u) ? 'Safari' : '';
+  return br ? `${os} · ${br}` : os;
+}
+function deviceName() { return (lsGet(DEVICE_NAME_LS) || '').trim().slice(0, 40) || deviceGuessName(); }
+// Registre relu de Dropbox, nettoyé (fichier de NOTRE dossier, mais il reste une entrée).
+function _dbxDevNorm(d) {
+  const devices = {};
+  const src = d && typeof d.devices === 'object' && d.devices ? d.devices : {};
+  for (const id of Object.keys(src)) {
+    if (!/^[A-Za-z0-9]{8,64}$/.test(id)) continue;
+    const v = src[id] || {};
+    devices[id] = { name: String(v.name || 'Appareil').slice(0, 40), seen: Number(v.seen) || 0 };
+  }
+  const def = d && typeof d.default === 'string' && devices[d.default] ? d.default : null;
+  return { default: def, devices };
+}
+let _dbxDevCache = null;   // { at, reg }
+async function dbxDevicesLoad() {
+  try { return _dbxDevNorm(await dropboxDownload(DBX_DEVICES_PATH)); }
+  catch (e) { if (e && e.status === 409) return _dbxDevNorm(null); throw e; }
+}
+// Relit le registre, y inscrit cet appareil, applique `fn` (ex. changer le défaut) et ne
+// réécrit le fichier que si quelque chose a changé.
+async function dbxDevicesUpdate(fn) {
+  const reg = await dbxDevicesLoad();
+  const before = JSON.stringify(reg);
+  const me = deviceId(), cur = reg.devices[me], name = deviceName();
+  if (!cur || cur.name !== name || Date.now() - cur.seen > DEVICE_SEEN_MS) reg.devices[me] = { name, seen: Date.now() };
+  if (fn) fn(reg);
+  if (JSON.stringify(reg) !== before) await dropboxUpload(reg, DBX_DEVICES_PATH);
+  _dbxDevCache = { at: Date.now(), reg };
+  return reg;
+}
+async function dbxIsDefaultDevice() {
+  if (!_dbxDevCache || Date.now() - _dbxDevCache.at > DBX_DEV_TTL_MS) await dbxDevicesUpdate();
+  return _dbxDevCache.reg.default === deviceId();
+}
+
 let _dbxAutoBusy = false;
 async function dropboxAutoDailySave() {
   if (_dbxAutoBusy || !dbxAutoOn() || !dropboxConfigured() || !dropboxConnected()) return '';
   if (lsGet(DBX_AUTO_DAY_LS) === localDayStr()) return '';
   if (backupEncOn() && !backupKeyReady()) return '';   // clé absente : pas de relance en boucle du message
+  // Pas l'appareil par défaut (ou registre injoignable) ⇒ rien, en silence : l'intervalle
+  // retentera, et le choix se fait dans la Configuration de module.
+  try { if (!(await dbxIsDefaultDevice())) return ''; } catch { return ''; }
   _dbxAutoBusy = true;
   try {
     const sealed = await backupSeal(await buildBackupFull(), { auto:true });
@@ -26826,6 +26894,62 @@ async function dropboxAutoDailySave() {
     return '✓ Sauvegarde Dropbox automatique du jour faite.';
   } catch (e) { return '✗ Sauvegarde Dropbox automatique échouée : ' + ((e && e.message) || 'erreur'); }
   finally { _dbxAutoBusy = false; }
+}
+// Choix de l'appareil par défaut (en tête de la Configuration de module).
+function DefaultDeviceField() {
+  const col = '#4ea3f5';
+  const connected = dropboxConfigured() && dropboxConnected();
+  const me = deviceId();
+  const [reg, setReg]   = React.useState(() => _dbxDevCache ? _dbxDevCache.reg : null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr]   = React.useState('');
+  const [name, setName] = React.useState(deviceName);
+  const run = fn => {
+    setBusy(true); setErr('');
+    dbxDevicesUpdate(fn).then(r => setReg(r)).catch(e => setErr('✗ Dropbox injoignable : ' + ((e && e.message) || 'erreur'))).finally(() => setBusy(false));
+  };
+  React.useEffect(() => { if (connected) run(); }, []);
+  const rename = () => {
+    const n = name.trim().slice(0, 40);
+    if (!n) { setName(deviceName()); return; }
+    lsSet(DEVICE_NAME_LS, n); setName(n); run();
+  };
+  const inp = { flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, padding:'7px 9px', color:C.text, fontSize:12, outline:'none', fontFamily:'inherit' };
+  const btn = { background:`${col}18`, border:`1px solid ${col}55`, color:col, borderRadius:8, padding:'6px 10px', fontSize:11, fontWeight:700, cursor:'pointer', flexShrink:0 };
+  const ids = reg ? Object.keys(reg.devices).sort((a, b) => (a === me ? -1 : b === me ? 1 : reg.devices[b].seen - reg.devices[a].seen)) : [];
+  const defName = reg && reg.default ? reg.devices[reg.default].name : '';
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'2px 4px 10px', borderBottom:`1px solid ${C.border}`, marginBottom:2 }}>
+      <div style={{ fontSize:12, fontWeight:700, color:col }}>📱 Appareil par défaut</div>
+      {!connected ? (
+        <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>
+          Connecte Dropbox (Import / Export) pour choisir l'appareil qui fait la sauvegarde automatique.
+        </div>
+      ) : (
+        <>
+          <select value={reg && reg.default ? reg.default : ''} disabled={busy || !reg}
+            onChange={e => { const v = e.target.value || null; run(r => { r.default = v && r.devices[v] ? v : null; }); }}
+            style={{ ...inp, flex:'none', width:'100%', cursor:'pointer', opacity: reg ? 1 : 0.5 }}>
+            <option value="">— Aucun (pas de sauvegarde automatique) —</option>
+            {ids.map(id => <option key={id} value={id}>{reg.devices[id].name}{id === me ? ' (cet appareil)' : ''}</option>)}
+          </select>
+          <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+            <span style={{ fontSize:10.5, color:C.muted, flexShrink:0 }}>Nom de cet appareil</span>
+            <input value={name} maxLength={40} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') rename(); }} style={inp} />
+            <button onClick={rename} disabled={busy || name.trim() === deviceName()} style={{ ...btn, opacity: (busy || name.trim() === deviceName()) ? 0.5 : 1 }}>Renommer</button>
+          </div>
+          <div style={{ fontSize:9.5, color: reg && !reg.default ? '#e0a050' : C.dim, lineHeight:1.5 }}>
+            {!reg ? (busy ? 'Lecture de la liste des appareils sur Dropbox…' : '')
+              : reg.default === me ? '✓ Cet appareil fait la sauvegarde Dropbox automatique.'
+              : reg.default ? `La sauvegarde automatique se fait sur « ${defName} ». Choisis cet appareil pour la faire ici.`
+              : '⚠ Aucun appareil par défaut : la sauvegarde Dropbox automatique ne part de nulle part.'}
+            {' '}Un appareil apparaît dans la liste dès qu'il ouvre cette page, connecté à Dropbox.
+          </div>
+        </>
+      )}
+      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.4 }}>{err}</div>}
+    </div>
+  );
 }
 function DropboxSync({ mode = 'save' }) {
   const { restoreBackup } = useStoreCore();
@@ -29250,6 +29374,7 @@ function VosEcoutesPanel() {
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
       {/* Ordre : Paramétrage → Autorisations → Lancement automatique → Limite data → Exporter → Sauvegardes cloud → Restaurations (JSON puis cloud) → quota → purge */}
       <StatsCollapse title="⚙️ PARAMÉTRAGE" color="#8ab4ff">
+        <DefaultDeviceField />
         {TOGGLE_MODULES.map(m => {
           const on   = moduleEnabled(moduleToggles, m.id);
           // « Afficher sur l'accueil » : coloré si activé ET souhaité, grisé sinon (module
@@ -29332,7 +29457,7 @@ function VosEcoutesPanel() {
           TVTIME_COLOR)}
         {autoSwitch(autoDbx, toggleAutoDbx, '☁︎ Sauvegarde Dropbox', '1×/jour, sauvegarde complète',
           autoDbx
-            ? 'Activé : une fois par jour à la connexion, une sauvegarde complète part sur Dropbox (après le scraping s\'il tourne). Il faut Dropbox connecté (Sauvegardes cloud) et le coffre 🔑 déverrouillé au moins une fois sur cet appareil.'
+            ? 'Activé : une fois par jour à la connexion, une sauvegarde complète part sur Dropbox (après le scraping s\'il tourne), depuis l\'appareil par défaut seulement (Configuration de module, en haut). Il faut Dropbox connecté et le coffre 🔑 déverrouillé au moins une fois sur cet appareil.'
             : 'Désactivé : la sauvegarde Dropbox ne part que si tu cliques sur « Sauvegarder sur Dropbox ».',
           '#4ea3f5')}
       </StatsCollapse>
