@@ -2616,6 +2616,12 @@ const D_BELT_V = 3.3 * 0.8, D_BELT_LIFE = D_BELT_LIFE_S * 60, D_BELT_GRIP = 0.3;
 const D_STEER_V = 7.2;                         // pas maximal du pilotage au doigt, en px/frame
 const D_TMAGNET_R = 150, D_TMAGNET_V = 3.2;    // 🧲 rayon d'attraction et vitesse
 const D_SLOW_LIFE = 600, D_SLOW = 0.55;        // ⏱️ 10 s à 60 fps, tout tourne à 55 % de vitesse
+// ⏱️ Vitesse GLOBALE du jeu (demande utilisateur : « le jeu va beaucoup trop vite », −20 %).
+// ⚠ Appliquée au PAS DE TEMPS `sf` de la boucle, exactement comme le ralentisseur (qui s'y
+// multiplie) : doodler, gravité, coffres, monstres, balles… tout ralentit d'autant, et les
+// trajectoires restent IDENTIQUES (v·sf et g·sf : la hauteur de saut ne bouge pas). Les durées
+// comptées en frames durent donc 25 % de secondes de plus.
+const D_TIME_SCALE = 0.8;
 // ⚠ 9.4.2 — Deux réglages de la même demande, appliqués dans l'ordre reçu :
 //   · −25 % sur la bande des tuiles débloquées ET sur les monstres ;
 //   · puis +10 % sur les tuiles à partir de 500 points, +20 % au-delà de 1000.
