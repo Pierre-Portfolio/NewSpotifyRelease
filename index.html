@@ -226,7 +226,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.37';
+const APP_VERSION = '13.21.38';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1809,7 +1809,7 @@ async function cgFetch(path) {
   for (let i = 0; i <= CG_RETRY_MS.length; i++) {
     if (i) await new Promise(r => setTimeout(r, CG_RETRY_MS[i - 1]));
     try {
-      const r = await fetch(CG_BASE + path);
+      const r = await fetch(CG_BASE + path, { signal: fetchSig() });
       if (r.status === 429) { last = 'RATE'; continue; }         // quota : ça repasse tout seul
       if (!r.ok) { last = 'HTTP ' + r.status; if (r.status < 500) break; continue; }
       return await r.json();
@@ -2067,6 +2067,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // `read(r)` (facultatif) consomme le CORPS sous le même plafond : un relais qui envoie ses
 // en-têtes puis se tait ne bloque pas plus longtemps que `ms`. Lève comme `fetch` (AbortError
 // à l'échéance) — les appelants gardent leur propre `try/catch`.
+// Signal d'échéance pour un `fetch` d'API tierce (piège 28) : sans lui, un hôte qui ne
+// répond pas laissait l'appel — et l'écran qui l'attend — en suspens indéfiniment.
+// ⚠ Réservé aux petites requêtes : pas aux envois/téléchargements de sauvegarde ni de photos.
+function fetchSig(ms) {
+  const t = ms || 15000;
+  try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(t); } catch {}
+  if (typeof AbortController === 'undefined') return undefined;
+  const c = new AbortController();
+  setTimeout(() => c.abort(), t);
+  return c.signal;
+}
 async function fetchTimeout(url, ms, init, read) {
   const ctrl  = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
@@ -19373,7 +19384,7 @@ async function displateFetchImages(list) {
     for (const via of ['direct', 'proxy']) {
       let html = '';
       try {
-        if (via === 'direct') { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) html = await r.text(); }
+        if (via === 'direct') { const r = await fetch(url, { signal: fetchSig(DISPLATE_HTML_MS), cache: 'no-store' }); if (r.ok) html = await r.text(); }
         else html = (await displateProxyText(url, DISPLATE_HTML_MS)) || '';
       } catch {}
       const step = { url, via, bytes: (html || '').length, rows: 0, imgs: 0, hit: 0 };
@@ -19424,7 +19435,7 @@ async function displateFetchSheet(force) {
   let best = null, gotCsv = false, sawHtml = false;
   for (const url of DISPLATE_CSV_URLS) {
     let text = '';
-    try { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) text = await r.text(); } catch {}
+    try { const r = await fetch(url, { signal: fetchSig(DISPLATE_HTML_MS), cache: 'no-store' }); if (r.ok) text = await r.text(); } catch {}
     if (!text || !text.trim() || /^\s*</.test(text)) {
       if (/^\s*</.test(text)) sawHtml = true;
       try { text = (await corsFetchText(url)) || ''; } catch { text = ''; }
@@ -20821,14 +20832,25 @@ function collScrollBox(el) {
 function PanelTopButton({ anchor, color }) {
   const [show, setShow] = React.useState(false);
   React.useEffect(() => {
+    // ⚠ `collScrollBox` fait un `getComputedStyle` par ancêtre : l'appeler à CHAQUE
+    // événement de scroll (capturé sur tout le document) forçait un recalcul de style en
+    // boucle. Le conteneur est retenu une fois trouvé (re-cherché s'il sort du DOM) et la
+    // lecture est groupée à une par image.
+    let box = null, raf = 0;
     const read = () => {
-      const box = collScrollBox(anchor.current);
+      raf = 0;
+      if (!box || !box.isConnected) box = collScrollBox(anchor.current);
       setShow(((box ? box.scrollTop : window.scrollY) || 0) > COLL_TOP_SHOW);
     };
+    const onScroll = () => { if (!raf) raf = requestAnimationFrame(read); };
     read();
-    document.addEventListener('scroll', read, true);
-    window.addEventListener('scroll', read, { passive: true });
-    return () => { document.removeEventListener('scroll', read, true); window.removeEventListener('scroll', read); };
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      document.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('scroll', onScroll);
+    };
   }, [anchor]);
   const toTop = () => {
     const box = collScrollBox(anchor.current);
@@ -22534,7 +22556,8 @@ function emploiRecap(crit) {
 
 // ⚠ `safeHref` ICI aussi (piège 30) : l'URL sort d'une API tierce — voire d'un relais public —
 // et une offre plus ancienne peut être en cache ; un `javascript:` s'exécuterait au clic.
-function EmploiJobCard({ j }) {
+// React.memo : props de données seules.
+const EmploiJobCard = React.memo(function EmploiJobCard({ j }) {
   return (
     <a href={safeHref(j.url) || undefined} target="_blank" rel="noopener noreferrer"
       style={{ display:'flex', flexDirection:'column', gap:4, padding:'9px 10px', background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, textDecoration:'none', color:'inherit' }}>
@@ -22557,7 +22580,7 @@ function EmploiJobCard({ j }) {
       {j.why ? <div style={{ fontSize:10.5, color:C.muted, fontStyle:'italic', lineHeight:1.4 }}>🤖 {j.why}</div> : null}
     </a>
   );
-}
+});
 
 function EmploiOffersSection({ crit }) {
   const [jobs, setJobs] = React.useState([]);
@@ -22783,7 +22806,7 @@ async function gimgSearch(q, n) {
     + '&num=' + Math.max(1, Math.min(10, n || GIMG_MAX))
     + '&key=' + encodeURIComponent(key) + '&cx=' + encodeURIComponent(cx) + '&q=' + encodeURIComponent(q);
   let r;
-  try { r = await fetch(url); } catch { throw new Error('GIMG:NET'); }
+  try { r = await fetch(url, { signal: fetchSig() }); } catch { throw new Error('GIMG:NET'); }
   let j = null; try { j = await r.json(); } catch {}
   if (!r.ok) {
     // ⚠ Le STATUT ne suffit pas à diagnostiquer : quota dépassé, clé invalide et API non
@@ -26943,9 +26966,9 @@ async function lolChampMap() {
     if (c && c.byKey && Date.now() - c.fetchedAt < 7 * 864e5) { _lolChampsCache = c; return c; }
   } catch {}
   try {
-    const vers = await (await fetch('https://ddragon.leagueoflegends.com/api/versions.json')).json();
+    const vers = await (await fetch('https://ddragon.leagueoflegends.com/api/versions.json', { signal: fetchSig() })).json();
     const v = vers[0];
-    const dd = await (await fetch(`https://ddragon.leagueoflegends.com/cdn/${v}/data/fr_FR/champion.json`)).json();
+    const dd = await (await fetch(`https://ddragon.leagueoflegends.com/cdn/${v}/data/fr_FR/champion.json`, { signal: fetchSig() })).json();
     const byKey = {};
     Object.values(dd.data).forEach(ch => { byKey[ch.key] = { name: ch.name, id: ch.id }; });
     const c = { v, fetchedAt: Date.now(), byKey };
@@ -29148,7 +29171,7 @@ function leakWikiIcon(name) {
         try {
           const r = await fetch('https://fr.wikipedia.org/w/api.php?action=query&format=json&origin=*'
             + '&generator=search&gsrlimit=1&gsrsearch=' + encodeURIComponent(name)
-            + '&prop=pageimages&piprop=thumbnail&pithumbsize=96');
+            + '&prop=pageimages&piprop=thumbnail&pithumbsize=96', { signal: fetchSig() });
           if (r.ok) {
             const j = await r.json();
             const pages = (j && j.query && j.query.pages) || {};
@@ -29190,7 +29213,7 @@ function LeakIcon({ l }) {
 // topstories.json puis item/{id}.json (12 fetchs parallèles) si Algolia est down/throttle.
 async function actuFetchHN() {
   try {
-    const r = await fetch('https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=12');
+    const r = await fetch('https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=12', { signal: fetchSig() });
     if (r.ok) {
       const j = await r.json();
       const hits = (j.hits || []).filter(h => h.title).slice(0, 12).map(h => ({
@@ -29203,12 +29226,12 @@ async function actuFetchHN() {
     }
   } catch {}
   try {
-    const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
+    const r = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json', { signal: fetchSig() });
     if (!r.ok) return [];
     const ids = ((await r.json()) || []).slice(0, 12);
     const items = await Promise.all(ids.map(async id => {
       try {
-        const ir = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+        const ir = await fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`, { signal: fetchSig() });
         return ir.ok ? await ir.json() : null;
       } catch { return null; }
     }));
@@ -29431,7 +29454,7 @@ async function actuFetchLeaks() {
 async function actuFetchHibp() {
   let list = null;
   try {
-    const r = await fetch('https://haveibeenpwned.com/api/v3/breaches');
+    const r = await fetch('https://haveibeenpwned.com/api/v3/breaches', { signal: fetchSig(30000) });
     if (r.ok) list = await r.json();
   } catch {}
   if (!list) {
@@ -29457,7 +29480,7 @@ async function actuFetchHibp() {
 // Retourne null si absent/périmé (> 24 h — Action en panne) → replis client.
 async function actuFetchStatic() {
   try {
-    const r = await fetch('./data/actu.json?_=' + Date.now(), { cache: 'no-store' });
+    const r = await fetch('./data/actu.json?_=' + Date.now(), { signal: fetchSig(), cache: 'no-store' });
     if (!r.ok) return null;
     const j = await r.json();
     if (!j || !j.updated_at) return null;
@@ -29582,7 +29605,7 @@ async function ytSubApi(path, params = {}) {
   const token = ytgToken();
   if (!token) return { __error: 'AUTH' };
   try {
-    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, { signal: fetchSig(),
       headers: { Authorization: `Bearer ${token}` },
     });
     if (res.status === 401) { ytgLogout(); return { __error: 'AUTH' }; }
@@ -29603,7 +29626,7 @@ async function ytSubPost(path, params = {}, body = null) {
   const token = ytgToken();
   if (!token) return { __error: 'AUTH' };
   try {
-    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, { signal: fetchSig(),
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : null,
@@ -29627,7 +29650,7 @@ async function ytSubDelete(path, params = {}) {
   const token = ytgToken();
   if (!token) return { __error: 'AUTH' };
   try {
-    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, { signal: fetchSig(),
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -29648,7 +29671,7 @@ async function ytSubPut(path, params = {}, body = null) {
   const token = ytgToken();
   if (!token) return { __error: 'AUTH' };
   try {
-    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, {
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${new URLSearchParams(params)}`, { signal: fetchSig(),
       method: 'PUT',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : null,
@@ -32369,7 +32392,8 @@ function ActuViaNotice({ via }) {
     </div>
   );
 }
-function ActuCard({ href, main, sub, right, rightColor, image, fav }) {
+// React.memo : props primitives — les cartes ne se redessinent plus à chaque rendu du panneau.
+const ActuCard = React.memo(function ActuCard({ href, main, sub, right, rightColor, image, fav }) {
   const [heroKo, setHeroKo] = React.useState(null); // null = OK | 'small' | 'err'
   const safe = safeHref(href);
   const hero = image && !heroKo ? safeHref(image) : null;
@@ -32416,7 +32440,7 @@ function ActuCard({ href, main, sub, right, rightColor, image, fav }) {
   return safe
     ? <a href={safe} target="_blank" rel="noopener noreferrer" style={style}>{inner}</a>
     : <div style={style}>{inner}</div>;
-}
+});
 
 // ══════════════════════════════════════════════════════════════════
 // 🤖 ACTU RÉSUMÉ PAR IA (demande utilisateur) — 5 puces sur l'actu MONDIALE de la
@@ -33371,7 +33395,7 @@ async function cmpStores() {
     if (c && c.map && Date.now() - c.t < 7 * 864e5) return (_cmpStores = c.map);
   } catch {}
   try {
-    const r = await fetch('https://www.cheapshark.com/api/1.0/stores');
+    const r = await fetch('https://www.cheapshark.com/api/1.0/stores', { signal: fetchSig() });
     if (!r.ok) return {};
     const arr = await r.json();
     const map = {};
@@ -33387,7 +33411,7 @@ let _cmpEurPromise = null;
 function cmpUsdToEur() {
   if (!_cmpEurPromise) _cmpEurPromise = (async () => {
     try {
-      const r = await fetch('https://api.frankfurter.app/latest?from=USD&to=EUR');
+      const r = await fetch('https://api.frankfurter.app/latest?from=USD&to=EUR', { signal: fetchSig() });
       if (!r.ok) return null;
       const j = await r.json();
       return (j && j.rates && j.rates.EUR) || null;
@@ -33398,13 +33422,13 @@ function cmpUsdToEur() {
 
 async function cmpGameSearch(q) {
   try {
-    const r = await fetch('https://www.cheapshark.com/api/1.0/games?title=' + encodeURIComponent(q) + '&limit=15');
+    const r = await fetch('https://www.cheapshark.com/api/1.0/games?title=' + encodeURIComponent(q) + '&limit=15', { signal: fetchSig() });
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
 async function cmpGameDeals(gameID) {
   try {
-    const r = await fetch('https://www.cheapshark.com/api/1.0/games?id=' + encodeURIComponent(gameID));
+    const r = await fetch('https://www.cheapshark.com/api/1.0/games?id=' + encodeURIComponent(gameID), { signal: fetchSig() });
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
@@ -33859,7 +33883,7 @@ async function cmpFetchDeals() {
     if (c && Array.isArray(c.deals) && Date.now() - c.t < 30 * 60000) return c.deals;
   } catch {}
   try {
-    const r = await fetch('https://www.cheapshark.com/api/1.0/deals?pageSize=30&sortBy=DealRating&onSale=1');
+    const r = await fetch('https://www.cheapshark.com/api/1.0/deals?pageSize=30&sortBy=DealRating&onSale=1', { signal: fetchSig() });
     if (!r.ok) return null;
     const deals = await r.json();
     if (!Array.isArray(deals)) return null;
@@ -33981,7 +34005,7 @@ async function cmpRefreshWatch(list) {
   const ids = list.map(w => w.gameID).filter(Boolean);
   if (!ids.length) return list;
   try {
-    const r = await fetch('https://www.cheapshark.com/api/1.0/games?ids=' + ids.join(','));
+    const r = await fetch('https://www.cheapshark.com/api/1.0/games?ids=' + ids.join(','), { signal: fetchSig() });
     if (!r.ok) return list;
     const j = await r.json();
     return list.map(w => {
@@ -34675,7 +34699,7 @@ async function fetchMeteo(lat, lon, days = 3) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
     + `&daily=weather_code,temperature_2m_max,temperature_2m_min`
     + `&timezone=Europe%2FParis&forecast_days=${days}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: fetchSig() });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const j = await res.json();
   const d = j.daily;
@@ -34697,7 +34721,7 @@ async function fetchMeteoDetail(lat, lon, days = 3) {
     + `wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant`
     + `&hourly=temperature_2m,precipitation_probability,relative_humidity_2m,weather_code`
     + `&timezone=Europe%2FParis&forecast_days=${days}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: fetchSig() });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const j = await res.json();
   const d = j.daily, h = j.hourly;
@@ -34899,7 +34923,7 @@ function nearestCityFR(lat, lon) {
 async function reverseGeocode(lat, lon) {
   // 1) BigDataCloud — pensé pour le navigateur, CORS permissif, pas de rate-limit
   try {
-    const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=fr`);
+    const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=fr`, { signal: fetchSig() });
     if (r.ok) {
       const j = await r.json();
       const c = j.city || j.locality || j.principalSubdivision;
@@ -34908,7 +34932,7 @@ async function reverseGeocode(lat, lon) {
   } catch {}
   // 2) Photon (Komoot) — CORS large, basé OSM
   try {
-    const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&lang=fr`);
+    const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&lang=fr`, { signal: fetchSig() });
     if (r.ok) {
       const j = await r.json();
       const p = (j.features && j.features[0] && j.features[0].properties) || {};
@@ -34918,7 +34942,7 @@ async function reverseGeocode(lat, lon) {
   } catch {}
   // 3) Nominatim (OpenStreetMap) — rate-limit 1 req/s
   try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=12&accept-language=fr`);
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=12&accept-language=fr`, { signal: fetchSig() });
     if (r.ok) {
       const j = await r.json();
       const a = j.address || {};
@@ -34938,7 +34962,7 @@ async function geocodeCity(name) {
   const q = (name || '').trim();
   if (!q) return null;
   const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=1&language=fr&format=json`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: fetchSig() });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const j = await res.json();
   const r = j.results && j.results[0];
@@ -35377,7 +35401,7 @@ async function fetchTD(symbol) {
   const key = tdKey();
   if (!TD_ENABLED || !key) return null;
   try {
-    const r = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`);
+    const r = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${encodeURIComponent(key)}`, { signal: fetchSig() });
     if (!r.ok) return null;
     const j = await r.json();
     if (!j || j.status === 'error' || j.code) return null;
@@ -35401,7 +35425,7 @@ async function fetchQuote(tdSymbol, stooqSymbol) {
 // XPT (platine), XPD (palladium). ⚠ Sucre/blé = symboles tentés à confirmer en test.
 async function fetchMetal(symbol) {
   try {
-    const r = await fetch('https://api.gold-api.com/price/' + encodeURIComponent(symbol));
+    const r = await fetch('https://api.gold-api.com/price/' + encodeURIComponent(symbol), { signal: fetchSig() });
     if (!r.ok) return null;
     const j = await r.json();
     return j && j.price != null ? { price: j.price } : null;
@@ -35420,7 +35444,7 @@ async function fetchAlphaCommodity(func, interval = 'monthly') {
   const av = avKey();
   if (!av) return null;
   try {
-    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval}&apikey=${encodeURIComponent(av)}`);
+    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval}&apikey=${encodeURIComponent(av)}`, { signal: fetchSig() });
     if (!r.ok) return null;
     const j = await r.json();
     const data = j && j.data;
@@ -35445,11 +35469,12 @@ async function fetchAlphaOil() { return fetchAlphaCommodity('WTI', 'daily'); }
 // le fichier est servi par la même origine (GitHub Pages = 'self'), aucun proxy CORS ni
 // clé n'est nécessaire, et on contourne le mur de consentement RGPD que Yahoo impose aux
 // navigateurs UE. Données EOD/différé rafraîchies plusieurs fois par jour ouvré.
-// Cache-buster + no-store : on veut toujours la dernière version commitée (le service
-// worker ne met de toute façon pas en cache cette ressource hors app-shell).
+// Cache-buster + no-store : on veut toujours la dernière version commitée — le `?_=`
+// contourne aussi le cache du CDN de GitHub Pages (~10 min). Le worker range ces fichiers
+// sous une clé SANS query (repli hors ligne), donc le buster ne gonfle plus son cache.
 async function fetchIndicesJSON() {
   try {
-    const r = await fetch('./data/indices.json?_=' + Date.now(), { cache: 'no-store' });
+    const r = await fetch('./data/indices.json?_=' + Date.now(), { signal: fetchSig(), cache: 'no-store' });
     if (!r.ok) return null;
     const j = await r.json();
     return j && j.indices ? j.indices : null;
@@ -35469,19 +35494,29 @@ async function fetchIndicesJSON() {
 //  • frankfurter (EUR/USD)                      : /{start}..{end} — BCE, CORS natif, sans clé
 //  • stooq       (indices, actions, or/argent)  : CSV historique quotidien via corsFetchText (proxies CORS)
 //  • alpha       (pétrole WTI, sucre)           : série complète Alpha Vantage (⚠ 1 req du quota ~25/j)
-// Tout est mis en cache session (_chartCache) : rouvrir un graphique ne refetch jamais.
+// Tout est mis en cache session (_chartCache, 6 h) : rouvrir un graphique ne refetch pas.
 // ════════════════════════════════════════════════
 // ⚠ CACHE BORNÉ (~1 an de points quotidiens par entrée, un objet {t,v} par point) : il
 // n'avait ni plafond ni éviction et ne grossissait que — ouvrir 30 graphiques dans une
 // session laissait 30 séries en RAM, en plus de la base SQLite déjà entièrement chargée.
 // FIFO sur l'ordre d'insertion des clés, comme `NOTE_DEC_CACHE_MAX` côté notes.
 const _chartCache = {};
+const _chartCacheAt = {};
 const CHART_CACHE_MAX = 24;
+// Séries QUOTIDIENNES : relues au bout de 6 h — sans échéance, un onglet resté ouvert
+// plusieurs jours gardait la courbe du premier affichage.
+const CHART_CACHE_TTL = 6 * 3600 * 1000;
 function chartCacheSet(key, val) {
   const ks = Object.keys(_chartCache);
-  if (ks.length >= CHART_CACHE_MAX) delete _chartCache[ks[0]];
+  if (ks.length >= CHART_CACHE_MAX) { delete _chartCache[ks[0]]; delete _chartCacheAt[ks[0]]; }
   _chartCache[key] = val;
+  _chartCacheAt[key] = Date.now();
   return val;
+}
+function chartCacheGet(key) {
+  if (!_chartCache[key]) return null;
+  if (Date.now() - (_chartCacheAt[key] || 0) > CHART_CACHE_TTL) { delete _chartCache[key]; delete _chartCacheAt[key]; return null; }
+  return _chartCache[key];
 }
 const CHART_RANGE_DAYS = { '24h':1, '7j':7, '1m':31, '3m':92, '1a':366, '5a':1830, '10a':3660 };
 
@@ -35595,7 +35630,7 @@ function finHistPoints(spec, range) {
 // mêmes proxies CORS que les cotations. Cache par symbole, découpé ensuite par période.
 async function fetchStooqHistory(symbol) {
   const key = 'stooqhist:' + symbol;
-  if (_chartCache[key]) return _chartCache[key];
+  if (chartCacheGet(key)) return chartCacheGet(key);
   const fmt = d => d.toISOString().slice(0, 10).replace(/-/g, '');
   const txt = await corsFetchText(`https://stooq.com/q/d/l/?s=${encodeURIComponent(symbol)}&d1=${fmt(new Date(Date.now() - 366 * 864e5))}&d2=${fmt(new Date())}&i=d`);
   if (!txt) return null;
@@ -35613,10 +35648,10 @@ async function fetchStooqHistory(symbol) {
 // Historique EUR/USD via Frankfurter (BCE) — 1 an de fixings quotidiens en 1 requête.
 async function fetchFxHistory() {
   const key = 'fxhist:EURUSD';
-  if (_chartCache[key]) return _chartCache[key];
+  if (chartCacheGet(key)) return chartCacheGet(key);
   try {
     const iso = d => d.toISOString().slice(0, 10);
-    const r = await fetch(`https://api.frankfurter.app/${iso(new Date(Date.now() - 366 * 864e5))}..${iso(new Date())}?from=EUR&to=USD`);
+    const r = await fetch(`https://api.frankfurter.app/${iso(new Date(Date.now() - 366 * 864e5))}..${iso(new Date())}?from=EUR&to=USD`, { signal: fetchSig() });
     if (!r.ok) return null;
     const j = await r.json();
     const pts = Object.keys(j.rates || {}).sort()
@@ -35632,11 +35667,11 @@ async function fetchFxHistory() {
 // AV (~25/j) au premier clic seulement (cache session ensuite).
 async function fetchAlphaSeries(func, interval) {
   const key = 'alphahist:' + func + ':' + interval;
-  if (_chartCache[key]) return _chartCache[key];
+  if (chartCacheGet(key)) return chartCacheGet(key);
   const av = avKey();
   if (!av) return null;
   try {
-    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval}&apikey=${encodeURIComponent(av)}`);
+    const r = await fetch(`https://www.alphavantage.co/query?function=${func}&interval=${interval}&apikey=${encodeURIComponent(av)}`, { signal: fetchSig() });
     if (!r.ok) return null;
     const j = await r.json();
     if (!Array.isArray(j && j.data)) return null;
@@ -35657,8 +35692,8 @@ async function fetchChartPoints(spec, range) {
       // CoinGecko : 1 fetch PAR période (la granularité dépend de `days` : 5 min sur
       // 24h, horaire sur 7j, quotidien au-delà) — chacun caché séparément.
       const key = 'cg:' + spec.id + ':' + range;
-      if (_chartCache[key]) return _chartCache[key];
-      const r = await fetch(`https://api.coingecko.com/api/v3/coins/${encodeURIComponent(spec.id)}/market_chart?vs_currency=usd&days=${CHART_RANGE_DAYS[range] || 7}`);
+      if (chartCacheGet(key)) return chartCacheGet(key);
+      const r = await fetch(`https://api.coingecko.com/api/v3/coins/${encodeURIComponent(spec.id)}/market_chart?vs_currency=usd&days=${CHART_RANGE_DAYS[range] || 7}`, { signal: fetchSig() });
       if (!r.ok) return null;
       const j = await r.json();
       const pts = chartDownsample((j.prices || []).map(p => ({ t: p[0], v: p[1] })).filter(p => p.v != null));
@@ -35995,7 +36030,7 @@ async function startFinanceLight() {
       let rate = td && td.price != null ? td.price : null;
       if (rate == null) {
         try {
-          const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
+          const r = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD', { signal: fetchSig() });
           const j = await r.json();
           rate = j.rates && j.rates.USD != null ? j.rates.USD : null;
         } catch {}
@@ -37082,8 +37117,8 @@ async function rsiCloses(a) {
     // days=2 → granularité HORAIRE côté CoinGecko (auto), ~48 points : de quoi amorcer
     // un RSI(14) et disposer ensuite de ~34 valeurs, dont les 24 dernières heures.
     const url = `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(a.id)}/market_chart?vs_currency=usd&days=2`;
-    let r = await fetch(url);
-    if (r.status === 429) { await new Promise(z => setTimeout(z, RSI_CG_RETRY)); r = await fetch(url); }
+    let r = await fetch(url, { signal: fetchSig() });
+    if (r.status === 429) { await new Promise(z => setTimeout(z, RSI_CG_RETRY)); r = await fetch(url, { signal: fetchSig() }); }
     if (!r.ok) return null;
     const j = await r.json();
     const pts = (j.prices || []).filter(p => Array.isArray(p) && p[1] != null);
@@ -37305,7 +37340,7 @@ const ALTSEASON_TOP = 50;   // même assiette que l'indice de référence : top 
 // ≤ 25 % = saison du Bitcoin. Une seule requête pour les 3 fenêtres.
 async function altseasonFetch() {
   const r = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc'
-    + '&per_page=100&page=1&sparkline=false&price_change_percentage=' + ALTSEASON_WINDOWS.map(w => w.k).join('%2C'));
+    + '&per_page=100&page=1&sparkline=false&price_change_percentage=' + ALTSEASON_WINDOWS.map(w => w.k).join('%2C'), { signal: fetchSig() });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const list = await r.json();
   if (!Array.isArray(list) || !list.length) throw new Error('Réponse CoinGecko illisible.');
@@ -37431,7 +37466,7 @@ function bullrunTrendCoin(c) {
 }
 async function bullrunTrendFetch(force) {
   if (!force && _bullrunTrendCache && Date.now() - _bullrunTrendCache.at < BULLRUN_TRENDS_TTL) return _bullrunTrendCache;
-  const r = await fetch(BULLRUN_TRENDING_URL, { cache: 'no-store' });
+  const r = await fetch(BULLRUN_TRENDING_URL, { signal: fetchSig(), cache: 'no-store' });
   if (!r.ok) throw new Error(r.status === 429 ? 'CoinGecko limite les requêtes (429) — réessaie dans une minute.' : `CoinGecko a répondu ${r.status}.`);
   const j = await r.json();
   const coins = (Array.isArray(j && j.coins) ? j.coins : []).map(bullrunTrendCoin).filter(Boolean);
@@ -37599,7 +37634,7 @@ const BULLRUN_PERF_WINS = [
 ];
 async function bullrunFetchMarkets(windows) {
   const r = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=' + BULLRUN_IDS
-    + '&sparkline=false&price_change_percentage=' + windows);
+    + '&sparkline=false&price_change_percentage=' + windows, { signal: fetchSig() });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const list = await r.json();
   if (!Array.isArray(list) || !list.length) throw new Error('Réponse CoinGecko illisible.');
@@ -37673,7 +37708,7 @@ function BullrunPerf() {
 // « monde réel » — ce résumé dit sur quel marché ses publications tombent) ──
 async function bullrunFetchMacro() {
   const [g, by] = await Promise.all([
-    fetch('https://api.coingecko.com/api/v3/global').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+    fetch('https://api.coingecko.com/api/v3/global', { signal: fetchSig() }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
     bullrunFetchMarkets('24h'),
   ]);
   const g2 = (g && g.data) || {};
@@ -38435,7 +38470,7 @@ async function bookSearch(q) {
   if (!term) return [];
   let netOk = false;
   try {
-    const r = await fetch('https://www.googleapis.com/books/v1/volumes?country=FR&maxResults=12&q=' + encodeURIComponent(term));
+    const r = await fetch('https://www.googleapis.com/books/v1/volumes?country=FR&maxResults=12&q=' + encodeURIComponent(term), { signal: fetchSig() });
     if (r.ok) {
       netOk = true;
       const j = await r.json();
@@ -38444,7 +38479,7 @@ async function bookSearch(q) {
     }
   } catch {}
   try {
-    const r = await fetch('https://openlibrary.org/search.json?limit=12&fields=key,title,author_name,first_publish_year,cover_i,number_of_pages_median&q=' + encodeURIComponent(term));
+    const r = await fetch('https://openlibrary.org/search.json?limit=12&fields=key,title,author_name,first_publish_year,cover_i,number_of_pages_median&q=' + encodeURIComponent(term), { signal: fetchSig() });
     if (r.ok) {
       netOk = true;
       const j = await r.json();
@@ -38643,7 +38678,7 @@ async function tmdbGet(path, params = {}) {
   if (!key) return null;
   const q = new URLSearchParams({ api_key: key, language: 'fr-FR', ...params });
   try {
-    const res = await fetch(`https://api.themoviedb.org/3${path}?${q}`);
+    const res = await fetch(`https://api.themoviedb.org/3${path}?${q}`, { signal: fetchSig() });
     if (!res.ok) return null;
     return await res.json();
   } catch { return null; }
@@ -38662,7 +38697,7 @@ async function ytApi(path, params = {}) {
   if (!key) return null;
   const q = new URLSearchParams({ key, ...params });
   try {
-    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${q}`);
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${q}`, { signal: fetchSig() });
     if (!res.ok) return null;
     return await res.json();
   } catch { return null; }
@@ -40642,7 +40677,7 @@ async function ytFetchComments(videoId) {
   const q = new URLSearchParams({ key, part: 'snippet', videoId, order: 'relevance',
     maxResults: String(YT_COMMENTS_MAX), textFormat: 'plainText' });
   let res;
-  try { res = await fetch(`https://www.googleapis.com/youtube/v3/commentThreads?${q}`); }
+  try { res = await fetch(`https://www.googleapis.com/youtube/v3/commentThreads?${q}`, { signal: fetchSig() }); }
   catch { return { error: 'NET' }; }
   const body = await res.json().catch(() => null);
   if (!res.ok) return { error: ytApiErr(res, body) };
@@ -40669,7 +40704,7 @@ async function ytFetchReplies(parentId) {
   const q = new URLSearchParams({ key, part: 'snippet', parentId,
     maxResults: String(YT_REPLIES_MAX), textFormat: 'plainText' });
   let res;
-  try { res = await fetch(`https://www.googleapis.com/youtube/v3/comments?${q}`); }
+  try { res = await fetch(`https://www.googleapis.com/youtube/v3/comments?${q}`, { signal: fetchSig() }); }
   catch { return { error: 'NET' }; }
   const body = await res.json().catch(() => null);
   if (!res.ok) return { error: ytApiErr(res, body) };
@@ -48457,7 +48492,7 @@ async function ghFetchDependabot(force) {
   let login = '', cursor = null, pages = 0;
   try {
     while (pages < 5) {                                 // cap 500 dépôts
-      const r = await fetch('https://api.github.com/graphql', {
+      const r = await fetch('https://api.github.com/graphql', { signal: fetchSig(),
         method: 'POST',
         headers: { 'Authorization': 'bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify({ query, variables: { cursor } }),
@@ -48506,7 +48541,7 @@ async function ghFetchProfile(force) {
   const query = `query{viewer{login name avatarUrl url createdAt followers{totalCount}following{totalCount}contributionsCollection{totalCommitContributions totalPullRequestContributions totalIssueContributions contributionCalendar{totalContributions weeks{contributionDays{contributionCount date}}}}repositories(first:100,ownerAffiliations:OWNER,isFork:false,orderBy:{field:STARGAZERS,direction:DESC}){totalCount nodes{name stargazerCount forkCount primaryLanguage{name}}}}}`;
   let j;
   try {
-    const r = await fetch('https://api.github.com/graphql', {
+    const r = await fetch('https://api.github.com/graphql', { signal: fetchSig(),
       method: 'POST',
       headers: { 'Authorization': 'bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -48886,7 +48921,7 @@ function srUser() { try { return (localStorage.getItem(SR_USER_LS) || '').trim()
 // GET JSON speedrun.com. Renvoie l'objet parsé, ou { __status } sur erreur HTTP.
 async function srGet(url) {
   try {
-    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    const r = await fetch(url, { signal: fetchSig(), headers: { 'Accept': 'application/json' } });
     if (!r.ok) return { __status: r.status };
     return await r.json();
   } catch { return { __status: 0 }; }
@@ -49161,7 +49196,7 @@ async function chessFetchStats(force) {
   const u = encodeURIComponent(user.toLowerCase());
   const get = async path => {
     try {
-      const r = await fetch(`https://api.chess.com/pub/player/${u}${path}`);
+      const r = await fetch(`https://api.chess.com/pub/player/${u}${path}`, { signal: fetchSig() });
       if (r.status === 404) return { __404: true };
       if (!r.ok) return null;
       return await r.json();
@@ -49329,7 +49364,7 @@ async function crFetchStats(force) {
   if (!force && cache && cache.tag === tag && Date.now() - cache.fetchedAt < CR_TTL) return cache;
   const get = async path => {
     try {
-      const r = await fetch(`${CR_PROXY}/players/%23${tag}${path}`, { headers: { Authorization: 'Bearer ' + key } });
+      const r = await fetch(`${CR_PROXY}/players/%23${tag}${path}`, { signal: fetchSig(), headers: { Authorization: 'Bearer ' + key } });
       if (r.status === 401 || r.status === 403) return { __err: 'KEY' };
       if (r.status === 404) return { __err: 'TAG' };
       if (!r.ok) return { __err: 'NET' };
@@ -51047,7 +51082,9 @@ function ArtistsPanel() {
   );
 }
 
-function ArtistRow({ a }) {
+// React.memo : la liste des artistes suivis est re-rendue à chaque changement du store (chaque
+// écoute) ; une ligne ne change que si SON objet artiste change (recréé à chaque rechargement).
+const ArtistRow = React.memo(function ArtistRow({ a }) {
   const err     = a.lastScanStatus === 'error';
   const partial = a.lastScanStatus === 'partial';
   const gone    = a.lastScanStatus === 'gone';
@@ -51122,7 +51159,7 @@ function ArtistRow({ a }) {
       </div>
     </div>
   );
-}
+});
 
 // ════════════════════════════════════════════════
 // COMPACT PLAYER — vue ultra-compacte (split-screen / fenêtre du bas sur tel)
@@ -51561,7 +51598,8 @@ function deltaExportTxt(data) {
   flip7Download(new Blob([out.join('\r\n')], { type:'text/plain;charset=utf-8' }), 'delta-musique-' + localDayStr() + '.txt');
 }
 
-function DeltaTrackRow({ t }) {
+// React.memo : props de données seules.
+const DeltaTrackRow = React.memo(function DeltaTrackRow({ t }) {
   return (
     <div style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 4px' }}>
       <AlbumArt size={38} letter={(t.artist || '?')[0]} color={DELTA_COLOR} image={t.image} />
@@ -51575,7 +51613,7 @@ function DeltaTrackRow({ t }) {
       </button>
     </div>
   );
-}
+});
 
 // Détail technique d'une section (mode debug seulement) : ce que Spotify a RÉELLEMENT renvoyé.
 // `announced` = le total annoncé par /me/playlists, `received` = entrées reçues page par page,

@@ -6,7 +6,7 @@
 //  · clé de cache NORMALISÉE './index.html', jamais l'URL de navigation (le retour OAuth
 //    `?code=…&state=…` écrivait le code d'autorisation dans Cache Storage) ;
 //  · CACHE bumpé à chaque déploiement, VENDOR seulement quand un fichier de vendor/ change.
-const CACHE  = 'spotifyplus-v683';          // app shell — bumpé à chaque déploiement
+const CACHE  = 'spotifyplus-v684';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
