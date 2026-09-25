@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.54';
+const APP_VERSION = '13.21.55';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2237,6 +2237,7 @@ const MUSIC_AUTO_LS       = 'spotifyplus_music_autosync';      // 'off' = désac
 const MUSIC_AUTO_DAY_LS   = 'spotifyplus_music_autosync_day';  // jour de la dernière passe TERMINÉE
 const MUSIC_AUTO_DELAY_MS = 4000;                              // laisse l'UI se monter avant de démarrer
 const MUSIC_AUTO_CHECK_MS = 10 * 60 * 1000;                    // re-tentative pendant la session (100 % local)
+const DBX_AUTO_DELAY_MS   = 30000;                             // après le départ d'un scraping auto (4 s) : il la reporte
 // ⚠ Absent = ACTIVÉ, seule la valeur 'off' désactive — même convention que `moduleEnabled`,
 // `moduleOnHome`, `apiExported` et `vetPrixShown`.
 function musicAutoOn()     { try { return localStorage.getItem(MUSIC_AUTO_LS) !== 'off'; } catch { return true; } }
@@ -4274,9 +4275,6 @@ function StoreProvider({ children }) {
             setStatus('Quota 24h atteint', 'error');
             notify('Spotify+ — Session terminée', `100 artistes scrapés. Prochaine synchro le ${when}.`);
             await endSync('daily_limit');
-            // ☁︎ Sauvegarde Dropbox automatique (case de « Sauvegarder sur Dropbox ») — APRÈS
-            // endSync, donc après le saveDB final : la base envoyée contient tout le lot.
-            dropboxAutoQuotaSave().then(r => { if (r) log(r, r.startsWith('✓') ? 'ok' : r.startsWith('✗') ? 'error' : 'warn'); });
             return;
           }
           const artist = artists[i];
@@ -4700,6 +4698,20 @@ function StoreProvider({ children }) {
     return () => { clearTimeout(t); clearInterval(iv); };
   }, [authState, otherTab, moduleToggles, financeAutoTry]);
 
+  // ── ☁︎ SAUVEGARDE DROPBOX quotidienne (voir `dropboxAutoDailySave`) ──
+  // ⚠ Reportée tant qu'un scraping TOURNE : l'intervalle la rejoue après, base à jour.
+  // ⚠ `dbReady` : la sauvegarde embarque la base SQLite. `otherTab` : un seul envoi.
+  const dropboxAutoTry = React.useCallback(() => {
+    if (syncStateRef.current === 'running') return;
+    dropboxAutoDailySave().then(r => { if (r) log(r, r.startsWith('✓') ? 'ok' : 'error'); }).catch(() => {});
+  }, [log]);
+  React.useEffect(() => {
+    if (authState !== 'connected' || !dbReady || otherTab) return;
+    const t  = setTimeout(dropboxAutoTry, DBX_AUTO_DELAY_MS);
+    const iv = setInterval(dropboxAutoTry, MUSIC_AUTO_CHECK_MS);
+    return () => { clearTimeout(t); clearInterval(iv); };
+  }, [authState, dbReady, otherTab, dropboxAutoTry]);
+
   // ── MÉTÉO : alerte pluie dans les 2 h (11.6.6) ───────────────────────────────
   // Effet SÉPARÉ du bloc auto ci-dessus : Open-Meteo n'a rien de Spotify, l'alerte vaut
   // donc AUSSI en mode hors ligne (`offline`) et sans base prête. Seul `otherTab` la
@@ -4836,7 +4848,7 @@ function StoreProvider({ children }) {
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
     aiOrder, setAiOrder,
-    dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
+    dbReady, musicAutoTry, financeAutoTry, dropboxAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoRemove, clearUndo,
     reloadArtists, navigateFeed, markListened,
@@ -4851,7 +4863,7 @@ function StoreProvider({ children }) {
     moduleToggles, setModuleEnabled,
     homeModules, setModuleOnHome,
     aiOrder, setAiOrder,
-    dbReady, musicAutoTry, financeAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
+    dbReady, musicAutoTry, financeAutoTry, dropboxAutoTry, removeFromFeed, setTrackLiked, restoreBackup,
     log, reloadFeed,
     undoRemove, clearUndo,
     reloadArtists, navigateFeed, markListened,
@@ -25106,7 +25118,7 @@ function buildBackup() {
              vet_prix: lsRaw(VET_PRIX_LS),
              // ⚠ La PRÉFÉRENCE de scraping auto voyage ; PAS `MUSIC_AUTO_DAY_LS` (le jour de
              // la dernière passe), qui est propre à cet appareil et se recalcule tout seul.
-             music_auto: lsRaw(MUSIC_AUTO_LS), finance_auto: lsRaw(FIN_AUTO_LS), tvtime_auto: lsRaw(TV_AUTO_LS),
+             music_auto: lsRaw(MUSIC_AUTO_LS), finance_auto: lsRaw(FIN_AUTO_LS), tvtime_auto: lsRaw(TV_AUTO_LS), dbx_auto: lsRaw(DBX_AUTO_LS),
              playerbar: lsRaw(PLAYERBAR_LS), playerbar_fold: lsRaw(PLAYERFOLD_LS) },
   };
 }
@@ -25833,6 +25845,7 @@ function applyBackup(data) {
     putRaw(MUSIC_AUTO_LS, data.prefs.music_auto);
     putRaw(FIN_AUTO_LS, data.prefs.finance_auto);
     putRaw(TV_AUTO_LS, data.prefs.tvtime_auto);
+    putRaw(DBX_AUTO_LS, data.prefs.dbx_auto);
     putRaw(PLAYERBAR_LS, data.prefs.playerbar);
     putRaw(PLAYERFOLD_LS, data.prefs.playerbar_fold);
   }
@@ -26783,30 +26796,42 @@ function MapsPanel() {
 // mode='save' (défaut) : Connecter / Sauvegarder + Déconnecter. mode='restore' : bouton
 // Restaurer seul (rien si non connecté). Permet de placer sauvegarde et restauration à des
 // endroits différents d'À propos (les saves groupés, puis les restores groupés).
-// ── ☁︎ Sauvegarde Dropbox au quota (demande utilisateur) ── Case à cocher du bouton
-// « Sauvegarder sur Dropbox » : chaque fois que le scraping s'arrête sur les 100 artistes
-// du quota, une sauvegarde complète part sur Dropbox. ⚠ Absent = désactivée, seule 'on'
-// l'active. ⚠ Le chiffrement reste la règle : sans clé dérivée du mot de passe maître
-// (`backupSeal(…, { auto:true })`), rien ne part — et rien n'est demandé.
+// ── ☁︎ Sauvegarde Dropbox automatique (À propos → 🤖 Lancement automatique, en dernier) ──
+// Une sauvegarde complète 1×/jour, qu'il y ait eu du scraping ou non (elle ne partait avant
+// qu'au quota de 100 artistes). ⚠ Absent = DÉSACTIVÉE, seule 'on' l'active (≠ les autres
+// automatismes : elle écrit chez un tiers). La clé garde son ancien nom (`…_auto_quota`) pour
+// ne pas perdre le réglage de qui l'avait cochée.
+// ⚠ Journée marquée (`DBX_AUTO_DAY_LS`, propre à l'appareil) sur SUCCÈS seulement : un échec
+// réseau est retenté par l'intervalle du store (`dropboxAutoTry`), qui attend aussi la fin
+// d'un scraping en cours — la sauvegarde du jour emporte alors le lot scrapé.
+// ⚠ Le chiffrement reste la règle : sans clé dérivée du mot de passe maître
+// (`backupSeal(…, { auto:true })`), rien ne part et RIEN n'est demandé (pas de geste).
 // Rend le message à journaliser, ou '' quand rien n'est tenté.
-const DBX_AUTO_QUOTA_LS = 'spotifyplus_dbx_auto_quota';
-async function dropboxAutoQuotaSave() {
-  if (lsGet(DBX_AUTO_QUOTA_LS) !== 'on' || !dropboxConfigured() || !dropboxConnected()) return '';
+const DBX_AUTO_LS     = 'spotifyplus_dbx_auto_quota';
+const DBX_AUTO_DAY_LS = 'spotifyplus_dbx_auto_day';
+function dbxAutoOn()     { return lsGet(DBX_AUTO_LS) === 'on'; }
+function dbxAutoSet(on)  { return lsSet(DBX_AUTO_LS, on ? 'on' : 'off'); }
+let _dbxAutoBusy = false;
+async function dropboxAutoDailySave() {
+  if (_dbxAutoBusy || !dbxAutoOn() || !dropboxConfigured() || !dropboxConnected()) return '';
+  if (lsGet(DBX_AUTO_DAY_LS) === localDayStr()) return '';
+  if (backupEncOn() && !backupKeyReady()) return '';   // clé absente : pas de relance en boucle du message
+  _dbxAutoBusy = true;
   try {
     const sealed = await backupSeal(await buildBackupFull(), { auto:true });
-    if (sealed === null) return '☁︎ Sauvegarde Dropbox automatique non faite : déverrouille une fois le coffre 🔑 sur cet appareil.';
+    if (sealed === null) return '';
     await dropboxUpload(sealed);
     try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
-    return '✓ Sauvegarde Dropbox automatique faite (quota de 100 artistes atteint).';
+    lsSet(DBX_AUTO_DAY_LS, localDayStr());
+    return '✓ Sauvegarde Dropbox automatique du jour faite.';
   } catch (e) { return '✗ Sauvegarde Dropbox automatique échouée : ' + ((e && e.message) || 'erreur'); }
+  finally { _dbxAutoBusy = false; }
 }
 function DropboxSync({ mode = 'save' }) {
   const { restoreBackup } = useStoreCore();
   const [connected, setConnected] = React.useState(dropboxConnected);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg]   = React.useState('');
-  const [autoQuota, setAutoQuota] = React.useState(() => lsGet(DBX_AUTO_QUOTA_LS) === 'on');
-  const toggleAutoQuota = on => { lsSet(DBX_AUTO_QUOTA_LS, on ? 'on' : 'off'); setAutoQuota(on); };
   // Sauvegarder = vert, Restaurer = bleu (demande utilisateur — couleur par action, pas par provider)
   const btn        = { background:'#34a85315', border:'1px solid #34a85355', borderRadius:10, padding:'10px 14px', cursor:'pointer', color:'#57c973', fontSize:11, fontWeight:700, letterSpacing:'0.04em', textAlign:'left' };
   const restoreBtn = { ...btn, background:'#4ea3f515', border:'1px solid #4ea3f555', color:'#4ea3f5' };
@@ -26851,10 +26876,6 @@ function DropboxSync({ mode = 'save' }) {
       {connected ? (
         <>
           <button onClick={save} disabled={busy} style={{ ...btn, opacity: busy ? 0.6 : 1 }}>☁︎ {busy ? 'Sauvegarde en cours…' : 'Sauvegarder sur Dropbox'} {!busy && <span style={{ fontWeight:400, opacity:0.7 }}>(tout, écrase la dernière version)</span>}</button>
-          <label style={{ display:'flex', alignItems:'center', gap:6, fontSize:10.5, color:C.muted, cursor:'pointer', padding:'0 2px' }}>
-            <input type="checkbox" checked={autoQuota} onChange={e => toggleAutoQuota(e.target.checked)} />
-            Sauvegarder automatiquement quand le scraping atteint les 100 artistes du quota
-          </label>
           <button onClick={disconnect} style={{ background:'none', border:'none', color:C.muted, fontSize:10, cursor:'pointer', textAlign:'left', padding:'0 2px' }}>Déconnecter Dropbox</button>
         </>
       ) : (
@@ -28474,8 +28495,8 @@ function StatsPanel() {
   );
 }
 
-// Couleur du collapse « 🤖 LANCEMENT AUTOMATIQUE » d'À propos (9.0.4). ⚠ Les 3 interrupteurs
-// qu'il contient prennent, eux, la couleur de LEUR module (Musique / Finance / TV Time) : c'est
+// Couleur du collapse « 🤖 LANCEMENT AUTOMATIQUE » d'À propos (9.0.4). ⚠ Les interrupteurs
+// qu'il contient prennent, eux, la couleur de LEUR module (Musique / Finance / TV Time / Dropbox) : c'est
 // ce qui les rend identifiables d'un coup d'œil.
 const AUTO_COLOR = '#4ec9b0';
 
@@ -29156,7 +29177,7 @@ function DataLimitPanel() {
 }
 
 function VosEcoutesPanel() {
-  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, aiOrder, setAiOrder, logout } = useStore();
+  const { listenStats: ls, purgeListened, resetQuota, musicAutoTry, financeAutoTry, dropboxAutoTry, restoreBackup, dailyScrapings, quotaUntil, dbReady, moduleToggles, setModuleEnabled, homeModules, setModuleOnHome, aiOrder, setAiOrder, logout } = useStore();
   // Affichage de la barre de lecture Spotify (bas de l'écran) — préférence persistée.
   const [barOn, setBarOn] = React.useState(playerBarPref);
   const toggleBar = () => { const on = !barOn; playerBarSet(on); setBarOn(on); };
@@ -29194,6 +29215,7 @@ function VosEcoutesPanel() {
   const [autoMusic, setAutoMusic] = React.useState(musicAutoOn);
   const [autoFin,   setAutoFin]   = React.useState(finAutoOn);
   const [autoTv,    setAutoTv]    = React.useState(tvAutoOn);
+  const [autoDbx,   setAutoDbx]   = React.useState(dbxAutoOn);
   const toggleAutoMusic = () => {
     const on = !autoMusic;
     musicAutoSet(on); setAutoMusic(on);
@@ -29210,6 +29232,11 @@ function VosEcoutesPanel() {
     const on = !autoTv;
     tvAutoSet(on); setAutoTv(on);
     if (on) { try { tvSyncDaily(); } catch {} }
+  };
+  const toggleAutoDbx = () => {
+    const on = !autoDbx;
+    dbxAutoSet(on); setAutoDbx(on);
+    if (on) { try { dropboxAutoTry(); } catch {} }
   };
   // Gabarit commun des deux interrupteurs (même famille visuelle que les boutons voisins)
   const autoSwitch = (on, onClick, label, hint, title, color) => (
@@ -29282,7 +29309,7 @@ function VosEcoutesPanel() {
         </div>
         <AuthPermsPanel />
       </StatsCollapse>
-      {/* 🤖 LANCEMENT AUTOMATIQUE — sous les Autorisations (position demandée) : les 3
+      {/* 🤖 LANCEMENT AUTOMATIQUE — sous les Autorisations (position demandée) : les
           automatismes qui se déclenchent à la connexion, réunis au même endroit. */}
       <StatsCollapse title="🤖 LANCEMENT AUTOMATIQUE" color={AUTO_COLOR}>
         <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, marginBottom:2 }}>
@@ -29303,6 +29330,11 @@ function VosEcoutesPanel() {
             ? 'Activé : une fois par jour à la connexion, chaque chaîne YouTube est vérifiée (nouvelles vidéos et Shorts) puis chaque série suivie (nouvelles saisons). Interrompue, elle reprend dans la journée là où elle s\'était arrêtée.'
             : 'Désactivé : la vérification n\'a lieu que quand tu ouvres TV Time (et seulement si elle date de plus de 6 h / 24 h), ou quand tu cliques sur le bouton ↻.',
           TVTIME_COLOR)}
+        {autoSwitch(autoDbx, toggleAutoDbx, '☁︎ Sauvegarde Dropbox', '1×/jour, sauvegarde complète',
+          autoDbx
+            ? 'Activé : une fois par jour à la connexion, une sauvegarde complète part sur Dropbox (après le scraping s\'il tourne). Il faut Dropbox connecté (Sauvegardes cloud) et le coffre 🔑 déverrouillé au moins une fois sur cet appareil.'
+            : 'Désactivé : la sauvegarde Dropbox ne part que si tu cliques sur « Sauvegarder sur Dropbox ».',
+          '#4ea3f5')}
       </StatsCollapse>
       {/* 📦 LIMITE DATA — entre le Lancement automatique et l'Export : on regarde ce qui
           reste AVANT de décider quoi sauvegarder puis alléger. Mesuré au montage seulement
