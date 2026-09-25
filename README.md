@@ -18,7 +18,7 @@
 ## Musique
 
 - Connexion **OAuth PKCE** 100 % client. Chaque artiste suivi est scanné depuis **sa propre date de dernier scan** ; la première fois, il rapporte **toute sa discographie** (et compte pour autant d'artistes qu'il a lu de pages).
-- **Quota de 100 artistes / 24 h glissantes**, pause / reprise, arrêt de 15 min minimum dès la première limite Spotify (429). **Scraping automatique** au lancement (À propos → 🤖 Lancement automatique).
+- **Quota de 100 artistes / 24 h glissantes**, pause / reprise, arrêt de 15 min minimum dès la première limite Spotify (429). **Scraping automatique** au lancement (À propos → ⏰ Lancement automatique).
 - **Feed** jusqu'à 1000 titres, filtres et tri sur toute la base. Clic = lecture, **×** = écouté et retiré (↩ Annuler 5 s), **❤** = like. Fin de titre ⇒ marqué écouté + **auto-avance**, sans voler une lecture lancée ailleurs.
 - **Découvertes de la semaine** : bouton violet dans ⚙ Scraping, ou simplement **lancer la playlist** — le Hub range ses titres dans « En attente ».
 - **🔀 Delta** : likes absents de tes playlists, artistes suivis sans titre rangé (⊘ pour te désabonner), artistes présents chez toi mais non suivis (➕), et 🤖 10 artistes + 10 titres suggérés par l'IA.
@@ -81,7 +81,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 
 ## Sauvegarde & données
 
-- Export / import JSON, complet ou par section ; **Dropbox, Google Drive, pCloud** en un bouton ; **sauvegarde Dropbox quotidienne** optionnelle (À propos → 🤖 Lancement automatique), faite par l'**appareil par défaut** choisi dans la Configuration générale.
+- Export / import JSON, complet ou par section ; **Dropbox, Google Drive, pCloud** en un bouton ; **sauvegarde Dropbox quotidienne** optionnelle (À propos → ⏰ Lancement automatique), faite par l'**appareil par défaut** choisi dans la Configuration générale.
 - **Chiffrées par défaut** avec le **mot de passe maître du coffre 🔑** (rien n'est demandé à l'export ; à la restauration sur un autre appareil, tape ce mot de passe). ⚠ Oublié = sauvegarde illisible.
 - La restauration **fusionne** : les compteurs au maximum (jamais doublés), et elle te prévient si le stockage est plein. Photos et caches ne sont pas embarqués.
 
