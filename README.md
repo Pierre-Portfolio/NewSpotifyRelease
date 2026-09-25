@@ -74,7 +74,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 - **Google Drive** se connecte en pop-up ; depuis l'**app installée** ça échoue : connecte-toi une fois depuis un onglet Chrome normal. YouTube a sa propre connexion.
 - **Autorisations** au même endroit : À propos → 🔐 Autorisations (cocher accorde, décocher retire).
 - **Tes clés ne passent jamais par un relais public**, sauf si tu coches « Relais publics pour les clés » (module API).
-- **Ordre des IA** : À propos → ⚙️ Paramétrage. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
+- **Ordre des IA** : À propos → 🛠️ Configuration → ⚙️ Configuration de module. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
 - **Stockage saturé ?** À propos → 📦 Limite data montre le poids de chaque module.
 
 ---
