@@ -82,7 +82,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 ## Sauvegarde & données
 
 - Export / import JSON, complet ou par section ; **Dropbox, Google Drive, pCloud** en un bouton ; **sauvegarde Dropbox quotidienne** optionnelle (À propos → ⏰ Lancement automatique), faite par l'**appareil par défaut** choisi dans la Configuration générale.
-- **Chiffrées par défaut** avec le **mot de passe maître du coffre 🔑** (rien n'est demandé à l'export ; à la restauration sur un autre appareil, tape ce mot de passe). ⚠ Oublié = sauvegarde illisible.
+- **Chiffrées par défaut** avec le **mot de passe maître du coffre 🔑** (rien n'est demandé à l'export ni à la restauration, Dropbox comprise, sur un appareil où le coffre a été déverrouillé une fois ; ailleurs, tape ce mot de passe). ⚠ Oublié = sauvegarde illisible.
 - La restauration **fusionne** : les compteurs au maximum (jamais doublés), et elle te prévient si le stockage est plein. Photos et caches ne sont pas embarqués.
 
 ---

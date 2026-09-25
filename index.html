@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.61';
+const APP_VERSION = '13.21.62';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -25202,9 +25202,14 @@ function isSealedBackup(d) { return !!(d && d.encrypted && isVaultBlob(d.enc)); 
 // ⚠ Liée au coffre par son sel (`vault`) : coffre réinitialisé ou remplacé par une
 // restauration ⇒ clé ignorée jusqu'au prochain déverrouillage (sinon on chiffrerait avec un
 // mot de passe oublié). Sur l'appareil seulement, JAMAIS dans `buildBackup`.
+// ⚠ Sel DÉDUIT du sel du coffre (`_backupSaltFor`), plus tiré au hasard par appareil : tous
+// les appareils qui partagent le coffre ont la MÊME clé, donc la sauvegarde Dropbox écrite
+// par l'appareil par défaut se restaure ailleurs sans rien demander (avant, chaque appareil
+// avait sa clé et seul le fichier écrit par CET appareil s'ouvrait seul). Les clés d'avant
+// (sel aléatoire) restent dans `prev` pour rouvrir les fichiers déjà scellés avec elles.
 // ⚠ `BACKUP_KEY_LS` = ancienne « clé de sauvegarde » (champ retiré) : plus jamais utilisée
 // pour chiffrer, seulement essayée à la restauration des anciens fichiers.
-const BACKUP_DK_LS  = 'spotifyplus_backup_dk';    // { salt, key (brute, b64), vault (sel du coffre) }
+const BACKUP_DK_LS  = 'spotifyplus_backup_dk';    // { salt, key (brute, b64), vault (sel du coffre), prev:[{salt,key}] }
 const BACKUP_KEY_LS = 'spotifyplus_backup_key';   // héritage : restauration seule
 function _backupDkRead() {
   let d = null; try { d = JSON.parse(lsGet(BACKUP_DK_LS) || 'null'); } catch {}
@@ -25221,17 +25226,24 @@ async function _backupDkCrypto(d) {
 }
 // Appelée par le coffre après un déverrouillage/une création réussi(e). Ne redérive que si
 // la clé manque ou ne correspond plus au coffre (600k itérations : pas à chaque ouverture).
+async function _backupSaltFor(vb) {
+  const h = await crypto.subtle.digest('SHA-256', _mdpTextEnc.encode('spotifyplus-backup|' + vb.salt));
+  return new Uint8Array(h).slice(0, 16);
+}
 async function backupKeyFromMaster(password, vaultBlob) {
   const vb = vaultBlob || loadVaultBlob();
   if (!password || !vb) return false;
   let d = null; try { d = JSON.parse(lsGet(BACKUP_DK_LS) || 'null'); } catch {}
-  if (d && d.vault === vb.salt && d.salt && d.key) return true;
-  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const salt = await _backupSaltFor(vb), saltB64 = _mdpB64(salt);
+  if (d && d.vault === vb.salt && d.salt === saltB64 && d.key) return true;
+  let prev = d && Array.isArray(d.prev) ? d.prev : [];
+  if (d && d.salt && d.key && d.salt !== saltB64) prev = [{ salt: d.salt, key: d.key }].concat(prev);
+  prev = prev.filter(k => k && k.salt && k.key && k.salt !== saltB64).slice(0, 3);
   const base = await crypto.subtle.importKey('raw', _mdpTextEnc.encode(password), 'PBKDF2', false, ['deriveKey']);
   const key  = await crypto.subtle.deriveKey({ name:'PBKDF2', salt, iterations: MDP_KDF_ITER[MDP_VAULT_V], hash:'SHA-256' },
     base, { name:'AES-GCM', length:256 }, true, ['encrypt', 'decrypt']);
   const raw = await crypto.subtle.exportKey('raw', key);
-  return lsSet(BACKUP_DK_LS, JSON.stringify({ salt: _mdpB64(salt), key: _mdpB64(raw), vault: vb.salt }));
+  return lsSet(BACKUP_DK_LS, JSON.stringify({ salt: saltB64, key: _mdpB64(raw), vault: vb.salt, prev }));
 }
 function backupKeyForget() { try { localStorage.removeItem(BACKUP_DK_LS); } catch {} _backupDkKey = null; }
 // Scelle une sauvegarde si l'option est active. Renvoie l'objet TEL QUEL si elle ne l'est
@@ -25269,11 +25281,14 @@ async function backupSeal(data, opts = {}) {
 async function backupOpen(data) {
   if (!isSealedBackup(data)) return data;
   const enc = data.enc;
-  // Clé de CET appareil d'abord (même sel ⇒ même clé), puis l'ancienne clé de sauvegarde ;
-  // un fichier d'ailleurs retombe sur la saisie du mot de passe maître.
-  const d = _backupDkRead();
-  if (d && d.salt === enc.salt) {
-    try { const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv:_mdpUnb64(enc.iv) }, await _backupDkCrypto(d), _mdpUnb64(enc.ct)); return JSON.parse(_mdpTextDec.decode(pt)); } catch {}
+  // Clés de CET appareil d'abord (même sel ⇒ même clé : l'actuelle, commune aux appareils du
+  // coffre, puis celles d'avant dans `prev`), puis l'ancienne clé de sauvegarde ; sinon saisie
+  // du mot de passe maître.
+  let raw = null; try { raw = JSON.parse(lsGet(BACKUP_DK_LS) || 'null'); } catch {}
+  const keys = raw ? [raw].concat(Array.isArray(raw.prev) ? raw.prev : []) : [];
+  for (const k of keys) {
+    if (!k || !k.key || k.salt !== enc.salt) continue;
+    try { const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv:_mdpUnb64(enc.iv) }, await _backupDkCrypto(k), _mdpUnb64(enc.ct)); return JSON.parse(_mdpTextDec.decode(pt)); } catch {}
   }
   const legacy = lsGet(BACKUP_KEY_LS);
   if (legacy) { try { return await mdpDecrypt(legacy, enc); } catch {} }
@@ -25281,7 +25296,13 @@ async function backupOpen(data) {
     let pw = null;
     try { pw = prompt(tries ? 'Mot de passe incorrect. Réessaie :' : '🔒 Cette sauvegarde est chiffrée.\n\nMot de passe maître du coffre 🔑 (ou ancienne phrase de passe) :'); } catch {}
     if (!pw) throw new Error('Restauration annulée (sauvegarde chiffrée).');
-    try { return await mdpDecrypt(pw, enc); } catch {}
+    let out;
+    try { out = await mdpDecrypt(pw, enc); } catch { continue; }
+    // Tapé une fois ici : s'il ouvre aussi le coffre local, la clé commune est posée tout de
+    // suite (en arrière-plan) ⇒ les prochaines restaurations ne demandent plus rien.
+    const vb = loadVaultBlob();
+    if (vb) mdpDecrypt(pw, vb).then(() => backupKeyFromMaster(pw, vb)).catch(() => {});
+    return out;
   }
   throw new Error('Mot de passe incorrect — la sauvegarde n\'a pas pu être déchiffrée.');
 }
