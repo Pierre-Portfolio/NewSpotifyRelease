@@ -92,6 +92,8 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 | Clé YouTube | TV Time (⚙) ou module API | Chaînes YouTube |
 | Clé Gemini (et éventuellement Groq, OpenRouter, Mistral…) | Module API | Tous les assistants IA |
 | SteamID64 (+ clé Web API) | Bon Plan ou module API | Liste de souhaits, bibliothèque, statistiques |
+| Clés Twelve Data et Alpha Vantage (gratuites) | Module API | Cours d'actions, pétrole et matières premières (Finance) |
+| Token GitHub **fine-grained**, « Dependabot alerts » en lecture seule | Module API ou Alertes → Dependabot | Failles de sécurité de tes dépôts — jamais un token *classic* « repo », qui donnerait l'écriture sur tous tes dépôts |
 | Client ID pCloud | Carte pCloud d'À propos | Sauvegarde pCloud |
 
 **Bon à savoir**
@@ -102,7 +104,8 @@ Tout fonctionne sans rien configurer, sauf les modules qui parlent à un service
 - **YouTube se connecte séparément de Drive** : bouton dédié dans Actu → Vidéos YouTube.
 - **👍 sur un commentaire YouTube** : l'API YouTube **ne sait pas** liker un commentaire. Le bouton mémorise le like dans le Hub *et* ouvre le commentaire sur youtube.com pour y poser le vrai like.
 - **« Stockage local saturé » ?** À propos → 📦 *Limite data* montre où part la place : espace utilisé, espace **encore libre** (mesuré sur ton navigateur, pas supposé), puis **le poids de chaque module** — 📦 son stockage local *et* 🗄️ sa base (SQLite pour Musique, liste pour TV Time, pièces jointes pour Note). Touche une ligne pour voir ses clés une par une — et sur TV Time, le poids des 📺 séries, 🎬 films, ▶️ YouTube, 🩳 Shorts et 📚 livres, chacun sa couleur.
-- **Sauvegardes chiffrées par défaut** : une phrase de passe est demandée à chaque export et à chaque restauration ; annuler propose un export en clair, à confirmer. L'interrupteur **🔒/🔓** (À propos → ↧ *Exporter*) repasse en clair — le fichier contient alors toutes tes clés d'API lisibles. ⚠ Phrase oubliée = sauvegarde définitivement illisible.
+- **Sauvegardes chiffrées par défaut** : une phrase de passe est demandée à chaque export et à chaque restauration ; annuler propose un export en clair, à confirmer. L'interrupteur **🔒/🔓** (À propos → ↧ *Exporter*) repasse en clair, après confirmation — le fichier contient alors toutes tes clés d'API lisibles. Une restauration qui **remplacerait une clé déjà enregistrée** par une autre valeur te le demande d'abord.
+- **Tes clés ne passent jamais par un relais public** : si un appel direct (Steam, Adzuna…) échoue, rien n'est relayé, sauf si tu coches **« Relais publics pour les clés »** en tête du module 🔌 API. ⚠ Phrase oubliée = sauvegarde définitivement illisible.
 - **Ordre des IA** : À propos → ⚙️ *Paramétrage* → **🤖 Ordre des IA**. Toutes les IA qui ont une clé servent **partout** dans l'appli : la n° 1 d'abord, puis la n° 2 dès que la première ne répond plus (plus de jetons, clé refusée, réseau), etc. Une IA à court de quota passe en dernier pendant 15 min. Seules exceptions : la recherche web et le résumé de vidéo YouTube, qui n'existent que chez Gemini.
 - **Savoir quelle IA a répondu** : quand une autre a pris le relais, un badge orange **⤵ Gemini → Groq** s'affiche à côté du résultat (avec 📷 si la requête emportait une photo).
 
