@@ -74,14 +74,14 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 - **Google Drive** se connecte en pop-up ; depuis l'**app installée** ça échoue : connecte-toi une fois depuis un onglet Chrome normal. YouTube a sa propre connexion.
 - **Autorisations** au même endroit : À propos → 🔐 Autorisations (cocher accorde, décocher retire).
 - **Tes clés ne passent jamais par un relais public**, sauf si tu coches « Relais publics pour les clés » (module API).
-- **Ordre des IA** : À propos → 🛠️ Configuration → ⚙️ Configuration de module. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
+- **Ordre des IA** : À propos → 🛠️ Configuration → 🤖 Ordre des IA. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
 - **Stockage saturé ?** À propos → 📦 Limite data montre le poids de chaque module.
 
 ---
 
 ## Sauvegarde & données
 
-- Export / import JSON, complet ou par section ; **Dropbox, Google Drive, pCloud** en un bouton ; **sauvegarde Dropbox quotidienne** optionnelle (À propos → 🤖 Lancement automatique), faite par l'**appareil par défaut** choisi en tête de la Configuration de module.
+- Export / import JSON, complet ou par section ; **Dropbox, Google Drive, pCloud** en un bouton ; **sauvegarde Dropbox quotidienne** optionnelle (À propos → 🤖 Lancement automatique), faite par l'**appareil par défaut** choisi dans la Configuration générale.
 - **Chiffrées par défaut** avec le **mot de passe maître du coffre 🔑** (rien n'est demandé à l'export ; à la restauration sur un autre appareil, tape ce mot de passe). ⚠ Oublié = sauvegarde illisible.
 - La restauration **fusionne** : les compteurs au maximum (jamais doublés), et elle te prévient si le stockage est plein. Photos et caches ne sont pas embarqués.
 
