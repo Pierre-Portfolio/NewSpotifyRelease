@@ -230,7 +230,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.53';
+const APP_VERSION = '13.21.54';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -25164,123 +25164,113 @@ async function buildBackupFull() {
 // clouds tiers et atterrit dans le dossier Téléchargements. L'asymétrie était frappante :
 // le coffre de mots de passe et les notes cryptées voyagent chiffrés dans ce même fichier,
 // à côté d'un token GitHub en clair.
-// ⚠ Même primitive que le coffre (`mdpEncrypt` : PBKDF2 600k + AES-GCM 256, sel et IV
-// tirés au hasard à chaque chiffrement). L'enveloppe garde `app`/`version`/`exported_at`
+// ⚠ Même primitive que le coffre (PBKDF2 600k + AES-GCM 256) et même mot de passe : le
+// mot de passe maître (voir `backupSeal`). L'enveloppe garde `app`/`version`/`exported_at`
 // en clair pour rester identifiable, tout le reste est dans `enc`.
-// ⚠ La phrase de passe n'est JAMAIS stockée — ni en localStorage, ni en mémoire entre deux
-// exports. Oubliée = sauvegarde irrécupérable, exactement comme le coffre : c'est pour ça
-// qu'elle est demandée DEUX FOIS, et qu'annuler la saisie propose un export EN CLAIR
-// explicitement confirmé plutôt qu'un fichier illisible.
 // ⚠ ACTIF PAR DÉFAUT (12.2.9) : un trousseau en clair sur trois clouds ne peut pas être le
 // réglage d'origine. Absent = chiffré ; seule la valeur 'off' (interrupteur 🔓 d'À propos)
-// laisse en clair — même convention que MUSIC_AUTO_LS / PLAYERBAR_LS. Les 4 appelants de
-// `backupSeal` partent tous d'un clic (export, Dropbox, Drive, pCloud) : le `prompt` ne peut
-// jamais surgir hors geste utilisateur.
+// laisse en clair — même convention que MUSIC_AUTO_LS / PLAYERBAR_LS. Hors geste utilisateur
+// (sauvegarde Dropbox automatique), `backupSeal(…, { auto:true })` : jamais de `prompt`.
 const BACKUP_ENC_LS = 'spotifyplus_backup_enc';   // absent = chiffrer ; 'off' = en clair
 function backupEncOn() { try { return localStorage.getItem(BACKUP_ENC_LS) !== 'off'; } catch { return true; } }
 function backupEncSet(on) { return lsSet(BACKUP_ENC_LS, on ? 'on' : 'off'); }
 function isSealedBackup(d) { return !!(d && d.encrypted && isVaultBlob(d.enc)); }
-// ── 🔐 Clé de sauvegarde mémorisée (À propos → Paramétrage) ──
-// Si elle est renseignée, elle REMPLACE la phrase de passe demandée à chaque export : les 4
-// sorties (fichier, Dropbox, Drive, pCloud) — et la sauvegarde Dropbox automatique au quota,
-// qui n'a plus besoin de personne — sont chiffrées avec elle sans rien demander.
-// ⚠ Stockée sur CET appareil et JAMAIS dans la sauvegarde (`buildBackup` a une liste
-// explicite : ne pas l'y ajouter) : elle protège les fichiers qui QUITTENT l'appareil. Elle
-// ne protège rien sur l'appareil lui-même — quiconque la lit y lit déjà les données en clair.
-// ⚠ Sur un nouvel appareil, la restauration la demande (ou l'ancienne phrase de passe d'un
-// fichier plus vieux) : d'où le conseil de la garder aussi dans le coffre.
-const BACKUP_KEY_LS  = 'spotifyplus_backup_key';
-const BACKUP_KEY_MIN = 6;
-function backupKeyGet() { return lsGet(BACKUP_KEY_LS); }
-function backupKeySet(k) {
-  if (!k) { try { localStorage.removeItem(BACKUP_KEY_LS); return true; } catch { return false; } }
-  return lsSet(BACKUP_KEY_LS, k);
+// ── 🔑 Sauvegardes chiffrées avec le MOT DE PASSE MAÎTRE du coffre (13.21.54) ──
+// Plus aucune phrase de passe demandée à l'export : les sauvegardes sont scellées avec une
+// clé DÉRIVÉE du mot de passe maître du module 🔑 Mot de passe. Pour restaurer, sur n'importe
+// quel appareil, on tape ce mot de passe maître (`backupOpen` → `mdpDecrypt`).
+// ⚠ Le mot de passe maître n'est JAMAIS stocké. On garde la clé AES PBKDF2(maître, sel
+// propre aux sauvegardes, 600k) — dérivée au déverrouillage/création du coffre
+// (`backupKeyFromMaster`). Sel DIFFÉRENT de celui du coffre : la clé stockée n'ouvre PAS le
+// coffre, et ne révèle pas le mot de passe (autant de force brute que sur le blob du coffre,
+// déjà en localStorage). Elle protège les fichiers qui QUITTENT l'appareil, rien de plus.
+// ⚠ Enveloppe = même format qu'un `mdpEncrypt` ({v, salt, iv, ct}, IV neuf à chaque fois) :
+// `mdpDecrypt(maître, enc)` la rouvre sans rien savoir de ce mécanisme.
+// ⚠ Liée au coffre par son sel (`vault`) : coffre réinitialisé ou remplacé par une
+// restauration ⇒ clé ignorée jusqu'au prochain déverrouillage (sinon on chiffrerait avec un
+// mot de passe oublié). Sur l'appareil seulement, JAMAIS dans `buildBackup`.
+// ⚠ `BACKUP_KEY_LS` = ancienne « clé de sauvegarde » (champ retiré) : plus jamais utilisée
+// pour chiffrer, seulement essayée à la restauration des anciens fichiers.
+const BACKUP_DK_LS  = 'spotifyplus_backup_dk';    // { salt, key (brute, b64), vault (sel du coffre) }
+const BACKUP_KEY_LS = 'spotifyplus_backup_key';   // héritage : restauration seule
+function _backupDkRead() {
+  let d = null; try { d = JSON.parse(lsGet(BACKUP_DK_LS) || 'null'); } catch {}
+  const vb = loadVaultBlob();
+  return (d && d.salt && d.key && vb && d.vault === vb.salt) ? d : null;
 }
+function backupKeyReady() { return !!_backupDkRead(); }
+let _backupDkKey = null;   // { raw, key } : import mémorisé de la clé stockée
+async function _backupDkCrypto(d) {
+  if (_backupDkKey && _backupDkKey.raw === d.key) return _backupDkKey.key;
+  const key = await crypto.subtle.importKey('raw', _mdpUnb64(d.key), { name:'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  _backupDkKey = { raw: d.key, key };
+  return key;
+}
+// Appelée par le coffre après un déverrouillage/une création réussi(e). Ne redérive que si
+// la clé manque ou ne correspond plus au coffre (600k itérations : pas à chaque ouverture).
+async function backupKeyFromMaster(password, vaultBlob) {
+  const vb = vaultBlob || loadVaultBlob();
+  if (!password || !vb) return false;
+  let d = null; try { d = JSON.parse(lsGet(BACKUP_DK_LS) || 'null'); } catch {}
+  if (d && d.vault === vb.salt && d.salt && d.key) return true;
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const base = await crypto.subtle.importKey('raw', _mdpTextEnc.encode(password), 'PBKDF2', false, ['deriveKey']);
+  const key  = await crypto.subtle.deriveKey({ name:'PBKDF2', salt, iterations: MDP_KDF_ITER[MDP_VAULT_V], hash:'SHA-256' },
+    base, { name:'AES-GCM', length:256 }, true, ['encrypt', 'decrypt']);
+  const raw = await crypto.subtle.exportKey('raw', key);
+  return lsSet(BACKUP_DK_LS, JSON.stringify({ salt: _mdpB64(salt), key: _mdpB64(raw), vault: vb.salt }));
+}
+function backupKeyForget() { try { localStorage.removeItem(BACKUP_DK_LS); } catch {} _backupDkKey = null; }
 // Scelle une sauvegarde si l'option est active. Renvoie l'objet TEL QUEL si elle ne l'est
-// pas, ou si l'utilisateur annule la saisie — un export en clair reste un export valide,
-// mieux vaut ça que pas de sauvegarde du tout.
-async function backupSeal(data) {
+// pas, `null` si rien ne doit partir (les appelants le gèrent).
+// `opts.auto` (sauvegarde sans geste) : aucune boîte de dialogue, `null` si la clé manque.
+// ⚠ Clé absente sur un clic : le mot de passe maître est demandé UNE fois pour cet appareil
+// (coffre jamais ouvert depuis), vérifié sur le coffre, puis plus jamais.
+async function backupSeal(data, opts = {}) {
   if (!backupEncOn()) return data;
-  const stored = backupKeyGet();
-  if (stored) {
-    const enc = await mdpEncrypt(stored, data);
-    return { app: data.app || 'spotifyplus', version: data.version, exported_at: data.exported_at, scope: data.scope, encrypted: true, enc };
+  const wrap = enc => ({ app: data.app || 'spotifyplus', version: data.version, exported_at: data.exported_at, scope: data.scope, encrypted: true, enc });
+  let d = _backupDkRead();
+  if (!d) {
+    if (opts.auto) return null;
+    const vb = loadVaultBlob();
+    if (!vb) {
+      // Pas de coffre = pas de mot de passe maître : export en clair seulement sur accord
+      // EXPLICITE (un « Annuler » réflexe n'envoie pas le trousseau en clair sur un cloud).
+      let clear = false;
+      try { clear = confirm("🔑 Aucun mot de passe maître défini.\n\nLes sauvegardes sont chiffrées avec le mot de passe du module 🔑 Mot de passe : crée-le d'abord.\n\nExporter quand même EN CLAIR (jeton GitHub et clés d'API lisibles) ?\nOK = en clair · Annuler = ne rien exporter."); } catch {}
+      return clear ? data : null;
+    }
+    let pw = null;
+    try { pw = prompt('🔑 Mot de passe maître du coffre\n\nIl chiffre tes sauvegardes. Demandé une seule fois sur cet appareil (puis à la restauration sur un autre).'); } catch {}
+    if (!pw) return null;
+    try { await mdpDecrypt(pw, vb); } catch { try { alert('Mot de passe maître incorrect — rien n\'a été sauvegardé.'); } catch {} return null; }
+    if (!(await backupKeyFromMaster(pw, vb)) || !(d = _backupDkRead())) { try { alert('⚠ Stockage plein : clé de sauvegarde non enregistrée.'); } catch {} return null; }
   }
-  let pw = null;
-  try { pw = prompt('🔒 Phrase de passe de la sauvegarde\n\nElle protège le fichier (clés d\'API, jeton GitHub, coffre…).\n⚠ Oubliée = sauvegarde définitivement illisible. Aucun moyen de la retrouver.\n\n(Annuler = proposer un export EN CLAIR.)'); } catch {}
-  if (!pw) {
-    // Saisie annulée : le chiffrement étant le défaut, un export en clair doit être un choix
-    // EXPLICITE — sinon un simple « Annuler » réflexe enverrait le trousseau en clair sur un
-    // cloud. Refus ⇒ null : rien n'est écrit nulle part (les appelants le gèrent déjà).
-    let clear = false;
-    try { clear = confirm("Exporter la sauvegarde EN CLAIR ?\n\nElle contiendra ton jeton GitHub et toutes tes clés d'API lisibles par quiconque ouvre le fichier.\n\nOK = en clair · Annuler = ne rien exporter."); } catch {}
-    return clear ? data : null;
-  }
-  let again = null;
-  try { again = prompt('Retape la même phrase de passe (une faute de frappe rendrait la sauvegarde illisible).'); } catch {}
-  if (again !== pw) { try { alert('Les deux saisies diffèrent — sauvegarde NON chiffrée, rien n\'a été enregistré de travers. Réessaie.'); } catch {} return null; }
-  const enc = await mdpEncrypt(pw, data);
-  return { app: data.app || 'spotifyplus', version: data.version, exported_at: data.exported_at, scope: data.scope, encrypted: true, enc };
+  const key = await _backupDkCrypto(d);
+  const iv  = crypto.getRandomValues(new Uint8Array(12));   // ⚠ TOUJOURS neuf (nonce GCM)
+  const ct  = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, _mdpTextEnc.encode(JSON.stringify(data)));
+  return wrap({ v: MDP_VAULT_V, salt: d.salt, iv: _mdpB64(iv), ct: _mdpB64(ct) });
 }
 // Ouvre une sauvegarde scellée. Une sauvegarde en clair passe sans rien demander, donc les
 // anciens fichiers restent restaurables sans condition.
 async function backupOpen(data) {
   if (!isSealedBackup(data)) return data;
-  // Clé mémorisée d'abord, sans rien demander ; un fichier scellé avec une AUTRE phrase de
-  // passe (ancienne sauvegarde, autre appareil) retombe sur la saisie.
-  const stored = backupKeyGet();
-  if (stored) { try { return await mdpDecrypt(stored, data.enc); } catch {} }
+  const enc = data.enc;
+  // Clé de CET appareil d'abord (même sel ⇒ même clé), puis l'ancienne clé de sauvegarde ;
+  // un fichier d'ailleurs retombe sur la saisie du mot de passe maître.
+  const d = _backupDkRead();
+  if (d && d.salt === enc.salt) {
+    try { const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv:_mdpUnb64(enc.iv) }, await _backupDkCrypto(d), _mdpUnb64(enc.ct)); return JSON.parse(_mdpTextDec.decode(pt)); } catch {}
+  }
+  const legacy = lsGet(BACKUP_KEY_LS);
+  if (legacy) { try { return await mdpDecrypt(legacy, enc); } catch {} }
   for (let tries = 0; tries < 3; tries++) {
     let pw = null;
-    try { pw = prompt(tries ? 'Phrase de passe incorrecte. Réessaie :' : '🔒 Cette sauvegarde est chiffrée.\n\nPhrase de passe :'); } catch {}
+    try { pw = prompt(tries ? 'Mot de passe incorrect. Réessaie :' : '🔒 Cette sauvegarde est chiffrée.\n\nMot de passe maître du coffre 🔑 (ou ancienne phrase de passe) :'); } catch {}
     if (!pw) throw new Error('Restauration annulée (sauvegarde chiffrée).');
-    try { return await mdpDecrypt(pw, data.enc); } catch {}
+    try { return await mdpDecrypt(pw, enc); } catch {}
   }
-  throw new Error('Phrase de passe incorrecte — la sauvegarde n\'a pas pu être déchiffrée.');
-}
-
-// Champ « 🔐 Clé de sauvegarde » (À propos → Paramétrage, en tête). Enregistrée seulement
-// au clic (jamais à la frappe : une clé à moitié tapée chiffrerait une sauvegarde).
-function BackupKeyField() {
-  const [saved, setSaved] = React.useState(() => !!backupKeyGet());
-  const [val, setVal]     = React.useState('');
-  const [show, setShow]   = React.useState(false);
-  const [msg, setMsg]     = React.useState('');
-  const col = '#4ea3f5';
-  const save = () => {
-    const k = val.trim();
-    if (k.length < BACKUP_KEY_MIN) { setMsg(`⚠ ${BACKUP_KEY_MIN} caractères minimum.`); return; }
-    if (saved && !confirm('Remplacer la clé de sauvegarde ?\n\nLes sauvegardes déjà faites restent chiffrées avec l\'ANCIENNE clé : garde-la pour pouvoir les restaurer.')) return;
-    if (!backupKeySet(k)) { setMsg('⚠ Stockage plein : clé non enregistrée.'); return; }
-    setSaved(true); setVal(''); setShow(false);
-    setMsg('✓ Clé enregistrée. Copie-la aussi dans ton coffre 🔑 : sans elle, tes sauvegardes sont illisibles.');
-  };
-  const clear = () => {
-    if (!confirm('Effacer la clé de sauvegarde de cet appareil ?\n\nLa phrase de passe te sera de nouveau demandée à chaque export. Les sauvegardes déjà faites restent chiffrées avec cette clé.')) return;
-    backupKeySet(''); setSaved(false); setMsg('Clé effacée de cet appareil.');
-  };
-  const inp = { flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, padding:'7px 9px', color:C.text, fontSize:12, fontFamily:'DM Mono,monospace', outline:'none' };
-  const btn = { background:`${col}18`, border:`1px solid ${col}55`, color:col, borderRadius:8, padding:'6px 10px', fontSize:11, fontWeight:700, cursor:'pointer', flexShrink:0 };
-  return (
-    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'2px 4px 10px', borderBottom:`1px solid ${C.border}`, marginBottom:2 }}>
-      <div style={{ fontSize:12, fontWeight:700, color:col }}>
-        🔐 Clé de sauvegarde {saved && <span style={{ fontSize:10, fontWeight:600, color:'#57c973' }}>· ✓ mémorisée sur cet appareil</span>}
-      </div>
-      <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-        <input type={show ? 'text' : 'password'} value={val} onChange={e => { setVal(e.target.value); setMsg(''); }}
-          onKeyDown={e => { if (e.key === 'Enter') save(); }}
-          placeholder={saved ? 'Nouvelle clé (remplace l’actuelle)' : `Clé de chiffrement (${BACKUP_KEY_MIN} caractères min.)`}
-          autoComplete="new-password" spellCheck={false} style={inp} />
-        <button onClick={() => setShow(v => !v)} title={show ? 'Masquer' : 'Afficher'} style={{ ...btn, padding:'6px 8px' }}>{show ? '🙈' : '👁'}</button>
-        <button onClick={save} disabled={!val.trim()} style={{ ...btn, opacity: val.trim() ? 1 : 0.5 }}>Enregistrer</button>
-        {saved && <button onClick={clear} title="Effacer la clé de cet appareil" style={{ ...btn, color:'#e05050', borderColor:'#e0505055', background:'#e0505012', padding:'6px 8px' }}>✕</button>}
-      </div>
-      <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>
-        Chiffre automatiquement tes sauvegardes (fichier, Dropbox, Drive, pCloud) sans rien te demander. Gardée sur cet appareil, jamais dans la sauvegarde — ⚠ copie-la dans ton coffre : elle sera demandée pour restaurer sur un autre appareil.
-      </div>
-      {msg && <div style={{ fontSize:10, color: msg.startsWith('⚠') ? '#e05050' : '#57c973', lineHeight:1.4 }}>{msg}</div>}
-    </div>
-  );
+  throw new Error('Mot de passe incorrect — la sauvegarde n\'a pas pu être déchiffrée.');
 }
 
 // Interrupteur « chiffrer la sauvegarde » (À propos → ↧ Exporter). Vaut pour les 4 sorties :
@@ -25293,7 +25283,7 @@ function BackupEncryptToggle() {
     // jeton GitHub et toutes les clés d'API lisibles par quiconque ouvre le fichier.
     if (!next && !confirm("🔓 Sauvegardes EN CLAIR ?\n\nChaque export (fichier, Dropbox, Drive, pCloud) contiendra ton jeton GitHub et toutes tes clés d'API, lisibles par quiconque accède au fichier.\n\nOK = en clair · Annuler = rester chiffré.")) return;
     if (next) {
-      const ok = confirm("🔒 Chiffrer les sauvegardes ?\n\nUne phrase de passe te sera demandée à CHAQUE export, et redemandée à chaque restauration.\n\n⚠ Elle n'est stockée nulle part : oubliée, la sauvegarde est définitivement illisible — exactement comme le coffre de mots de passe.\n\nCe que ça protège : ton jeton GitHub, tes clés d'IA, TMDB, YouTube, Riot, Google Custom Search — aujourd'hui écrits EN CLAIR dans le fichier, à côté du coffre qui, lui, est chiffré.");
+      const ok = confirm("🔒 Chiffrer les sauvegardes ?\n\nElles seront chiffrées avec le mot de passe maître du coffre 🔑, demandé à la restauration sur un autre appareil.\n\n⚠ Oublié, la sauvegarde est définitivement illisible — exactement comme le coffre.\n\nCe que ça protège : ton jeton GitHub, tes clés d'IA, TMDB, YouTube, Riot, Google Custom Search — aujourd'hui écrits EN CLAIR dans le fichier, à côté du coffre qui, lui, est chiffré.");
       if (!ok) return;
     }
     if (backupEncSet(next)) setOn(next);
@@ -25310,9 +25300,9 @@ function BackupEncryptToggle() {
         </div>
         <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5, marginTop:2 }}>
           {on
-            ? (backupKeyGet()
-                ? "Chiffrées automatiquement avec ta clé de sauvegarde (À propos → Paramétrage), sans rien demander. AES-GCM 256, PBKDF2 600k — la même mécanique que le coffre."
-                : "Phrase de passe demandée à chaque export et à chaque restauration (AES-GCM 256, PBKDF2 600k — la même mécanique que le coffre) — ou renseigne une clé de sauvegarde dans le Paramétrage. ⚠ Oubliée = fichier illisible.")
+            ? (backupKeyReady()
+                ? "Chiffrées automatiquement avec le mot de passe maître du coffre 🔑, sans rien demander. Pour restaurer ailleurs, tape ce mot de passe. AES-GCM 256, PBKDF2 600k."
+                : "Chiffrées avec le mot de passe maître du coffre 🔑 : il sera demandé une seule fois au prochain export (ou déverrouille le coffre). ⚠ Oublié = fichier illisible.")
             : "Le fichier contient EN CLAIR ton jeton GitHub et toutes tes clés d'API, et il part sur Dropbox / Drive / pCloud. Touche pour le chiffrer."}
         </div>
       </div>
@@ -25378,7 +25368,7 @@ function maybeWeeklyBackupPrompt() {
   (async () => {
     try {
       const sealed = await backupSeal(await buildBackupFull());
-      if (sealed === null) { retrySoon(); alert('💾 Sauvegarde hebdomadaire non envoyée (phrase de passe non saisie). Elle sera reproposée au prochain lancement.'); return; }
+      if (sealed === null) { retrySoon(); alert('💾 Sauvegarde hebdomadaire non envoyée (chiffrement annulé). Elle sera reproposée au prochain lancement.'); return; }
       await dropboxUpload(sealed);
       try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
       alert('✓ Sauvegarde envoyée sur Dropbox.');
@@ -26796,17 +26786,15 @@ function MapsPanel() {
 // ── ☁︎ Sauvegarde Dropbox au quota (demande utilisateur) ── Case à cocher du bouton
 // « Sauvegarder sur Dropbox » : chaque fois que le scraping s'arrête sur les 100 artistes
 // du quota, une sauvegarde complète part sur Dropbox. ⚠ Absent = désactivée, seule 'on'
-// l'active. ⚠ Le chiffrement reste la règle : si la sauvegarde est chiffrée (défaut), la
-// clé de sauvegarde mémorisée sert sans rien demander ; sans elle, la phrase de passe est
-// DEMANDÉE à ce moment-là — l'annuler
-// suit le chemin de `backupSeal` (export en clair seulement sur accord explicite, sinon rien).
+// l'active. ⚠ Le chiffrement reste la règle : sans clé dérivée du mot de passe maître
+// (`backupSeal(…, { auto:true })`), rien ne part — et rien n'est demandé.
 // Rend le message à journaliser, ou '' quand rien n'est tenté.
 const DBX_AUTO_QUOTA_LS = 'spotifyplus_dbx_auto_quota';
 async function dropboxAutoQuotaSave() {
   if (lsGet(DBX_AUTO_QUOTA_LS) !== 'on' || !dropboxConfigured() || !dropboxConnected()) return '';
   try {
-    const sealed = await backupSeal(await buildBackupFull());
-    if (sealed === null) return '☁︎ Sauvegarde Dropbox automatique annulée (phrase de passe non saisie).';
+    const sealed = await backupSeal(await buildBackupFull(), { auto:true });
+    if (sealed === null) return '☁︎ Sauvegarde Dropbox automatique non faite : déverrouille une fois le coffre 🔑 sur cet appareil.';
     await dropboxUpload(sealed);
     try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
     return '✓ Sauvegarde Dropbox automatique faite (quota de 100 artistes atteint).';
@@ -29235,8 +29223,6 @@ function VosEcoutesPanel() {
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
       {/* Ordre : Paramétrage → Autorisations → Lancement automatique → Limite data → Exporter → Sauvegardes cloud → Restaurations (JSON puis cloud) → quota → purge */}
       <StatsCollapse title="⚙️ PARAMÉTRAGE" color="#8ab4ff">
-        {/* 🔐 Clé de sauvegarde — à la place du texte d'explication des modules (demande utilisateur). */}
-        <BackupKeyField />
         {TOGGLE_MODULES.map(m => {
           const on   = moduleEnabled(moduleToggles, m.id);
           // « Afficher sur l'accueil » : coloré si activé ET souhaité, grisé sinon (module
@@ -48175,6 +48161,7 @@ function GestionMdpPanel() {
       saveVaultBlob(nb);
       try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}  // efface l'ancien clair migré
       const kh = await mdpVaultHandle(pw, nb);
+      backupKeyFromMaster(pw, nb).catch(() => {});   // clé des sauvegardes (voir backupSeal)
       masterRef.current = kh; _mdpSession = { unlocked:true, kh, entries:initial, tags:[] };
       setEntries(initial); setTags([]); setPhase('unlocked'); setPw(''); setPw2(''); mdpBumpActivity();
     } catch { setErr('Erreur de création du coffre'); }
@@ -48191,6 +48178,7 @@ function GestionMdpPanel() {
       let cur = blob;
       if ((blob.v || 1) < MDP_VAULT_V || Array.isArray(data)) { try { const nb = await mdpEncrypt(pw, vault); saveVaultBlob(nb); cur = nb; } catch {} }
       const kh = await mdpVaultHandle(pw, cur);
+      backupKeyFromMaster(pw, cur).catch(() => {});   // clé des sauvegardes (voir backupSeal)
       masterRef.current = kh; _mdpSession = { unlocked:true, kh, entries:vault.entries, tags:vault.tags };
       setEntries(vault.entries); setTags(vault.tags); setPhase('unlocked'); setPw(''); mdpBumpActivity();
       // Coffre lisible → croisement avec les dernières fuites de données (tâche To do).
@@ -48232,6 +48220,7 @@ function GestionMdpPanel() {
     if (!confirm('⚠ Réinitialiser le coffre ?\n\nLe mot de passe maître oublié rend les identifiants chiffrés IRRÉCUPÉRABLES : ils seront supprimés. (Une copie de secours du blob chiffré actuel est gardée dans spotifyplus_mdp_vault_prev, au cas où tu retrouverais le mot de passe.)\n\nTu pourras ensuite définir un nouveau mot de passe maître.')) return;
     try { const existing = loadVaultBlob(); if (existing) localStorage.setItem('spotifyplus_mdp_vault_prev', JSON.stringify(existing)); } catch {}
     try { localStorage.removeItem(MDP_VAULT_KEY); } catch {}
+    backupKeyForget();   // clé dérivée d'un mot de passe OUBLIÉ : plus rien ne doit en sortir
     try { localStorage.removeItem(MDP_LEGACY_KEY); } catch {}   // efface aussi un éventuel ancien stockage clair
     _mdpClearIdle();
     _mdpSession = { unlocked:false, kh:null, entries:null, tags:null };
@@ -53883,7 +53872,7 @@ const IA_ACTIONS = [
     label: () => '☁️ Sauvegarde Dropbox',
     run: async () => {
       const sealed = await backupSeal(await buildBackupFull());
-      if (sealed === null) throw new Error('Sauvegarde annulée (phrase de passe non saisie).');
+      if (sealed === null) throw new Error('Sauvegarde annulée (chiffrement annulé).');
       await dropboxUpload(sealed);
       try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
       return { msg:'Sauvegardé sur Dropbox.' };
@@ -53893,7 +53882,7 @@ const IA_ACTIONS = [
     label: () => '☁️ Sauvegarde Google Drive',
     run: async () => {
       const sealed = await backupSeal(await buildBackupFull());
-      if (sealed === null) throw new Error('Sauvegarde annulée (phrase de passe non saisie).');
+      if (sealed === null) throw new Error('Sauvegarde annulée (chiffrement annulé).');
       await gdriveUpload(sealed);
       try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
       return { msg:'Sauvegardé sur Google Drive.' };

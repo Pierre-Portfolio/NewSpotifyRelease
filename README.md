@@ -82,7 +82,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 ## Sauvegarde & données
 
 - Export / import JSON, complet ou par section ; **Dropbox, Google Drive, pCloud** en un bouton.
-- **Chiffrées par défaut** (phrase de passe, ou une **🔐 clé de sauvegarde** enregistrée dans À propos → Paramétrage). ⚠ Phrase oubliée = sauvegarde illisible.
+- **Chiffrées par défaut** avec le **mot de passe maître du coffre 🔑** (rien n'est demandé à l'export ; à la restauration sur un autre appareil, tape ce mot de passe). ⚠ Oublié = sauvegarde illisible.
 - La restauration **fusionne** : les compteurs au maximum (jamais doublés), et elle te prévient si le stockage est plein. Photos et caches ne sont pas embarqués.
 
 ---
