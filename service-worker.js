@@ -6,7 +6,7 @@
 //  · clé de cache NORMALISÉE './index.html', jamais l'URL de navigation (le retour OAuth
 //    `?code=…&state=…` écrivait le code d'autorisation dans Cache Storage) ;
 //  · CACHE bumpé à chaque déploiement, VENDOR seulement quand un fichier de vendor/ change.
-const CACHE  = 'spotifyplus-v682';          // app shell — bumpé à chaque déploiement
+const CACHE  = 'spotifyplus-v683';          // app shell — bumpé à chaque déploiement
 // ⚠ À bumper UNIQUEMENT quand un fichier de vendor/ change (mise à jour de sql.js, de
 // Leaflet, des mots de Motus). Le bumper à chaque commit annulerait tout le gain.
 const VENDOR = 'spotifyplus-vendor-v2';
@@ -61,7 +61,10 @@ self.addEventListener('activate', e => {
       //     suivante. Ce cache se purge lui-même (l'amorçage supprime les autres versions).
       //   · `VENDOR` — les fichiers immuables de vendor/ (1,9 Mo). C'est TOUT l'intérêt de
       //     l'avoir séparé : le purger ici le ferait retélécharger à chaque déploiement.
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== VENDOR && k !== 'spotifyplus-compiled').map(k => caches.delete(k))))
+      // ⚠ Seuls les caches `spotifyplus-*` sont purgés : `caches.keys()` couvre TOUTE l'origine
+      // pierre-portfolio.github.io, que partagent les autres dépôts GitHub Pages du compte —
+      // effacer « tout ce qui n'est pas à nous » détruisait les caches de leurs PWA.
+      .then(keys => Promise.all(keys.filter(k => k.startsWith('spotifyplus-') && k !== CACHE && k !== VENDOR && k !== 'spotifyplus-compiled').map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -161,18 +164,23 @@ self.addEventListener('fetch', e => {
       return cached;
     })());
   } else if (url.origin === location.origin && url.pathname.includes('/data/')) {
-    // data/*.json (Actu, indices, calendrier macro) : STALE-WHILE-REVALIDATE. On répond tout de suite avec la
-    // copie en cache s'il y en a une (Actu et Finance s'affichent hors ligne et sans attendre
-    // le réseau), et le téléchargement met le cache à jour pour la prochaine fois. Rangé dans
-    // CACHE (purgé à chaque déploiement, c'est sans importance : il se remplit au 1er usage).
-    // ⚠ `waitUntil` : la mise à jour doit aller à son terme même quand on a déjà répondu.
-    const net = fetch(e.request).then(res => {
-      if (!res.ok) return res;
-      const copy = res.clone();
-      return caches.open(CACHE).then(c => c.put(e.request, copy)).then(() => res, () => res);
-    });
-    e.waitUntil(net.catch(() => {}));
-    e.respondWith(caches.match(e.request).then(cached => cached || net));
+    // data/*.json (Actu, indices, calendrier macro) : RÉSEAU D'ABORD, repli sur la dernière
+    // copie en cache (Actu et Finance restent lisibles hors ligne). Rangé dans CACHE (purgé à
+    // chaque déploiement, sans importance : il se remplit au 1er usage).
+    // ⚠ Clé = le chemin SANS la query : l'app demande `actu.json?_=<horodatage>`, chaque
+    // appel était une URL neuve — aucune copie n'était jamais retrouvée (ni repli hors ligne)
+    // et chaque ouverture ajoutait ~140 Ko au cache jusqu'au déploiement suivant.
+    // ⚠ Réseau d'abord et non l'inverse : l'app lit ces fichiers en `no-store` parce qu'elle
+    // veut le DERNIER relevé commité ; servir la copie de la visite précédente le retarderait.
+    const key = new Request(url.origin + url.pathname);
+    e.respondWith(fetch(e.request).then(res => {
+      if (res.ok) {
+        const copy = res.clone();
+        e.waitUntil(caches.open(CACHE).then(c => c.put(key, copy)).catch(() => {}));
+        return res;
+      }
+      return caches.match(key).then(cached => cached || res);
+    }, err => caches.match(key).then(cached => { if (cached) return cached; throw err; })));
   } else if (url.origin === location.origin) {
     // Ressources locales (vendor/, icônes) : cache-first, tous caches confondus —
     // `caches.match` sans option balaie aussi bien CACHE que VENDOR.

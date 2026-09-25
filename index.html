@@ -226,7 +226,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.36';
+const APP_VERSION = '13.21.37';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3035,6 +3035,10 @@ const FIRST_SCRAPE_MAX_PAGES = 20;
 // l'année seule passait alors SOUS le cutoff (ex. 2026-03-15) et était ratée. On considère
 // la date comme une PÉRIODE [début, fin] et on garde la sortie si cette période CHEVAUCHE
 // [cutoff, ceiling] — les doublons éventuels sont absorbés par INSERT OR IGNORE.
+// Pistes d'un album au-delà de la 1re page de 50 (deluxe, compilations) : pages lues en plus.
+const ALBUM_TRACK_PAGES_MAX = 4;
+// Un « single » Spotify d'au moins 4 titres est un EP (définition Spotify : 4 à 6 titres).
+const EP_MIN_TRACKS = 4;
 function releaseInRange(dateStr, cutoff, ceiling) {
   if (!dateStr) return false;
   const p = String(dateStr).split('-');
@@ -4344,7 +4348,19 @@ function StoreProvider({ children }) {
               albItems.push(...page.items);
               albumsData = { items: albItems, next: page.next || null };
               if (albumPages === 1) writeLightRow();
-              if (!firstScrape) break;   // scan incrémental : une seule page, comme avant
+              if (!firstScrape) {
+                // ⚠ Avec `include_groups=album,single`, Spotify range les résultats PAR GROUPE
+                // (tous les albums du plus récent au plus ancien, PUIS les singles) : chez un
+                // artiste d'au moins 10 albums, la page 1 ne contient aucun single et un single
+                // sorti hier n'était jamais lu. Page pleine d'albums + suite ⇒ UNE requête de
+                // plus sur le seul groupe `single` (une unité de quota de plus, comptée plus bas).
+                if (page.next && !page.items.some(a => (a.album_group || a.album_type) === 'single')) {
+                  const sp = await apiGetSafe(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=single&limit=10&market=FR`);
+                  albumPages++;
+                  if (sp?.items) albItems.push(...sp.items.filter(a => !albItems.some(b => b.id === a.id)));
+                }
+                break;                   // scan incrémental : une seule page (par groupe)
+              }
               albUrl = page.next || null;
               if (albUrl && albumPages >= FIRST_SCRAPE_MAX_PAGES) { albumsCut = true; albUrl = null; }
             }
@@ -4389,19 +4405,33 @@ function StoreProvider({ children }) {
 
               const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
               if (!tracksData?.items?.length) continue;
+              // 50 = plafond de l'endpoint : une édition deluxe / une compilation plus longue
+              // perdait tout ce qui suit la 50e piste. `next` déroulé (plafonné, hors quota
+              // artistes comme la 1re page de pistes).
+              for (let tp = 0, nx = tracksData.next; nx && tp < ALBUM_TRACK_PAGES_MAX; tp++) {
+                const more = await apiGetSafe(nx);
+                if (!more?.items?.length) break;
+                tracksData.items.push(...more.items);
+                nx = more.next || null;
+              }
+              // EP : Spotify le classe `single` (4 à 6 titres). Le réduire à sa 1re piste comme un
+              // vrai single (titre + versions instrumentale/radio) en perdait 3 à 5 titres : à
+              // partir de EP_MIN_TRACKS il est traité comme un album (release_type 'ep').
+              const isSingle = album.album_type === 'single' && tracksData.items.length < EP_MIN_TRACKS;
+              const relType  = album.album_type === 'single' ? (isSingle ? 'single' : 'ep') : album.album_type;
               const uris = tracksData.items.map(t => t.uri);
               // Ne traiter que les pistes NOUVELLES : ni déjà en base, ni purgées (seenUris
               // inclut purged_uris via knownUris). Un titre écouté puis purgé ne réapparaît
               // donc plus au re-scan, et un album dont la piste 1 est sortie en single avant
               // n'est pas sauté en entier (ses autres pistes restent nouvelles).
-              const newTracks = (album.album_type === 'single' ? tracksData.items.slice(0, 1) : tracksData.items)
+              const newTracks = (isSingle ? tracksData.items.slice(0, 1) : tracksData.items)
                 .filter(t => !seenUris.has(t.uri));
               if (newTracks.length === 0) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
 
               // Sauvegarder en DB locale — images[1] = 300px (images[0] = 640px, inutile
               // pour des vignettes de 38-80px : ~-75% de bande passante sur un feed de 1000)
               const coverUrl = album.images?.[1]?.url || album.images?.[0]?.url || null;
-              if (album.album_type === 'single') {
+              if (isSingle) {
                 try {
                   dbRun(
                     "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4413,7 +4443,7 @@ function StoreProvider({ children }) {
                   try {
                     dbRun(
                       "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      [t.uri, artist.name, t.name, album.name, album.album_type, album.release_date || null, coverUrl, t.duration_ms || null]
+                      [t.uri, artist.name, t.name, album.name, relType, album.release_date || null, coverUrl, t.duration_ms || null]
                     );
                   } catch {}
                 }
@@ -4428,7 +4458,7 @@ function StoreProvider({ children }) {
               setStats(s => ({ ...s, releases: totalReleases, tracks: totalTracks }));
 
               const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
-              if (album.album_type === 'single') {
+              if (isSingle) {
                 artistFeedItems.push({
                   id:          newTracks[0].uri,
                   spotifyUri:  newTracks[0].uri,
@@ -5050,9 +5080,19 @@ function SeekBar({ now }) {
   const [hover,    setHover]    = React.useState(false);
   const [dragging, setDragging] = React.useState(false);
   const [localPct, setLocalPct] = React.useState(null);
+  // ⚠ Le geste pose ses écouteurs sur `window` : si la barre disparaît en plein glissement
+  // (titre fini, lecteur replié), ils survivaient et `getPct` lisait `barRef.current` nul.
+  // `detachRef` les retire au démontage ; `nowRef` donne la durée du titre AU RELÂCHEMENT
+  // (celle du début du geste positionnait le titre suivant avec la durée du précédent).
+  const detachRef = React.useRef(null);
+  const nowRef    = React.useRef(now);
+  nowRef.current  = now;
+  React.useEffect(() => () => { if (detachRef.current) detachRef.current(); }, []);
 
   const getPct = (clientX) => {
-    const r = barRef.current.getBoundingClientRect();
+    const el = barRef.current;
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
     return Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100));
   };
 
@@ -5064,13 +5104,20 @@ function SeekBar({ now }) {
     e.preventDefault();
     startDrag(e.clientX);
     const onMove = (ev) => setLocalPct(getPct(ev.clientX));
-    const onUp   = (ev) => {
-      const p = getPct(ev.clientX);
-      setDragging(false); setLocalPct(null);
-      seek((p / 100) * now.duration * 1000);
+    const detach = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup',   onUp);
+      detachRef.current = null;
     };
+    const onUp   = (ev) => {
+      const p = getPct(ev.clientX);
+      detach();
+      setDragging(false); setLocalPct(null);
+      const d = nowRef.current && nowRef.current.duration;
+      if (d) seek((p / 100) * d * 1000);
+    };
+    if (detachRef.current) detachRef.current();
+    detachRef.current = detach;
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup',   onUp);
   };
@@ -5078,13 +5125,20 @@ function SeekBar({ now }) {
     e.preventDefault();
     startDrag(e.touches[0].clientX);
     const onMove = (ev) => setLocalPct(getPct(ev.touches[0].clientX));
-    const onEnd  = (ev) => {
-      const p = getPct(ev.changedTouches[0].clientX);
-      setDragging(false); setLocalPct(null);
-      seek((p / 100) * now.duration * 1000);
+    const detach = () => {
       window.removeEventListener('touchmove', onMove);
       window.removeEventListener('touchend',  onEnd);
+      detachRef.current = null;
     };
+    const onEnd  = (ev) => {
+      const p = getPct(ev.changedTouches[0].clientX);
+      detach();
+      setDragging(false); setLocalPct(null);
+      const d = nowRef.current && nowRef.current.duration;
+      if (d) seek((p / 100) * d * 1000);
+    };
+    if (detachRef.current) detachRef.current();
+    detachRef.current = detach;
     window.addEventListener('touchmove', onMove, { passive:false });
     window.addEventListener('touchend',  onEnd);
   };
@@ -7157,9 +7211,29 @@ function vendorHeal(src, force) {
   return true;
 }
 const _vendorP = {};
+// ⚠ Déploiement pendant que la page est ouverte : `skipWaiting()` fait prendre la main au
+// NOUVEAU worker, qui sert alors doodle.js / sport-data.js / dobble-art.js de la NOUVELLE
+// version à une page restée sur l'ancienne (les deux partagent des globales). On ne le
+// soupçonne que si un worker contrôlait DÉJÀ la page (sinon c'est la 1re installation), et
+// on ne le conclut qu'en lisant l'APP_VERSION de l'app shell que ce worker a mis en cache.
+let _vendorStale = false;
+try {
+  if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      caches.match('./index.html').then(r => r && r.text()).then(t => {
+        const m = t && /APP_VERSION\s*=\s*'([^']+)'/.exec(t);
+        if (m && m[1] !== APP_VERSION) _vendorStale = true;
+      }).catch(() => {});
+    });
+  }
+} catch {}
 function loadVendorScript(src, ready) {
   if (ready()) return Promise.resolve();
   if (_vendorP[src]) return _vendorP[src];
+  if (_vendorStale && confirm('Une nouvelle version du Hub a été installée pendant que cette page était ouverte.\n\nRecharger maintenant ? (sinon ce module pourrait ne pas fonctionner)')) {
+    location.reload();
+    return new Promise(() => {});
+  }
   _vendorP[src] = new Promise((res, rej) => {
     const s = document.createElement('script');
     s.src = src;
@@ -52267,7 +52341,10 @@ function DeltaPanel() {
 // ════════════════════════════════════════════════
 const MUSIQUE_COLOR = '#45c552';   // vert de l'arc-en-ciel (entre Mot de Passe et To Do)
 function MusiquePanel() {
-  const { likedTracks, history, artists, feed } = useStore();
+  const { likedTracks, history, artists, feed, listenStats } = useStore();
+  // Le feed en mémoire est plafonné à 1 000 (LIMIT de loadFeedFromDB) : au-delà, le compteur
+  // du collapse annonçait 1 000 au lieu du vrai reste, compté en SQL (`rem_count`).
+  const waiting = feed.length < 1000 ? feed.length : Math.max(feed.length, (listenStats && listenStats.remaining) || 0);
   // `compact` = variantes mobiles des panneaux de scraping (mêmes composants, densité
   // différente) — MusiquePanel est rendu par WebApp ET par MobileApp.
   const isMobile = useIsMobile();
@@ -52292,7 +52369,7 @@ function MusiquePanel() {
           <LogsPanel compact={isMobile} />
         </div>
       </StatsCollapse>
-      <StatsCollapse defaultOpen={false} color={C.accent} title={<span>⏳ EN ATTENTE {cnt(feed.length)}</span>}>
+      <StatsCollapse defaultOpen={false} color={C.accent} title={<span>⏳ EN ATTENTE {cnt(waiting)}</span>}>
         <FeedList isMobile={isMobile} />
       </StatsCollapse>
       <StatsCollapse defaultOpen={false} color="#e05050" title={<span>❤ LIKÉS {cnt(likedTracks.length)}</span>}>
