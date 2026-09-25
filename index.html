@@ -226,7 +226,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.35';
+const APP_VERSION = '13.21.36';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -15800,7 +15800,7 @@ function vetMatch(it, f) {
   if (f.ids && f.ids.indexOf(it.id) < 0) return false;
   const q = String(f.q || '').trim().toLowerCase();
   if (q) {
-    const hay = [it.name, it.marque, it.couleur, it.tissu, it.taille, it.prix, it.etat, it.lieu, vetTypeLabel(it.type), it.corporate ? 'corporate chic' : '']
+    const hay = [it.name, it.marque, it.couleur, it.tissu, it.taille, it.coupe, it.ressenti, it.prix, it.etat, it.lieu, vetTypeLabel(it.type), it.corporate ? 'corporate chic' : '']
       .map(v => String(v == null ? '' : v).toLowerCase()).join(' ');
     if (!hay.includes(q)) return false;
   }
@@ -15925,12 +15925,185 @@ function vetLoad() {
         const want = Math.max(+counts[t] || 0, have);
         for (let k = have; k < want; k++) items.push(vetBlankItem(t));
       });
-      return { counts: vetCounts(items), items, brands };
+      const tailles = d.tailles && typeof d.tailles === 'object' ? d.tailles : {};   // 📏 Mes tailles actuelles
+      return { counts: vetCounts(items), items, brands, tailles };
     }
   } catch {}
-  return { counts: {}, items: [], brands: [] };
+  return { counts: {}, items: [], brands: [], tailles: {} };
 }
 function vetSave(d) { lsSet(VET_LS, JSON.stringify(d)); }
+// ── COUPE et RESSENTI PORTÉ d'un vêtement (demande utilisateur) ── sous TAILLE dans la fiche.
+// ⚠ Même contrat que VET_TISSUS : le NOM est persisté tel quel (`it.coupe`, `it.ressenti`),
+// ne jamais en RENOMMER un ; un ajout est sans effet sur l'existant. Absent = non renseigné.
+// Ordre : du plus près du corps au plus ample, puis les coupes propres aux bas, puis Stretch
+// (une MATIÈRE qui change le tombé plus qu'une coupe, mais demandée dans la même liste).
+// 3e élément = poids de la fiche dans le calcul des tailles moyennes (`vetTailleAvg`) : une
+// coupe volontairement ample (oversize, baggy…) porte une étiquette qui dit mal la taille réelle.
+const VET_COUPES = [
+  ['Skinny', '🦵', 1], ['Extra slim', '📏', 1], ['Slim fit', '📐', 1], ['Muscle fit', '💪', 1], ['Athletic fit', '🏃', 1],
+  ['Ajusté / Tailored', '✂️', 1], ['Regular fit', '👕', 1], ['Classic fit', '🎩', 1], ['Droit / Straight', '⬇️', 1],
+  ['Fuselé / Tapered', '🔻', 1], ['Carotte', '🥕', 0.8], ['Bootcut', '👢', 1], ['Évasé / Flare', '🔔', 0.8],
+  ['Relaxed fit', '😌', 0.8], ['Comfort fit', '🛋️', 0.8], ['Loose fit', '🌬️', 0.6], ['Large / Wide leg', '↔️', 0.6],
+  ['Baggy', '🛹', 0.5], ['Oversize', '🧸', 0.5], ['Boxy', '📦', 0.6], ['Cropped / Court', '✂️', 0.8],
+  ['Stretch', '🧬', 0.7], ['Slim stretch', '🧬', 0.7],
+];
+const vetCoupe = c => VET_COUPES.find(x => x[0] === c) || null;
+// `[nom, couleur, décalage]` — le décalage dit dans quel sens corriger la taille de l'étiquette :
+// un vêtement SERRÉ dit que ma vraie taille est au-dessus, un TROP LARGE qu'elle est en dessous.
+const VET_RESSENTIS = [['Confort', '#4caf50', 0], ['Serré', '#e8873a', 1], ['Trop large', '#6f8fd8', -1]];
+const vetRessenti = r => VET_RESSENTIS.find(x => x[0] === r) || null;
+
+// ── 📏 MES TAILLES (demande utilisateur) ── Six postes, chacun nourri par des TYPES de VET_TYPES.
+// ⚠ La clé est persistée (`data.tailles[clé]`, dans VET_LS donc dans la sauvegarde) : ne pas
+// la renommer. `step` = écart entre deux tailles NUMÉRIQUES voisines du poste (pointure au
+// demi, pantalon FR de 2 en 2, chaussettes par tranches de 4…), `round` = pas d'arrondi affiché.
+const VET_TAILLE_POSTES = [
+  { key:'tete',      icon:'🧢', label:'Tête',       types:['bob','bonnet','casquette'],                        step:1,   round:1,   ph:'ex. M, 57, 58 cm' },
+  { key:'chemise',   icon:'👔', label:'Chemise',    types:['chemise','polo','tshirt','pull','sweat'],          step:1,   round:1,   ph:'ex. M, 40, 41' },
+  { key:'pantalon',  icon:'👖', label:'Pantalon',   types:['pantalon','cargo','jean','jogging','pantalonimper','short','shortsport','shortplage'], step:2, round:2, ph:'ex. 42, W32 L34, M' },
+  { key:'calecon',   icon:'🩲', label:'Caleçon',    types:['sousvet'],                                         step:1,   round:1,   ph:'ex. M, L' },
+  { key:'chaussette',icon:'🧦', label:'Chaussette', types:['chaussettes'],                                     step:4,   round:1,   ph:'ex. 39-42, 43-46' },
+  { key:'chaussure', icon:'👟', label:'Chaussure',  types:['chaussures'],                                      step:0.5, round:0.5, ph:'ex. 42, 42,5' },
+];
+// Échelle des tailles en LETTRES (index = rang). 2XL/3XL… sont des alias de XXL/XXXL.
+const VET_LETTRES = ['XXXS', 'XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', '4XL', '5XL'];
+const VET_LETTRE_ALIAS = { '2XL':'XXL', '3XL':'XXXL', 'XXXXL':'4XL', 'XXXXXL':'5XL' };
+// Taille saisie (texte libre) → `{ kind:'let'|'W'|'num', v }` ou null (illisible, « TU »…).
+// ⚠ Pur et tolérant : « M », « t. 42 », « 42,5 », « 39-42 » (→ milieu 40,5), « W32 L34 » (→ W32).
+function vetTailleParse(s) {
+  const t = String(s || '').toUpperCase().replace(',', '.').trim();
+  if (!t) return null;
+  const lm = /(?:^|[^A-Z0-9])((?:[2-5]|X{0,5})XL|XXX?S|XS|S|M|L)(?![A-Z0-9])/.exec(' ' + t);
+  if (lm) {
+    const k = VET_LETTRE_ALIAS[lm[1]] || lm[1];
+    const i = VET_LETTRES.indexOf(k);
+    if (i >= 0) return { kind:'let', v:i };
+  }
+  const w = /W\s*(\d{2})/.exec(t);
+  if (w) return { kind:'W', v:+w[1] };
+  const r = /(\d{2,}(?:\.\d+)?)\s*[-/À]\s*(\d{2,}(?:\.\d+)?)/.exec(t);   // « 42 1/2 » n'est pas une tranche
+  if (r) return { kind:'num', v:(+r[1] + +r[2]) / 2 };
+  const n = /(\d+(?:\.\d+)?)/.exec(t);
+  return n ? { kind:'num', v:+n[1] } : null;
+}
+const vetTailleFmt = (kind, v, post) => {
+  if (kind === 'let') return VET_LETTRES[Math.max(0, Math.min(VET_LETTRES.length - 1, Math.round(v)))];
+  const r = kind === 'num' ? (post.round || 1) : 1;   // le pas de 2 du pantalon FR ne vaut pas pour un W
+  const x = Math.round(v / r) * r;
+  const s = x.toLocaleString('fr-FR', { maximumFractionDigits: 1 });
+  return kind === 'W' ? 'W' + s : s;
+};
+// ── Taille MOYENNE d'un poste — le « calcul savant » ──
+// 1. Chaque fiche du poste donne une taille lue par `vetTailleParse`.
+// 2. Elle est CORRIGÉE par le ressenti porté : Serré ⇒ un cran au-dessus, Trop large ⇒ un
+//    cran en dessous (le cran = 1 lettre, 1 W, ou `step` du poste en numérique).
+// 3. Elle est PONDÉRÉE : ressenti Confort 1 · corrigé 0,6 (on devine le cran) · inconnu 0,8 ;
+//    × le poids de la coupe (`VET_COUPES`, oversize 0,5…) ; × 0,5 si la fiche est marquée à
+//    vendre/donner/jeter (souvent parce qu'elle tombe mal) ; × 0,7 si « Neuf scellé » (jamais porté).
+// 4. Les fiches sont réparties par ÉCHELLE (lettres / W / numérique) : l'échelle qui pèse le
+//    plus donne le résultat, une seconde échelle pesant ≥ 25 % est citée à côté. Jamais de
+//    conversion lettres ⇄ chiffres (elles dépendent de la marque, on inventerait).
+// 5. Moyenne pondérée, puis on retire les fiches à plus de 2 crans de cette moyenne (une
+//    taille mal saisie ou un vêtement d'un autre) et on recalcule — `out` les compte.
+// Rend `{ main:{kind,v,txt}, alt, n, used, out, spread }` ou null si aucune taille lisible.
+function vetTailleAvg(items, post) {
+  const rows = [];
+  (items || []).forEach(it => {
+    if (!it || post.types.indexOf(it.type) < 0) return;
+    const p = vetTailleParse(it.taille); if (!p) return;
+    const cran = p.kind === 'num' ? post.step : 1;
+    const res = vetRessenti(it.ressenti);
+    const v = p.v + (res ? res[2] * cran : 0);
+    let w = res ? (res[2] ? 0.6 : 1) : 0.8;
+    const cp = vetCoupe(it.coupe); if (cp) w *= cp[2];
+    if (it.destin) w *= 0.5;
+    if (it.etat === 'Neuf scellé') w *= 0.7;
+    rows.push({ kind:p.kind, v, w, cran });
+  });
+  if (!rows.length) return null;
+  const byKind = {};
+  rows.forEach(r => { (byKind[r.kind] = byKind[r.kind] || []).push(r); });
+  const mean = arr => { const W = arr.reduce((s, r) => s + r.w, 0); return W ? arr.reduce((s, r) => s + r.v * r.w, 0) / W : null; };
+  const calc = arr => {
+    const m0 = mean(arr);
+    const kept = arr.filter(r => Math.abs(r.v - m0) <= 2 * r.cran);
+    const use = kept.length ? kept : arr;
+    const m = mean(use);
+    const W = use.reduce((s, r) => s + r.w, 0);
+    const sd = Math.sqrt(use.reduce((s, r) => s + r.w * (r.v - m) * (r.v - m), 0) / (W || 1));
+    return { kind: arr[0].kind, v: m, w: W, used: use.length, out: arr.length - use.length, spread: sd / (arr[0].cran || 1) };
+  };
+  const res = Object.keys(byKind).map(k => calc(byKind[k])).sort((a, b) => b.w - a.w);
+  const tot = res.reduce((s, r) => s + r.w, 0);
+  const main = res[0];
+  const alt = res[1] && res[1].w >= 0.25 * tot ? res[1] : null;
+  return {
+    main: { ...main, txt: vetTailleFmt(main.kind, main.v, post) },
+    alt: alt ? { ...alt, txt: vetTailleFmt(alt.kind, alt.v, post) } : null,
+    n: rows.length, used: main.used + (alt ? alt.used : 0), out: main.out + (alt ? alt.out : 0), spread: main.spread,
+  };
+}
+// Fiabilité lisible du résultat : nombre de fiches ET dispersion (en crans).
+const vetTailleFiab = a => !a ? '' : a.used >= 3 && a.spread <= 0.5 ? 'fiable' : a.used >= 2 && a.spread <= 1 ? 'correcte' : 'indicative';
+
+// ── 🤖 TAILLES PENSÉES PAR L'IA ── Résultat gardé sur l'appareil (re-générable ⇒ hors sauvegarde).
+const VET_TAILLES_IA_LS = 'spotifyplus_vetement_tailles_ia';
+const vetTaillesIaLoad = () => { try { return JSON.parse(lsGet(VET_TAILLES_IA_LS)) || null; } catch { return null; } };
+// Ce qui part à l'IA : dernière pesée, taille (cm) du profil Santé, la préférence « près du
+// corps », mes tailles saisies, les moyennes calculées et TOUTES les fiches, champ par champ
+// — SANS photo ni id (rien d'utile à l'IA, et la photo ne quitte jamais Drive).
+function vetTaillesIaPrompt(items, tailles) {
+  const w = (typeof loadWeights === 'function' ? loadWeights() : []).filter(x => x && x.poids != null);
+  const last = w.length ? w[w.length - 1] : null;
+  const prof = typeof loadFoodProfile === 'function' ? loadFoodProfile() : null;
+  const L = [
+    "Tu es un styliste et expert des guides de tailles homme. Déduis les tailles qui m'iront le mieux.",
+    "",
+    "MOI :",
+    last ? `- Dernière pesée (${last.date || '?'}) : ${last.poids} kg`
+      + (last.graisse != null ? `, graisse ${last.graisse} %` : '') + (last.muscle != null ? `, muscle ${last.muscle} kg` : '')
+      : '- Dernière pesée : inconnue',
+    prof && prof.height ? `- Taille : ${prof.height} cm` : '- Taille : inconnue',
+    prof && prof.age ? `- Âge : ${prof.age} ans` : null,
+    prof && prof.sex ? `- Sexe : ${prof.sex === 'f' ? 'femme' : 'homme'}` : null,
+    "- Préférence : en général j'aime que les vêtements COLLENT AU CORPS (coupe près du corps, ajustée).",
+    "",
+    "MES TAILLES SAISIES À LA MAIN :",
+    ...VET_TAILLE_POSTES.map(p => `- ${p.label} : ${(tailles && tailles[p.key]) || 'non renseignée'}`),
+    "",
+    "MES TAILLES MOYENNES CALCULÉES SUR MA GARDE-ROBE :",
+    ...VET_TAILLE_POSTES.map(p => { const a = vetTailleAvg(items, p); return `- ${p.label} : ${a ? a.main.txt + (a.alt ? ' (aussi ' + a.alt.txt + ')' : '') + ` sur ${a.n} vêtement(s)` : 'aucune donnée'}`; }),
+    "",
+    "MA GARDE-ROBE (un vêtement par ligne) :",
+    ...(items || []).map(it => '- ' + [
+      vetTypeLabel(it.type), it.name && `« ${it.name} »`, it.marque && 'marque ' + it.marque, it.couleur, it.tissu,
+      it.taille && 'taille ' + it.taille, it.coupe && 'coupe ' + it.coupe, it.ressenti && 'ressenti porté : ' + it.ressenti,
+      it.etat, it.prix && 'prix ' + it.prix + ' €', it.lieu, it.corporate && 'corporate', it.destin && 'à ' + it.destin,
+    ].filter(Boolean).join(' | ')),
+    "",
+    "Rends UNIQUEMENT du JSON :",
+    '{"tailles":{' + VET_TAILLE_POSTES.map(p => `"${p.key}":{"taille":"...","note":"une phrase"}`).join(',') + '},',
+    '"resume":"2-3 phrases : ce que tu retiens de ma morphologie et de mes vêtements"}',
+    "",
+    "Règles : pour chaque poste donne la taille à ACHETER (lettres et/ou chiffres FR/EU, pointure pour les chaussures,",
+    "tour de tête en cm ou lettre pour la tête). Tiens compte du ressenti porté (Serré / Trop large) et de ma préférence",
+    "près du corps. N'invente pas de mesure absente ; si une donnée manque, dis-le dans la note. Réponds en français.",
+  ];
+  return L.filter(x => x != null).join('\n');
+}
+async function vetTaillesIaRun(items, tailles) {
+  const raw = await aiGenerate('vetement', [{ text: vetTaillesIaPrompt(items, tailles) }]);
+  const j = geminiExtract(raw, '{', '}');
+  if (!j || typeof j !== 'object') throw new Error("Réponse de l'IA illisible.");
+  const t = {};
+  VET_TAILLE_POSTES.forEach(p => {
+    const x = j.tailles && j.tailles[p.key];
+    t[p.key] = x && typeof x === 'object' ? { taille: String(x.taille || '').trim(), note: String(x.note || '').trim() } : { taille: String(x || '').trim(), note: '' };
+  });
+  const out = { at: Date.now(), tailles: t, resume: String(j.resume || '').trim(), ai: typeof aiLastProvider === 'function' ? aiLastProvider() : '' };
+  lsSet(VET_TAILLES_IA_LS, JSON.stringify(out));
+  return out;
+}
 // Photo → Blob (envoyé tel quel à Drive, PLUS JAMAIS de data URL en localStorage) :
 // contain dans 640 px (ratio préservé, pas de recadrage), WebP 0.8 → repli JPEG 0.85.
 // ⚠ Safari encode en PNG quand on lui demande du WebP : on vérifie le type réel du Blob.
@@ -16277,6 +16450,76 @@ function VetPhotoPick({ onFile, disabled, busy, compact, color, hasPhoto }) {
       {one(true,  '📷', hasPhoto ? 'Reprendre une photo' : 'Prendre une photo', 'Ouvrir l\'appareil photo')}
       {one(false, '🖼️', hasPhoto ? 'Choisir dans la galerie' : 'Galerie',        'Choisir une image dans la galerie')}
     </span>
+  );
+}
+// ── 📏 MES TAILLES (demande utilisateur) ── Collapse au-dessus de « Mes vêtements », avec trois
+// sous-collapses : ✍️ actuelles (saisies à la main, persistées dans VET_LS → sauvegarde),
+// 📊 moyennes (RECALCULÉES à chaque rendu depuis les fiches, rien n'est stocké) et 🤖 pensées
+// par l'IA (sur bouton seulement, jamais automatique ; résultat gardé sur l'appareil).
+function VetTaillesSection({ items, tailles, onTailles }) {
+  const [ia, setIa]     = React.useState(vetTaillesIaLoad);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr]   = React.useState('');
+  const avgs = React.useMemo(() => VET_TAILLE_POSTES.map(p => [p, vetTailleAvg(items, p)]), [items]);
+  const nAvg = avgs.filter(([, a]) => a).length;
+  const nMine = VET_TAILLE_POSTES.filter(p => String(tailles[p.key] || '').trim()).length;
+  const inputS = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', colorScheme:'dark', width:'100%', minWidth:0 };
+  const row = (p, right) => (
+    <div key={p.key} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 0', borderBottom:`1px solid ${C.border}55` }}>
+      <span style={{ width:104, flexShrink:0, fontSize:11.5, fontWeight:700, color:C.muted }}>{p.icon} {p.label}</span>
+      <div style={{ flex:1, minWidth:0 }}>{right}</div>
+    </div>
+  );
+  const run = async () => {
+    if (!aiAnyKey(false)) { setErr("Aucune clé IA : renseigne-en une dans le module API."); return; }
+    setBusy(true); setErr('');
+    try { setIa(await vetTaillesIaRun(items, tailles)); }
+    catch (e) { setErr('✗ ' + (e && e.message ? e.message : 'Erreur IA')); }
+    finally { setBusy(false); }
+  };
+  return (
+    <StatsCollapse title="📏 MES TAILLES" color={VETEMENT_COLOR} defaultOpen={false}>
+      <StatsCollapse title={`✍️ MES TAILLES ACTUELLES${nMine ? ' · ' + nMine + '/' + VET_TAILLE_POSTES.length : ''}`} color={VETEMENT_COLOR} defaultOpen={true}>
+        {VET_TAILLE_POSTES.map(p => row(p,
+          <input type="text" value={tailles[p.key] || ''} placeholder={p.ph}
+            onChange={e => onTailles({ ...tailles, [p.key]: e.target.value })} style={inputS} />))}
+      </StatsCollapse>
+      <StatsCollapse title={`📊 MES TAILLES MOYENNES${nAvg ? ' · ' + nAvg + '/' + VET_TAILLE_POSTES.length : ''}`} color={VETEMENT_COLOR} defaultOpen={false}>
+        <div style={{ fontSize:10.5, color:C.dim, lineHeight:1.5, marginBottom:4 }}>
+          Calculées sur la taille de tes fiches, corrigées d'un cran par le <b>ressenti porté</b> (serré ⇒ au-dessus, trop large ⇒ en dessous)
+          et pondérées par la <b>coupe</b> (oversize, baggy comptent moins), les vêtements marqués à vendre / donner / jeter et le neuf jamais porté.
+          Les tailles aberrantes (à plus de 2 crans) sont écartées.
+        </div>
+        {avgs.map(([p, a]) => row(p, a
+          ? <span style={{ fontSize:12, color:C.text }}>
+              <b style={{ color:VETEMENT_COLOR, fontSize:13 }}>{a.main.txt}</b>
+              {a.alt && <span style={{ color:C.muted }}> · aussi <b>{a.alt.txt}</b></span>}
+              <span style={{ fontSize:10, color:C.dim }}> — {a.n} vêtement{a.n > 1 ? 's' : ''}{a.out ? `, ${a.out} écarté${a.out > 1 ? 's' : ''}` : ''} · {vetTailleFiab(a)}</span>
+            </span>
+          : <span style={{ fontSize:10.5, color:C.dim }}>aucune taille lisible dans tes fiches</span>))}
+      </StatsCollapse>
+      <StatsCollapse title="🤖 TAILLES PENSÉES PAR L'IA" color={VETEMENT_COLOR} defaultOpen={false}>
+        <div style={{ fontSize:10.5, color:C.dim, lineHeight:1.5, marginBottom:6 }}>
+          Envoie à l'IA ta dernière pesée, ta taille (profil Santé), ta préférence pour les vêtements <b>près du corps</b>, tes tailles
+          ci-dessus et la liste de tous tes vêtements avec leurs infos — <b>sans aucune photo</b>.
+        </div>
+        <button onClick={run} disabled={busy}
+          style={{ background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:6, padding:'6px 12px', fontSize:11.5, fontWeight:700, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1, fontFamily:'inherit' }}>
+          {busy ? "⏳ L'IA réfléchit…" : ia ? '✨ Redemander à l\'IA' : "✨ Demander à l'IA"}
+        </button>
+        {err && <div style={{ fontSize:10.5, color:'#ff8a8a', marginTop:6 }}>{err}</div>}
+        {ia && <div style={{ marginTop:8 }}>
+          {VET_TAILLE_POSTES.map(p => { const x = ia.tailles && ia.tailles[p.key]; return row(p, x && x.taille
+            ? <span style={{ fontSize:12, color:C.text }}><b style={{ color:VETEMENT_COLOR, fontSize:13 }}>{x.taille}</b>
+                {x.note && <span style={{ display:'block', fontSize:10.5, color:C.muted }}>{x.note}</span>}</span>
+            : <span style={{ fontSize:10.5, color:C.dim }}>{(x && x.note) || '—'}</span>); })}
+          {ia.resume && <div style={{ fontSize:11, color:C.text, lineHeight:1.55, marginTop:8 }}>{ia.resume}</div>}
+          <div style={{ fontSize:10, color:C.dim, marginTop:4 }}>
+            {new Date(ia.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })}{ia.ai ? ' · ' + ia.ai : ''}
+          </div>
+        </div>}
+      </StatsCollapse>
+    </StatsCollapse>
   );
 }
 function VetementPanel() {
@@ -16725,6 +16968,20 @@ function VetementPanel() {
               </select></div>
             <div>{fieldLabel('TAILLE')}
               <input type="text" value={it.taille || ''} placeholder="ex. M, 40, 42…" onChange={e => updItem(it.id, { taille: e.target.value })} style={selStyle} /></div>
+            {/* COUPE puis RESSENTI PORTÉ (demande utilisateur), juste sous la taille : les
+                trois se lisent ensemble et nourrissent 📏 Mes tailles (`vetTailleAvg`).
+                Listes fermées pour la même raison que le tissu. */}
+            <div>{fieldLabel('COUPE')}
+              <select value={it.coupe || ''} onChange={e => updItem(it.id, { coupe: e.target.value })} style={selStyle}>
+                <option value="">—</option>
+                {VET_COUPES.map(([n, ic]) => <option key={n} value={n}>{ic} {n}</option>)}
+              </select></div>
+            <div>{fieldLabel('RESSENTI PORTÉ')}
+              <select value={it.ressenti || ''} onChange={e => updItem(it.id, { ressenti: e.target.value })}
+                style={{ ...selStyle, color: vetRessenti(it.ressenti) ? vetRessenti(it.ressenti)[1] : C.text }}>
+                <option value="">—</option>
+                {VET_RESSENTIS.map(([n]) => <option key={n} value={n}>{n}</option>)}
+              </select></div>
             {/* PRIX (8.3.1) — ⚠ type="text" + inputMode="decimal" et JAMAIS
                 type="number" : un input number REJETTE la virgule du clavier FR
                 (la saisie repartirait à vide en silence). La valeur est stockée
@@ -16853,6 +17110,10 @@ function VetementPanel() {
           ? <button onClick={gdriveLogin} style={{ background:`${VETEMENT_COLOR}18`, border:`1px solid ${VETEMENT_COLOR}66`, color:VETEMENT_COLOR, borderRadius:6, padding:'5px 12px', fontSize:11, fontWeight:700, cursor:'pointer' }}>Connecter Google Drive</button>
           : <button onClick={() => syncDrive({ force:true })} disabled={drive === 'loading'} style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:6, padding:'5px 12px', fontSize:11, cursor: drive === 'loading' ? 'default' : 'pointer', opacity: drive === 'loading' ? 0.5 : 1 }}>↻ Rafraîchir</button>}
       </div>
+
+      {/* 📏 Mes tailles (demande utilisateur) — AU-DESSUS de Mes vêtements. */}
+      <VetTaillesSection items={data.items} tailles={data.tailles || {}}
+        onTailles={t => save({ ...data, tailles: t })} />
 
       {/* Mes vêtements — SEUL collapse depuis 8.3.7 (l'Inventaire a été retiré, « Mes
           vêtements fait tout »). Rangé en SOUS-CATÉGORIE → TYPE → fiche, avec une barre de
@@ -24563,6 +24824,7 @@ function buildBackup() {
       // vivent dans Drive (HUB_Pierre/Vetement, fichier nommé avec l'id de la fiche) et se
       // retrouvent donc toutes seules après restauration sur un autre appareil.
       return { counts: v.counts || {}, brands: Array.isArray(v.brands) ? v.brands : [],
+               tailles: v.tailles && typeof v.tailles === 'object' ? v.tailles : {},
                items: Array.isArray(v.items) ? v.items.map(it => { const { photo, ...rest } = it || {}; return rest; }) : [] };
     })(),
     // Revente : articles + annonces rédigées (les PHOTOS vivent dans Drive, HUB_Pierre/Revente,
@@ -25223,7 +25485,9 @@ function applyBackup(data) {
       if (local && Array.isArray(local.items)) local.items.forEach(it => { if (it && safeKey(it.id) && it.photo) localPhotos[it.id] = it.photo; });
       const items = Array.isArray(data.vetement.items) ? data.vetement.items.map(it => (it && localPhotos[it.id]) ? { ...it, photo: localPhotos[it.id] } : it) : [];
       put('spotifyplus_vetements', { counts: data.vetement.counts || {}, items,
-                                     brands: Array.isArray(data.vetement.brands) ? data.vetement.brands : ((local && local.brands) || []) });
+                                     brands: Array.isArray(data.vetement.brands) ? data.vetement.brands : ((local && local.brands) || []),
+                                     // 📏 Mes tailles : celles du fichier, sinon celles déjà sur l'appareil (ancien export).
+                                     tailles: (data.vetement.tailles && typeof data.vetement.tailles === 'object') ? data.vetement.tailles : ((local && local.tailles) || {}) });
     } catch {}
   }
   // Clés / pseudos d'API — REMPLACÉS si non vides (comme tmdb_key/yt_key)
