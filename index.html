@@ -226,7 +226,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.32';
+const APP_VERSION = '13.21.33';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20782,8 +20782,11 @@ const MTGSET_DELAY    = 1800;   // ms entre deux cartes — le garde-fou anti-ba
 const MTGSET_PAGE_MAX = 30;     // garde-fou de pagination (30 × 175 ≈ 5 000 cartes)
 // États retenus, du meilleur au moins bon. ⚠ On ne descend JAMAIS sous Good : c'est la
 // consigne, et une carte Played/Poor n'est pas ce qu'on veut dans une extension complète.
+// ⚠ EX (Excellent) est AU-DESSUS de Good : il compte dans le palier « Good » (le moins cher des
+// deux), comme MT compte dans le palier « Near Mint ». L'écarter perdait des offres meilleures
+// et moins chères qu'un GD.
 const MTGSET_CONDS = ['MT', 'NM', 'EX', 'GD'];
-const MTGSET_COND_KEEP = { NM:1, GD:1, MT:1 };   // MT (Mint) vaut mieux que NM : on l'accepte comme telle
+const MTGSET_COND_KEEP = Object.fromEntries(MTGSET_CONDS.map(c => [c, 1]));
 
 // État PARTAGÉ (cf. l'avertissement ci-dessus).
 const _mtgSet = {
@@ -20978,14 +20981,18 @@ function mtgSetLang(txt) {
   return '';
 }
 // Choix d'une offre pour UNE carte, selon les deux règles de l'analyse poussée :
-//  · langue : français, sauf si l'extension n'existe pas en français (alors anglais) ;
-//  · état : Good par défaut, Near Mint si elle ne coûte pas plus de 5 c de plus.
-function mtgSetPickOffer(offers, wantFr) {
-  const langOk = o => !o.lang || (wantFr ? o.lang === 'fr' : true);
-  const pool = (offers || []).filter(o => MTGSET_COND_KEEP[o.cond] && langOk(o));
+//  · langue : français, sauf si l'extension n'existe pas en français (alors ANGLAIS — et
+//    seulement anglais : une offre allemande ou italienne n'est pas « la VO ») ;
+//  · état : Good (ou EX) par défaut, Near Mint (ou MT) s'il ne coûte pas plus de 5 c de plus.
+// ⚠ Une langue ILLISIBLE n'est pas une langue acceptée : `langRead` = la page a-t-elle livré
+// au moins un drapeau lisible ? Si oui, une offre sans langue est écartée ; si aucun drapeau
+// ne se lit (la page a changé), on ne peut rien trier et on garde tout plutôt que rien.
+function mtgSetPickOffer(offers, wantFr, langRead) {
+  const want = wantFr ? 'fr' : 'en';
+  const pool = (offers || []).filter(o => MTGSET_COND_KEEP[o.cond] && (langRead ? o.lang === want : true));
   if (!pool.length) return null;
-  const best = c => pool.filter(o => o.cond === c).sort((a, b) => a.price - b.price)[0] || null;
-  const gd = best('GD'), nm = best('NM') || best('MT');
+  const best = cs => pool.filter(o => cs.includes(o.cond)).sort((a, b) => a.price - b.price)[0] || null;
+  const gd = best(['GD', 'EX']), nm = best(['NM', 'MT']);
   if (gd && nm) return (nm.price - gd.price <= MTGSET_NM_MAX) ? nm : gd;
   return nm || gd;
 }
@@ -20997,11 +21004,12 @@ function mtgSetPickOffer(offers, wantFr) {
 // On réduit donc chaque vendeur à sa MEILLEURE offre au sens de la règle Good/NM avant de
 // regrouper — c'est la même règle, appliquée vendeur par vendeur au lieu de globalement.
 function mtgSetBestPerSeller(offers, wantFr) {
-  const bySeller = {};
+  const bySeller = Object.create(null);   // nom de vendeur = texte de la page : pas de prototype
   for (const o of (offers || [])) (bySeller[o.seller] = bySeller[o.seller] || []).push(o);
+  const langRead = (offers || []).some(o => o.lang);   // lu sur TOUTE la page, pas par vendeur
   const out = [];
   for (const seller of Object.keys(bySeller)) {
-    const pick = mtgSetPickOffer(bySeller[seller], wantFr);
+    const pick = mtgSetPickOffer(bySeller[seller], wantFr, langRead);
     if (pick) out.push({ ...pick, seller });
   }
   return out;
@@ -22007,7 +22015,7 @@ function emploiAiPrompt(crit, jobs) {
     id: j.id, titre: j.title, entreprise: j.company, lieu: j.location,
     remote: j.remote, contrat: j.contract || '?',
     salaire: j.salMin != null ? `${j.salMin}${j.salMax != null ? '-' + j.salMax : ''} €/an` : (j.salText || '?'),
-    publiee: j.at ? new Date(j.at).toISOString().slice(0, 10) : '?',
+    publiee: j.at ? localDayStr(new Date(j.at)) : '?',
     resume: (j.excerpt || '').slice(0, 300),
   }));
   return [
@@ -23240,6 +23248,15 @@ function usePlayerControls(opts) {
       .then(data => { if (data) setIsLiked(data[0]); })
       .catch(() => {});
   }, [now?.uri, wantLike]);
+  // Like posé ou retiré AILLEURS (liste des likés, feed) pendant que le titre joue : l'effet
+  // ci-dessus ne repart qu'au changement de titre, le cœur restait faux. On ne relit ici que
+  // l'état LOCAL (aucune requête) et seulement pour un titre que la base connaît.
+  React.useEffect(() => {
+    if (!wantLike || !now?.uri) return;
+    const feedItem = feedIndex.get(now.uri);
+    const inLikes  = likedTracks.some(t => t.spotifyUri === now.uri);
+    if (feedItem || inLikes) setIsLiked(inLikes || !!feedItem?.liked);
+  }, [likedTracks, feedIndex]);
 
   // ⚠ Curseur optimiste `_effUri` : le poll player est périmé jusqu'à 5 s, `_navUri` prend
   // le relais tant qu'il est frais (voir _effUri).
@@ -24320,7 +24337,7 @@ function APIPanel() {
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `spotifyplus-api-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+    a.href = url; a.download = `spotifyplus-api-${localDayStr()}.json`; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return (
@@ -24724,7 +24741,7 @@ async function downloadBackup(section) {
   const url  = URL.createObjectURL(file);
   const a    = document.createElement('a');
   a.href = url;
-  const day = new Date().toISOString().slice(0, 10);
+  const day = localDayStr();   // jour LOCAL (piège 16) : l'UTC datait de la veille entre 0 h et 2 h
   a.download = fields ? `spotifyplus-${section.key}-${day}.json` : `spotifyplus-sauvegarde-${day}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
@@ -24740,10 +24757,17 @@ function maybeWeeklyBackupPrompt() {
   const parse = k => { try { return parseInt(localStorage.getItem(k) || '0') || 0; } catch { return 0; } };
   if (now - parse('spotifyplus_backup_prompt_at') < WEEK) return;
   if (now - parse('spotifyplus_last_backup') < WEEK) return;
+  // Des données à perdre ? La base musique OU l'un des modules locaux — sans le second test,
+  // qui utilise le Hub sans Spotify n'était jamais invité à sauvegarder.
   let hasData = false;
   try { hasData = (dbGet("SELECT COUNT(*) c FROM artists_scraped")?.c || 0) > 0; } catch {}
+  if (!hasData) hasData = ['spotifyplus_todos', 'spotifyplus_notes', 'spotifyplus_rappels', 'spotifyplus_remember_custom',
+    'spotifyplus_collection', 'spotifyplus_mdp_vault', 'spotifyplus_food_days', 'spotifyplus_finance_history', 'spotifyplus_vetements']
+    .some(k => lsGet(k).length > 2);
   if (!hasData) return;
   try { localStorage.setItem('spotifyplus_backup_prompt_at', String(now)); } catch {}
+  // Échec APRÈS accord : la proposition revient au prochain lancement au lieu d'attendre 7 jours.
+  const retrySoon = () => { try { localStorage.removeItem('spotifyplus_backup_prompt_at'); } catch {} };
   // ⚠ Envoyée sur DROPBOX, plus jamais téléchargée dans le navigateur (demande utilisateur).
   // Dropbox pas configuré / pas connecté ⇒ on le DIT, sans repli sur un téléchargement.
   if (!dropboxConfigured() || !dropboxConnected()) {
@@ -24755,11 +24779,11 @@ function maybeWeeklyBackupPrompt() {
   (async () => {
     try {
       const sealed = await backupSeal(await buildBackupFull());
-      if (sealed === null) return;
+      if (sealed === null) { retrySoon(); alert('💾 Sauvegarde hebdomadaire non envoyée (phrase de passe non saisie). Elle sera reproposée au prochain lancement.'); return; }
       await dropboxUpload(sealed);
       try { localStorage.setItem('spotifyplus_last_backup', String(Date.now())); } catch {}
       alert('✓ Sauvegarde envoyée sur Dropbox.');
-    } catch (e) { alert('✗ Sauvegarde Dropbox échouée : ' + ((e && e.message) || 'erreur')); }
+    } catch (e) { retrySoon(); alert('✗ Sauvegarde Dropbox échouée : ' + ((e && e.message) || 'erreur') + '\n\nElle sera reproposée au prochain lancement.'); }
   })();
 }
 
@@ -44949,7 +44973,7 @@ function PoidsSection({ profile, onProfileWeight }) {
     const data = { app:'spotifyplus', version: APP_VERSION, exported_at: new Date().toISOString(), scope:['food'], food:{ weights: list } };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type:'application/json' }));
     const a = document.createElement('a');
-    a.href = url; a.download = `spotifyplus-poids-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+    a.href = url; a.download = `spotifyplus-poids-${localDayStr()}.json`; a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1500);
     setMsg(`✓ ${list.length} pesée(s) exportée(s)`);
   };
