@@ -53,7 +53,7 @@
   button { font-family:inherit; }
   /* Infobulle des boutons — posée par installButtonTips() (survol / appui long 3 s) */
   .btn-tip { position:fixed; left:0; top:0; z-index:2147483000; max-width:min(280px, calc(100vw - 16px)); padding:6px 9px; border-radius:7px; background:#1c1c1c; border:1px solid #3a3a3a; color:#f0f0f0; font:500 12px/1.4 'DM Sans',-apple-system,BlinkMacSystemFont,sans-serif; box-shadow:0 6px 20px rgba(0,0,0,.5); pointer-events:none; white-space:pre-line; overflow-wrap:anywhere; }
-  button { -webkit-touch-callout:none; }
+  button { -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
   ::-webkit-scrollbar { width:6px; height:6px; }
   ::-webkit-scrollbar-track { background:transparent; }
   ::-webkit-scrollbar-thumb { background:#2a2a2a; border-radius:99px; }
@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.63';
+const APP_VERSION = '13.21.64';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -55088,8 +55088,13 @@ function Shell() {
 // en phase de CAPTURE, donc avant ceux de React (posés sur #root).
 // · Souris : infobulle IMMÉDIATE au survol. Le `title` natif (qui n'apparaît qu'après ~1 s, et
 //   ferait doublon) est mis de côté pendant le survol puis rendu (`data-tip-title`).
-// · Tactile : appui maintenu TIP_HOLD_MS sans bouger (8 px, piège 12) → infobulle, et le clic
+// · Tactile : appui maintenu TIP_HOLD_MS sans bouger (TIP_MOVE_PX) → infobulle, et le clic
 //   qui suit le relâchement est AVALÉ : un appui long n'active JAMAIS le bouton.
+//   ⚠ Suivi par les événements TOUCH, pas pointer : sur un vrai téléphone, le geste natif
+//   d'appui long (sélection du texte, loupe iOS, vers 0,5 s) envoie `pointercancel` alors que
+//   le doigt est toujours posé — c'est ce qui empêchait l'infobulle d'apparaître (l'émulation
+//   Chromium ne le reproduit pas). Les touch* continuent, eux, jusqu'au lever du doigt ; la
+//   sélection est en plus coupée (CSS `user-select` sur `button`, `selectstart` pendant l'appui).
 // Texte : `data-tip` > `title` > `aria-label` > libellé visible (un bouton-symbole seul passe par
 // TIP_GLYPHS). Rien à dire ⇒ pas d'infobulle.
 // ⚠ `data-notip` sur un ancêtre coupe tout (plateau de jeu : une case n'a rien à expliquer) ;
@@ -55097,6 +55102,7 @@ function Shell() {
 // ⚠ DOM pur, hors de React (aucun rendu déclenché) ; rendu dans le plein écran natif s'il y en
 // a un (piège 9).
 const TIP_HOLD_MS = 3000;
+const TIP_MOVE_PX = 14;   // un doigt immobile dérive de quelques px en 3 s ; au-delà = défilement
 const TIP_SEL = 'button, [role="button"], input[type="button"], input[type="submit"], [data-tip]';
 const TIP_GLYPHS = (() => {
   const m = {};
@@ -55152,7 +55158,7 @@ function installButtonTips() {
     if (a && a.trim()) return a.trim();
     const raw = String(el.tagName === 'INPUT' ? el.value : (el.innerText || el.textContent || '')).replace(/\s+/g, ' ').trim();
     if (!raw) return '';
-    const g = TIP_GLYPHS[raw.replace(/️/g, '')];
+    const g = TIP_GLYPHS[raw.replace(/\uFE0F/g, '')];
     if (g) return g;
     return raw.length > 160 ? raw.slice(0, 159) + '…' : raw;
   };
@@ -55208,11 +55214,16 @@ function installButtonTips() {
   }, true);
   window.addEventListener('pointerout', e => { if (e.pointerType === 'mouse' && !e.relatedTarget) { muted = null; hide(); } }, true);
   window.addEventListener('pointerdown', e => {
-    if (e.pointerType === 'mouse') { if (cur) { muted = cur; hide(); } return; }
+    if (e.pointerType === 'mouse' && cur) { muted = cur; hide(); }
+  }, true);
+  const opt = { capture: true, passive: true };
+  window.addEventListener('touchstart', e => {
     hide(); endHold();
+    if (e.touches.length !== 1) return;
     const el = targetOf(e.target);
     if (!el || el.closest('[data-hold]')) return;
-    const h = { el, id: e.pointerId, x: e.clientX, y: e.clientY, fired: false, timer: 0 };
+    const t0 = e.touches[0];
+    const h = { el, x: t0.clientX, y: t0.clientY, fired: false, timer: 0 };
     h.timer = setTimeout(() => {
       const t = textOf(el);
       if (!t || hold !== h) return;
@@ -55222,20 +55233,23 @@ function installButtonTips() {
       try { navigator.vibrate && navigator.vibrate(12); } catch {}
     }, TIP_HOLD_MS);
     hold = h;
-  }, true);
-  window.addEventListener('pointermove', e => {
-    if (hold && !hold.fired && e.pointerId === hold.id && Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > 8) endHold();
-  }, true);
-  const release = e => {
-    if (!hold || e.pointerId !== hold.id) return;
+  }, opt);
+  window.addEventListener('touchmove', e => {
+    if (!hold || hold.fired) return;
+    const t = e.touches[0];
+    if (e.touches.length !== 1 || !t || Math.hypot(t.clientX - hold.x, t.clientY - hold.y) > TIP_MOVE_PX) endHold();
+  }, opt);
+  const release = () => {
+    if (!hold) return;
     if (hold.fired) {
       swallow = { el: hold.el, until: Date.now() + 800 };
       hideT = setTimeout(hide, 4000);
     }
     endHold();
   };
-  window.addEventListener('pointerup', release, true);
-  window.addEventListener('pointercancel', release, true);
+  window.addEventListener('touchend', release, opt);
+  window.addEventListener('touchcancel', release, opt);
+  window.addEventListener('selectstart', e => { if (hold) e.preventDefault(); }, true);
   // Pendant l'appui : pas de menu contextuel / loupe du navigateur.
   window.addEventListener('contextmenu', e => { if (hold && hold.el.contains(e.target)) e.preventDefault(); }, true);
   window.addEventListener('click', e => {
