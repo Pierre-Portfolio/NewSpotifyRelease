@@ -154,7 +154,7 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 8. `selfHeading:true` dans `SECTION` **et** heading retiré de `MobileApp`.
 9. **`position:fixed` piégé par un ancêtre `transform`** → portal sur `document.body`. ⚠ En **plein écran natif**, un portal est invisible : rendre en enfant du lecteur.
 10. **`useImmersiveLock(active)`** sur tout overlay plein écran (sinon une rotation bascule en `CompactPlayer` et démonte l'overlay).
-11. **Appui long** : ref `{timer, fired}` qui neutralise le `click` suivant ; bloquer `onContextMenu` + `userSelect`.
+11. **Appui long** : ref `{timer, fired}` qui neutralise le `click` suivant ; bloquer `onContextMenu` + `userSelect`. ⚠ `installButtonTips` (infobulle au survol / appui 3 s sur TOUT bouton, clic avalé) : un bouton qui a son propre appui long porte `data-hold`, un plateau de jeu `data-notip`.
 12. **Swipe/défilement finissent par un `click`** → garde `moved` (8 px).
 13. **Une iframe cross-origin avale les événements** : couche de capture transparente.
 

@@ -13,6 +13,8 @@
 
 > ⏱️ La première ouverture après une mise à jour prend quelques secondes (« Préparation du Hub… »), les suivantes sont instantanées. Sur réseau lent, la copie locale s'ouvre au bout de 1,5 s et un bandeau propose de recharger si une nouvelle version arrive.
 
+> 💬 Chaque bouton s'explique : **survol** à la souris = infobulle immédiate ; sur mobile, **appui de 3 s** = infobulle, sans déclencher le bouton.
+
 ---
 
 ## Musique
