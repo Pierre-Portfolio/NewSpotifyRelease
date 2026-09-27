@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.71';
+const APP_VERSION = '13.21.72';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20877,49 +20877,87 @@ const COLLECTION_SUBS = {
   ],
 };
 
-// 🧙 DECK MAGIC — trois decks construits PAR L'IA avec les seules cartes de la collection.
-// ⚠ Une fiche Magic ne connaît ni le type, ni le coût, ni le texte de la carte : ils sont
-//   demandés à Scryfall (`/cards/collection`, lots de 75, mêmes identifiants que la cote) et
-//   gardés EN MÉMOIRE seulement (`_mtgDeck.info`, re-fetchable ⇒ ni stockage ni sauvegarde).
-// ⚠ L'IA ne reçoit PAS toute la collection (des milliers de lignes dépasseraient le contexte
-//   des IA gratuites) : `mtgDeckPool` présélectionne localement `MTG_DECK_POOL` cartes, celles
-//   qui collent à la demande (couleurs, mots-clés traduits par `MTG_DECK_WORDS`) en tête.
-// ⚠ TOUT nom rendu par le modèle est revérifié contre la collection (`mtgDeckCheck`) : carte
-//   inventée ou en double = retirée et comptée. Chaque carte est possédée en ×1 ⇒ ×1 dans le
-//   deck ; seuls les terrains de base sont hors collection (comptés à part).
-// ⚠ État module-level (piège 5) : replier le collapse ne jette ni les decks ni l'analyse.
-const MTG_DECK_POOL = 250;        // cartes envoyées au modèle au plus
+// 🧙 DECK MAGIC — trois decks construits LOCALEMENT (sans IA) avec les cartes de la collection.
+// ⚠ Pourquoi pas une IA : 20 000 cartes ne tiennent dans le contexte d'aucune IA gratuite, et
+//   une présélection de quelques centaines donnait des decks bancals. Le moteur ci-dessous
+//   note CHAQUE carte (thèmes lus dans son texte, rôle, coût, popularité EDHREC) et assemble
+//   en une seconde.
+// ⚠ Une fiche Magic ne connaît ni le type, ni le coût, ni le texte : ils viennent de Scryfall
+//   (`/cards/collection`, lots de 75), UNE FOIS par nom de carte, puis restent sur l'appareil
+//   dans la base `spotifyplus_mtg_oracle` (piège 20 ; cache re-fetchable ⇒ HORS sauvegarde).
+//   Un nouvel import ne relit que les noms inconnus ; une carte introuvable est retentée après
+//   `MTG_ORACLE_MISS_MS`.
+// ⚠ Chaque carte est possédée en ×1 ⇒ ×1 dans le deck ; seuls les terrains de base sont hors
+//   collection (comptés à part, répartis selon les symboles de mana des sorts retenus).
+// ⚠ État module-level (piège 5) : replier le collapse ne jette ni les decks ni le cache.
 const MTG_DECK_Q_MAX = 400;       // longueur de la demande libre
+const MTG_ORACLE_DB = 'spotifyplus_mtg_oracle', MTG_ORACLE_STORE = 'cards';
+const MTG_ORACLE_MISS_MS = 7 * 864e5;
 const MTG_BASICS = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes'];
 const MTG_BASICS_FR = { Plains:'Plaine', Island:'Île', Swamp:'Marais', Mountain:'Montagne', Forest:'Forêt', Wastes:'Désert' };
+const MTG_BASIC_OF = { W:'Plains', U:'Island', B:'Swamp', R:'Mountain', G:'Forest' };
 const MTG_COLORS = [
-  ['W', /\b(blanc|blanche|white)\b/], ['U', /\b(bleu|bleue|blue)\b/], ['B', /\b(noir|noire|black)\b/],
-  ['R', /\b(rouge|red)\b/], ['G', /\b(vert|verte|green)\b/],
+  ['W', /\b(blanc|blanche|blancs|white)\b/], ['U', /\b(bleu|bleue|bleus|blue)\b/], ['B', /\b(noir|noire|noirs|black)\b/],
+  ['R', /\b(rouge|rouges|red)\b/], ['G', /\b(vert|verte|verts|green)\b/],
 ];
-// Guildes et clans courants → couleurs (la demande « deck golgari » doit filtrer comme « noir vert »).
+// Guildes et clans → couleurs (« deck golgari » = noir-vert) ; sert aussi à NOMMER les decks.
 const MTG_GUILDS = { azorius:'WU', dimir:'UB', rakdos:'BR', gruul:'RG', selesnya:'GW', orzhov:'WB', izzet:'UR',
   golgari:'BG', boros:'RW', simic:'GU', esper:'WUB', grixis:'UBR', jund:'BRG', naya:'RGW', bant:'GWU',
-  abzan:'WBG', jeskai:'URW', sultai:'BGU', mardu:'RWB', temur:'GUR', mono:'' };
-// Mots français → termes du texte ANGLAIS des cartes (Scryfall rend l'oracle en anglais).
-const MTG_DECK_WORDS = {
-  vol:'flying', volant:'flying', zombie:'zombie', zombies:'zombie', elfe:'elf', elfes:'elf', gobelin:'goblin',
-  gobelins:'goblin', dragon:'dragon', dragons:'dragon', ange:'angel', anges:'angel', vampire:'vampire',
-  vampires:'vampire', humain:'human', humains:'human', chevalier:'knight', chevaliers:'knight', soldat:'soldier',
-  soldats:'soldier', sorcier:'wizard', sorciers:'wizard', pirate:'pirate', pirates:'pirate', dinosaure:'dinosaur',
-  dinosaures:'dinosaur', chat:'cat', chats:'cat', artefact:'artifact', artefacts:'artifact', enchantement:'enchantment',
-  enchantements:'enchantment', jeton:'token', jetons:'token', cimetiere:'graveyard', piocher:'draw', pioche:'draw',
-  contrecarrer:'counter', contresort:'counter', marqueur:'counter', marqueurs:'counter', vie:'life', gagner:'gain',
-  defausse:'discard', defausser:'discard', sacrifice:'sacrifice', sacrifier:'sacrifice', meule:'mill', mill:'mill',
-  degats:'damage', brulure:'damage', burn:'damage', pietinement:'trample', celerite:'haste',
-  vigilance:'vigilance', contact:'deathtouch', lien:'lifelink', rituel:'sorcery', ephemere:'instant',
-  equipement:'equipment', equipements:'equipment', aura:'aura', auras:'aura', rampe:'search your library',
-  ramp:'search your library', terrain:'land', terrains:'land', exil:'exile', exiler:'exile', copie:'copy',
-  reanimation:'return target creature card from your graveyard', reanimer:'graveyard', tribal:'creature',
-  controle:'counter target', aggro:'haste', legendaire:'legendary', planeswalker:'planeswalker',
+  abzan:'WBG', jeskai:'URW', sultai:'BGU', mardu:'RWB', temur:'GUR' };
+// Tribus : mot français (normalisé, sans accent) → sous-type anglais des cartes. Un sous-type
+// tapé en anglais (« slivers », « eldrazi ») est reconnu directement dans la collection.
+const MTG_TRIBES_FR = {
+  zombie:'Zombie', elfe:'Elf', gobelin:'Goblin', dragon:'Dragon', ange:'Angel', vampire:'Vampire', humain:'Human',
+  chevalier:'Knight', soldat:'Soldier', sorcier:'Wizard', pirate:'Pirate', dinosaure:'Dinosaur', chat:'Cat', loup:'Wolf',
+  'loup-garou':'Werewolf', esprit:'Spirit', ondin:'Merfolk', squelette:'Skeleton', demon:'Demon', bete:'Beast',
+  oiseau:'Bird', fee:'Faerie', hydre:'Hydra', slivoide:'Sliver', rat:'Rat', ecureuil:'Squirrel', lapin:'Rabbit',
+  chien:'Dog', guerrier:'Warrior', clerc:'Cleric', voleur:'Rogue', druide:'Druid', chaman:'Shaman', nain:'Dwarf',
+  geant:'Giant', horreur:'Horror', serpent:'Serpent', dieu:'God', samourai:'Samurai', moine:'Monk', artificier:'Artificer',
+  assembleur:'Construct', insecte:'Insect', araignee:'Spider', champignon:'Fungus', saprobionte:'Saproling',
+  elementaire:'Elemental', sphinx:'Sphinx', minotaure:'Minotaur', gorgone:'Gorgon', ours:'Bear', dryade:'Dryad',
+  centaure:'Centaur', golem:'Golem', ninja:'Ninja', eldrazi:'Eldrazi', myr:'Myr', thopter:'Thopter', ogre:'Ogre', troll:'Troll',
 };
-// Mots de la demande qui ne disent rien des cartes (sinon ils pèseraient dans le tri).
-const MTG_DECK_STOP = /^(deck|decks|carte|cartes|avec|pour|sans|dans|plus|tres|jouer|joue|faire|veux|voudrais|mais|style|theme|base|commander|edh|commandant|format|mono)$/;
-const _mtgDeck = { info: new Map(), fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', cols: '', subs: new Set() };
+// Les thèmes : `w` = mots de la demande qui les appellent (normalisés, FR et EN), `s(f, ft)` =
+// note de la carte pour ce thème : 2 = moteur / récompense explicite, 1 = carte qui l'alimente.
+// ⚠ Lu dans le texte ANGLAIS de Scryfall (oracle) : les regex sont en anglais.
+const MTG_THEMES = [
+  { id:'tokens', label:'Jetons', w:['jeton','jetons','token','tokens','armee','wide'],
+    s:(f, x) => /creates? .*tokens?|create (a|an|two|three|x|that many) .*token/.test(x.o) ? 2 : /creatures you control get \+|whenever (a|another) (creature|token)( you control)? enters/.test(x.o) ? 2 : 0 },
+  { id:'counters', label:'Marqueurs +1/+1', w:['marqueur','marqueurs','counter','counters','+1/+1','proliferation','proliferate'],
+    s:(f, x) => /proliferate|for each \+1\/\+1 counter|with (a|one or more) \+1\/\+1 counters?|whenever .*\+1\/\+1 counters? (is|are) put/.test(x.o) ? 2 : /\+1\/\+1 counter/.test(x.o) ? 1 : 0 },
+  { id:'graveyard', label:'Cimetière', w:['cimetiere','graveyard','reanimation','reanimator','recursion','recyclage','recycle','reanimer'],
+    s:(f, x) => /from your graveyard|in your graveyard|flashback|unearth|escape|embalm|eternalize|delve|dredge|disturb/.test(x.o) ? 2 : /\bmills?\b|surveil|discard a card|put .* into your graveyard/.test(x.o) ? 1 : 0 },
+  { id:'aristo', label:'Sacrifice', w:['sacrifice','sacrifier','aristocrat','aristocrats','aristocrate','aristocrates','meurt','mort','morts'],
+    s:(f, x) => /whenever (a|another) (nontoken )?creature( you control)? dies|sacrifice (a|another) (creature|permanent)|whenever you sacrifice/.test(x.o) ? 2 : /when .* dies|create .*token/.test(x.o) ? 1 : 0 },
+  { id:'lifegain', label:'Gain de vie', w:['vie','lifegain','soin','soins','lifelink'],
+    s:(f, x) => /whenever you gain life|for each 1 life you gained|if you gained life/.test(x.o) ? 2 : /gains? (\d+|x|that much) life|lifelink/.test(x.o) || x.kw.includes('lifelink') ? 1 : 0 },
+  { id:'spells', label:'Éphémères & rituels', w:['sort','sorts','spell','spells','spellslinger','ephemere','ephemeres','rituel','rituels','magecraft','prouesse','prowess'],
+    s:(f, x) => /whenever you cast (an|a) (instant|sorcery|noncreature)|instant (and|or) sorcery spells? you cast|magecraft|prowess/.test(x.o) ? 2 : (/Instant|Sorcery/.test(x.t0) ? 1 : 0) },
+  { id:'artifacts', label:'Artefacts', w:['artefact','artefacts','artifact','artifacts'],
+    s:(f, x) => /artifacts? you control|whenever (an|another|a) (nontoken )?artifact|for each artifact|affinity for artifacts|metalcraft|improvise/.test(x.o) ? 2 : (/Artifact/.test(x.t0) ? 1 : 0) },
+  { id:'enchant', label:'Enchantements', w:['enchantement','enchantements','enchantment','enchantments','enchantress','constellation'],
+    s:(f, x) => /enchantments? you control|whenever (an|another|a) enchantment|constellation|for each enchantment/.test(x.o) ? 2 : (/Enchantment/.test(x.t0) ? 1 : 0) },
+  { id:'flying', label:'Volants', w:['vol','volant','volants','flying','flyers','fliers','ciel','airs'],
+    s:(f, x) => /creatures? (you control )?with flying (you control )?get|flying creatures you control/.test(x.o) ? 2 : (x.kw.includes('flying') ? 1 : 0) },
+  { id:'mill', label:'Meule', w:['meule','mill','moudre'],
+    s:(f, x) => /(target|each) (player|opponent) mills|mills? (\d+|x|that many|half)/.test(x.o) ? 2 : 0 },
+  { id:'discard', label:'Défausse', w:['defausse','defausser','discard'],
+    s:(f, x) => /(each|target) (opponent|player) discards|whenever an opponent discards/.test(x.o) ? 2 : 0 },
+  { id:'landfall', label:'Terrains (landfall)', w:['landfall','terrain','terrains','lands'],
+    s:(f, x) => /landfall|whenever a land( you control)? enters|play an additional land|you may play lands from/.test(x.o) || x.kw.includes('landfall') ? 2 : (x.ramp ? 1 : 0) },
+  { id:'burn', label:'Brûlure', w:['burn','brulure','brulures','degat','degats','damage'],
+    s:(f, x) => /deals? (\d+|x) damage to (each opponent|any target|target player|target opponent|each player)|damage to each opponent/.test(x.o) ? 2 : 0 },
+  { id:'control', label:'Contrôle', w:['controle','control','contresort','contresorts','counterspell','counterspells'],
+    s:(f, x) => x.counter ? 2 : (x.removal || x.draw) ? 1 : 0 },
+  { id:'blink', label:'Clignotement', w:['blink','flicker','clignotement','clignoter'],
+    s:(f, x) => /exile (another )?(target )?(creature|permanent|nonland permanent)s? you (control|own).*return|return (it|that card|them|those cards) to the battlefield/.test(x.o) ? 2 : (x.creature && /when .* enters/.test(x.o) ? 1 : 0) },
+  { id:'voltron', label:'Équipements & auras', w:['equipement','equipements','equipment','aura','auras','voltron'],
+    s:(f, x) => /Equipment|Aura/.test(x.t0) || x.kw.includes('equip') ? 2 : /equipped creature|enchanted creature|whenever .* becomes the target|attach/.test(x.o) ? 1 : 0 },
+  { id:'aggro', label:'Aggro', w:['aggro','rapide','agressif','haste','celerite','rush'],
+    s:(f, x) => x.creature && f.v <= 3 && (x.kw.includes('haste') || x.kw.includes('first strike') || x.kw.includes('menace') || x.kw.includes('prowess') || x.kw.includes('double strike')) ? 2 : (x.creature && f.v <= 2 ? 1 : 0) },
+];
+const MTG_LAYOUT_SKIP = /^(token|double_faced_token|emblem|art_series|planar|scheme|vanguard|augment|host)$/;
+const _mtgDeck = { info: new Map(), loaded: false, fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', cols: '', subs: new Set() };
 // 💾 DECKS SAUVEGARDÉS : une copie ALLÉGÉE (nom, coût, type par carte — le texte des cartes
 // se relit sur Scryfall) dans le localStorage, préfixe `spotifyplus_collection` ⇒ compté avec
 // Collection dans Limite data. ⚠ Donnée saisie ⇒ DANS `buildBackup` (`mtg_decks`), fusionnée
@@ -20964,7 +21002,42 @@ function useMtgDeck() {
   React.useEffect(() => { _mtgDeck.subs.add(bump); return () => { _mtgDeck.subs.delete(bump); }; }, []);
   return _mtgDeck;
 }
-// Carte Scryfall → fiche compacte (face double : textes des deux faces).
+// ── Cache Scryfall sur l'appareil (clé = nom normalisé de la carte) ──
+let _mtgOracleIdb = null;
+function mtgOracleOpen() {
+  if (_mtgOracleIdb) return _mtgOracleIdb;
+  _mtgOracleIdb = new Promise((res, rej) => {
+    const req = indexedDB.open(MTG_ORACLE_DB, 1);
+    req.onupgradeneeded = e => { const db = e.target.result; if (!db.objectStoreNames.contains(MTG_ORACLE_STORE)) db.createObjectStore(MTG_ORACLE_STORE); };
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = e => { _mtgOracleIdb = null; rej(e); };
+  });
+  return _mtgOracleIdb;
+}
+async function mtgOracleLoadAll() {
+  const db = await mtgOracleOpen();
+  const st = db.transaction(MTG_ORACLE_STORE, 'readonly').objectStore(MTG_ORACLE_STORE);
+  const [keys, vals] = await Promise.all([_photoCacheReq(st.getAllKeys()), _photoCacheReq(st.getAll())]);
+  const m = new Map();
+  keys.forEach((k, i) => { if (vals[i]) m.set(k, vals[i]); });
+  return m;
+}
+async function mtgOraclePutMany(entries) {
+  if (!entries.length) return;
+  const db = await mtgOracleOpen();
+  await new Promise((res, rej) => {
+    const tx = db.transaction(MTG_ORACLE_STORE, 'readwrite');
+    const st = tx.objectStore(MTG_ORACLE_STORE);
+    for (const [k, v] of entries) st.put(v, k);
+    tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+  });
+}
+// Poids du cache (Limite data) : sérialisation JSON, même unité que la base des cartes.
+async function mtgOracleBytes() {
+  try { const m = await mtgOracleLoadAll(); let b = 0; for (const [k, v] of m) b += k.length + JSON.stringify(v).length; return { bytes: b, n: m.size }; }
+  catch { return { bytes: 0, n: 0 }; }
+}
+// Carte Scryfall → fiche compacte (face double : textes des deux faces, type de la face avant).
 function mtgDeckCompact(c) {
   const faces = Array.isArray(c.card_faces) ? c.card_faces : [];
   const txt = c.oracle_text != null ? c.oracle_text : faces.map(f => f.oracle_text || '').join(' // ');
@@ -20973,13 +21046,17 @@ function mtgDeckCompact(c) {
     m: String(c.mana_cost != null && c.mana_cost !== '' ? c.mana_cost : (faces[0] && faces[0].mana_cost) || ''),
     v: typeof c.cmc === 'number' ? c.cmc : 0,
     ci: Array.isArray(c.color_identity) ? c.color_identity.join('') : '',
-    o: String(txt || '').replace(/\s+/g, ' ').trim(),
-    cmd: !!(c.legalities && c.legalities.commander === 'legal'),
+    o: String(txt || '').replace(/\s+/g, ' ').trim().slice(0, 700),
+    kw: Array.isArray(c.keywords) ? c.keywords.map(k => String(k).toLowerCase()).slice(0, 12) : [],
+    r: typeof c.edhrec_rank === 'number' ? c.edhrec_rank : 0,
+    pm: Array.isArray(c.produced_mana) ? c.produced_mana.join('') : '',
+    cl: !(c.legalities && c.legalities.commander && c.legalities.commander !== 'legal' && c.legalities.commander !== 'restricted'),
+    lay: String(c.layout || ''), at: Date.now(),
   };
 }
-// Rattache un lot de réponses Scryfall à ses fiches (id Scryfall, sinon extension+numéro,
-// sinon nom — même ordre de confiance que `mtgQuoteApply` ; les introuvables sont sautés
-// par Scryfall, on ne peut donc PAS se fier à la position).
+// Rattache un lot de réponses Scryfall aux NOMS de la collection (id Scryfall, sinon extension+
+// numéro, sinon nom — les introuvables sont sautés par Scryfall, la position ne veut rien dire).
+// Rend les entrées à écrire dans le cache.
 function mtgDeckAttach(lot, cards) {
   const byScry = new Map(), bySn = new Map(), byName = new Map();
   for (const x of lot) {
@@ -20988,145 +21065,289 @@ function mtgDeckAttach(lot, cards) {
     if (id.set) bySn.set(id.set + '|' + id.collector_number, x);
     if (!byName.has(mtgNorm(x.name))) byName.set(mtgNorm(x.name), x);
   }
+  const out = [], done = new Set();
   for (const c of cards) {
     if (!c) continue;
     const x = byScry.get(c.id) || bySn.get(String(c.set || '').toLowerCase() + '|' + String(c.collector_number || ''))
       || byName.get(mtgNorm(c.name)) || byName.get(mtgNorm(String(c.name || '').split(' // ')[0]));
-    if (x) _mtgDeck.info.set(x.id, mtgDeckCompact(c));
+    if (!x) continue;
+    const k = mtgNorm(x.name);
+    if (done.has(k)) continue;
+    done.add(k); out.push([k, mtgDeckCompact(c)]);
   }
-  // Scryfall ne connaît pas la fiche : on garde au moins son nom (l'IA le connaît peut-être).
-  for (const x of lot) if (!_mtgDeck.info.has(x.id)) _mtgDeck.info.set(x.id, { n: String(x.name || ''), t:'', m:'', v:0, ci:'', o:'', cmd:false, miss:true });
+  for (const x of lot) { const k = mtgNorm(x.name); if (!done.has(k)) { done.add(k); out.push([k, { n: String(x.name || ''), miss: true, at: Date.now() }]); } }
+  for (const [k, v] of out) _mtgDeck.info.set(k, v);
+  return out;
 }
-// Complète `_mtgDeck.info` pour toute la collection (une seule fois par session).
+// Complète le cache pour toute la collection : UN représentant par nom (celui qui a un id
+// Scryfall de préférence), seuls les noms absents du cache partent chez Scryfall.
 async function mtgDeckFetchInfo(list, stop) {
-  const todo = list.filter(x => x && x.id && !_mtgDeck.info.has(x.id));
+  if (!_mtgDeck.loaded) {
+    try { const m = await mtgOracleLoadAll(); for (const [k, v] of m) if (!_mtgDeck.info.has(k)) _mtgDeck.info.set(k, v); } catch {}
+    _mtgDeck.loaded = true;
+  }
+  const now = Date.now(), reps = new Map();
+  const hasScry = x => MTG_UUID.test(String((x.meta || {}).scry || '')) || /^mtg:[0-9a-f-]{36}$/.test(String(x.id));
+  for (const x of list) {
+    if (!x || !x.name) continue;
+    const k = mtgNorm(x.name), f = _mtgDeck.info.get(k);
+    if (f && !(f.miss && now - (f.at || 0) > MTG_ORACLE_MISS_MS)) continue;
+    const cur = reps.get(k);
+    if (!cur || (!hasScry(cur) && hasScry(x))) reps.set(k, x);
+  }
+  const todo = [...reps.values()];
   for (let i = 0; i < todo.length && !stop.v; i += MTG_QUOTE_LOT) {
     const lot = todo.slice(i, i + MTG_QUOTE_LOT);
     _mtgDeck.fetch = { done: i, total: todo.length }; mtgDeckPublish();
-    const cards = await mtgQuoteLot(lot, fetchSig(15000));
-    mtgDeckAttach(lot, cards);
+    const cards = await mtgQuoteLot(lot, fetchSig(20000));
+    try { await mtgOraclePutMany(mtgDeckAttach(lot, cards)); } catch {}
     if (i + MTG_QUOTE_LOT < todo.length) await new Promise(r => setTimeout(r, MTG_QUOTE_GAP));
   }
   _mtgDeck.fetch = null;
 }
-// Ce que la demande impose : couleurs (null = libre), format, mots cherchés dans les cartes.
+
+// ── Lecture d'une carte : rôles et notes par thème (calculés une fois, en mémoire) ──
+const MTG_CMASK = { W:1, U:2, B:4, R:8, G:16 };
+const mtgMask = s => { let m = 0; for (const ch of String(s || '')) m |= (MTG_CMASK[ch] || 0); return m; };
+function mtgFeat(f) {
+  if (f._x) return f._x;
+  const o = String(f.o || '').toLowerCase(), t0 = String(f.t || '').split(' // ')[0];
+  const x = { o, t0, kw: f.kw || [] };
+  x.land = /\bLand\b/.test(t0);
+  x.basic = /\bBasic\b/.test(t0);
+  x.creature = /Creature/.test(t0);
+  x.legend = (/Legendary/.test(t0) && /Creature/.test(t0)) || /can be your commander/.test(o);
+  x.sub = x.creature && t0.includes('—') ? t0.split('—')[1].trim().split(/\s+/) : [];
+  x.removal = /(destroy|exile) (target|up to one target|another target) (creature|permanent|nonland permanent|artifact|enchantment|planeswalker|attacking)|destroy all|exile all (creatures|nonland)|deals? (\d+|x) damage to (any target|target creature|each creature|target attacking)|target creature (an opponent controls )?gets -\d+\/-\d+|fights? (target|another|up to)|return target (creature|nonland permanent) to (its|their) owner/.test(o);
+  x.draw = /\bdraws? (a card|two cards|three cards|x cards|cards|that many cards|an additional card)|investigate/.test(o);
+  x.ramp = !x.land && (/search your library for (a|an|up to \w+|two) (basic )?(land|forest|plains|island|swamp|mountain)/.test(o) || /\{t\}: add|add (one|two|three) mana|mana of any (one )?color|add \{[wubrgc]\}/.test(o));
+  x.counter = /counter target (spell|creature spell|noncreature spell|activated|instant)/.test(o);
+  x.q = f.r ? Math.max(0.3, 6 - Math.log10(f.r)) : 0.5;     // popularité EDHREC : rang 1 → 6, 10 000 → 2
+  x.mask = mtgMask(f.ci);
+  x.b = Math.min(6, Math.max(1, Math.round(f.v || 0)));      // tranche de la courbe
+  x.th = {};
+  for (const th of MTG_THEMES) { const s = th.s(f, x); if (s) x.th[th.id] = s; }
+  f._x = x;
+  return x;
+}
+// Note d'une carte pour un thème (thème standard ou « tribe:Zombie »).
+function mtgThemeScore(f, id) {
+  const x = mtgFeat(f);
+  if (id.slice(0, 6) !== 'tribe:') return x.th[id] || 0;
+  const tr = id.slice(6), trl = tr.toLowerCase();
+  if (x.creature && (x.sub.includes(tr) || x.kw.includes('changeling'))) return 2;
+  return new RegExp('\\b' + trl + '(s|es)?\\b').test(x.o) ? 2 : 0;
+}
+function mtgThemeLabel(id) {
+  if (id.slice(0, 6) === 'tribe:') return 'Tribu ' + id.slice(6);
+  const th = MTG_THEMES.find(t => t.id === id);
+  return th ? th.label : id;
+}
+function mtgColorName(cols) {
+  const s = MTG_PICK_COLORS.map(x => x.c).filter(c => cols.indexOf(c) >= 0).join('');
+  if (!s) return 'Incolore';
+  if (s.length === 1) return 'Mono-' + MTG_PICK_COLORS.find(x => x.c === s).label.toLowerCase();
+  for (const g in MTG_GUILDS) { const gs = MTG_GUILDS[g]; if (gs.length === s.length && [...gs].every(c => s.includes(c))) return g[0].toUpperCase() + g.slice(1); }
+  return MTG_PICK_COLORS.filter(x => s.includes(x.c)).map(x => x.label).join('-');
+}
+
 // Les 5 couleurs du sélecteur à gauche de la barre (ordre WUBRG). `bg`/`fg` = pastille.
 const MTG_PICK_COLORS = [
   { c:'W', label:'Blanc', bg:'#f3ecd0', fg:'#3a3320' }, { c:'U', label:'Bleu', bg:'#3f8fd9', fg:'#fff' },
   { c:'B', label:'Noir', bg:'#2a2a2a', fg:'#ddd' }, { c:'R', label:'Rouge', bg:'#d9534f', fg:'#fff' },
   { c:'G', label:'Vert', bg:'#3fa45b', fg:'#fff' },
 ];
-// `picked` (couleurs cochées dans le sélecteur) PRIME sur les couleurs lues dans le texte.
-function mtgDeckIntent(q, picked) {
+// Ce que la demande impose : couleurs (null = libres ; `picked`, les coches du sélecteur,
+// PRIME sur le texte), format, thèmes et tribus reconnus (`tribes` = sous-types présents
+// dans la collection, pour reconnaître un nom tapé en anglais).
+function mtgDeckIntent(q, picked, tribes) {
   const s = mtgNorm(q);
   let cols = '';
   for (const [c, re] of MTG_COLORS) if (re.test(s)) cols += c;
   for (const g in MTG_GUILDS) if (new RegExp('\\b' + g + '\\b').test(s)) cols += MTG_GUILDS[g];
   cols = [...new Set(cols.split(''))].join('');
-  const commander = /\b(commander|edh|commandant)\b/.test(s);
-  const words = new Set();
-  for (const w of s.split(/[^a-z0-9+/]+/)) {
-    if (w.length < 3 || MTG_DECK_STOP.test(w) || MTG_COLORS.some(([, re]) => re.test(w))) continue;
-    if (MTG_DECK_WORDS[w]) words.add(MTG_DECK_WORDS[w]);
-    else if (w.length >= 4 && !MTG_GUILDS.hasOwnProperty(w)) words.add(w.replace(/s$/, ''));
-  }
   if (picked) cols = MTG_PICK_COLORS.map(x => x.c).filter(c => picked.indexOf(c) >= 0).join('');
-  return { cols: cols || null, commander, words: [...words] };
-}
-// Présélection locale : cartes UNIQUES par nom (×1), hors terrains de base, dans les couleurs
-// demandées (incolore toujours admise), les plus pertinentes d'abord.
-function mtgDeckPool(list, intent) {
-  const seen = new Set(), out = [];
-  for (const x of list) {
-    const f = x && _mtgDeck.info.get(x.id);
-    if (!f || !f.n) continue;
-    const k = mtgNorm(f.n);
-    if (seen.has(k) || MTG_BASICS.some(b => mtgNorm(b) === k) || /^Basic /.test(f.t)) continue;
-    if (intent.cols && f.ci && f.ci.split('').some(c => intent.cols.indexOf(c) < 0)) continue;
-    seen.add(k);
-    const hay = mtgNorm(f.n + ' ' + f.t + ' ' + f.o);
-    let sc = 0;
-    for (const w of intent.words) if (hay.includes(w)) sc += 2;
-    if (intent.commander && /Legendary Creature/.test(f.t)) sc += 1;
-    if (/Land/.test(f.t)) sc += 0.5;             // terrains non-base : utiles à toute base mana
-    out.push({ f, sc });
+  const commander = /\b(commander|edh|commandant)\b/.test(s);
+  const words = s.split(/[^a-z0-9+/-]+/).filter(Boolean);
+  // Formes possibles d'un mot au singulier (« zombies » → zombie, « loups » → loup, « elfes » → elfe/elf).
+  const forms = w => [w, w.replace(/s$/, ''), w.replace(/es$/, ''), w.replace(/x$/, '')];
+  const themes = [];
+  for (const th of MTG_THEMES) if (words.some(w => th.w.includes(w))) themes.push(th.id);
+  for (const w of words) {
+    let tr = '';
+    for (const v of forms(w)) { tr = MTG_TRIBES_FR[v] || (tribes && tribes.get(v)) || ''; if (tr) break; }
+    if (tr && !themes.includes('tribe:' + tr)) themes.unshift('tribe:' + tr);   // une tribu nommée passe en tête
   }
-  out.sort((a, b) => (b.sc - a.sc) || (a.f.v - b.f.v));
-  return { pool: out.slice(0, MTG_DECK_POOL).map(o => o.f), total: out.length };
+  return { cols: cols || null, commander, themes };
 }
-function mtgDeckPrompt(q, intent, pool) {
-  const size = intent.commander ? 100 : 60;
-  return [
-    "Tu es un expert en construction de decks Magic: The Gathering.",
-    'Demande du joueur : """' + q + '"""',
-    '',
-    `Construis 3 decks DIFFÉRENTS (archétypes ou plans de jeu distincts), format ${intent.commander ? 'Commander (100 cartes, commandant compris)' : '60 cartes'}.`,
-    'Règles STRICTES :',
-    '- Utilise UNIQUEMENT des cartes de la liste ci-dessous, en recopiant leur nom EXACT (en anglais).',
-    '- Chaque carte au plus UNE fois par deck (le joueur n’en possède qu’un exemplaire). Une même carte peut apparaître dans plusieurs decks.',
-    '- Les terrains de base ne sont PAS dans la liste : indique leur nombre dans `terrains_base` (ils sont en quantité illimitée).',
-    `- Vise ${size} cartes au total (cartes + terrains de base) avec une courbe de mana et un nombre de terrains cohérents. S'il n'y a pas assez de cartes jouables, fais un deck plus court plutôt que d'inventer.`,
-    '- Cherche les SYNERGIES réelles entre les textes des cartes et explique-les.',
-    intent.cols ? `- Couleurs IMPOSÉES : ${MTG_PICK_COLORS.filter(x => intent.cols.indexOf(x.c) >= 0).map(x => x.label).join(', ')} (les 3 decks restent dans ces couleurs ; cartes incolores permises).` : '- Couleurs libres.',
-    intent.commander ? '- `commandant` = une créature légendaire de la liste, dont les couleurs couvrent tout le deck.' : '- `commandant` = "".',
-    '- Textes en français, courts.',
-    '',
-    'Cartes disponibles (nom | coût | type | texte) :',
-    ...pool.map(f => [f.n, f.m, f.t, f.o.slice(0, 110)].filter(Boolean).join(' | ')),
-    '',
-    'Réponds UNIQUEMENT par ce JSON, sans texte autour :',
-    '{"decks":[{"nom":"...","archetype":"...","plan":"2 phrases","synergies":["...","...","..."],"commandant":"","cartes":["nom exact", "..."],"terrains_base":{"Plains":0,"Island":0,"Swamp":0,"Mountain":0,"Forest":0}}]}',
-  ].join('\n');
-}
-// Réponse du modèle → decks vérifiés contre la collection (noms inventés et doublons retirés).
-function mtgDeckCheck(raw, list) {
-  const byName = new Map();
-  for (const x of list) {
-    const f = x && _mtgDeck.info.get(x.id);
-    const n = f && f.n ? f.n : (x && x.name);
-    if (!n) continue;
-    const k = mtgNorm(n);
-    if (!byName.has(k)) byName.set(k, f || { n, t:'', m:'', v:0, ci:'', o:'' });
-    const front = mtgNorm(String(n).split(' // ')[0]);
-    if (!byName.has(front)) byName.set(front, byName.get(k));
-  }
-  const decks = (raw && Array.isArray(raw.decks) ? raw.decks : []).slice(0, 3).map(d => {
-    const seen = new Set(), cards = [];
-    let invented = 0, dup = 0;
-    for (const nm of (Array.isArray(d && d.cartes) ? d.cartes : [])) {
-      const k = mtgNorm(String(nm || '').replace(/^\d+\s*x?\s+/i, ''));
-      if (MTG_BASICS.some(b => mtgNorm(b) === k)) continue;          // base listé en carte : ignoré
-      const f = byName.get(k);
-      if (!f) { invented++; continue; }
-      if (seen.has(mtgNorm(f.n))) { dup++; continue; }
-      seen.add(mtgNorm(f.n)); cards.push(f);
+
+// ── Assemblage d'un deck ──
+const MTG_FMT = {
+  std: { spells:36, lands:24, nonbasicMax:8, curve:{1:6, 2:10, 3:9, 4:6, 5:3, 6:2}, removal:5, draw:3, ramp:0, creatures:14 },
+  cmd: { spells:62, lands:37, nonbasicMax:18, curve:{1:8, 2:14, 3:14, 4:11, 5:8, 6:7}, removal:8, draw:8, ramp:9, creatures:22 },
+};
+// `themes` = [thème principal, thème secondaire éventuel] ; `cols` = couleurs ; `cmd` = commandant (fiche) ou null.
+function mtgBuildDeck(pool, themes, cols, fmtKey, cmd) {
+  const F = MTG_FMT[fmtKey];
+  const cm = mtgMask(cols);
+  const tsc = f => themes.reduce((a, id, i) => a + mtgThemeScore(f, id) * (i ? 0.6 : 1), 0);
+  const eligible = pool.filter(f => { const x = mtgFeat(f); return !x.land && (x.mask & ~cm) === 0 && f !== cmd && (fmtKey !== 'cmd' || f.cl !== false); });
+  const score = f => tsc(f) * 4 + mtgFeat(f).q;
+  const chosen = [], has = new Set(), cnt = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0 };
+  const room = () => chosen.length < F.spells;
+  const add = f => { chosen.push(f); has.add(f); cnt[mtgFeat(f).b]++; };
+  const pick = (list, n, strict) => {
+    for (const f of list) {
+      if (n <= 0 || !room()) break;
+      if (has.has(f) || (strict && cnt[mtgFeat(f).b] >= F.curve[mtgFeat(f).b])) continue;
+      add(f); n--;
     }
-    const basics = {};
-    const tb = d && d.terrains_base && typeof d.terrains_base === 'object' ? d.terrains_base : {};
-    for (const b of MTG_BASICS) { const n = Math.round(parseFloat(tb[b])); if (isFinite(n) && n > 0) basics[b] = Math.min(n, 60); }
-    const cmdF = d && d.commandant ? byName.get(mtgNorm(d.commandant)) : null;
-    return {
-      nom: String((d && d.nom) || 'Deck').slice(0, 60), arch: String((d && d.archetype) || '').slice(0, 60),
-      plan: String((d && d.plan) || '').slice(0, 400),
-      syn: (Array.isArray(d && d.synergies) ? d.synergies : []).map(s => String(s || '').slice(0, 220)).filter(Boolean).slice(0, 5),
-      cmd: cmdF ? cmdF.n : '', cards, basics, invented, dup,
-    };
-  }).filter(d => d.cards.length);
-  return decks;
+  };
+  const by = key => (a, b) => key(b) - key(a);
+  const themed = eligible.filter(f => tsc(f) > 0).sort(by(score));
+  pick(themed, Math.round(F.spells * 0.6), true);                      // 1. le cœur du thème
+  for (const [role, need] of [['removal', F.removal], ['draw', F.draw], ['ramp', F.ramp]]) {  // 2. les rôles
+    const have = chosen.filter(f => mtgFeat(f)[role]).length;
+    if (need > have) pick(eligible.filter(f => mtgFeat(f)[role]).sort(by(f => tsc(f) * 2 + mtgFeat(f).q)), need - have, true);
+  }
+  const crea = chosen.filter(f => mtgFeat(f).creature).length;         // 3. assez de créatures
+  if (crea < F.creatures && !themes.includes('spells') && !themes.includes('control'))
+    pick(eligible.filter(f => mtgFeat(f).creature).sort(by(score)), F.creatures - crea, true);
+  const rest = eligible.slice().sort(by(score));
+  pick(rest, F.spells, true);                                          // 4. le reste, courbe tenue…
+  pick(rest, F.spells, false);                                         //    …puis sans (collection maigre)
+  // Terrains : non-base qui produisent les couleurs du deck (bicolores d'abord), puis base au
+  // prorata des symboles de mana des sorts retenus.
+  const lands = [];
+  const nbMax = cols.length >= 2 ? F.nonbasicMax : Math.min(4, F.nonbasicMax);
+  const landScore = f => {
+    const x = mtgFeat(f);
+    const pm = f.pm || '';
+    const fetch = /search your library for (a|an) basic land/.test(x.o);
+    const hits = [...cols].filter(c => pm.includes(c)).length;
+    const off = [...pm].filter(c => c !== 'C' && cols.indexOf(c) < 0).length;
+    if ((x.mask & ~cm) !== 0 || (hits === 0 && !fetch) || (off > 0 && hits < 2)) return -1;
+    return hits * 2 + (fetch ? 1.5 : 0) + tsc(f) * 2 + x.q / 2;
+  };
+  pool.filter(f => { const x = mtgFeat(f); return x.land && !x.basic; }).map(f => [f, landScore(f)]).filter(([, s]) => s > (cols.length >= 2 ? 1 : 3))
+    .sort((a, b) => b[1] - a[1]).slice(0, nbMax).forEach(([f]) => lands.push(f));
+  const nBasics = Math.max(0, F.lands - lands.length);
+  const pips = {};
+  for (const f of [...chosen, ...(cmd ? [cmd] : [])]) for (const c of cols) pips[c] = (pips[c] || 0) + ((f.m || '').split('{' + c).length - 1);
+  const basics = {};
+  const tot = [...cols].reduce((a, c) => a + (pips[c] || 0), 0);
+  if (cols.length && nBasics) {
+    let left = nBasics;
+    const order = [...cols].sort((a, b) => (pips[b] || 0) - (pips[a] || 0));
+    order.forEach((c, i) => {
+      const n = i === order.length - 1 ? left : Math.max(1, Math.round(nBasics * (tot ? (pips[c] || 0) / tot : 1 / cols.length)));
+      const k = Math.min(left, n);
+      if (k > 0) { basics[MTG_BASIC_OF[c]] = k; left -= k; }
+    });
+  }
+  // Explications, calculées sur le deck obtenu.
+  const all = [...chosen, ...lands];
+  const names = arr => arr.slice(0, 5).map(f => f.n).join(', ');
+  const main = themes[0];
+  const inTheme = chosen.filter(f => mtgThemeScore(f, main) > 0);
+  const engines = chosen.filter(f => mtgThemeScore(f, main) === 2).sort(by(f => mtgFeat(f).q));
+  const nCrea = chosen.filter(f => mtgFeat(f).creature).length;
+  const avg = chosen.length ? chosen.reduce((a, f) => a + (f.v || 0), 0) / chosen.length : 0;
+  const rolesOf = role => chosen.filter(f => mtgFeat(f)[role]).sort(by(f => mtgFeat(f).q));
+  const syn = [];
+  if (engines.length) syn.push(`Moteurs « ${mtgThemeLabel(main)} » : ${names(engines)}${engines.length > 5 ? ` (+${engines.length - 5})` : ''}.`);
+  if (themes[1]) {
+    const bridge = chosen.filter(f => mtgThemeScore(f, main) > 0 && mtgThemeScore(f, themes[1]) > 0);
+    if (bridge.length) syn.push(`Pont ${mtgThemeLabel(main)} ↔ ${mtgThemeLabel(themes[1])} : ${names(bridge)}.`);
+  }
+  const rm = rolesOf('removal'), dr = rolesOf('draw'), rp = rolesOf('ramp'), ct = rolesOf('counter');
+  syn.push(`Interaction : ${rm.length} retrait${rm.length > 1 ? 's' : ''}${rm.length ? ' (' + names(rm.slice(0, 3)) + ')' : ''}${ct.length ? `, ${ct.length} contresort${ct.length > 1 ? 's' : ''}` : ''}.`);
+  syn.push(`Carburant : ${dr.length} pioche${dr.length > 1 ? 's' : ''}${rp.length ? `, ${rp.length} accélération${rp.length > 1 ? 's' : ''} de mana` : ''}.`);
+  syn.push(`Courbe : ${[1, 2, 3, 4, 5, 6].map(b => `${b === 6 ? '6+' : b === 1 ? '≤1' : b}:${cnt[b]}`).join(' · ')} — coût moyen ${avg.toFixed(1).replace('.', ',')}.`);
+  if (chosen.length < F.spells) syn.push(`⚠ Seulement ${chosen.length} sorts jouables sur ${F.spells} dans ces couleurs : deck incomplet.`);
+  return {
+    nom: `${mtgColorName(cols)} · ${themes.map(mtgThemeLabel).join(' + ')}`,
+    arch: fmtKey === 'cmd' ? 'Commander' : '60 cartes',
+    plan: `${inTheme.length} carte${inTheme.length > 1 ? 's' : ''} du thème sur ${chosen.length} sorts, ${nCrea} créature${nCrea > 1 ? 's' : ''}, ${lands.length + nBasics} terrains dont ${lands.length} non-base de ta collection.`,
+    syn, cmd: cmd ? cmd.n : '', cards: [...(cmd ? [cmd] : []), ...all], basics, invented: 0, dup: 0,
+  };
 }
+// Densité d'un thème dans des couleurs : combien de cartes jouables le servent (pondéré qualité).
+function mtgDensity(pool, id, cm) {
+  let d = 0;
+  for (const f of pool) { const x = mtgFeat(f); if (x.land || (x.mask & ~cm) !== 0) continue; const s = mtgThemeScore(f, id); if (s) d += s * (1 + x.q / 6); }
+  return d;
+}
+const MTG_COLOR_OPTS = ['W', 'U', 'B', 'R', 'G', 'WU', 'UB', 'BR', 'RG', 'GW', 'WB', 'UR', 'BG', 'RW', 'GU'];
 async function mtgDeckBuild(q, list, stop, picked) {
   await mtgDeckFetchInfo(list, stop);
   if (stop.v) throw new Error('Arrêté.');
-  const intent = mtgDeckIntent(q, picked);
-  const { pool, total } = mtgDeckPool(list, intent);
-  if (pool.length < 10) throw new Error(intent.cols
-    ? `Seulement ${pool.length} carte${pool.length > 1 ? 's' : ''} dans ces couleurs : pas de quoi bâtir un deck.`
-    : 'Pas assez de cartes identifiées pour bâtir un deck.');
-  const txt = await aiGenerate('collection', [{ text: mtgDeckPrompt(q, intent, pool) }]);
-  const meta = aiMeta();
-  const decks = mtgDeckCheck(geminiExtract(txt, '{', '}'), list);
-  if (!decks.length) throw new Error("Réponse de l'IA illisible ou sans aucune carte de ta collection.");
-  return { decks, meta, intent, sent: pool.length, total };
+  // Pool : UNE fiche par nom (×1), cartes réelles seulement.
+  const pool = [], seen = new Set(), tribes = new Map(), tribeN = new Map();
+  for (const x of list) {
+    if (!x || !x.name) continue;
+    const k = mtgNorm(x.name);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const f = _mtgDeck.info.get(k);
+    if (!f || f.miss || MTG_LAYOUT_SKIP.test(f.lay || '') || /^(Token|Emblem|Conspiracy|Dungeon)\b/.test(f.t || '')) continue;
+    pool.push(f);
+    for (const s of mtgFeat(f).sub) { tribes.set(s.toLowerCase(), s); tribeN.set(s, (tribeN.get(s) || 0) + 1); }
+  }
+  if (pool.length < 20) throw new Error('Pas assez de cartes identifiées sur Scryfall pour bâtir un deck.');
+  const intent = mtgDeckIntent(q, picked, tribes);
+  const fmtKey = intent.commander ? 'cmd' : 'std';
+  const F = MTG_FMT[fmtKey];
+  const fixed = intent.cols;
+  const colorOpts = fixed ? [fixed] : MTG_COLOR_OPTS;
+  const playable = cm => pool.reduce((a, f) => { const x = mtgFeat(f); return a + (!x.land && (x.mask & ~cm) === 0 ? 1 : 0); }, 0);
+  const okCols = colorOpts.filter(c => playable(mtgMask(c)) >= Math.min(F.spells, 20));
+  if (!okCols.length) throw new Error(`Trop peu de cartes jouables en ${mtgColorName(fixed || '')} pour bâtir un deck.`);
+  // Combinaisons (thèmes, couleurs) candidates, notées par densité.
+  const topTribes = [...tribeN.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([s]) => 'tribe:' + s);
+  const asked = intent.themes;
+  const cand = [];
+  if (asked.length) {
+    const main = asked[0];
+    const second = asked[1] || null;
+    for (const c of okCols) cand.push({ themes: second ? [main, second] : [main], cols: c, d: mtgDensity(pool, main, mtgMask(c)) });
+    // Couleurs imposées (une seule option) ⇒ les variantes viennent d'un thème secondaire.
+    if (okCols.length < 3 && !second) {
+      for (const c of okCols) for (const th of [...MTG_THEMES.map(t => t.id), ...topTribes]) {
+        if (th === main) continue;
+        cand.push({ themes: [main, th], cols: c, d: mtgDensity(pool, main, mtgMask(c)) * 0.9 + mtgDensity(pool, th, mtgMask(c)) * 0.3 });
+      }
+    }
+  } else {
+    for (const c of okCols) for (const th of [...MTG_THEMES.map(t => t.id), ...topTribes]) cand.push({ themes: [th], cols: c, d: mtgDensity(pool, th, mtgMask(c)) * (c.length === 1 ? 0.8 : 1) });
+  }
+  cand.sort((a, b) => b.d - a.d);
+  // Trois decks DIFFÉRENTS : sans thème demandé, trois thèmes distincts ; avec, trois couleurs
+  // (ou trois thèmes secondaires) distinctes.
+  const picks = [], usedTh = new Set(), usedCols = new Set(), usedCmd = new Set();
+  for (const c of cand) {
+    if (picks.length >= 3) break;
+    const key = c.themes.join('+');
+    if (!asked.length && usedTh.has(c.themes[0])) continue;
+    if (asked.length && okCols.length >= 3 && usedCols.has(c.cols)) continue;
+    if (picks.some(p => p.themes.join('+') === key && p.cols === c.cols)) continue;
+    let cmd = null, cols = c.cols;
+    if (fmtKey === 'cmd') {
+      // Commandant : créature légendaire des couleurs du deck, qui sert le thème.
+      const cm = mtgMask(cols);
+      const cands = pool.filter(f => { const x = mtgFeat(f); return x.legend && f.cl !== false && (x.mask & ~cm) === 0 && !usedCmd.has(f.n); })
+        .map(f => [f, c.themes.reduce((a, id, i) => a + mtgThemeScore(f, id) * (i ? 0.6 : 1), 0) * 5 + mtgFeat(f).q + (mtgFeat(f).mask === cm ? 3 : 0)])
+        .sort((a, b) => b[1] - a[1]);
+      if (!cands.length) continue;
+      cmd = cands[0][0]; usedCmd.add(cmd.n);
+      cols = MTG_PICK_COLORS.map(x => x.c).filter(ch => (cmd.ci || '').includes(ch)).join('') || cols;
+    }
+    picks.push({ ...c, cols, cmd });
+    usedTh.add(c.themes[0]); usedCols.add(c.cols);
+  }
+  if (!picks.length) throw new Error(fmtKey === 'cmd' ? 'Aucune créature légendaire dans ces couleurs pour servir de commandant.' : 'Aucun deck possible avec ces critères.');
+  const decks = picks.map(p => mtgBuildDeck(pool, p.themes, p.cols, fmtKey, p.cmd));
+  return { decks, intent, total: pool.length, fmtKey };
 }
 // Rubriques d'affichage d'un deck (dans cet ordre ; une carte va dans la première qui colle).
 const MTG_DECK_GROUPS = [
@@ -21227,14 +21448,13 @@ function MtgDeckSection({ list }) {
     const id = mtgDeckSave(d, _mtgDeck.lastQ || q);
     if (id) { d.savedId = id; setSaveErr(false); mtgDeckPublish(); } else setSaveErr(true);
   };
-  const hasKey = aiAnyKey(false);
   const n = list.length;
   const [pickOpen, setPickOpen] = React.useState(false);
   const cols = st.cols;                        // module-level : survit au repli (piège 5)
   const toggleCol = c => { _mtgDeck.cols = cols.indexOf(c) >= 0 ? cols.replace(c, '') : cols + c; mtgDeckPublish(); };
   const colNames = MTG_PICK_COLORS.filter(x => cols.indexOf(x.c) >= 0).map(x => x.label.toLowerCase());
   // Couleurs cochées sans texte : la demande devient « Deck bleu et rouge ».
-  const ready = !!(q.trim() || cols) && n > 0 && hasKey;
+  const ready = !!(q.trim() || cols) && n > 0;
   const run = async () => {
     const text = (q.trim() || (cols ? 'Deck ' + colNames.join(' et ') : '')).slice(0, MTG_DECK_Q_MAX);
     if (!text || st.busy || !n) return;
@@ -21245,8 +21465,7 @@ function MtgDeckSection({ list }) {
       _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current, cols);
     } catch (e) {
       const m = String((e && e.message) || e);
-      _mtgDeck.err = m.includes('NO_KEY') ? 'Aucune clé IA — renseigne-la dans le module API.'
-        : /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m;
+      _mtgDeck.err = /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m;
     }
     _mtgDeck.busy = false; _mtgDeck.fetch = null; mtgDeckPublish();
   };
@@ -21254,7 +21473,7 @@ function MtgDeckSection({ list }) {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ fontSize:10, color:C.muted, lineHeight:1.5 }}>
-        Décris le deck voulu (couleurs, thème, créatures, style de jeu, « commander »…) : l'IA en construit 3 avec les {n} carte{n > 1 ? 's' : ''} de ta collection Magic, chacune en un exemplaire.
+        Décris le deck voulu : un thème ({MTG_THEMES.map(t => t.label.toLowerCase()).join(', ')}), une tribu (zombies, elfes, dragons…), des couleurs ou une guilde, « commander » pour 100 cartes. 3 decks sont construits sur l'appareil avec les {n} carte{n > 1 ? 's' : ''} de ta collection Magic, chacune en un exemplaire.
       </div>
       <form onSubmit={e => { e.preventDefault(); run(); }} style={{ display:'flex', gap:6 }}>
         {/* 🎨 Sélecteur de couleurs (liste à cocher, une ou plusieurs) — ouvert SOUS la barre :
@@ -21273,10 +21492,10 @@ function MtgDeckSection({ list }) {
           style={{ flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:12, padding:'8px 10px', outline:'none' }} />
         {st.busy
           ? <button type="button" onClick={() => { stopRef.current.v = true; }} disabled={!fx}
-              title={fx ? 'Arrêter la lecture Scryfall' : 'L’IA travaille'}
+              title={fx ? 'Arrêter la lecture Scryfall' : 'Assemblage en cours'}
               style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, fontSize:11, fontWeight:700, padding:'0 12px', cursor: fx ? 'pointer' : 'default' }}>{fx ? '⏹' : '⏳'}</button>
           : <button type="submit" disabled={!ready}
-              title={!hasKey ? 'Renseigne une clé IA dans le module API' : !n ? 'Ta collection Magic est vide' : 'Construire 3 decks'}
+              title={!n ? 'Ta collection Magic est vide' : 'Construire 3 decks'}
               style={{ background: ready ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${ready ? COLLECTION_COLOR + '66' : C.border}`, borderRadius:8,
                 color: ready ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'0 12px', cursor: ready ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' }}>
               ✨ Créer
@@ -21302,19 +21521,17 @@ function MtgDeckSection({ list }) {
           </div>
         </div>
       )}
-      {!hasKey && <div style={{ fontSize:9.5, color:C.dim }}>Aucune clé IA : renseigne-en une dans le module API.</div>}
       {!n && <div style={{ fontSize:9.5, color:C.dim }}>Ta collection Magic est vide : importe d'abord ton CSV (📥 dans 🟣 Magic).</div>}
       {st.busy && (
         <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>
-          {fx ? `⏳ Lecture des cartes sur Scryfall… ${fx.done} / ${fx.total}` : '⏳ L’IA assemble les decks…'}
+          {fx ? `⏳ Lecture des cartes sur Scryfall… ${fx.done} / ${fx.total} (une seule fois : gardées ensuite sur l'appareil)` : '⏳ Assemblage des decks…'}
         </div>
       )}
       {st.err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
       {r && !st.busy && (
         <>
           <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>
-            « {st.lastQ} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · couleurs ' + r.intent.cols : ''} · {r.sent} carte{r.sent > 1 ? 's' : ''} proposée{r.sent > 1 ? 's' : ''} à l'IA sur {r.total} éligible{r.total > 1 ? 's' : ''}
-            <AiFallbackBadge fb={r.meta && r.meta.fb} />
+            « {st.lastQ} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · ' + mtgColorName(r.intent.cols) : ''}{r.intent.themes.length ? ' · ' + r.intent.themes.map(mtgThemeLabel).join(', ') : ' · aucun thème reconnu : les plus fournis de ta collection'} · {r.total} cartes différentes analysées
           </div>
           {saveErr && <div style={{ fontSize:10, color:'#e05050' }}>⚠ Deck NON sauvegardé : le stockage local est plein.</div>}
           {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} onSave={save} />)}
@@ -29142,6 +29359,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.72', date:'2026-09-27', title:'🧙 Deck Magic sans IA', items:[
+    'Les 3 decks sont construits sur l’appareil, en une seconde, avec TOUTE la collection (plus d’envoi à une IA).',
+    'Chaque carte est notée : thème (jetons, cimetière, sacrifice, volants…, ou une tribu), rôle (retrait, pioche, accélération), coût et popularité ; courbe de mana et base de terrains calculées.',
+    'La 1re fois, les cartes sont lues sur Scryfall puis gardées sur l’appareil : les fois suivantes, rien n’est retéléchargé.',
+  ] },
   { v:'13.21.71', date:'2026-09-27', title:'💶 Cote des extensions', items:[
     'Collection → Cartes : sous le nom de chaque extension, sa cote (prix des cartes possédées) remplace le nombre de fiches.',
   ] },
@@ -29157,11 +29379,6 @@ const RELEASE_NOTES = [
   { v:'13.21.68', date:'2026-09-27', title:'👕 Fiche vêtement', items:[
     'Photo 10 % plus grande.',
     'Boutons « Reprendre une photo », « Galerie » et « Retirer » l’un sous l’autre, sous la photo, avant le nom.',
-  ] },
-  { v:'13.21.67', date:'2026-09-27', title:'🧙 Deck Magic', items:[
-    'Collection → Cartes : nouvelle section « Deck Magic » entre Magic et Analyse Cardmarket.',
-    'Décris le deck voulu dans la barre : l’IA en construit 3 avec les cartes de ta collection (un exemplaire de chaque), synergies expliquées.',
-    'Chaque liste se copie en un clic (format « 1 Nom », pour Arena, ManaBox, Moxfield…).',
   ] },
 ];
 
@@ -29497,7 +29714,7 @@ function lsuScan() {
 // de renvoyer l'utilisateur vers un « IndexedDB » opaque de plusieurs centaines de Mo.
 // ⚠ Curseur et non `getAll()` sur les médias : un seul enregistrement en RAM à la fois.
 async function lsuIdbScan() {
-  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0, cardsBy:{}, photos:0, photosN:0, sportImg:0 };
+  const out = { db:0, media:0, mediaN:0, tv:0, cards:0, cardsN:0, cardsBy:{}, photos:0, photosN:0, sportImg:0, mtgOracle:0, mtgOracleN:0 };
   try { const raw = await idbGet(IDB_KEY); out.db = (raw && (raw.byteLength || raw.length)) || 0; } catch {}
   // TV Time : sa base ne range pas une chaîne mais des OBJETS (clonage structuré), dont la
   // taille sur disque n'est exposée par aucune API — on la mesure à sa sérialisation JSON,
@@ -29555,6 +29772,8 @@ async function lsuIdbScan() {
   // ⚠ Sa taille est plafonnée (`SPORT_IMG_MAX_TOTAL`) mais elle peut atteindre plusieurs
   // Mo — l'ignorer ici ferait mentir le panneau, qui prétend ventiler TOUTE la réserve.
   try { const raw = await sportImgIdbGet(); out.sportImg = (raw && (raw.byteLength || raw.length)) || 0; } catch {}
+  // Cache Scryfall du Deck Magic (re-téléchargeable) : compté avec Collection.
+  try { const o = await mtgOracleBytes(); out.mtgOracle = o.bytes; out.mtgOracleN = o.n; } catch {}
   return out;
 }
 // Ventilation INTERNE de TV Time — le seul module dont UNE clé porte des milliers de
@@ -29725,8 +29944,8 @@ function DataLimitPanel() {
   // Ventilation finale : le localStorage de chaque module + sa part de base IndexedDB.
   const rows = scan.rows.map(r => ({
     ...r,
-    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : r.id === 'collection' ? idb.cards : r.id === 'photocache' ? idb.photos : r.id === 'sport' ? idb.sportImg : 0,
-    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : r.id === 'collection' ? `base Cartes — ${idb.cardsN} carte${idb.cardsN > 1 ? 's' : ''} (Pokémon, Magic)` : r.id === 'photocache' ? `${idb.photosN} photo${idb.photosN > 1 ? 's' : ''} gardée${idb.photosN > 1 ? 's' : ''} sur cet appareil — Drive fait toujours autorité` : r.id === 'sport' ? 'base SQLite des planches d\'exercices — tout y est re-téléchargeable' : '',
+    idb: !idb ? 0 : r.id === 'musique' ? idb.db : r.id === 'note' ? idb.media : r.id === 'tvtime' ? idb.tv : r.id === 'collection' ? idb.cards + (idb.mtgOracle || 0) : r.id === 'photocache' ? idb.photos : r.id === 'sport' ? idb.sportImg : 0,
+    idbNote: !idb ? '' : r.id === 'musique' ? 'base SQLite' : r.id === 'note' ? `${idb.mediaN} pièce${idb.mediaN > 1 ? 's' : ''} jointe${idb.mediaN > 1 ? 's' : ''}` : r.id === 'tvtime' ? 'base TV Time (séries, films, chaînes)' : r.id === 'collection' ? `base Cartes — ${idb.cardsN} carte${idb.cardsN > 1 ? 's' : ''} (Pokémon, Magic)${idb.mtgOracleN ? ` + fiches Scryfall du Deck Magic (${idb.mtgOracleN}, re-téléchargeables)` : ''}` : r.id === 'photocache' ? `${idb.photosN} photo${idb.photosN > 1 ? 's' : ''} gardée${idb.photosN > 1 ? 's' : ''} sur cet appareil — Drive fait toujours autorité` : r.id === 'sport' ? 'base SQLite des planches d\'exercices — tout y est re-téléchargeable' : '',
   })).map(r => ({ ...r, tot: r.ls + r.idb }))
      .filter(r => r.tot > 0)
      .sort((a, b) => b.tot - a.tot);
