@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.72';
+const APP_VERSION = '13.21.73';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20975,8 +20975,41 @@ function mtgDeckNorm(d) {
     nom: String(d.nom || 'Deck').slice(0, 60), arch: String(d.arch || '').slice(0, 60), plan: String(d.plan || '').slice(0, 400),
     syn: (Array.isArray(d.syn) ? d.syn : []).map(x => String(x || '').slice(0, 220)).filter(Boolean).slice(0, 5),
     cmd: String(d.cmd || '').slice(0, 120), basics, invented: 0, dup: 0,
-    cards: d.cards.filter(f => f && f.n).slice(0, 120).map(f => ({ n: String(f.n).slice(0, 120), t: String(f.t || '').slice(0, 80), m: String(f.m || '').slice(0, 40) })),
+    ai: mtgAiNorm(d.ai),
+    // v = coût, i = image, ro = rôles (lettres de `MTG_ROLES`) : de quoi rendre 🖼️ et 📊 sans Scryfall.
+    cards: d.cards.filter(f => f && f.n).slice(0, 120).map(f => ({
+      n: String(f.n).slice(0, 120), t: String(f.t || '').slice(0, 80), m: String(f.m || '').slice(0, 40),
+      v: mtgCmcOf(f), i: String(mtgCardImg(f)).slice(0, 300), ro: mtgRolesOf(f),
+    })),
   };
+}
+// Avis IA d'un deck, borné (vient d'un modèle ⇒ jamais affiché tel quel sans tri).
+function mtgAiNorm(a) {
+  if (!a || typeof a !== 'object' || a.busy || a.err) return null;
+  const L = (v, n) => (Array.isArray(v) ? v : []).map(x => String(x || '').slice(0, 260)).filter(Boolean).slice(0, n);
+  const r = { resume: String(a.resume || '').slice(0, 500), syn: L(a.syn, 4), weak: L(a.weak, 3) };
+  return r.resume || r.syn.length ? r : null;
+}
+// Rôles d'une carte : R retrait, D pioche, M accélération de mana, C contresort. Une carte
+// sauvegardée les porte (`ro`) ; une fiche du cache les calcule depuis son texte.
+const MTG_ROLES = [['R', 'removal', 'Retraits'], ['D', 'draw', 'Pioches'], ['M', 'ramp', 'Accélérations'], ['C', 'counter', 'Contresorts']];
+function mtgRolesOf(f) {
+  if (typeof f.ro === 'string') return f.ro;
+  if (!f.o && !f.t) return '';
+  const x = mtgFeat(f);
+  return MTG_ROLES.filter(([, k]) => x[k]).map(([l]) => l).join('');
+}
+// Coût converti : champ `v`, sinon relu dans le coût (« {2}{B}{B} » = 4) pour les vieux decks.
+function mtgCmcOf(f) {
+  if (typeof f.v === 'number') return f.v;
+  let n = 0;
+  for (const sym of String(f.m || '').split(' // ')[0].match(/\{[^}]+\}/g) || []) { const d = parseInt(sym.slice(1), 10); n += isFinite(d) ? d : (/X/.test(sym) ? 0 : 1); }
+  return n;
+}
+// Image d'une carte : cache Scryfall, sinon l'exemplaire possédé, sinon l'image par NOM
+// (redirection Scryfall — `img-src https:` l'autorise ; chargée paresseusement).
+function mtgCardImg(f) {
+  return f.i || f.im || f._img || ('https://api.scryfall.com/cards/named?format=image&version=normal&exact=' + encodeURIComponent(String(f.n || '').split(' // ')[0]));
 }
 function mtgDecksLoad() {
   try { const a = JSON.parse(lsGet(MTG_DECKS_LS) || '[]'); return Array.isArray(a) ? a.map(mtgDeckNorm).filter(Boolean) : []; } catch { return []; }
@@ -20992,6 +21025,7 @@ function useMtgSaved() {
   return mtgDecksLoad();
 }
 // Sauvegarde un deck généré ; renvoie son id (ou '' si le stockage est plein).
+function mtgDeckUnsave(id) { return mtgDecksWrite(mtgDecksLoad().filter(x => x.id !== id)); }
 function mtgDeckSave(d, q) {
   const e = mtgDeckNorm({ ...d, q, id: 'deck-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now() });
   return mtgDecksWrite([e, ...mtgDecksLoad()]) ? e.id : '';
@@ -21052,6 +21086,7 @@ function mtgDeckCompact(c) {
     pm: Array.isArray(c.produced_mana) ? c.produced_mana.join('') : '',
     cl: !(c.legalities && c.legalities.commander && c.legalities.commander !== 'legal' && c.legalities.commander !== 'restricted'),
     lay: String(c.layout || ''), at: Date.now(),
+    im: String((c.image_uris && c.image_uris.normal) || (faces[0] && faces[0].image_uris && faces[0].image_uris.normal) || ''),
   };
 }
 // Rattache un lot de réponses Scryfall aux NOMS de la collection (id Scryfall, sinon extension+
@@ -21153,9 +21188,10 @@ function mtgColorName(cols) {
 
 // Les 5 couleurs du sélecteur à gauche de la barre (ordre WUBRG). `bg`/`fg` = pastille.
 const MTG_PICK_COLORS = [
-  { c:'W', label:'Blanc', bg:'#f3ecd0', fg:'#3a3320' }, { c:'U', label:'Bleu', bg:'#3f8fd9', fg:'#fff' },
-  { c:'B', label:'Noir', bg:'#2a2a2a', fg:'#ddd' }, { c:'R', label:'Rouge', bg:'#d9534f', fg:'#fff' },
-  { c:'G', label:'Vert', bg:'#3fa45b', fg:'#fff' },
+  // `bar` = teinte des graphiques 📊 : le noir de la pastille disparaîtrait sur le fond sombre.
+  { c:'W', label:'Blanc', bg:'#f3ecd0', fg:'#3a3320', bar:'#e8dcb0' }, { c:'U', label:'Bleu', bg:'#3f8fd9', fg:'#fff', bar:'#3f8fd9' },
+  { c:'B', label:'Noir', bg:'#2a2a2a', fg:'#ddd', bar:'#8e7fa0' }, { c:'R', label:'Rouge', bg:'#d9534f', fg:'#fff', bar:'#d9534f' },
+  { c:'G', label:'Vert', bg:'#3fa45b', fg:'#fff', bar:'#3fa45b' },
 ];
 // Ce que la demande impose : couleurs (null = libres ; `picked`, les coches du sélecteur,
 // PRIME sur le texte), format, thèmes et tribus reconnus (`tribes` = sous-types présents
@@ -21252,7 +21288,6 @@ function mtgBuildDeck(pool, themes, cols, fmtKey, cmd) {
   const inTheme = chosen.filter(f => mtgThemeScore(f, main) > 0);
   const engines = chosen.filter(f => mtgThemeScore(f, main) === 2).sort(by(f => mtgFeat(f).q));
   const nCrea = chosen.filter(f => mtgFeat(f).creature).length;
-  const avg = chosen.length ? chosen.reduce((a, f) => a + (f.v || 0), 0) / chosen.length : 0;
   const rolesOf = role => chosen.filter(f => mtgFeat(f)[role]).sort(by(f => mtgFeat(f).q));
   const syn = [];
   if (engines.length) syn.push(`Moteurs « ${mtgThemeLabel(main)} » : ${names(engines)}${engines.length > 5 ? ` (+${engines.length - 5})` : ''}.`);
@@ -21260,14 +21295,13 @@ function mtgBuildDeck(pool, themes, cols, fmtKey, cmd) {
     const bridge = chosen.filter(f => mtgThemeScore(f, main) > 0 && mtgThemeScore(f, themes[1]) > 0);
     if (bridge.length) syn.push(`Pont ${mtgThemeLabel(main)} ↔ ${mtgThemeLabel(themes[1])} : ${names(bridge)}.`);
   }
-  const rm = rolesOf('removal'), dr = rolesOf('draw'), rp = rolesOf('ramp'), ct = rolesOf('counter');
-  syn.push(`Interaction : ${rm.length} retrait${rm.length > 1 ? 's' : ''}${rm.length ? ' (' + names(rm.slice(0, 3)) + ')' : ''}${ct.length ? `, ${ct.length} contresort${ct.length > 1 ? 's' : ''}` : ''}.`);
-  syn.push(`Carburant : ${dr.length} pioche${dr.length > 1 ? 's' : ''}${rp.length ? `, ${rp.length} accélération${rp.length > 1 ? 's' : ''} de mana` : ''}.`);
-  syn.push(`Courbe : ${[1, 2, 3, 4, 5, 6].map(b => `${b === 6 ? '6+' : b === 1 ? '≤1' : b}:${cnt[b]}`).join(' · ')} — coût moyen ${avg.toFixed(1).replace('.', ',')}.`);
+  // Chiffres (courbe, rôles, couleurs) : panneau 📊 Stats du deck (`MtgDeckStats`).
+  const rm = rolesOf('removal');
+  if (rm.length) syn.push(`Retraits principaux : ${names(rm.slice(0, 3))}.`);
   if (chosen.length < F.spells) syn.push(`⚠ Seulement ${chosen.length} sorts jouables sur ${F.spells} dans ces couleurs : deck incomplet.`);
   return {
     nom: `${mtgColorName(cols)} · ${themes.map(mtgThemeLabel).join(' + ')}`,
-    arch: fmtKey === 'cmd' ? 'Commander' : '60 cartes',
+    arch: fmtKey === 'cmd' ? 'Commander' : '',
     plan: `${inTheme.length} carte${inTheme.length > 1 ? 's' : ''} du thème sur ${chosen.length} sorts, ${nCrea} créature${nCrea > 1 ? 's' : ''}, ${lands.length + nBasics} terrains dont ${lands.length} non-base de ta collection.`,
     syn, cmd: cmd ? cmd.n : '', cards: [...(cmd ? [cmd] : []), ...all], basics, invented: 0, dup: 0,
   };
@@ -21291,6 +21325,8 @@ async function mtgDeckBuild(q, list, stop, picked) {
     seen.add(k);
     const f = _mtgDeck.info.get(k);
     if (!f || f.miss || MTG_LAYOUT_SKIP.test(f.lay || '') || /^(Token|Emblem|Conspiracy|Dungeon)\b/.test(f.t || '')) continue;
+    // Fiches lues avant 13.21.73 : pas d'image en cache ⇒ celle de l'exemplaire possédé (id Scryfall).
+    if (!f.im && !f._img) f._img = mtgImgUrl(x).replace('/small/', '/normal/');
     pool.push(f);
     for (const s of mtgFeat(f).sub) { tribes.set(s.toLowerCase(), s); tribeN.set(s, (tribeN.get(s) || 0) + 1); }
   }
@@ -21354,24 +21390,184 @@ const MTG_DECK_GROUPS = [
   ['Créatures', /Creature/], ['Planeswalkers', /Planeswalker/], ['Éphémères', /Instant/], ['Rituels', /Sorcery/],
   ['Artefacts', /Artifact/], ['Enchantements', /Enchantment/], ['Terrains', /Land/], ['Autres', /.*/],
 ];
-function mtgDeckText(d) {
-  const lines = [];
-  if (d.cmd) lines.push('1 ' + d.cmd);
-  for (const f of d.cards) if (f.n !== d.cmd) lines.push('1 ' + f.n);
-  for (const b in d.basics) lines.push(d.basics[b] + ' ' + b);
-  return lines.join('\n');
+// 🤖 AVIS IA EN PARALLÈLE : le deck est construit sur l'appareil, puis chacun des 3 part SEUL
+// chez l'IA (60 à 100 noms, jamais la collection) pour un résumé de jeu, ses vraies synergies
+// et ses faiblesses. Les decks s'affichent tout de suite ; l'avis arrive ensuite dans la fiche.
+// ⚠ Sans clé IA : rien ne part, les decks restent complets. Un deck déjà ⭐ reçoit l'avis dans
+// sa copie sauvegardée.
+function mtgDeckAiPrompt(d, fmtLabel) {
+  return [
+    'Tu es un expert de Magic: The Gathering. Voici un deck (' + fmtLabel + ') construit automatiquement.',
+    'Nom : ' + d.nom + (d.cmd ? ' — commandant : ' + d.cmd : ''),
+    'Terrains de base : ' + (Object.keys(d.basics).map(b => d.basics[b] + ' ' + b).join(', ') || 'aucun'),
+    'Cartes (nom | coût | type) :',
+    ...d.cards.map(f => [f.n, f.m, f.t].filter(Boolean).join(' | ')),
+    '',
+    'En français, court et concret. Cite uniquement des cartes de la liste.',
+    'Réponds UNIQUEMENT par ce JSON :',
+    '{"resume":"2 phrases : comment jouer ce deck","synergies":["3 synergies ou combos réels entre cartes de la liste"],"faiblesses":["2 points faibles"]}',
+  ].join('\n');
 }
-function MtgDeckCard({ d, i, onSave, onDelete }) {
-  const [copied, setCopied] = React.useState(false);
-  const [del, setDel] = React.useState(false);     // 1er appui sur 🗑 = confirmation
+async function mtgDeckAiOne(d, fmtLabel) {
+  d.ai = { busy: true }; mtgDeckPublish();
+  try {
+    const txt = await aiGenerate('collection', [{ text: mtgDeckAiPrompt(d, fmtLabel) }]);
+    const meta = aiMeta();
+    const j = geminiExtract(txt, '{', '}');
+    const ai = mtgAiNorm(j && { resume: j.resume, syn: j.synergies, weak: j.faiblesses });
+    d.ai = ai ? { ...ai, fb: meta.fb } : { err: "Réponse de l'IA illisible." };
+    if (ai && d.savedId) mtgDecksWrite(mtgDecksLoad().map(x => (x.id === d.savedId ? { ...x, ai } : x)));
+  } catch (e) {
+    const m = String((e && e.message) || e);
+    d.ai = { err: m.includes('NO_KEY') ? 'Aucune clé IA.' : m.slice(0, 160) };
+  }
+  mtgDeckPublish();
+}
+function mtgDeckAiAll(res) {
+  if (!aiAnyKey(false)) return;
+  const lab = res.fmtKey === 'cmd' ? 'Commander 100 cartes' : '60 cartes';
+  res.decks.forEach(d => { mtgDeckAiOne(d, lab); });      // ⚠ en parallèle, jamais attendu
+}
+function MtgDeckAi({ ai }) {
+  if (!ai) return null;
+  if (ai.busy) return <div style={{ fontSize:10, color:C.muted, fontStyle:'italic' }}>🤖 L'IA analyse le deck…</div>;
+  if (ai.err) return <div style={{ fontSize:9.5, color:C.dim }}>🤖 Avis IA indisponible : {ai.err}</div>;
+  return (
+    <div style={{ border:`1px solid ${C.border}`, background:C.surface, borderRadius:8, padding:'7px 10px', display:'flex', flexDirection:'column', gap:4 }}>
+      <div style={{ fontSize:10, fontWeight:700, color:C.muted, letterSpacing:'0.05em' }}>🤖 AVIS IA<AiFallbackBadge fb={ai.fb} /></div>
+      {ai.resume && <div style={{ fontSize:11, color:'#c8c8c8', lineHeight:1.5 }}>{ai.resume}</div>}
+      {ai.syn.map((t, k) => <div key={'s' + k} style={{ fontSize:10.5, color:'#c8c8c8', lineHeight:1.45 }}>🔗 {t}</div>)}
+      {ai.weak.map((t, k) => <div key={'w' + k} style={{ fontSize:10.5, color:C.muted, lineHeight:1.45 }}>⚠ {t}</div>)}
+    </div>
+  );
+}
+// 📊 STATS DU DECK — courbe de mana (histogramme, une seule teinte : c'est une grandeur),
+// symboles de mana par couleur (barre empilée aux couleurs Magic, légende chiffrée : jamais la
+// couleur seule), types et rôles en tableau. Survol = infobulle native (`title`).
+function MtgDeckStats({ d }) {
+  const spells = d.cards.filter(f => !/\bLand\b/.test(String(f.t || '').split(' // ')[0]));
+  const nLand = d.cards.length - spells.length;
   const nBasics = Object.values(d.basics).reduce((a, b) => a + b, 0);
-  const groups = MTG_DECK_GROUPS.map(([label, re]) => [label, []]);
+  const curve = [0, 1, 2, 3, 4, 5, 6].map(b => spells.filter(f => Math.min(6, Math.round(mtgCmcOf(f))) === b).length);
+  const max = Math.max(1, ...curve);
+  const avg = spells.length ? spells.reduce((a, f) => a + mtgCmcOf(f), 0) / spells.length : 0;
+  const pips = MTG_PICK_COLORS.map(x => ({ ...x, n: spells.reduce((a, f) => a + (String(f.m || '').split('{' + x.c).length - 1), 0) })).filter(x => x.n > 0);
+  const totP = pips.reduce((a, x) => a + x.n, 0);
+  const types = MTG_DECK_GROUPS.slice(0, -1).map(([label, re]) => [label, d.cards.filter(f => re.test(String(f.t || '').split(' // ')[0]) && (label === 'Terrains' || !/\bLand\b/.test(f.t || ''))).length])
+    .filter(([label, n]) => n > 0 && label !== 'Terrains');
+  const roles = MTG_ROLES.map(([l, , label]) => [label, d.cards.filter(f => mtgRolesOf(f).includes(l)).length]);
+  const rowS = { display:'flex', justifyContent:'space-between', fontSize:11, color:C.text, padding:'2px 0', borderBottom:`1px solid ${C.border}` };
+  const H = 70;
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+      <div style={{ display:'flex', gap:14, flexWrap:'wrap', fontFamily:'DM Mono,monospace' }}>
+        {[['Cartes', d.cards.length + nBasics], ['Coût moyen', avg.toFixed(2).replace('.', ',')], ['Terrains', nLand + nBasics]].map(([k, v]) => (
+          <div key={k}><div style={{ fontSize:16, fontWeight:800, color:C.text }}>{v}</div><div style={{ fontSize:9, color:C.muted }}>{k}</div></div>
+        ))}
+      </div>
+      <div>
+        <div style={{ fontSize:10, fontWeight:700, color:C.muted, marginBottom:6 }}>COURBE DE MANA (hors terrains)</div>
+        <div style={{ display:'flex', alignItems:'flex-end', gap:6, height:H + 16 }}>
+          {curve.map((n, b) => (
+            <div key={b} title={`${n} carte${n > 1 ? 's' : ''} à ${b === 6 ? '6 mana ou plus' : b + ' mana'}`}
+              style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'flex-end', height:'100%', cursor:'default' }}>
+              <span style={{ fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace', marginBottom:2 }}>{n || ''}</span>
+              <div style={{ width:'70%', maxWidth:26, height: Math.max(n ? 3 : 0, Math.round(n / max * H)), background:COLLECTION_COLOR, borderRadius:'4px 4px 0 0' }} />
+            </div>
+          ))}
+        </div>
+        <div style={{ display:'flex', gap:6, borderTop:`1px solid ${C.border}`, paddingTop:3 }}>
+          {curve.map((_, b) => <span key={b} style={{ flex:1, textAlign:'center', fontSize:9.5, color:C.muted, fontFamily:'DM Mono,monospace' }}>{b === 6 ? '6+' : b}</span>)}
+        </div>
+      </div>
+      {totP > 0 && (
+        <div>
+          <div style={{ fontSize:10, fontWeight:700, color:C.muted, marginBottom:6 }}>SYMBOLES DE MANA</div>
+          <div style={{ display:'flex', gap:2, height:12 }}>
+            {pips.map(x => <div key={x.c} title={`${x.label} : ${x.n} symbole${x.n > 1 ? 's' : ''}`} style={{ flex:x.n, background:x.bar, borderRadius:3 }} />)}
+          </div>
+          <div style={{ display:'flex', gap:10, flexWrap:'wrap', marginTop:5 }}>
+            {pips.map(x => (
+              <span key={x.c} style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10.5, color:C.text }}>
+                <span style={{ width:9, height:9, borderRadius:'50%', background:x.bar }} />
+                {x.label} {x.n} <span style={{ color:C.muted }}>({Math.round(x.n / totP * 100)} %)</span>
+              </span>
+            ))}
+          </div>
+          {nBasics > 0 && <div style={{ fontSize:10, color:C.muted, marginTop:4 }}>Terrains de base : {Object.keys(d.basics).map(b => `${d.basics[b]} ${MTG_BASICS_FR[b] || b}`).join(' · ')}</div>}
+        </div>
+      )}
+      <div style={{ display:'flex', gap:16, flexWrap:'wrap' }}>
+        <div style={{ flex:1, minWidth:130 }}>
+          <div style={{ fontSize:10, fontWeight:700, color:C.muted, marginBottom:4 }}>TYPES</div>
+          {types.map(([k, n]) => <div key={k} style={rowS}><span>{k}</span><b style={{ fontFamily:'DM Mono,monospace' }}>{n}</b></div>)}
+          <div style={rowS}><span>Terrains</span><b style={{ fontFamily:'DM Mono,monospace' }}>{nLand} + {nBasics} base</b></div>
+        </div>
+        <div style={{ flex:1, minWidth:130 }}>
+          <div style={{ fontSize:10, fontWeight:700, color:C.muted, marginBottom:4 }}>RÔLES</div>
+          {roles.map(([k, n]) => <div key={k} style={rowS}><span>{k}</span><b style={{ fontFamily:'DM Mono,monospace' }}>{n}</b></div>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+// 🖼️ CARTES DU DECK en images (grille, chargement paresseux), puis la liste texte repliée.
+function MtgDeckPhotos({ d, groups, nBasics }) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(80px, 1fr))', gap:6 }}>
+        {d.cards.map(f => (
+          <a key={f.n} href={safeHref('https://scryfall.com/search?q=' + encodeURIComponent('!"' + String(f.n).split(' // ')[0] + '"'))} target="_blank" rel="noopener noreferrer"
+            title={f.n} style={{ display:'block', aspectRatio:'488 / 680', color:C.muted, fontSize:9, textDecoration:'none', borderRadius:6, overflow:'hidden', background:C.surface, border: f.n === d.cmd ? `2px solid ${COLLECTION_COLOR}` : `1px solid ${C.border}` }}>
+            <img src={mtgCardImg(f)} alt={f.n} loading="lazy" referrerPolicy="no-referrer"
+              style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+          </a>
+        ))}
+      </div>
+      {nBasics > 0 && <div style={{ fontSize:10.5, color:C.muted }}>+ terrains de base (hors collection) : {Object.keys(d.basics).map(b => `${d.basics[b]} ${MTG_BASICS_FR[b] || b}`).join(' · ')}</div>}
+      <StatsCollapse title={`📜 LISTE (${d.cards.length} de ta collection + ${nBasics} de base)`} color={COLLECTION_COLOR} defaultOpen={false}>
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {groups.filter(g => g[1].length).map(([label, fs]) => (
+            <div key={label}>
+              <div style={{ fontSize:9.5, fontWeight:700, color:C.muted, letterSpacing:'0.05em', textTransform:'uppercase' }}>{label} ({fs.length})</div>
+              {fs.map(f => (
+                <div key={f.n} style={{ display:'flex', gap:6, fontSize:11, color:C.text, lineHeight:1.5, userSelect:'text' }}>
+                  <span style={{ flex:1, minWidth:0 }}>1 {f.n}</span>
+                  <span style={{ color:C.muted, fontFamily:'DM Mono,monospace', fontSize:10 }}>{f.m}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </StatsCollapse>
+    </div>
+  );
+}
+// Une fiche de deck. Boutons 🖼️ Cartes / 📊 Stats EXCLUSIFS (ouvrir l'un ferme l'autre, rappuyer
+// referme), puis ⭐ : sauvegarde (généré) ou retrait (deuxième appui) des decks sauvegardés.
+function MtgDeckCard({ d, i, onSave, onUnsave }) {
+  const [mode, setMode] = React.useState('');
+  const [del, setDel] = React.useState(false);
+  const nBasics = Object.values(d.basics).reduce((a, b) => a + b, 0);
+  const groups = MTG_DECK_GROUPS.map(([label]) => [label, []]);
   for (const f of d.cards) {
     const gi = MTG_DECK_GROUPS.findIndex(([, re]) => re.test(f.t || 'Autres'));
     groups[gi < 0 ? groups.length - 1 : gi][1].push(f);
   }
-  const copy = () => {
-    try { navigator.clipboard.writeText(mtgDeckText(d)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {}); } catch {}
+  const starred = !!(d.savedId || d.at);
+  const star = () => {
+    if (!starred) { onSave && onSave(d); return; }
+    if (!del) { setDel(true); setTimeout(() => setDel(false), 3000); return; }
+    setDel(false); onUnsave && onUnsave(d);
+  };
+  const tab = (id, label, title) => {
+    const on = mode === id;
+    return (
+      <button onClick={() => setMode(m => (m === id ? '' : id))} type="button" aria-pressed={on} title={title}
+        style={{ background: on ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${on ? COLLECTION_COLOR : COLLECTION_COLOR + '66'}`, borderRadius:8, color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+        {label}
+      </button>
+    );
   };
   return (
     <div style={{ border:`1px solid ${COLLECTION_COLOR}44`, background:C.surfaceHigh, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:6 }}>
@@ -21389,52 +21585,19 @@ function MtgDeckCard({ d, i, onSave, onDelete }) {
           {d.syn.map((s, k) => <li key={k} style={{ fontSize:10.5, color:'#c8c8c8', lineHeight:1.45 }}>🔗 {s}</li>)}
         </ul>
       )}
-      <StatsCollapse title={`📜 LISTE (${d.cards.length} de ta collection + ${nBasics} de base)`} color={COLLECTION_COLOR} defaultOpen={false}>
-        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-          {groups.filter(g => g[1].length).map(([label, fs]) => (
-            <div key={label}>
-              <div style={{ fontSize:9.5, fontWeight:700, color:C.muted, letterSpacing:'0.05em', textTransform:'uppercase' }}>{label} ({fs.length})</div>
-              {fs.map(f => (
-                <div key={f.n} style={{ display:'flex', gap:6, fontSize:11, color:C.text, lineHeight:1.5 }}>
-                  <span style={{ flex:1, minWidth:0 }}>{f.n}</span>
-                  <span style={{ color:C.muted, fontFamily:'DM Mono,monospace', fontSize:10 }}>{f.m}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-          {nBasics > 0 && (
-            <div style={{ fontSize:10.5, color:C.muted }}>
-              Terrains de base (hors collection) : {Object.keys(d.basics).map(b => `${d.basics[b]} ${MTG_BASICS_FR[b] || b}`).join(' · ')}
-            </div>
-          )}
-        </div>
-      </StatsCollapse>
+      <MtgDeckAi ai={d.ai} />
       <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
-        <button onClick={copy} type="button" title="Copier la liste au format « 1 Nom » (Arena, ManaBox, Moxfield…)"
-          style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:8, color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
-          {copied ? '✓ Copiée' : '📋 Copier la liste'}
+        {tab('photo', '🖼️ Cartes', 'Voir les cartes du deck en images (et la liste)')}
+        {tab('stats', '📊 Stats', 'Courbe de mana, couleurs, types et rôles du deck')}
+        <button onClick={star} type="button" aria-pressed={starred}
+          title={!starred ? 'Sauvegarder ce deck (⭐ Decks sauvegardés)' : del ? 'Appuie encore pour le retirer des sauvegardés' : 'Deck sauvegardé — deuxième appui pour le retirer'}
+          style={{ background: starred ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${del ? '#e05050' : COLLECTION_COLOR + '66'}`, borderRadius:8, color: del ? '#e05050' : '#f5c542', fontSize:14, lineHeight:1, padding:'4px 9px', cursor:'pointer' }}>
+          {del ? '✕' : starred ? '★' : '☆'}
         </button>
-        {onSave && (
-          <button onClick={() => { if (!d.savedId) onSave(d); }} type="button" disabled={!!d.savedId}
-            title={d.savedId ? 'Déjà dans 💾 Decks sauvegardés' : 'Garder ce deck dans 💾 Decks sauvegardés'}
-            style={{ background: d.savedId ? 'none' : `${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:8, color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor: d.savedId ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
-            {d.savedId ? '✓ Sauvegardé' : '💾 Sauvegarder'}
-          </button>
-        )}
-        {onDelete && (
-          <button onClick={() => { if (del) onDelete(d.id); else { setDel(true); setTimeout(() => setDel(false), 3000); } }} type="button"
-            title="Supprimer ce deck sauvegardé (deuxième appui pour confirmer)"
-            style={{ background:'none', border:`1px solid ${del ? '#e05050' : C.border}`, borderRadius:8, color: del ? '#e05050' : C.muted, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
-            {del ? '🗑 Confirmer' : '🗑 Supprimer'}
-          </button>
-        )}
         {d.at > 0 && <span style={{ fontSize:9.5, color:C.dim }}>{new Date(d.at).toLocaleDateString('fr-FR')}{d.q ? ` · « ${d.q} »` : ''}</span>}
-        {(d.invented > 0 || d.dup > 0) && (
-          <span style={{ fontSize:9.5, color:'#e0a050' }}>
-            ⚠ {[d.invented && `${d.invented} carte${d.invented > 1 ? 's' : ''} hors collection`, d.dup && `${d.dup} doublon${d.dup > 1 ? 's' : ''}`].filter(Boolean).join(' et ')} retiré{(d.invented + d.dup) > 1 ? 's' : ''}
-          </span>
-        )}
       </div>
+      {mode === 'photo' && <MtgDeckPhotos d={d} groups={groups} nBasics={nBasics} />}
+      {mode === 'stats' && <MtgDeckStats d={d} />}
     </div>
   );
 }
@@ -21448,6 +21611,7 @@ function MtgDeckSection({ list }) {
     const id = mtgDeckSave(d, _mtgDeck.lastQ || q);
     if (id) { d.savedId = id; setSaveErr(false); mtgDeckPublish(); } else setSaveErr(true);
   };
+  const unsave = d => { if (d.savedId) mtgDeckUnsave(d.savedId); d.savedId = ''; mtgDeckPublish(); };
   const n = list.length;
   const [pickOpen, setPickOpen] = React.useState(false);
   const cols = st.cols;                        // module-level : survit au repli (piège 5)
@@ -21463,6 +21627,7 @@ function MtgDeckSection({ list }) {
     _mtgDeck.lastQ = text; _mtgDeck.busy = true; _mtgDeck.err = ''; mtgDeckPublish();
     try {
       _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current, cols);
+      mtgDeckAiAll(_mtgDeck.res);
     } catch (e) {
       const m = String((e && e.message) || e);
       _mtgDeck.err = /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m;
@@ -21534,7 +21699,7 @@ function MtgDeckSection({ list }) {
             « {st.lastQ} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · ' + mtgColorName(r.intent.cols) : ''}{r.intent.themes.length ? ' · ' + r.intent.themes.map(mtgThemeLabel).join(', ') : ' · aucun thème reconnu : les plus fournis de ta collection'} · {r.total} cartes différentes analysées
           </div>
           {saveErr && <div style={{ fontSize:10, color:'#e05050' }}>⚠ Deck NON sauvegardé : le stockage local est plein.</div>}
-          {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} onSave={save} />)}
+          {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} onSave={save} onUnsave={unsave} />)}
         </>
       )}
     </div>
@@ -21542,14 +21707,19 @@ function MtgDeckSection({ list }) {
 }
 // Decks gardés d'une génération à l'autre (le plus récent en tête).
 function MtgSavedDecks({ saved }) {
-  if (!saved.length) return <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>Aucun deck sauvegardé : génère-en avec la recherche ci-dessous, puis « 💾 Sauvegarder ».</div>;
-  return saved.map((d, i) => <MtgDeckCard key={d.id} d={d} i={i} onDelete={id => mtgDecksWrite(mtgDecksLoad().filter(x => x.id !== id))} />);
+  if (!saved.length) return <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>Aucun deck sauvegardé : génère-en avec la recherche ci-dessous, puis touche ☆.</div>;
+  return saved.map((d, i) => <MtgDeckCard key={d.id} d={d} i={i} onUnsave={x => {
+    mtgDeckUnsave(x.id);
+    // Le même deck encore affiché dans les résultats perd son ★.
+    for (const g of ((_mtgDeck.res && _mtgDeck.res.decks) || [])) if (g.savedId === x.id) g.savedId = '';
+    mtgDeckPublish();
+  }} />);
 }
 function CollectionMagicDeck({ list }) {
   const saved = useMtgSaved();
   return (
     <StatsCollapse title="🧙 DECK MAGIC" color={COLLECTION_COLOR} defaultOpen={false}>
-      <StatsCollapse title={`💾 DECKS SAUVEGARDÉS · ${saved.length}`} color={COLLECTION_COLOR} defaultOpen={false}>
+      <StatsCollapse title={`⭐ DECKS SAUVEGARDÉS · ${saved.length}`} color={COLLECTION_COLOR} defaultOpen={false}>
         <MtgSavedDecks saved={saved} />
       </StatsCollapse>
       <StatsCollapse title="🔎 RECHERCHE" color={COLLECTION_COLOR} defaultOpen={true}>
@@ -29359,6 +29529,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.73', date:'2026-09-27', title:'🖼️ Decks Magic : cartes, stats et avis IA', items:[
+    'Chaque deck a trois boutons : 🖼️ Cartes (les cartes en images + la liste), 📊 Stats (courbe de mana, couleurs, types, rôles) — l’un ferme l’autre — et ☆ pour le sauvegarder.',
+    'L’IA revient EN PARALLÈLE : le deck est construit sur l’appareil, puis l’IA donne son avis (comment le jouer, synergies, faiblesses) à partir de ses seules cartes.',
+    'Le bouton « Copier la liste » est retiré (la liste reste sélectionnable).',
+  ] },
   { v:'13.21.72', date:'2026-09-27', title:'🧙 Deck Magic sans IA', items:[
     'Les 3 decks sont construits sur l’appareil, en une seconde, avec TOUTE la collection (plus d’envoi à une IA).',
     'Chaque carte est notée : thème (jetons, cimetière, sacrifice, volants…, ou une tribu), rôle (retrait, pioche, accélération), coût et popularité ; courbe de mana et base de terrains calculées.',
@@ -29375,10 +29550,6 @@ const RELEASE_NOTES = [
     'Deck Magic : chaque deck généré a un bouton « 💾 Sauvegarder ».',
     'Les decks gardés sont dans le sous-collapse « Decks sauvegardés », au-dessus de la recherche (suppression en deux appuis).',
     'Ils font partie de la sauvegarde (section Collection).',
-  ] },
-  { v:'13.21.68', date:'2026-09-27', title:'👕 Fiche vêtement', items:[
-    'Photo 10 % plus grande.',
-    'Boutons « Reprendre une photo », « Galerie » et « Retirer » l’un sous l’autre, sous la photo, avant le nom.',
   ] },
 ];
 
