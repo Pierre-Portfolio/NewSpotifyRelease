@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.69';
+const APP_VERSION = '13.21.70';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20917,7 +20917,7 @@ const MTG_DECK_WORDS = {
 };
 // Mots de la demande qui ne disent rien des cartes (sinon ils pèseraient dans le tri).
 const MTG_DECK_STOP = /^(deck|decks|carte|cartes|avec|pour|sans|dans|plus|tres|jouer|joue|faire|veux|voudrais|mais|style|theme|base|commander|edh|commandant|format|mono)$/;
-const _mtgDeck = { info: new Map(), fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', subs: new Set() };
+const _mtgDeck = { info: new Map(), fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', cols: '', subs: new Set() };
 // 💾 DECKS SAUVEGARDÉS : une copie ALLÉGÉE (nom, coût, type par carte — le texte des cartes
 // se relit sur Scryfall) dans le localStorage, préfixe `spotifyplus_collection` ⇒ compté avec
 // Collection dans Limite data. ⚠ Donnée saisie ⇒ DANS `buildBackup` (`mtg_decks`), fusionnée
@@ -21008,7 +21008,14 @@ async function mtgDeckFetchInfo(list, stop) {
   _mtgDeck.fetch = null;
 }
 // Ce que la demande impose : couleurs (null = libre), format, mots cherchés dans les cartes.
-function mtgDeckIntent(q) {
+// Les 5 couleurs du sélecteur à gauche de la barre (ordre WUBRG). `bg`/`fg` = pastille.
+const MTG_PICK_COLORS = [
+  { c:'W', label:'Blanc', bg:'#f3ecd0', fg:'#3a3320' }, { c:'U', label:'Bleu', bg:'#3f8fd9', fg:'#fff' },
+  { c:'B', label:'Noir', bg:'#2a2a2a', fg:'#ddd' }, { c:'R', label:'Rouge', bg:'#d9534f', fg:'#fff' },
+  { c:'G', label:'Vert', bg:'#3fa45b', fg:'#fff' },
+];
+// `picked` (couleurs cochées dans le sélecteur) PRIME sur les couleurs lues dans le texte.
+function mtgDeckIntent(q, picked) {
   const s = mtgNorm(q);
   let cols = '';
   for (const [c, re] of MTG_COLORS) if (re.test(s)) cols += c;
@@ -21021,6 +21028,7 @@ function mtgDeckIntent(q) {
     if (MTG_DECK_WORDS[w]) words.add(MTG_DECK_WORDS[w]);
     else if (w.length >= 4 && !MTG_GUILDS.hasOwnProperty(w)) words.add(w.replace(/s$/, ''));
   }
+  if (picked) cols = MTG_PICK_COLORS.map(x => x.c).filter(c => picked.indexOf(c) >= 0).join('');
   return { cols: cols || null, commander, words: [...words] };
 }
 // Présélection locale : cartes UNIQUES par nom (×1), hors terrains de base, dans les couleurs
@@ -21057,6 +21065,7 @@ function mtgDeckPrompt(q, intent, pool) {
     '- Les terrains de base ne sont PAS dans la liste : indique leur nombre dans `terrains_base` (ils sont en quantité illimitée).',
     `- Vise ${size} cartes au total (cartes + terrains de base) avec une courbe de mana et un nombre de terrains cohérents. S'il n'y a pas assez de cartes jouables, fais un deck plus court plutôt que d'inventer.`,
     '- Cherche les SYNERGIES réelles entre les textes des cartes et explique-les.',
+    intent.cols ? `- Couleurs IMPOSÉES : ${MTG_PICK_COLORS.filter(x => intent.cols.indexOf(x.c) >= 0).map(x => x.label).join(', ')} (les 3 decks restent dans ces couleurs ; cartes incolores permises).` : '- Couleurs libres.',
     intent.commander ? '- `commandant` = une créature légendaire de la liste, dont les couleurs couvrent tout le deck.' : '- `commandant` = "".',
     '- Textes en français, courts.',
     '',
@@ -21103,10 +21112,10 @@ function mtgDeckCheck(raw, list) {
   }).filter(d => d.cards.length);
   return decks;
 }
-async function mtgDeckBuild(q, list, stop) {
+async function mtgDeckBuild(q, list, stop, picked) {
   await mtgDeckFetchInfo(list, stop);
   if (stop.v) throw new Error('Arrêté.');
-  const intent = mtgDeckIntent(q);
+  const intent = mtgDeckIntent(q, picked);
   const { pool, total } = mtgDeckPool(list, intent);
   if (pool.length < 10) throw new Error(intent.cols
     ? `Seulement ${pool.length} carte${pool.length > 1 ? 's' : ''} dans ces couleurs : pas de quoi bâtir un deck.`
@@ -21218,13 +21227,20 @@ function MtgDeckSection({ list }) {
   };
   const hasKey = aiAnyKey(false);
   const n = list.length;
+  const [pickOpen, setPickOpen] = React.useState(false);
+  const cols = st.cols;                        // module-level : survit au repli (piège 5)
+  const toggleCol = c => { _mtgDeck.cols = cols.indexOf(c) >= 0 ? cols.replace(c, '') : cols + c; mtgDeckPublish(); };
+  const colNames = MTG_PICK_COLORS.filter(x => cols.indexOf(x.c) >= 0).map(x => x.label.toLowerCase());
+  // Couleurs cochées sans texte : la demande devient « Deck bleu et rouge ».
+  const ready = !!(q.trim() || cols) && n > 0 && hasKey;
   const run = async () => {
-    const text = q.trim().slice(0, MTG_DECK_Q_MAX);
+    const text = (q.trim() || (cols ? 'Deck ' + colNames.join(' et ') : '')).slice(0, MTG_DECK_Q_MAX);
     if (!text || st.busy || !n) return;
+    setPickOpen(false);
     stopRef.current = { v: false };
     _mtgDeck.lastQ = text; _mtgDeck.busy = true; _mtgDeck.err = ''; mtgDeckPublish();
     try {
-      _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current);
+      _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current, cols);
     } catch (e) {
       const m = String((e && e.message) || e);
       _mtgDeck.err = m.includes('NO_KEY') ? 'Aucune clé IA — renseigne-la dans le module API.'
@@ -21239,6 +21255,17 @@ function MtgDeckSection({ list }) {
         Décris le deck voulu (couleurs, thème, créatures, style de jeu, « commander »…) : l'IA en construit 3 avec les {n} carte{n > 1 ? 's' : ''} de ta collection Magic, chacune en un exemplaire.
       </div>
       <form onSubmit={e => { e.preventDefault(); run(); }} style={{ display:'flex', gap:6 }}>
+        {/* 🎨 Sélecteur de couleurs (liste à cocher, une ou plusieurs) — ouvert SOUS la barre :
+            un menu flottant serait rogné par l'`overflow:hidden` du StatsCollapse. */}
+        <button type="button" onClick={() => setPickOpen(o => !o)} aria-expanded={pickOpen}
+          title={cols ? 'Couleurs imposées : ' + colNames.join(', ') : 'Choisir une ou plusieurs couleurs (sinon lues dans le texte)'}
+          style={{ display:'flex', alignItems:'center', gap:2, flexShrink:0, background:C.surfaceHigh, border:`1px solid ${cols ? COLLECTION_COLOR + '88' : C.border}`, borderRadius:8, padding:'0 7px', cursor:'pointer' }}>
+          {MTG_PICK_COLORS.map(x => {
+            const on = !cols || cols.indexOf(x.c) >= 0;
+            return <span key={x.c} style={{ width:11, height:11, borderRadius:'50%', background:x.bg, border:'1px solid #ffffff40', opacity: on ? 1 : 0.2 }} />;
+          })}
+          <span style={{ fontSize:9, color:C.muted, marginLeft:2 }}>{pickOpen ? '▲' : '▼'}</span>
+        </button>
         <input value={q} onChange={e => setQ(e.target.value)} maxLength={MTG_DECK_Q_MAX}
           placeholder="Ex. : deck noir-vert qui recycle le cimetière…" enterKeyHint="search"
           style={{ flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:12, padding:'8px 10px', outline:'none' }} />
@@ -21246,13 +21273,33 @@ function MtgDeckSection({ list }) {
           ? <button type="button" onClick={() => { stopRef.current.v = true; }} disabled={!fx}
               title={fx ? 'Arrêter la lecture Scryfall' : 'L’IA travaille'}
               style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, fontSize:11, fontWeight:700, padding:'0 12px', cursor: fx ? 'pointer' : 'default' }}>{fx ? '⏹' : '⏳'}</button>
-          : <button type="submit" disabled={!q.trim() || !n || !hasKey}
+          : <button type="submit" disabled={!ready}
               title={!hasKey ? 'Renseigne une clé IA dans le module API' : !n ? 'Ta collection Magic est vide' : 'Construire 3 decks'}
-              style={{ background: q.trim() && n && hasKey ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${q.trim() && n && hasKey ? COLLECTION_COLOR + '66' : C.border}`, borderRadius:8,
-                color: q.trim() && n && hasKey ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'0 12px', cursor: q.trim() && n && hasKey ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' }}>
+              style={{ background: ready ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${ready ? COLLECTION_COLOR + '66' : C.border}`, borderRadius:8,
+                color: ready ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'0 12px', cursor: ready ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' }}>
               ✨ Créer
             </button>}
       </form>
+      {pickOpen && (
+        <div role="listbox" aria-multiselectable="true" style={{ display:'flex', flexDirection:'column', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, padding:4 }}>
+          {MTG_PICK_COLORS.map(x => {
+            const on = cols.indexOf(x.c) >= 0;
+            return (
+              <button key={x.c} type="button" role="option" aria-selected={on} onClick={() => toggleCol(x.c)}
+                style={{ display:'flex', alignItems:'center', gap:8, background: on ? `${COLLECTION_COLOR}18` : 'none', border:'none', borderRadius:6, padding:'7px 8px', cursor:'pointer', color: on ? C.text : C.muted, fontSize:12, fontWeight: on ? 700 : 500, textAlign:'left' }}>
+                <span style={{ width:14, fontSize:12, color: on ? COLLECTION_COLOR : C.dim }}>{on ? '☑' : '☐'}</span>
+                <span style={{ width:16, height:16, borderRadius:'50%', background:x.bg, color:x.fg, border:'1px solid #ffffff40', fontSize:9, fontWeight:800, display:'flex', alignItems:'center', justifyContent:'center' }}>{x.c}</span>
+                {x.label}
+              </button>
+            );
+          })}
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'4px 8px 2px', fontSize:9.5, color:C.dim }}>
+            <span>{cols ? 'Les 3 decks restent dans ces couleurs.' : 'Aucune coche : couleurs lues dans le texte.'}</span>
+            {cols && <button type="button" onClick={() => { _mtgDeck.cols = ''; mtgDeckPublish(); }}
+              style={{ background:'none', border:'none', color:COLLECTION_COLOR, fontSize:10, fontWeight:700, cursor:'pointer', padding:0 }}>Effacer</button>}
+          </div>
+        </div>
+      )}
       {!hasKey && <div style={{ fontSize:9.5, color:C.dim }}>Aucune clé IA : renseigne-en une dans le module API.</div>}
       {!n && <div style={{ fontSize:9.5, color:C.dim }}>Ta collection Magic est vide : importe d'abord ton CSV (📥 dans 🟣 Magic).</div>}
       {st.busy && (
@@ -29093,6 +29140,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.70', date:'2026-09-27', title:'🎨 Couleurs du Deck Magic', items:[
+    'Deck Magic : bouton aux 5 couleurs à gauche de la barre de recherche, qui ouvre une liste à cocher (une ou plusieurs couleurs).',
+    'Les couleurs cochées sont imposées aux 3 decks ; sans coche, elles restent lues dans le texte.',
+  ] },
   { v:'13.21.69', date:'2026-09-27', title:'💾 Decks Magic sauvegardés', items:[
     'Deck Magic : chaque deck généré a un bouton « 💾 Sauvegarder ».',
     'Les decks gardés sont dans le sous-collapse « Decks sauvegardés », au-dessus de la recherche (suppression en deux appuis).',
@@ -29110,9 +29161,6 @@ const RELEASE_NOTES = [
   { v:'13.21.66', date:'2026-09-27', title:'📋 Release note', items:[
     'À propos : nouvelle section « Release note » entre Limite data et Import / Export.',
     'Elle liste les 5 dernières versions du hub et ce que chacune a changé.',
-  ] },
-  { v:'13.21.65', date:'2026-09-27', title:'🎮 Simon', items:[
-    'Les boutons 4 / 9 restent cliquables pendant une partie : changer de mode abandonne la partie en cours au lieu de rester verrouillé jusqu’à perdre.',
   ] },
 ];
 
