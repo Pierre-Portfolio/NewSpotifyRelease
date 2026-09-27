@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.68';
+const APP_VERSION = '13.21.69';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20917,7 +20917,45 @@ const MTG_DECK_WORDS = {
 };
 // Mots de la demande qui ne disent rien des cartes (sinon ils pèseraient dans le tri).
 const MTG_DECK_STOP = /^(deck|decks|carte|cartes|avec|pour|sans|dans|plus|tres|jouer|joue|faire|veux|voudrais|mais|style|theme|base|commander|edh|commandant|format|mono)$/;
-const _mtgDeck = { info: new Map(), fetch: null, res: null, busy: false, err: '', q: '', subs: new Set() };
+const _mtgDeck = { info: new Map(), fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', subs: new Set() };
+// 💾 DECKS SAUVEGARDÉS : une copie ALLÉGÉE (nom, coût, type par carte — le texte des cartes
+// se relit sur Scryfall) dans le localStorage, préfixe `spotifyplus_collection` ⇒ compté avec
+// Collection dans Limite data. ⚠ Donnée saisie ⇒ DANS `buildBackup` (`mtg_decks`), fusionnée
+// par id à la restauration (le local gagne).
+const MTG_DECKS_LS = 'spotifyplus_collection_mtgdecks';
+const MTG_DECKS_MAX = 30;
+const _mtgSaved = { subs: new Set() };
+function mtgDeckNorm(d) {
+  if (!d || typeof d !== 'object' || !d.id || !Array.isArray(d.cards)) return null;
+  const basics = {};
+  const b0 = d.basics && typeof d.basics === 'object' ? d.basics : {};
+  for (const b of MTG_BASICS) { const n = Math.round(parseFloat(b0[b])); if (isFinite(n) && n > 0) basics[b] = Math.min(n, 60); }
+  return {
+    id: String(d.id).slice(0, 40), at: +d.at || 0, q: String(d.q || '').slice(0, MTG_DECK_Q_MAX),
+    nom: String(d.nom || 'Deck').slice(0, 60), arch: String(d.arch || '').slice(0, 60), plan: String(d.plan || '').slice(0, 400),
+    syn: (Array.isArray(d.syn) ? d.syn : []).map(x => String(x || '').slice(0, 220)).filter(Boolean).slice(0, 5),
+    cmd: String(d.cmd || '').slice(0, 120), basics, invented: 0, dup: 0,
+    cards: d.cards.filter(f => f && f.n).slice(0, 120).map(f => ({ n: String(f.n).slice(0, 120), t: String(f.t || '').slice(0, 80), m: String(f.m || '').slice(0, 40) })),
+  };
+}
+function mtgDecksLoad() {
+  try { const a = JSON.parse(lsGet(MTG_DECKS_LS) || '[]'); return Array.isArray(a) ? a.map(mtgDeckNorm).filter(Boolean) : []; } catch { return []; }
+}
+function mtgDecksWrite(a) {
+  const ok = lsSet(MTG_DECKS_LS, JSON.stringify(a.slice().sort((x, y) => y.at - x.at).slice(0, MTG_DECKS_MAX)));
+  for (const f of _mtgSaved.subs) { try { f(); } catch {} }
+  return ok;
+}
+function useMtgSaved() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { _mtgSaved.subs.add(bump); return () => { _mtgSaved.subs.delete(bump); }; }, []);
+  return mtgDecksLoad();
+}
+// Sauvegarde un deck généré ; renvoie son id (ou '' si le stockage est plein).
+function mtgDeckSave(d, q) {
+  const e = mtgDeckNorm({ ...d, q, id: 'deck-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now() });
+  return mtgDecksWrite([e, ...mtgDecksLoad()]) ? e.id : '';
+}
 function mtgDeckPublish() { for (const f of _mtgDeck.subs) { try { f(); } catch {} } }
 function useMtgDeck() {
   const [, bump] = React.useReducer(x => x + 1, 0);
@@ -21091,8 +21129,9 @@ function mtgDeckText(d) {
   for (const b in d.basics) lines.push(d.basics[b] + ' ' + b);
   return lines.join('\n');
 }
-function MtgDeckCard({ d, i }) {
+function MtgDeckCard({ d, i, onSave, onDelete }) {
   const [copied, setCopied] = React.useState(false);
+  const [del, setDel] = React.useState(false);     // 1er appui sur 🗑 = confirmation
   const nBasics = Object.values(d.basics).reduce((a, b) => a + b, 0);
   const groups = MTG_DECK_GROUPS.map(([label, re]) => [label, []]);
   for (const f of d.cards) {
@@ -21143,6 +21182,21 @@ function MtgDeckCard({ d, i }) {
           style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:8, color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
           {copied ? '✓ Copiée' : '📋 Copier la liste'}
         </button>
+        {onSave && (
+          <button onClick={() => { if (!d.savedId) onSave(d); }} type="button" disabled={!!d.savedId}
+            title={d.savedId ? 'Déjà dans 💾 Decks sauvegardés' : 'Garder ce deck dans 💾 Decks sauvegardés'}
+            style={{ background: d.savedId ? 'none' : `${COLLECTION_COLOR}22`, border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:8, color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor: d.savedId ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
+            {d.savedId ? '✓ Sauvegardé' : '💾 Sauvegarder'}
+          </button>
+        )}
+        {onDelete && (
+          <button onClick={() => { if (del) onDelete(d.id); else { setDel(true); setTimeout(() => setDel(false), 3000); } }} type="button"
+            title="Supprimer ce deck sauvegardé (deuxième appui pour confirmer)"
+            style={{ background:'none', border:`1px solid ${del ? '#e05050' : C.border}`, borderRadius:8, color: del ? '#e05050' : C.muted, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+            {del ? '🗑 Confirmer' : '🗑 Supprimer'}
+          </button>
+        )}
+        {d.at > 0 && <span style={{ fontSize:9.5, color:C.dim }}>{new Date(d.at).toLocaleDateString('fr-FR')}{d.q ? ` · « ${d.q} »` : ''}</span>}
         {(d.invented > 0 || d.dup > 0) && (
           <span style={{ fontSize:9.5, color:'#e0a050' }}>
             ⚠ {[d.invented && `${d.invented} carte${d.invented > 1 ? 's' : ''} hors collection`, d.dup && `${d.dup} doublon${d.dup > 1 ? 's' : ''}`].filter(Boolean).join(' et ')} retiré{(d.invented + d.dup) > 1 ? 's' : ''}
@@ -21154,15 +21208,21 @@ function MtgDeckCard({ d, i }) {
 }
 function MtgDeckSection({ list }) {
   const st = useMtgDeck();
-  const [q, setQ] = React.useState(st.q);
+  const [q, setQ0] = React.useState(st.q);
+  const setQ = v => { _mtgDeck.q = v; setQ0(v); };   // survit au repli du sous-collapse (piège 5)
+  const [saveErr, setSaveErr] = React.useState(false);
   const stopRef = React.useRef({ v: false });
+  const save = d => {
+    const id = mtgDeckSave(d, _mtgDeck.lastQ || q);
+    if (id) { d.savedId = id; setSaveErr(false); mtgDeckPublish(); } else setSaveErr(true);
+  };
   const hasKey = aiAnyKey(false);
   const n = list.length;
   const run = async () => {
     const text = q.trim().slice(0, MTG_DECK_Q_MAX);
     if (!text || st.busy || !n) return;
     stopRef.current = { v: false };
-    _mtgDeck.q = text; _mtgDeck.busy = true; _mtgDeck.err = ''; mtgDeckPublish();
+    _mtgDeck.lastQ = text; _mtgDeck.busy = true; _mtgDeck.err = ''; mtgDeckPublish();
     try {
       _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current);
     } catch (e) {
@@ -21204,19 +21264,31 @@ function MtgDeckSection({ list }) {
       {r && !st.busy && (
         <>
           <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>
-            « {st.q} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · couleurs ' + r.intent.cols : ''} · {r.sent} carte{r.sent > 1 ? 's' : ''} proposée{r.sent > 1 ? 's' : ''} à l'IA sur {r.total} éligible{r.total > 1 ? 's' : ''}
+            « {st.lastQ} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · couleurs ' + r.intent.cols : ''} · {r.sent} carte{r.sent > 1 ? 's' : ''} proposée{r.sent > 1 ? 's' : ''} à l'IA sur {r.total} éligible{r.total > 1 ? 's' : ''}
             <AiFallbackBadge fb={r.meta && r.meta.fb} />
           </div>
-          {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} />)}
+          {saveErr && <div style={{ fontSize:10, color:'#e05050' }}>⚠ Deck NON sauvegardé : le stockage local est plein.</div>}
+          {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} onSave={save} />)}
         </>
       )}
     </div>
   );
 }
+// Decks gardés d'une génération à l'autre (le plus récent en tête).
+function MtgSavedDecks({ saved }) {
+  if (!saved.length) return <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>Aucun deck sauvegardé : génère-en avec la recherche ci-dessous, puis « 💾 Sauvegarder ».</div>;
+  return saved.map((d, i) => <MtgDeckCard key={d.id} d={d} i={i} onDelete={id => mtgDecksWrite(mtgDecksLoad().filter(x => x.id !== id))} />);
+}
 function CollectionMagicDeck({ list }) {
+  const saved = useMtgSaved();
   return (
     <StatsCollapse title="🧙 DECK MAGIC" color={COLLECTION_COLOR} defaultOpen={false}>
-      <MtgDeckSection list={list} />
+      <StatsCollapse title={`💾 DECKS SAUVEGARDÉS · ${saved.length}`} color={COLLECTION_COLOR} defaultOpen={false}>
+        <MtgSavedDecks saved={saved} />
+      </StatsCollapse>
+      <StatsCollapse title="🔎 RECHERCHE" color={COLLECTION_COLOR} defaultOpen={true}>
+        <MtgDeckSection list={list} />
+      </StatsCollapse>
     </StatsCollapse>
   );
 }
@@ -25443,6 +25515,8 @@ function buildBackup() {
     // la plus grosse collection du Hub. Le cache mémoire est chargé au boot ⇒ lecture
     // synchrone possible, comme pour TV Time.
     collection: (() => { const d = collLoad(); return Object.keys(d).length ? d : null; })(),
+    // 🧙 Decks Magic sauvegardés (listes allégées, cf. `MTG_DECKS_LS`)
+    mtg_decks: (() => { const a = mtgDecksLoad(); return a.length ? a : null; })(),
     // Histoire : fiches d'œuvres rédigées par l'IA (⚠ JAMAIS les photos, qui ne sont
     // de toute façon pas conservées — seul le texte de la fiche vit ici)
     histoire: (() => { const a = lsJson(HISTOIRE_LS); return Array.isArray(a) ? a : null; })(),
@@ -25498,7 +25572,7 @@ const EXPORT_SECTIONS = [
   { key:'frigo',    label:'Frigo',        icon:'🧊', hint:'contenu + dates de péremption', fields:['frigo'] },
   { key:'vetement', label:'Vêtement',     icon:'👕', hint:'inventaire + fiches + marques (photos sur Drive)', fields:['vetement'] },
   { key:'revente',  label:'Revente',      icon:'🏷️', hint:'articles + annonces rédigées (photos sur Drive)', fields:['revente'] },
-  { key:'collection', label:'Collection',  icon:'🗃️', hint:'cartes, Displate, Pop, jeux… (références, pas les images)', fields:['collection'] },
+  { key:'collection', label:'Collection',  icon:'🗃️', hint:'cartes, Displate, Pop, jeux… (références, pas les images)', fields:['collection', 'mtg_decks'] },
   { key:'histoire', label:'Histoire',     icon:'🏛️', hint:"fiches d'œuvres (résumé + lien avec la ville)", fields:['histoire'] },
   { key:'emploi',   label:'Emploi',       icon:'💼', hint:'critères de recherche + profil', fields:['emploi'] },
   { key:'ia',       label:'IA',           icon:'🤖', hint:'10 dernières demandes + modules ouverts à l\'IA', fields:['ia_history', 'ia_modules'] },
@@ -26136,6 +26210,15 @@ function applyBackup(data) {
       // ⚠ `collSave` et non `put` : les cartes ne repassent PAS par le localStorage (elles
       // le satureraient), il les redirige vers leur base. Un refus est SIGNALÉ, jamais avalé.
       if (!collSave(next)) failed.push(COLLECTION_LS);
+    } catch {}
+  }
+  // 🧙 Decks Magic sauvegardés — union par id, le local gagne.
+  if (Array.isArray(data.mtg_decks)) {
+    try {
+      const local = mtgDecksLoad();
+      const have = new Set(local.map(d => d.id));
+      const inc = data.mtg_decks.map(mtgDeckNorm).filter(d => d && !have.has(d.id));
+      if (inc.length && !mtgDecksWrite(local.concat(inc))) failed.push(MTG_DECKS_LS);
     } catch {}
   }
   // Revente — articles FUSIONNÉS par id (le local gagne sur un id déjà présent, les articles
@@ -29010,6 +29093,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.69', date:'2026-09-27', title:'💾 Decks Magic sauvegardés', items:[
+    'Deck Magic : chaque deck généré a un bouton « 💾 Sauvegarder ».',
+    'Les decks gardés sont dans le sous-collapse « Decks sauvegardés », au-dessus de la recherche (suppression en deux appuis).',
+    'Ils font partie de la sauvegarde (section Collection).',
+  ] },
   { v:'13.21.68', date:'2026-09-27', title:'👕 Fiche vêtement', items:[
     'Photo 10 % plus grande.',
     'Boutons « Reprendre une photo », « Galerie » et « Retirer » l’un sous l’autre, sous la photo, avant le nom.',
@@ -29025,10 +29113,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.65', date:'2026-09-27', title:'🎮 Simon', items:[
     'Les boutons 4 / 9 restent cliquables pendant une partie : changer de mode abandonne la partie en cours au lieu de rester verrouillé jusqu’à perdre.',
-  ] },
-  { v:'13.21.64', date:'2026-09-26', title:'💬 Infobulles sur mobile', items:[
-    'L’appui long suit les événements tactiles : le geste natif du téléphone n’annule plus l’infobulle.',
-    'L’appui long ne sélectionne plus le texte des boutons.',
   ] },
 ];
 
