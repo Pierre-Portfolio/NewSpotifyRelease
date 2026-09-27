@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.66';
+const APP_VERSION = '13.21.67';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -20873,6 +20873,351 @@ const COLLECTION_SUBS = {
   ],
 };
 
+// 🧙 DECK MAGIC — trois decks construits PAR L'IA avec les seules cartes de la collection.
+// ⚠ Une fiche Magic ne connaît ni le type, ni le coût, ni le texte de la carte : ils sont
+//   demandés à Scryfall (`/cards/collection`, lots de 75, mêmes identifiants que la cote) et
+//   gardés EN MÉMOIRE seulement (`_mtgDeck.info`, re-fetchable ⇒ ni stockage ni sauvegarde).
+// ⚠ L'IA ne reçoit PAS toute la collection (des milliers de lignes dépasseraient le contexte
+//   des IA gratuites) : `mtgDeckPool` présélectionne localement `MTG_DECK_POOL` cartes, celles
+//   qui collent à la demande (couleurs, mots-clés traduits par `MTG_DECK_WORDS`) en tête.
+// ⚠ TOUT nom rendu par le modèle est revérifié contre la collection (`mtgDeckCheck`) : carte
+//   inventée ou en double = retirée et comptée. Chaque carte est possédée en ×1 ⇒ ×1 dans le
+//   deck ; seuls les terrains de base sont hors collection (comptés à part).
+// ⚠ État module-level (piège 5) : replier le collapse ne jette ni les decks ni l'analyse.
+const MTG_DECK_POOL = 250;        // cartes envoyées au modèle au plus
+const MTG_DECK_Q_MAX = 400;       // longueur de la demande libre
+const MTG_BASICS = ['Plains', 'Island', 'Swamp', 'Mountain', 'Forest', 'Wastes'];
+const MTG_BASICS_FR = { Plains:'Plaine', Island:'Île', Swamp:'Marais', Mountain:'Montagne', Forest:'Forêt', Wastes:'Désert' };
+const MTG_COLORS = [
+  ['W', /\b(blanc|blanche|white)\b/], ['U', /\b(bleu|bleue|blue)\b/], ['B', /\b(noir|noire|black)\b/],
+  ['R', /\b(rouge|red)\b/], ['G', /\b(vert|verte|green)\b/],
+];
+// Guildes et clans courants → couleurs (la demande « deck golgari » doit filtrer comme « noir vert »).
+const MTG_GUILDS = { azorius:'WU', dimir:'UB', rakdos:'BR', gruul:'RG', selesnya:'GW', orzhov:'WB', izzet:'UR',
+  golgari:'BG', boros:'RW', simic:'GU', esper:'WUB', grixis:'UBR', jund:'BRG', naya:'RGW', bant:'GWU',
+  abzan:'WBG', jeskai:'URW', sultai:'BGU', mardu:'RWB', temur:'GUR', mono:'' };
+// Mots français → termes du texte ANGLAIS des cartes (Scryfall rend l'oracle en anglais).
+const MTG_DECK_WORDS = {
+  vol:'flying', volant:'flying', zombie:'zombie', zombies:'zombie', elfe:'elf', elfes:'elf', gobelin:'goblin',
+  gobelins:'goblin', dragon:'dragon', dragons:'dragon', ange:'angel', anges:'angel', vampire:'vampire',
+  vampires:'vampire', humain:'human', humains:'human', chevalier:'knight', chevaliers:'knight', soldat:'soldier',
+  soldats:'soldier', sorcier:'wizard', sorciers:'wizard', pirate:'pirate', pirates:'pirate', dinosaure:'dinosaur',
+  dinosaures:'dinosaur', chat:'cat', chats:'cat', artefact:'artifact', artefacts:'artifact', enchantement:'enchantment',
+  enchantements:'enchantment', jeton:'token', jetons:'token', cimetiere:'graveyard', piocher:'draw', pioche:'draw',
+  contrecarrer:'counter', contresort:'counter', marqueur:'counter', marqueurs:'counter', vie:'life', gagner:'gain',
+  defausse:'discard', defausser:'discard', sacrifice:'sacrifice', sacrifier:'sacrifice', meule:'mill', mill:'mill',
+  degats:'damage', brulure:'damage', burn:'damage', pietinement:'trample', celerite:'haste',
+  vigilance:'vigilance', contact:'deathtouch', lien:'lifelink', rituel:'sorcery', ephemere:'instant',
+  equipement:'equipment', equipements:'equipment', aura:'aura', auras:'aura', rampe:'search your library',
+  ramp:'search your library', terrain:'land', terrains:'land', exil:'exile', exiler:'exile', copie:'copy',
+  reanimation:'return target creature card from your graveyard', reanimer:'graveyard', tribal:'creature',
+  controle:'counter target', aggro:'haste', legendaire:'legendary', planeswalker:'planeswalker',
+};
+// Mots de la demande qui ne disent rien des cartes (sinon ils pèseraient dans le tri).
+const MTG_DECK_STOP = /^(deck|decks|carte|cartes|avec|pour|sans|dans|plus|tres|jouer|joue|faire|veux|voudrais|mais|style|theme|base|commander|edh|commandant|format|mono)$/;
+const _mtgDeck = { info: new Map(), fetch: null, res: null, busy: false, err: '', q: '', subs: new Set() };
+function mtgDeckPublish() { for (const f of _mtgDeck.subs) { try { f(); } catch {} } }
+function useMtgDeck() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { _mtgDeck.subs.add(bump); return () => { _mtgDeck.subs.delete(bump); }; }, []);
+  return _mtgDeck;
+}
+// Carte Scryfall → fiche compacte (face double : textes des deux faces).
+function mtgDeckCompact(c) {
+  const faces = Array.isArray(c.card_faces) ? c.card_faces : [];
+  const txt = c.oracle_text != null ? c.oracle_text : faces.map(f => f.oracle_text || '').join(' // ');
+  return {
+    n: String(c.name || ''), t: String(c.type_line || (faces[0] && faces[0].type_line) || ''),
+    m: String(c.mana_cost != null && c.mana_cost !== '' ? c.mana_cost : (faces[0] && faces[0].mana_cost) || ''),
+    v: typeof c.cmc === 'number' ? c.cmc : 0,
+    ci: Array.isArray(c.color_identity) ? c.color_identity.join('') : '',
+    o: String(txt || '').replace(/\s+/g, ' ').trim(),
+    cmd: !!(c.legalities && c.legalities.commander === 'legal'),
+  };
+}
+// Rattache un lot de réponses Scryfall à ses fiches (id Scryfall, sinon extension+numéro,
+// sinon nom — même ordre de confiance que `mtgQuoteApply` ; les introuvables sont sautés
+// par Scryfall, on ne peut donc PAS se fier à la position).
+function mtgDeckAttach(lot, cards) {
+  const byScry = new Map(), bySn = new Map(), byName = new Map();
+  for (const x of lot) {
+    const id = mtgQuoteIdent(x);
+    if (id.id) byScry.set(id.id, x);
+    if (id.set) bySn.set(id.set + '|' + id.collector_number, x);
+    if (!byName.has(mtgNorm(x.name))) byName.set(mtgNorm(x.name), x);
+  }
+  for (const c of cards) {
+    if (!c) continue;
+    const x = byScry.get(c.id) || bySn.get(String(c.set || '').toLowerCase() + '|' + String(c.collector_number || ''))
+      || byName.get(mtgNorm(c.name)) || byName.get(mtgNorm(String(c.name || '').split(' // ')[0]));
+    if (x) _mtgDeck.info.set(x.id, mtgDeckCompact(c));
+  }
+  // Scryfall ne connaît pas la fiche : on garde au moins son nom (l'IA le connaît peut-être).
+  for (const x of lot) if (!_mtgDeck.info.has(x.id)) _mtgDeck.info.set(x.id, { n: String(x.name || ''), t:'', m:'', v:0, ci:'', o:'', cmd:false, miss:true });
+}
+// Complète `_mtgDeck.info` pour toute la collection (une seule fois par session).
+async function mtgDeckFetchInfo(list, stop) {
+  const todo = list.filter(x => x && x.id && !_mtgDeck.info.has(x.id));
+  for (let i = 0; i < todo.length && !stop.v; i += MTG_QUOTE_LOT) {
+    const lot = todo.slice(i, i + MTG_QUOTE_LOT);
+    _mtgDeck.fetch = { done: i, total: todo.length }; mtgDeckPublish();
+    const cards = await mtgQuoteLot(lot, fetchSig(15000));
+    mtgDeckAttach(lot, cards);
+    if (i + MTG_QUOTE_LOT < todo.length) await new Promise(r => setTimeout(r, MTG_QUOTE_GAP));
+  }
+  _mtgDeck.fetch = null;
+}
+// Ce que la demande impose : couleurs (null = libre), format, mots cherchés dans les cartes.
+function mtgDeckIntent(q) {
+  const s = mtgNorm(q);
+  let cols = '';
+  for (const [c, re] of MTG_COLORS) if (re.test(s)) cols += c;
+  for (const g in MTG_GUILDS) if (new RegExp('\\b' + g + '\\b').test(s)) cols += MTG_GUILDS[g];
+  cols = [...new Set(cols.split(''))].join('');
+  const commander = /\b(commander|edh|commandant)\b/.test(s);
+  const words = new Set();
+  for (const w of s.split(/[^a-z0-9+/]+/)) {
+    if (w.length < 3 || MTG_DECK_STOP.test(w) || MTG_COLORS.some(([, re]) => re.test(w))) continue;
+    if (MTG_DECK_WORDS[w]) words.add(MTG_DECK_WORDS[w]);
+    else if (w.length >= 4 && !MTG_GUILDS.hasOwnProperty(w)) words.add(w.replace(/s$/, ''));
+  }
+  return { cols: cols || null, commander, words: [...words] };
+}
+// Présélection locale : cartes UNIQUES par nom (×1), hors terrains de base, dans les couleurs
+// demandées (incolore toujours admise), les plus pertinentes d'abord.
+function mtgDeckPool(list, intent) {
+  const seen = new Set(), out = [];
+  for (const x of list) {
+    const f = x && _mtgDeck.info.get(x.id);
+    if (!f || !f.n) continue;
+    const k = mtgNorm(f.n);
+    if (seen.has(k) || MTG_BASICS.some(b => mtgNorm(b) === k) || /^Basic /.test(f.t)) continue;
+    if (intent.cols && f.ci && f.ci.split('').some(c => intent.cols.indexOf(c) < 0)) continue;
+    seen.add(k);
+    const hay = mtgNorm(f.n + ' ' + f.t + ' ' + f.o);
+    let sc = 0;
+    for (const w of intent.words) if (hay.includes(w)) sc += 2;
+    if (intent.commander && /Legendary Creature/.test(f.t)) sc += 1;
+    if (/Land/.test(f.t)) sc += 0.5;             // terrains non-base : utiles à toute base mana
+    out.push({ f, sc });
+  }
+  out.sort((a, b) => (b.sc - a.sc) || (a.f.v - b.f.v));
+  return { pool: out.slice(0, MTG_DECK_POOL).map(o => o.f), total: out.length };
+}
+function mtgDeckPrompt(q, intent, pool) {
+  const size = intent.commander ? 100 : 60;
+  return [
+    "Tu es un expert en construction de decks Magic: The Gathering.",
+    'Demande du joueur : """' + q + '"""',
+    '',
+    `Construis 3 decks DIFFÉRENTS (archétypes ou plans de jeu distincts), format ${intent.commander ? 'Commander (100 cartes, commandant compris)' : '60 cartes'}.`,
+    'Règles STRICTES :',
+    '- Utilise UNIQUEMENT des cartes de la liste ci-dessous, en recopiant leur nom EXACT (en anglais).',
+    '- Chaque carte au plus UNE fois par deck (le joueur n’en possède qu’un exemplaire). Une même carte peut apparaître dans plusieurs decks.',
+    '- Les terrains de base ne sont PAS dans la liste : indique leur nombre dans `terrains_base` (ils sont en quantité illimitée).',
+    `- Vise ${size} cartes au total (cartes + terrains de base) avec une courbe de mana et un nombre de terrains cohérents. S'il n'y a pas assez de cartes jouables, fais un deck plus court plutôt que d'inventer.`,
+    '- Cherche les SYNERGIES réelles entre les textes des cartes et explique-les.',
+    intent.commander ? '- `commandant` = une créature légendaire de la liste, dont les couleurs couvrent tout le deck.' : '- `commandant` = "".',
+    '- Textes en français, courts.',
+    '',
+    'Cartes disponibles (nom | coût | type | texte) :',
+    ...pool.map(f => [f.n, f.m, f.t, f.o.slice(0, 110)].filter(Boolean).join(' | ')),
+    '',
+    'Réponds UNIQUEMENT par ce JSON, sans texte autour :',
+    '{"decks":[{"nom":"...","archetype":"...","plan":"2 phrases","synergies":["...","...","..."],"commandant":"","cartes":["nom exact", "..."],"terrains_base":{"Plains":0,"Island":0,"Swamp":0,"Mountain":0,"Forest":0}}]}',
+  ].join('\n');
+}
+// Réponse du modèle → decks vérifiés contre la collection (noms inventés et doublons retirés).
+function mtgDeckCheck(raw, list) {
+  const byName = new Map();
+  for (const x of list) {
+    const f = x && _mtgDeck.info.get(x.id);
+    const n = f && f.n ? f.n : (x && x.name);
+    if (!n) continue;
+    const k = mtgNorm(n);
+    if (!byName.has(k)) byName.set(k, f || { n, t:'', m:'', v:0, ci:'', o:'' });
+    const front = mtgNorm(String(n).split(' // ')[0]);
+    if (!byName.has(front)) byName.set(front, byName.get(k));
+  }
+  const decks = (raw && Array.isArray(raw.decks) ? raw.decks : []).slice(0, 3).map(d => {
+    const seen = new Set(), cards = [];
+    let invented = 0, dup = 0;
+    for (const nm of (Array.isArray(d && d.cartes) ? d.cartes : [])) {
+      const k = mtgNorm(String(nm || '').replace(/^\d+\s*x?\s+/i, ''));
+      if (MTG_BASICS.some(b => mtgNorm(b) === k)) continue;          // base listé en carte : ignoré
+      const f = byName.get(k);
+      if (!f) { invented++; continue; }
+      if (seen.has(mtgNorm(f.n))) { dup++; continue; }
+      seen.add(mtgNorm(f.n)); cards.push(f);
+    }
+    const basics = {};
+    const tb = d && d.terrains_base && typeof d.terrains_base === 'object' ? d.terrains_base : {};
+    for (const b of MTG_BASICS) { const n = Math.round(parseFloat(tb[b])); if (isFinite(n) && n > 0) basics[b] = Math.min(n, 60); }
+    const cmdF = d && d.commandant ? byName.get(mtgNorm(d.commandant)) : null;
+    return {
+      nom: String((d && d.nom) || 'Deck').slice(0, 60), arch: String((d && d.archetype) || '').slice(0, 60),
+      plan: String((d && d.plan) || '').slice(0, 400),
+      syn: (Array.isArray(d && d.synergies) ? d.synergies : []).map(s => String(s || '').slice(0, 220)).filter(Boolean).slice(0, 5),
+      cmd: cmdF ? cmdF.n : '', cards, basics, invented, dup,
+    };
+  }).filter(d => d.cards.length);
+  return decks;
+}
+async function mtgDeckBuild(q, list, stop) {
+  await mtgDeckFetchInfo(list, stop);
+  if (stop.v) throw new Error('Arrêté.');
+  const intent = mtgDeckIntent(q);
+  const { pool, total } = mtgDeckPool(list, intent);
+  if (pool.length < 10) throw new Error(intent.cols
+    ? `Seulement ${pool.length} carte${pool.length > 1 ? 's' : ''} dans ces couleurs : pas de quoi bâtir un deck.`
+    : 'Pas assez de cartes identifiées pour bâtir un deck.');
+  const txt = await aiGenerate('collection', [{ text: mtgDeckPrompt(q, intent, pool) }]);
+  const meta = aiMeta();
+  const decks = mtgDeckCheck(geminiExtract(txt, '{', '}'), list);
+  if (!decks.length) throw new Error("Réponse de l'IA illisible ou sans aucune carte de ta collection.");
+  return { decks, meta, intent, sent: pool.length, total };
+}
+// Rubriques d'affichage d'un deck (dans cet ordre ; une carte va dans la première qui colle).
+const MTG_DECK_GROUPS = [
+  ['Créatures', /Creature/], ['Planeswalkers', /Planeswalker/], ['Éphémères', /Instant/], ['Rituels', /Sorcery/],
+  ['Artefacts', /Artifact/], ['Enchantements', /Enchantment/], ['Terrains', /Land/], ['Autres', /.*/],
+];
+function mtgDeckText(d) {
+  const lines = [];
+  if (d.cmd) lines.push('1 ' + d.cmd);
+  for (const f of d.cards) if (f.n !== d.cmd) lines.push('1 ' + f.n);
+  for (const b in d.basics) lines.push(d.basics[b] + ' ' + b);
+  return lines.join('\n');
+}
+function MtgDeckCard({ d, i }) {
+  const [copied, setCopied] = React.useState(false);
+  const nBasics = Object.values(d.basics).reduce((a, b) => a + b, 0);
+  const groups = MTG_DECK_GROUPS.map(([label, re]) => [label, []]);
+  for (const f of d.cards) {
+    const gi = MTG_DECK_GROUPS.findIndex(([, re]) => re.test(f.t || 'Autres'));
+    groups[gi < 0 ? groups.length - 1 : gi][1].push(f);
+  }
+  const copy = () => {
+    try { navigator.clipboard.writeText(mtgDeckText(d)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {}); } catch {}
+  };
+  return (
+    <div style={{ border:`1px solid ${COLLECTION_COLOR}44`, background:C.surfaceHigh, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:6 }}>
+      <div style={{ display:'flex', alignItems:'baseline', gap:8, flexWrap:'wrap' }}>
+        <span style={{ fontSize:13, fontWeight:800, color:COLLECTION_COLOR }}>{i + 1}. {d.nom}</span>
+        {d.arch && <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>{d.arch}</span>}
+        <span style={{ marginLeft:'auto', fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+          {d.cards.length + nBasics} cartes
+        </span>
+      </div>
+      {d.cmd && <div style={{ fontSize:11, color:C.text }}>👑 Commandant : <b>{d.cmd}</b></div>}
+      {d.plan && <div style={{ fontSize:11, color:'#c8c8c8', lineHeight:1.5 }}>{d.plan}</div>}
+      {d.syn.length > 0 && (
+        <ul style={{ margin:0, paddingLeft:18, display:'flex', flexDirection:'column', gap:2 }}>
+          {d.syn.map((s, k) => <li key={k} style={{ fontSize:10.5, color:'#c8c8c8', lineHeight:1.45 }}>🔗 {s}</li>)}
+        </ul>
+      )}
+      <StatsCollapse title={`📜 LISTE (${d.cards.length} de ta collection + ${nBasics} de base)`} color={COLLECTION_COLOR} defaultOpen={false}>
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {groups.filter(g => g[1].length).map(([label, fs]) => (
+            <div key={label}>
+              <div style={{ fontSize:9.5, fontWeight:700, color:C.muted, letterSpacing:'0.05em', textTransform:'uppercase' }}>{label} ({fs.length})</div>
+              {fs.map(f => (
+                <div key={f.n} style={{ display:'flex', gap:6, fontSize:11, color:C.text, lineHeight:1.5 }}>
+                  <span style={{ flex:1, minWidth:0 }}>{f.n}</span>
+                  <span style={{ color:C.muted, fontFamily:'DM Mono,monospace', fontSize:10 }}>{f.m}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          {nBasics > 0 && (
+            <div style={{ fontSize:10.5, color:C.muted }}>
+              Terrains de base (hors collection) : {Object.keys(d.basics).map(b => `${d.basics[b]} ${MTG_BASICS_FR[b] || b}`).join(' · ')}
+            </div>
+          )}
+        </div>
+      </StatsCollapse>
+      <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+        <button onClick={copy} type="button" title="Copier la liste au format « 1 Nom » (Arena, ManaBox, Moxfield…)"
+          style={{ background:'none', border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:8, color:COLLECTION_COLOR, fontSize:10.5, fontWeight:700, padding:'5px 10px', cursor:'pointer', fontFamily:'DM Mono,monospace' }}>
+          {copied ? '✓ Copiée' : '📋 Copier la liste'}
+        </button>
+        {(d.invented > 0 || d.dup > 0) && (
+          <span style={{ fontSize:9.5, color:'#e0a050' }}>
+            ⚠ {[d.invented && `${d.invented} carte${d.invented > 1 ? 's' : ''} hors collection`, d.dup && `${d.dup} doublon${d.dup > 1 ? 's' : ''}`].filter(Boolean).join(' et ')} retiré{(d.invented + d.dup) > 1 ? 's' : ''}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+function MtgDeckSection({ list }) {
+  const st = useMtgDeck();
+  const [q, setQ] = React.useState(st.q);
+  const stopRef = React.useRef({ v: false });
+  const hasKey = aiAnyKey(false);
+  const n = list.length;
+  const run = async () => {
+    const text = q.trim().slice(0, MTG_DECK_Q_MAX);
+    if (!text || st.busy || !n) return;
+    stopRef.current = { v: false };
+    _mtgDeck.q = text; _mtgDeck.busy = true; _mtgDeck.err = ''; mtgDeckPublish();
+    try {
+      _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current);
+    } catch (e) {
+      const m = String((e && e.message) || e);
+      _mtgDeck.err = m.includes('NO_KEY') ? 'Aucune clé IA — renseigne-la dans le module API.'
+        : /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m;
+    }
+    _mtgDeck.busy = false; _mtgDeck.fetch = null; mtgDeckPublish();
+  };
+  const r = st.res, fx = st.fetch;
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      <div style={{ fontSize:10, color:C.muted, lineHeight:1.5 }}>
+        Décris le deck voulu (couleurs, thème, créatures, style de jeu, « commander »…) : l'IA en construit 3 avec les {n} carte{n > 1 ? 's' : ''} de ta collection Magic, chacune en un exemplaire.
+      </div>
+      <form onSubmit={e => { e.preventDefault(); run(); }} style={{ display:'flex', gap:6 }}>
+        <input value={q} onChange={e => setQ(e.target.value)} maxLength={MTG_DECK_Q_MAX}
+          placeholder="Ex. : deck noir-vert qui recycle le cimetière…" enterKeyHint="search"
+          style={{ flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:12, padding:'8px 10px', outline:'none' }} />
+        {st.busy
+          ? <button type="button" onClick={() => { stopRef.current.v = true; }} disabled={!fx}
+              title={fx ? 'Arrêter la lecture Scryfall' : 'L’IA travaille'}
+              style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, fontSize:11, fontWeight:700, padding:'0 12px', cursor: fx ? 'pointer' : 'default' }}>{fx ? '⏹' : '⏳'}</button>
+          : <button type="submit" disabled={!q.trim() || !n || !hasKey}
+              title={!hasKey ? 'Renseigne une clé IA dans le module API' : !n ? 'Ta collection Magic est vide' : 'Construire 3 decks'}
+              style={{ background: q.trim() && n && hasKey ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${q.trim() && n && hasKey ? COLLECTION_COLOR + '66' : C.border}`, borderRadius:8,
+                color: q.trim() && n && hasKey ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'0 12px', cursor: q.trim() && n && hasKey ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' }}>
+              ✨ Créer
+            </button>}
+      </form>
+      {!hasKey && <div style={{ fontSize:9.5, color:C.dim }}>Aucune clé IA : renseigne-en une dans le module API.</div>}
+      {!n && <div style={{ fontSize:9.5, color:C.dim }}>Ta collection Magic est vide : importe d'abord ton CSV (📥 dans 🟣 Magic).</div>}
+      {st.busy && (
+        <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+          {fx ? `⏳ Lecture des cartes sur Scryfall… ${fx.done} / ${fx.total}` : '⏳ L’IA assemble les decks…'}
+        </div>
+      )}
+      {st.err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>⚠ {st.err}</div>}
+      {r && !st.busy && (
+        <>
+          <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>
+            « {st.q} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · couleurs ' + r.intent.cols : ''} · {r.sent} carte{r.sent > 1 ? 's' : ''} proposée{r.sent > 1 ? 's' : ''} à l'IA sur {r.total} éligible{r.total > 1 ? 's' : ''}
+            <AiFallbackBadge fb={r.meta && r.meta.fb} />
+          </div>
+          {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} />)}
+        </>
+      )}
+    </div>
+  );
+}
+function CollectionMagicDeck({ list }) {
+  return (
+    <StatsCollapse title="🧙 DECK MAGIC" color={COLLECTION_COLOR} defaultOpen={false}>
+      <MtgDeckSection list={list} />
+    </StatsCollapse>
+  );
+}
 // 🃏 ANALYSE CARDMARKET — le collapse qui chiffre le coût d'une extension Magic.
 // ⚠ 12.6.4 — IL A DÉMÉNAGÉ DE BON PLAN VERS COLLECTION → CARTES (demande utilisateur), sous
 // 🟣 Magic : c'est là que vivent les cartes, et c'est leur cote qu'il analyse. Il prend au
@@ -20960,7 +21305,8 @@ function CollectionCat({ cat, data, save, saveErr }) {
           </StatsCollapse>
         );
       })}
-      {/* 🃏 Analyse Cardmarket : dans CARTES seulement, et en DERNIER — donc juste sous 🟣 Magic. */}
+      {/* 🧙 Deck Magic puis 🃏 Analyse Cardmarket : dans CARTES seulement, en DERNIER — donc juste sous 🟣 Magic. */}
+      {cat.id === 'cartes' && <CollectionMagicDeck list={collList(data, 'magic')} />}
       {cat.id === 'cartes' && <CollectionCardmarket />}
     </div>
   );
@@ -28662,6 +29008,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.67', date:'2026-09-27', title:'🧙 Deck Magic', items:[
+    'Collection → Cartes : nouvelle section « Deck Magic » entre Magic et Analyse Cardmarket.',
+    'Décris le deck voulu dans la barre : l’IA en construit 3 avec les cartes de ta collection (un exemplaire de chaque), synergies expliquées.',
+    'Chaque liste se copie en un clic (format « 1 Nom », pour Arena, ManaBox, Moxfield…).',
+  ] },
   { v:'13.21.66', date:'2026-09-27', title:'📋 Release note', items:[
     'À propos : nouvelle section « Release note » entre Limite data et Import / Export.',
     'Elle liste les 5 dernières versions du hub et ce que chacune a changé.',
@@ -28676,10 +29027,6 @@ const RELEASE_NOTES = [
   { v:'13.21.63', date:'2026-09-26', title:'💬 Infobulles des boutons', items:[
     'Chaque bouton affiche une explication au survol (instantanée).',
     'Sur mobile, un appui long de 3 s montre l’explication sans déclencher le bouton.',
-  ] },
-  { v:'13.21.62', date:'2026-09-25', title:'🔐 Sauvegardes chiffrées', items:[
-    'Même clé de sauvegarde sur tous les appareils du coffre : la restauration Dropbox ne redemande plus le mot de passe.',
-    'Les anciens fichiers déjà chiffrés restent lisibles.',
   ] },
 ];
 
