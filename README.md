@@ -78,6 +78,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 - **Tes clés ne passent jamais par un relais public**, sauf si tu coches « Relais publics pour les clés » (module API).
 - **Ordre des IA** : À propos → 🤖 Ordre des IA. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
 - **Stockage saturé ?** À propos → 📦 Limite data montre le poids de chaque module.
+- **Quoi de neuf ?** À propos → 📋 Release note : les 5 dernières versions et ce qu'elles changent.
 
 ---
 
