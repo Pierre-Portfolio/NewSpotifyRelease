@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.75';
+const APP_VERSION = '13.21.76';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -18348,6 +18348,12 @@ function collItem(r) {
            price, qty: 1, url: safeHref(String(r.url || '')) || null,
            meta: (r.meta && typeof r.meta === 'object') ? r.meta : {}, addedAt: Date.now() };
 }
+// Carte ajoutée dans une langue : `meta.lang` posé, et un id DISTINCT hors anglais — sinon un
+// exemplaire français incrémenterait la quantité de l'anglais déjà possédé.
+function cardWithLang(r, lang) {
+  const id = String(r.id || r.name || '');
+  return { ...r, id: lang && lang !== 'en' ? id + ':' + lang : id, meta: { ...(r.meta || {}), lang } };
+}
 // Ajoute (ou incrémente la quantité si l'id est déjà là) et renvoie la NOUVELLE map.
 function collAdd(data, subId, r, extraMeta) {
   const it = collItem(r);
@@ -18847,7 +18853,8 @@ function CollectionSub({ sub, data, onData }) {
     try {
       const rows = await sub.addSet(setRow.id, (got, tot) =>
         setSetRun({ id: setRow.id, step: `${got}${tot ? ' / ' + tot : ''}` }));
-      const r = addMany(rows, { pokeSet: setRow.id, setAt: Date.now() });
+      const lang = sub.langPick ? sub.langPick() : '';
+      const r = addMany(lang ? rows.map(x => cardWithLang(x, lang)) : rows, { pokeSet: setRow.id, setAt: Date.now() });
       setSetRun(null);
       setImpMsg(`✓ ${setRow.name} — ${r.added} carte${r.added > 1 ? 's' : ''} ajoutée${r.added > 1 ? 's' : ''} sur ${rows.length} lue${rows.length > 1 ? 's' : ''}`
         + (r.skipped ? ` · ${r.skipped} déjà dans ta collection` : '')
@@ -18857,7 +18864,7 @@ function CollectionSub({ sub, data, onData }) {
   const add = r0 => {
     // Copie : `onAdd` peut retoucher l'item avant enregistrement (les jeux vidéo y posent
     // la plateforme choisie) sans altérer la liste de résultats affichée.
-    const r = { ...r0 };
+    const r = sub.langPick ? cardWithLang(r0, sub.langPick()) : { ...r0 };
     const extra = sub.onAdd ? sub.onAdd(r) : null;
     if (extra === false) return;                      // ajout annulé (ex. plateforme non choisie)
     const next = collAdd(data, sub.id, r, extra || null);
@@ -18904,6 +18911,11 @@ function CollectionSub({ sub, data, onData }) {
         <CollImg src={it.img || (sub.img ? sub.img(it) : '')} fileId={collPhotoFileId(it.id)} icon={sub.icon} />
         {/* Quantité en PASTILLE : la ligne « − ×N + × » ne tient pas sous une fiche de cette
             largeur. Elle reste modifiable dans la fiche, qui s'ouvre au clic. */}
+        {onEdit && CARD_SUBS.includes(sub.id) && (l => (
+          <span title={l ? `Langue : ${CARD_LANG_NAMES[l] || l.toUpperCase()}` : 'Langue inconnue — réimporte ton export CSV pour la connaître'}
+            style={{ position:'absolute', right:3, top:3, background: l === 'fr' ? '#1d4ed8e6' : 'rgba(0,0,0,0.72)', color: l ? '#fff' : C.muted,
+              borderRadius:4, fontSize:8, fontWeight:800, fontFamily:'DM Mono,monospace', lineHeight:1, padding:'2px 3px' }}>{l ? l.toUpperCase() : '?'}</span>
+        ))(cardLangOf(sub.id, it))}
         {qty > 1 && (
           <span title={`${qty} exemplaires`} style={{ position:'absolute', left:3, bottom:3, background:'rgba(0,0,0,0.72)',
             border:`1px solid ${COLLECTION_COLOR}66`, borderRadius:5, fontSize:8.5, fontWeight:800, color:COLLECTION_COLOR,
@@ -19096,6 +19108,7 @@ function CollectionSub({ sub, data, onData }) {
                         {/* Cote de l'extension (prix × quantité des cartes possédées) à la place du
                             nombre de fiches ; aucune carte cotée ⇒ « non cotée », jamais 0 €. */}
                         {(st => st.priced ? collEur(st.value) : 'non cotée')(collStats(g.items))}
+                        {(n => n ? ` · ${n} FR` : '')(g.items.filter(it => cardLangOf(sub.id, it) === 'fr').length)}
                       </span>
                     </span>
                     <span style={{ fontSize:11, fontWeight:700, fontFamily:'DM Mono,monospace', color:COLLECTION_COLOR, flexShrink:0 }}>
@@ -20361,7 +20374,7 @@ function mtgCsvRow(col, r) {
     sub: [set || code.toUpperCase(), num && ('n°' + num), foil ? 'foil' : '', lang && lang.toUpperCase()].filter(Boolean).join(' · '),
     img: '', price: (typeof price === 'number' && price > 0) ? price : null,
     url: mtgBuyUrl(name), qty,
-    meta: { set: set || code.toUpperCase(), code, num, foil, lang, cond, csv: true, scry: MTG_UUID.test(scry) ? scry : '' },
+    meta: { set: set || code.toUpperCase(), code, num, foil, lang: cardLangNorm(lang) || lang.toLowerCase(), cond, csv: true, scry: MTG_UUID.test(scry) ? scry : '' },
   };
 }
 // CSV → lignes fusionnées (un même id listé deux fois = ses quantités ADDITIONNÉES : c'est
@@ -20411,8 +20424,11 @@ function collImportCards(data, subId, rows) {
       const cur = list[at];
       const keepPrice = cur.meta && cur.meta.edited;
       const price = keepPrice ? cur.price : (it.price != null ? it.price : cur.price);
-      if (cur.qty === it.qty && cur.price === price && cur.sub === (it.sub || cur.sub)) continue;
-      list[at] = { ...cur, qty: it.qty, sub: it.sub || cur.sub, price, meta: { ...(cur.meta || {}), ...it.meta } };
+      // ⚠ La LANGUE compte aussi : une fiche importée sans elle la reçoit au prochain import.
+      if (cur.qty === it.qty && cur.price === price && cur.sub === (it.sub || cur.sub)
+        && (!it.meta.lang || cardLangNorm((cur.meta || {}).lang) === cardLangNorm(it.meta.lang))) continue;
+      // Un fichier SANS colonne de langue n'efface jamais celle déjà connue.
+      list[at] = { ...cur, qty: it.qty, sub: it.sub || cur.sub, price, meta: { ...(cur.meta || {}), ...it.meta, lang: it.meta.lang || (cur.meta || {}).lang || '' } };
       updated++;
     } else {
       if (list.length >= CARDS_MAX) { full = true; break; }
@@ -20677,6 +20693,44 @@ function useCardSets(subId, active) {
 // Code d'extension et numéro d'une fiche.
 // ⚠ Les fiches Pokémon d'avant 13.15.1 ne portent ni `setId` ni `num` — les deux se
 // DÉDUISENT de leur id (`pkm:<extension>-<numéro>`), qui les contient depuis toujours.
+// 🌐 LANGUE D'UNE CARTE (`meta.lang`, normalisée en code à 2 lettres).
+// ⚠ Magic : elle vient de la colonne « Language » de l'export CSV ; une fiche qui ne l'a pas
+//   est INCONNUE (« ? ») jusqu'au prochain import, qui la complète (`collImportCards`).
+// ⚠ Pokémon : tout ce qui a été ajouté avant 13.21.76 est ANGLAIS (demande utilisateur) ; les
+//   ajouts suivants prennent la langue choisie au bouton 🌐 de la barre (`PokeLangBtn`).
+const CARD_LANG_NAMES = { fr:'Français', en:'Anglais', de:'Allemand', it:'Italien', es:'Espagnol', pt:'Portugais', ja:'Japonais', ko:'Coréen', ru:'Russe', zh:'Chinois' };
+function cardLangNorm(v) {
+  const s = mtgNorm(v);
+  if (!s) return '';
+  if (/^(fr|fre|fra|french|francais)$/.test(s)) return 'fr';
+  if (/^(en|eng|english|anglais)$/.test(s)) return 'en';
+  if (/^(de|ger|deu|german|allemand)$/.test(s)) return 'de';
+  if (/^(it|ita|italian|italien)$/.test(s)) return 'it';
+  if (/^(es|spa|sp|spanish|espagnol)$/.test(s)) return 'es';
+  if (/^(pt|por|portuguese|portugais)$/.test(s)) return 'pt';
+  if (/^(ja|jp|jpn|japanese|japonais)$/.test(s)) return 'ja';
+  if (/^(ko|kr|kor|korean|coreen)$/.test(s)) return 'ko';
+  if (/^(ru|rus|russian|russe)$/.test(s)) return 'ru';
+  if (/^(zh|zhs|zht|cs|ct|chinese|chinois)/.test(s)) return 'zh';
+  return /^[a-z]{2}$/.test(s) ? s : '';
+}
+function cardLangOf(subId, it) {
+  const l = cardLangNorm(it && it.meta && it.meta.lang);
+  return l || (subId === 'pokemon' ? 'en' : '');
+}
+// Langue choisie pour les PROCHAINS ajouts Pokémon (préférence d'interface, sur l'appareil).
+const POKE_LANG_LS = 'spotifyplus_collection_poke_lang';
+function pokeLangPick() { return lsGet(POKE_LANG_LS) === 'fr' ? 'fr' : 'en'; }
+function PokeLangBtn({ style }) {
+  const [l, setL] = React.useState(pokeLangPick);
+  const flip = () => { const n = l === 'fr' ? 'en' : 'fr'; lsSet(POKE_LANG_LS, n); setL(n); };
+  return (
+    <button onClick={flip} type="button" style={{ ...style, fontSize:10, fontWeight:800, fontFamily:'DM Mono,monospace' }}
+      title={`Langue des PROCHAINES cartes ajoutées : ${l === 'fr' ? 'français' : 'anglais'} (toucher pour changer)`}>
+      {l.toUpperCase()}
+    </button>
+  );
+}
 function cardSetCode(subId, it) {
   const m = (it && it.meta) || {};
   if (subId === 'magic') return String(m.code || '').toLowerCase();
@@ -20833,7 +20887,7 @@ const COLLECTION_SUBS = {
     // ⚠ UNE SEULE BARRE pour deux choses : `search` rend les cartes, `searchSets` les
     // extensions, et les deux partent ensemble. `addSet` verse l'extension choisie.
     { id:'pokemon', label:'Pokémon', icon:'🔴', unit:'carte', article:'une première carte',
-      search: pokeSearch, searchSets: pokeSetSearch, addSet: pokeSetCards,
+      search: pokeSearch, searchSets: pokeSetSearch, addSet: pokeSetCards, barBtn: PokeLangBtn, langPick: pokeLangPick,
       placeholder:'Une carte ou une extension…',
       note:"Source : Pokémon TCG API (sans clé). Le prix affiché est le prix MOYEN DE VENTE récent sur Cardmarket quand il est publié — sinon le prix de tendance, sinon le marché TCGplayer. La barre accepte aussi bien le nom d'une carte que celui d'une extension : une extension trouvée s'ajoute en entier d'un bouton, les cartes déjà possédées étant laissées telles quelles. Seules les références (nom, série, prix, adresse de l'image) sont enregistrées : les images elles-mêmes ne sont jamais stockées." },
     { id:'magic', label:'Magic', icon:'🟣', unit:'carte', article:'une première carte',
@@ -20957,7 +21011,7 @@ const MTG_THEMES = [
     s:(f, x) => x.creature && f.v <= 3 && (x.kw.includes('haste') || x.kw.includes('first strike') || x.kw.includes('menace') || x.kw.includes('prowess') || x.kw.includes('double strike')) ? 2 : (x.creature && f.v <= 2 ? 1 : 0) },
 ];
 const MTG_LAYOUT_SKIP = /^(token|double_faced_token|emblem|art_series|planar|scheme|vanguard|augment|host)$/;
-const _mtgDeck = { info: new Map(), loaded: false, fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', cols: '', subs: new Set() };
+const _mtgDeck = { info: new Map(), loaded: false, frOnly: true, fetch: null, res: null, busy: false, err: '', q: '', lastQ: '', cols: '', subs: new Set() };
 // 💾 DECKS SAUVEGARDÉS : une copie ALLÉGÉE (nom, coût, type par carte — le texte des cartes
 // se relit sur Scryfall) dans le localStorage, préfixe `spotifyplus_collection` ⇒ compté avec
 // Collection dans Limite data. ⚠ Donnée saisie ⇒ DANS `buildBackup` (`mtg_decks`), fusionnée
@@ -20979,7 +21033,7 @@ function mtgDeckNorm(d) {
     // v = coût, i = image, ro = rôles (lettres de `MTG_ROLES`) : de quoi rendre 🖼️ et 📊 sans Scryfall.
     cards: d.cards.filter(f => f && f.n).slice(0, 120).map(f => ({
       n: String(f.n).slice(0, 120), t: String(f.t || '').slice(0, 80), m: String(f.m || '').slice(0, 40),
-      v: mtgCmcOf(f), i: String(mtgCardImg(f)).slice(0, 300), ro: mtgRolesOf(f),
+      v: mtgCmcOf(f), i: String(mtgCardImg(f)).slice(0, 300), ro: mtgRolesOf(f), nf: String(f.nf || f._nfr || '').slice(0, 120),
     })),
   };
 }
@@ -21008,8 +21062,10 @@ function mtgCmcOf(f) {
 }
 // Image d'une carte : cache Scryfall, sinon l'exemplaire possédé, sinon l'image par NOM
 // (redirection Scryfall — `img-src https:` l'autorise ; chargée paresseusement).
+// Nom affiché : le nom FRANÇAIS de l'exemplaire possédé quand il est connu.
+function mtgCardName(f) { return f.nf || f._nfr || f.n; }
 function mtgCardImg(f) {
-  return f.i || f.im || f._img || ('https://api.scryfall.com/cards/named?format=image&version=normal&exact=' + encodeURIComponent(String(f.n || '').split(' // ')[0]));
+  return f.i || f._imfr || f.im || f._img || ('https://api.scryfall.com/cards/named?format=image&version=normal&exact=' + encodeURIComponent(String(f.n || '').split(' // ')[0]));
 }
 function mtgDecksLoad() {
   try { const a = JSON.parse(lsGet(MTG_DECKS_LS) || '[]'); return Array.isArray(a) ? a.map(mtgDeckNorm).filter(Boolean) : []; } catch { return []; }
@@ -21313,24 +21369,36 @@ function mtgDensity(pool, id, cm) {
   return d;
 }
 const MTG_COLOR_OPTS = ['W', 'U', 'B', 'R', 'G', 'WU', 'UB', 'BR', 'RG', 'GW', 'WB', 'UR', 'BG', 'RW', 'GU'];
-async function mtgDeckBuild(q, list, stop, picked) {
+async function mtgDeckBuild(q, list, stop, picked, frOnly) {
   await mtgDeckFetchInfo(list, stop);
   if (stop.v) throw new Error('Arrêté.');
+  // Exemplaire FRANÇAIS possédé de chaque nom (celui qui a un id Scryfall de préférence :
+  // son image est déjà la version française). `frOnly` ⇒ seuls ces noms entrent au pool.
+  const frBy = new Map();
+  for (const x of list) {
+    if (!x || !x.name || cardLangOf('magic', x) !== 'fr') continue;
+    const k = mtgNorm(x.name), cur = frBy.get(k);
+    if (!cur || (!mtgImgUrl(cur) && mtgImgUrl(x))) frBy.set(k, x);
+  }
+  if (frOnly && !frBy.size) throw new Error("Aucune carte Magic connue en français : la langue vient de la colonne « Language » de ton export CSV — réimporte-le (📥 dans 🟣 Magic), ou décoche « cartes françaises seulement ».");
   // Pool : UNE fiche par nom (×1), cartes réelles seulement.
   const pool = [], seen = new Set(), tribes = new Map(), tribeN = new Map();
   for (const x of list) {
     if (!x || !x.name) continue;
     const k = mtgNorm(x.name);
     if (seen.has(k)) continue;
+    const fr = frBy.get(k);
+    if (frOnly && !fr) continue;
     seen.add(k);
     const f = _mtgDeck.info.get(k);
     if (!f || f.miss || MTG_LAYOUT_SKIP.test(f.lay || '') || /^(Token|Emblem|Conspiracy|Dungeon)\b/.test(f.t || '')) continue;
     // Fiches lues avant 13.21.73 : pas d'image en cache ⇒ celle de l'exemplaire possédé (id Scryfall).
     if (!f.im && !f._img) f._img = mtgImgUrl(x).replace('/small/', '/normal/');
+    f._frItem = fr || null;               // pour l'image et le nom français (`mtgDeckFrResolve`)
     pool.push(f);
     for (const s of mtgFeat(f).sub) { tribes.set(s.toLowerCase(), s); tribeN.set(s, (tribeN.get(s) || 0) + 1); }
   }
-  if (pool.length < 20) throw new Error('Pas assez de cartes identifiées sur Scryfall pour bâtir un deck.');
+  if (pool.length < 20) throw new Error(frOnly ? `Seulement ${pool.length} carte${pool.length > 1 ? 's' : ''} française${pool.length > 1 ? 's' : ''} identifiée${pool.length > 1 ? 's' : ''} : pas de quoi bâtir un deck.` : 'Pas assez de cartes identifiées sur Scryfall pour bâtir un deck.');
   const intent = mtgDeckIntent(q, picked, tribes);
   const fmtKey = intent.commander ? 'cmd' : 'std';
   const F = MTG_FMT[fmtKey];
@@ -21383,7 +21451,56 @@ async function mtgDeckBuild(q, list, stop, picked) {
   }
   if (!picks.length) throw new Error(fmtKey === 'cmd' ? 'Aucune créature légendaire dans ces couleurs pour servir de commandant.' : 'Aucun deck possible avec ces critères.');
   const decks = picks.map(p => mtgBuildDeck(pool, p.themes, p.cols, fmtKey, p.cmd));
-  return { decks, intent, total: pool.length, fmtKey };
+  return { decks, intent, total: pool.length, fmtKey, frOnly: !!frOnly };
+}
+// 🇫🇷 IMAGES ET NOMS FRANÇAIS des cartes des decks, lus sur l'exemplaire français POSSÉDÉ :
+// par son id Scryfall (`/cards/collection`, lots de 75 — l'id désigne l'impression française)
+// ou, sans id (Delver Lens), par extension + numéro en recherche `lang:fr` (lots de 20).
+// ⚠ En tâche de fond, comme l'avis IA : les decks s'affichent d'abord en anglais. Un deck déjà
+// ⭐ reçoit images et noms dans sa copie sauvegardée.
+async function mtgDeckFrResolve(res) {
+  const todo = [...new Set(res.decks.flatMap(d => d.cards))].filter(f => f._frItem && !f._imfr);
+  if (!todo.length) return;
+  const byId = [], bySn = [];
+  for (const f of todo) {
+    const x = f._frItem, id = mtgQuoteIdent(x);
+    if (id.id) byId.push([id.id, f]);
+    else if (id.set && id.collector_number) bySn.push([id.set + '|' + id.collector_number, f]);
+  }
+  const put = (f, c) => {
+    const faces = Array.isArray(c.card_faces) ? c.card_faces : [];
+    const im = (c.image_uris && c.image_uris.normal) || (faces[0] && faces[0].image_uris && faces[0].image_uris.normal) || '';
+    if (im) f._imfr = im;
+    const nf = c.printed_name || (faces.length ? faces.map(x => x.printed_name || '').filter(Boolean).join(' // ') : '');
+    if (nf) f._nfr = nf;
+  };
+  try {
+    for (let i = 0; i < byId.length; i += MTG_QUOTE_LOT) {
+      const lot = byId.slice(i, i + MTG_QUOTE_LOT);
+      const r = await fetch(MTG_COLL_URL, { method:'POST', signal: fetchSig(20000), headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ identifiers: lot.map(([id]) => ({ id })) }) });
+      const j = r.ok ? await r.json() : null;
+      const m = new Map(lot);
+      for (const c of (j && j.data) || []) { const f = m.get(c.id); if (f) put(f, c); }
+      await new Promise(r2 => setTimeout(r2, MTG_QUOTE_GAP));
+    }
+    for (let i = 0; i < bySn.length; i += 20) {
+      const lot = bySn.slice(i, i + 20);
+      const q = 'lang:fr (' + lot.map(([k]) => { const [sc, cn] = k.split('|'); return `(s:${sc} cn:"${cn.replace(/"/g, '')}")`; }).join(' or ') + ')';
+      const r = await fetch('https://api.scryfall.com/cards/search?unique=prints&include_extras=true&q=' + encodeURIComponent(q), { signal: fetchSig(20000) });
+      const j = r.ok ? await r.json() : null;
+      const m = new Map(lot);
+      for (const c of (j && j.data) || []) { const f = m.get(String(c.set || '').toLowerCase() + '|' + String(c.collector_number || '')); if (f) put(f, c); }
+      await new Promise(r2 => setTimeout(r2, MTG_QUOTE_GAP));
+    }
+  } catch {}
+  // Copies sauvegardées : on y reporte ce qui vient d'être trouvé.
+  const saved = res.decks.filter(d => d.savedId);
+  if (saved.length) mtgDecksWrite(mtgDecksLoad().map(x => {
+    const d = saved.find(g => g.savedId === x.id);
+    return d ? mtgDeckNorm({ ...x, cards: d.cards }) : x;
+  }));
+  mtgDeckPublish();
 }
 // Rubriques d'affichage d'un deck (dans cet ordre ; une carte va dans la première qui colle).
 const MTG_DECK_GROUPS = [
@@ -21528,10 +21645,10 @@ function MtgDeckPhotos({ d, nBasics }) {
   const piles = [[], [], [], []];
   lands.forEach((f, k) => piles[k % 4].push(f));
   const cardBtn = (f, extra) => (
-    <button key={f.n} type="button" onClick={() => setZoom(all.indexOf(f))} title={f.basicN ? `${f.basicN} × ${MTG_BASICS_FR[f.n] || f.n}` : f.n}
+    <button key={f.n} type="button" onClick={() => setZoom(all.indexOf(f))} title={f.basicN ? `${f.basicN} × ${MTG_BASICS_FR[f.n] || f.n}` : mtgCardName(f)}
       style={{ position:'relative', display:'block', width:'100%', aspectRatio:'488 / 680', padding:0, borderRadius:5, overflow:'hidden', cursor:'zoom-in',
         background:C.surface, color:C.muted, fontSize:8, border: f.n === d.cmd ? `2px solid ${COLLECTION_COLOR}` : `1px solid ${C.border}`, ...extra }}>
-      <img src={mtgCardImg(f)} alt={f.n} loading="lazy" referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+      <img src={mtgCardImg(f)} alt={mtgCardName(f)} loading="lazy" referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
       {f.basicN > 0 && (
         <span style={{ position:'absolute', right:3, bottom:3, background:'#000c', color:'#fff', fontSize:10, fontWeight:800, borderRadius:4, padding:'1px 4px', fontFamily:'DM Mono,monospace' }}>×{f.basicN}</span>
       )}
@@ -21565,7 +21682,7 @@ function MtgDeckList({ d, groups, nBasics }) {
           <div style={{ fontSize:9.5, fontWeight:700, color:C.muted, letterSpacing:'0.05em', textTransform:'uppercase' }}>{label} ({fs.length})</div>
           {fs.map(f => (
             <div key={f.n} style={{ display:'flex', gap:6, fontSize:11, color:C.text, lineHeight:1.5, userSelect:'text' }}>
-              <span style={{ flex:1, minWidth:0 }}>1 {f.n}</span>
+              <span style={{ flex:1, minWidth:0 }}>1 {mtgCardName(f)}{mtgCardName(f) !== f.n && <span style={{ color:C.muted, fontSize:10 }}> ({f.n})</span>}</span>
               <span style={{ color:C.muted, fontFamily:'DM Mono,monospace', fontSize:10 }}>{f.m}</span>
             </div>
           ))}
@@ -21597,12 +21714,13 @@ function MtgCardZoom({ cards, at, onAt, onClose }) {
       <button type="button" onClick={onClose} aria-label="Fermer" style={{ ...nav, position:'absolute', top:14, right:14, fontSize:16 }}>✕</button>
       <div style={{ display:'flex', alignItems:'center', gap:8, maxWidth:'100%' }} onClick={e => e.stopPropagation()}>
         {cards.length > 1 && <button type="button" onClick={() => go(-1)} aria-label="Carte précédente" style={nav}>‹</button>}
-        <img src={mtgBigImg(mtgCardImg(f))} alt={f.n} referrerPolicy="no-referrer"
+        <img src={mtgBigImg(mtgCardImg(f))} alt={mtgCardName(f)} referrerPolicy="no-referrer"
           style={{ maxWidth:'calc(100vw - 120px)', maxHeight:'78vh', width:'auto', height:'auto', borderRadius:14, boxShadow:'0 8px 30px #000a' }} />
         {cards.length > 1 && <button type="button" onClick={() => go(1)} aria-label="Carte suivante" style={nav}>›</button>}
       </div>
       <div style={{ color:'#ddd', fontSize:12, textAlign:'center' }} onClick={e => e.stopPropagation()}>
-        {f.basicN ? `${f.basicN} × ${MTG_BASICS_FR[f.n] || f.n} (terrain de base)` : f.n}
+        {f.basicN ? `${f.basicN} × ${MTG_BASICS_FR[f.n] || f.n} (terrain de base)` : mtgCardName(f)}
+        {!f.basicN && mtgCardName(f) !== f.n && <span style={{ color:'#999', marginLeft:6 }}>({f.n})</span>}
         <span style={{ color:'#999', fontFamily:'DM Mono,monospace', marginLeft:8 }}>{at + 1} / {cards.length}</span>
       </div>
     </div>,
@@ -21643,7 +21761,7 @@ function MtgDeckCard({ d, i, onSave, onUnsave }) {
         <span style={{ fontSize:13, fontWeight:800, color:COLLECTION_COLOR }}>{i + 1}. {d.nom}</span>
         {d.arch && <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>{d.arch}</span>}
       </div>
-      {d.cmd && <div style={{ fontSize:11, color:C.text }}>👑 Commandant : <b>{d.cmd}</b></div>}
+      {d.cmd && <div style={{ fontSize:11, color:C.text }}>👑 Commandant : <b>{(c => (c ? mtgCardName(c) : d.cmd))(d.cards.find(f => f.n === d.cmd))}</b></div>}
       <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
         {tab('strat', d.ai && d.ai.busy ? '🧠⏳' : '🧠', 'Stratégie : plan de jeu, synergies et avis de l’IA')}
         {tab('photo', '🖼️', 'Cartes du deck en images')}
@@ -21698,8 +21816,9 @@ function MtgDeckSection({ list }) {
     stopRef.current = { v: false };
     _mtgDeck.lastQ = text; _mtgDeck.busy = true; _mtgDeck.err = ''; mtgDeckPublish();
     try {
-      _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current, cols);
+      _mtgDeck.res = await mtgDeckBuild(text, list, stopRef.current, cols, st.frOnly);
       mtgDeckAiAll(_mtgDeck.res);
+      mtgDeckFrResolve(_mtgDeck.res);
     } catch (e) {
       const m = String((e && e.message) || e);
       _mtgDeck.err = /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m;
@@ -21738,6 +21857,12 @@ function MtgDeckSection({ list }) {
               ✨ Créer
             </button>}
       </form>
+      <button type="button" role="checkbox" aria-checked={st.frOnly} onClick={() => { _mtgDeck.frOnly = !st.frOnly; mtgDeckPublish(); }}
+        title="Ne construire les decks qu'avec les cartes que tu possèdes en français (langue lue dans ton export CSV)"
+        style={{ alignSelf:'flex-start', background:'none', border:'none', padding:0, cursor:'pointer', color: st.frOnly ? C.text : C.muted, fontSize:11, fontWeight:600, textAlign:'left' }}>
+        <span style={{ color: st.frOnly ? COLLECTION_COLOR : C.dim }}>{st.frOnly ? '☑' : '☐'}</span> 🇫🇷 Cartes françaises seulement
+        <span style={{ color:C.muted, fontWeight:400 }}> ({list.filter(x => cardLangOf('magic', x) === 'fr').length} en français · {list.filter(x => !cardLangOf('magic', x)).length} de langue inconnue)</span>
+      </button>
       {pickOpen && (
         <div role="listbox" aria-multiselectable="true" style={{ display:'flex', flexDirection:'column', background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, padding:4 }}>
           {MTG_PICK_COLORS.map(x => {
@@ -21768,7 +21893,7 @@ function MtgDeckSection({ list }) {
       {r && !st.busy && (
         <>
           <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.5 }}>
-            « {st.lastQ} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · ' + mtgColorName(r.intent.cols) : ''}{r.intent.themes.length ? ' · ' + r.intent.themes.map(mtgThemeLabel).join(', ') : ' · aucun thème reconnu : les plus fournis de ta collection'} · {r.total} cartes différentes analysées
+            « {st.lastQ} » · {r.intent.commander ? 'Commander 100 cartes' : '60 cartes'}{r.intent.cols ? ' · ' + mtgColorName(r.intent.cols) : ''}{r.intent.themes.length ? ' · ' + r.intent.themes.map(mtgThemeLabel).join(', ') : ' · aucun thème reconnu : les plus fournis de ta collection'} · {r.total} cartes différentes{r.frOnly ? ' en français' : ''} analysées
           </div>
           {saveErr && <div style={{ fontSize:10, color:'#e05050' }}>⚠ Deck NON sauvegardé : le stockage local est plein.</div>}
           {r.decks.map((d, i) => <MtgDeckCard key={i + d.nom} d={d} i={i} onSave={save} onUnsave={unsave} />)}
@@ -29601,6 +29726,12 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.76', date:'2026-09-27', title:'🇫🇷 Langue des cartes', items:[
+    'Collection → Cartes : chaque carte affiche sa langue (FR en bleu, EN…, « ? » si inconnue) et chaque extension son nombre de cartes françaises.',
+    'Magic : la langue vient de la colonne Language de l’export CSV ; une carte sans cette info reste « ? » et la reçoit au prochain import.',
+    'Pokémon : tout l’existant est en anglais ; le bouton EN/FR à droite de la barre fixe la langue des prochaines cartes et extensions ajoutées.',
+    'Deck Magic : « 🇫🇷 Cartes françaises seulement » (coché par défaut), images et noms des cartes en français.',
+  ] },
   { v:'13.21.75', date:'2026-09-27', title:'🧙 Boutons des decks en icônes', items:[
     'Deck Magic : boutons en icônes seules 🧠 🖼️ 📜 📊 ☆ (nom au survol ou à l’appui long).',
     'La liste texte 📜 a son propre bouton, à droite de 🖼️ Cartes.',
@@ -29619,9 +29750,6 @@ const RELEASE_NOTES = [
     'Les 3 decks sont construits sur l’appareil, en une seconde, avec TOUTE la collection (plus d’envoi à une IA).',
     'Chaque carte est notée : thème (jetons, cimetière, sacrifice, volants…, ou une tribu), rôle (retrait, pioche, accélération), coût et popularité ; courbe de mana et base de terrains calculées.',
     'La 1re fois, les cartes sont lues sur Scryfall puis gardées sur l’appareil : les fois suivantes, rien n’est retéléchargé.',
-  ] },
-  { v:'13.21.71', date:'2026-09-27', title:'💶 Cote des extensions', items:[
-    'Collection → Cartes : sous le nom de chaque extension, sa cote (prix des cartes possédées) remplace le nombre de fiches.',
   ] },
 ];
 
