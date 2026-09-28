@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.87';
+const APP_VERSION = '13.21.88';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1357,8 +1357,16 @@ function actifsPct(raw) {
 // Date de la colonne A : ISO « 2026-06-01 » / « 2026-06 » (mois seul), « 01/06/2026 » (fr),
 // « 6/1/2026 » (US : si le 2e nombre dépasse 12, c'est forcément le jour → swap) ou
 // « 6/2026 » / « 09/2024 » (mois/année — format réellement utilisé dans la feuille Actif)
+// ⚠ Chaque onglet a SON format d'affichage, et l'API rend la date telle qu'affichée : Pop
+// est en « jj/mm/aa » (« 30/08/26 ») — sans l'année à 2 chiffres, aucune ligne n'était
+// reconnue et l'import Pop échouait en entier. Un numéro de série (date non formatée) est
+// accepté aussi.
 function actifsDate(raw) {
   if (!raw) return null;
+  if (typeof raw === 'number') {
+    if (raw > 20000 && raw < 80000) { const d = new Date(Date.UTC(1899, 11, 30) + Math.round(raw) * 864e5); return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()).getTime(); }
+    return null;
+  }
   const s = String(raw).trim();
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (m) return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
@@ -1372,6 +1380,14 @@ function actifsDate(raw) {
   }
   m = s.match(/^(\d{1,2})\/(\d{4})$/);                      // mois/année « 6/2026 », « 09/2024 »
   if (m) { const mo = +m[1]; if (mo >= 1 && mo <= 12) return new Date(+m[2], mo - 1, 1).getTime(); }
+  m = s.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{2})$/);          // jour/mois/année courte « 30/08/26 »
+  if (m) {
+    let d = +m[1], mo = +m[2];
+    if (d <= 12 && mo > 12) { const t = d; d = mo; mo = t; }
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return new Date(2000 + +m[3], mo - 1, d).getTime();
+  }
+  m = s.match(/^(\d{1,2})\/(\d{2})$/);                       // mois/année courte « 8/26 »
+  if (m) { const mo = +m[1]; if (mo >= 1 && mo <= 12) return new Date(2000 + +m[2], mo - 1, 1).getTime(); }
   return null;
 }
 
@@ -1501,6 +1517,13 @@ async function actifsFindFile(token) {
   if (!file) {
     const any = await actifsDriveQuery(token, `name contains 'Finance' and ${SS} and trashed=false`, 'files(id,name,modifiedTime)');
     file = any.find(x => /finance/i.test(x.name)) || any[0] || null;
+  }
+  // ⚠ « Old_Finance » : pour Drive, « name contains 'Finance' » cherche un MOT qui commence
+  // par « Finance » — collé derrière un « _ », il n'est pas trouvé. Dernier repli : les
+  // tableurs les plus récents, filtrés ici sur le nom.
+  if (!file) {
+    const recent = await actifsDriveQuery(token, `${SS} and trashed=false`, 'files(id,name,modifiedTime)');
+    file = recent.find(x => /finance/i.test(x.name)) || null;
   }
   if (file) try { localStorage.setItem(ACTIFS_FILE_LS, JSON.stringify(file)); } catch {}
   return file;
@@ -20009,32 +20032,86 @@ async function collFinanceFetch(subId, force) {
 // image et le reste de ses métadonnées ; seuls le prix et le lien suivent le classeur —
 // c'est lui la source de vérité de la VALEUR (c'est ce chiffre qui alimente le patrimoine),
 // y compris pour un Displate déjà coté par le catalogue tiers.
-// ⚠ Rien n'est jamais SUPPRIMÉ : une colonne retirée du classeur laisse la fiche en place
-// (l'app n'a aucun moyen de distinguer « revendu » de « colonne renommée »).
+// ⚠ RAPPROCHEMENT (`collFinFind`) : une colonne du classeur retrouve la fiche déjà là même
+// si elle a été ajoutée autrement — catalogue Displate, recherche IA Pop (« Kaneki », #61),
+// photo de montre (« Tissot PR 100 Chronograph »). Avant, seul l'id exact (= l'en-tête)
+// comptait : chaque import créait un DOUBLON de tout ce qui existait déjà. Ordre : id exact,
+// nom exact, nom normalisé, numéro Funko + premier mot (Pop), puis tous les mots du nom le
+// plus court contenus dans l'autre (≥ 2 mots). Une fiche ne sert qu'à UNE colonne.
+// ⚠ Deux en-têtes qui ne diffèrent que par la casse (« The World » / « The world ») sont
+// deux objets : pour eux, seuls l'id et le nom EXACTS valent.
+// ⚠ Les doublons laissés par les anciens imports (fiche créée par le classeur, id = en-tête,
+// sans image) sont RETIRÉS quand une fiche d'origine correspond à la même colonne : c'est
+// elle qui reçoit le prix. Rien d'autre n'est jamais supprimé — une colonne retirée du
+// classeur laisse sa fiche en place.
+const collFinKey = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/[^a-z0-9]+/g, ' ').trim();
+const collFinNum = s => { const m = String(s || '').match(/(?:^|[\s#])(\d{1,5})\s*$/); return m ? m[1] : ''; };
+const collFinTok = s => collFinKey(s).split(' ').filter(w => w.length >= 3 || /\d/.test(w));
+function collFinFind(list, it, taken, strict, skip) {
+  const ok = (x, k) => x && !taken.has(k) && !(skip && skip(x));
+  let i = list.findIndex((x, k) => ok(x, k) && x.id === it.id);
+  if (i >= 0) return i;
+  i = list.findIndex((x, k) => ok(x, k) && x.name === it.name);
+  if (i >= 0 || strict) return i;
+  const key = collFinKey(it.name);
+  i = list.findIndex((x, k) => ok(x, k) && collFinKey(x.name) === key);
+  if (i >= 0) return i;
+  const num = collFinNum(it.name);
+  if (num) {
+    const first = collFinKey(it.name.replace(/\d+\s*$/, '')).split(' ')[0] || '';
+    i = list.findIndex((x, k) => {
+      if (!ok(x, k)) return false;
+      const xn = String((x.meta && x.meta.numero) || collFinNum(x.name) || ((String(x.sub || '').match(/#\s*(\d+)/) || [])[1]) || '');
+      return xn === num && (!first || collFinKey(x.name).split(' ').includes(first));
+    });
+    if (i >= 0) return i;
+  }
+  const a = collFinTok(it.name);
+  return list.findIndex((x, k) => {
+    if (!ok(x, k)) return false;
+    const b = collFinTok(x.name);
+    const [sh, lo] = a.length <= b.length ? [a, b] : [b, a];
+    return sh.length >= 2 && sh.every(w => lo.includes(w));
+  });
+}
+// Fiche créée par un import du classeur et jamais retouchée : candidate au retrait si une
+// fiche d'origine correspond à la même colonne.
+const collFinOwn = (x, it) => x && x.meta && x.meta.finance && x.id === it.id && !x.img && (x.qty || 1) === 1;
 function collMergeFinance(data, subId, items) {
-  const list = collList(data, subId).slice();
-  const byId = new Map();
-  list.forEach((x, i) => { if (x && x.id) byId.set(x.id, i); });
-  let added = 0, updated = 0, full = false, count = collLsCount(data);
+  let list = collList(data, subId).slice();
+  let added = 0, updated = 0, merged = 0, full = false, count = collLsCount(data);
+  const keys = new Map();
+  for (const it of (items || [])) { const k = collFinKey(it.name); keys.set(k, (keys.get(k) || 0) + 1); }
+  const taken = new Set(), drop = new Set();
   for (const it of (items || [])) {
-    const at = byId.has(it.id) ? byId.get(it.id) : -1;
+    const strict = keys.get(collFinKey(it.name)) > 1;
     const stamp = { finance: true, financeAt: Date.now() };
+    let at = collFinFind(list, it, taken, strict);
+    // L'id exact est une fiche du classeur sans rien d'autre ? Une fiche d'origine (catalogue,
+    // IA, photo) qui correspond l'emporte : le doublon est retiré.
+    if (at >= 0 && !strict && collFinOwn(list[at], it)) {
+      const alt = collFinFind(list, it, new Set([...taken, at]), false, x => collFinOwn(x, it) || (x.meta && x.meta.finance));
+      if (alt >= 0) { drop.add(at); taken.add(at); at = alt; merged++; }
+    }
     if (at >= 0) {
+      taken.add(at);
       const cur = list[at];
       const price = (typeof it.price === 'number' && isFinite(it.price) && it.price >= 0) ? it.price : cur.price;
       const url   = it.url ? (safeHref(it.url) || cur.url) : cur.url;
-      if (cur.price === price && cur.url === url) continue;
+      if (cur.price === price && cur.url === url && cur.meta && cur.meta.finance) continue;
       list[at] = { ...cur, price, url, meta: { ...(cur.meta || {}), ...stamp } };
       updated++;
     } else {
       if (count >= COLLECTION_MAX) { full = true; break; }
       const n = collItem({ ...it, sub: 'classeur Finance', meta: stamp });
       if (!n) continue;
-      byId.set(n.id, list.length);
+      taken.add(list.length);
       list.push(n); added++; count++;
     }
   }
-  return { data: (added || updated) ? { ...data, [subId]: list } : data, added, updated, full };
+  if (drop.size) list = list.filter((_, k) => !drop.has(k));
+  return { data: (added || updated || merged) ? { ...data, [subId]: list } : data, added, updated, merged, full };
 }
 
 const COLL_FIN_ERR = {
@@ -20074,7 +20151,8 @@ function CollFinanceImport({ sub, onMerge }) {
   const bilan = res && [
     res.added   ? `${res.added} ajouté${res.added > 1 ? 's' : ''}` : null,
     res.updated ? `${res.updated} mis à jour` : null,
-    !res.added && !res.updated ? 'déjà à jour' : null,
+    res.merged ? `${res.merged} doublon${res.merged > 1 ? 's' : ''} d'anciens imports retiré${res.merged > 1 ? 's' : ''}` : null,
+    !res.added && !res.updated && !res.merged ? 'déjà à jour' : null,
     `relevé de ${fmtActifMonth(res.month)}`,
     res.vides.length ? `${res.vides.length} colonne${res.vides.length > 1 ? 's' : ''} à 0 € ignorée${res.vides.length > 1 ? 's' : ''}` : null,
     res.full ? `collection pleine (${COLLECTION_MAX})` : null,
@@ -20105,8 +20183,10 @@ function CollFinanceImport({ sub, onMerge }) {
         Une colonne = un objet, son en-tête donne le nom et sa valeur du dernier mois donne le prix —
         <b>ramené en euros par le Total de la ligne</b> (les colonnes Displate sont en dollars avant
         le ratio de revente), si bien que la somme des fiches retombe sur le Total du classeur.
-        Une référence déjà là garde sa quantité, sa photo et ses notes : <b>seuls le prix et le lien
-        sont réalignés sur le classeur</b>, qui fait foi pour la valeur. Rien n'est jamais supprimé —
+        Une référence déjà là — même ajoutée par la recherche, l'IA ou une photo, sous un nom un peu
+        différent (« Kaneki » #61 pour « Kaneki 61 ») — est retrouvée et garde sa quantité, sa photo et
+        ses notes : <b>seuls le prix et le lien sont réalignés sur le classeur</b>, qui fait foi pour la
+        valeur. Les doublons créés par d'anciens imports sont retirés ; rien d'autre n'est supprimé —
         une colonne retirée du classeur laisse sa fiche en place, à toi de l'enlever.
       </div>
     </div>
@@ -29895,6 +29975,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.88', date:'2026-09-28', title:'📥 Import Finance réparé (Displate, Pop, Montre)', items:[
+    'Pop : l’import ne trouvait aucune ligne (dates au format 30/08/26 dans l’onglet) — il fonctionne maintenant.',
+    'Displate, Pop et Montre : une référence déjà dans ta collection (ajoutée par la recherche, l’IA ou une photo, sous un nom un peu différent) est retrouvée et mise à jour au lieu d’être dupliquée ; les doublons laissés par les anciens imports sont retirés.',
+    'Le classeur est retrouvé même renommé (« Old_Finance »).',
+  ] },
   { v:'13.21.87', date:'2026-09-28', title:'🌍 Carte des guerres', items:[
     'Actu → Cartographie → Guerre : une carte du monde s’affiche au-dessus de la liste, avec un point sur chaque pays touché par un conflit en cours.',
     'Couleur et taille du point = intensité du conflit le plus grave (guerre majeure, mineure, conflit, escarmouches) ; toucher un point donne le pays et ses conflits.',
@@ -29912,10 +29997,6 @@ const RELEASE_NOTES = [
     'Actu → Cartographie → Réseaux de transport : une vraie carte de Paris et de l’Île-de-France avec le tracé de chaque ligne dans sa couleur officielle (métro, RER, tram, Transilien) et les gares.',
     'Boutons pour afficher ou masquer chaque mode et les gares ; toucher une ligne ou une gare donne son nom.',
     'Trains en direct : la RATP et la SNCF ne publient pas la position des rames en accès libre, la fiche le signale ; le plan officiel IDFM reste en lien.',
-  ] },
-  { v:'13.21.83', date:'2026-09-28', title:'⚔️ Guerre : nouvelle source', items:[
-    'Actu → Cartographie → Guerre : le lien mène à Liveuamap, la carte en direct des conflits, au lieu de world-on-fire.com.',
-    'L’ancienne source de chiffres (UCDP) exige désormais un jeton : la fiche liste maintenant les conflits armés en cours d’après Wikipédia, par intensité, avec les morts de l’année pour chaque guerre majeure et mineure.',
   ] },
 ];
 
