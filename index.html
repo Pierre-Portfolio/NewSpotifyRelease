@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.90';
+const APP_VERSION = '13.21.91';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -26276,7 +26276,9 @@ function moduleOnHome(homeToggles, id) { return !homeToggles || homeToggles[id] 
 // Objet de sauvegarde : stats d'écoute, dernières dates de scrap des artistes, to do.
 // Réutilisé par le bouton d'export, la proposition hebdo et la sync Dropbox.
 function buildBackup() {
-  let stats = null, artists = [], music = [];
+  // ⚠ `music` reste `null` si la lecture échoue : la restauration REMPLACE la table
+  // `tracks` par ce tableau, un `[]` né d'une erreur viderait donc la Musique de l'appareil.
+  let stats = null, artists = [], music = null;
   try { stats = dbGet("SELECT * FROM stats WHERE id = 1"); } catch {}
   try {
     artists = dbAll(
@@ -26284,10 +26286,10 @@ function buildBackup() {
     );
   } catch {}
   // Musique : TOUTES les pistes (feed en attente `listened=0` + historique `listened=1`),
-  // avec leur état écouté/liké — restaurables (INSERT/UPSERT prudent dans applyBackup).
+  // avec leur état écouté/liké — dans l'ordre d'insertion (le feed départage par `id`).
   try {
     music = dbAll(
-      "SELECT spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms, listened, liked, listened_at, added_at FROM tracks"
+      "SELECT spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms, listened, liked, listened_at, added_at FROM tracks ORDER BY id"
     );
   } catch {}
   const lsJson = k => { try { return JSON.parse(localStorage.getItem(k)) || null; } catch { return null; } };
@@ -26765,7 +26767,7 @@ function mergeTvImport(current, incoming) {
 function restoreFailMsg(res) {
   const f = (res && res.failed) || [];
   if (!f.length) return '';
-  const nom = k => ({ 'spotifyplus_tvtime':'TV Time', 'spotifyplus_maps':'Maps', 'spotifyplus_todos':'To do',
+  const nom = k => ({ 'spotifyplus_tvtime':'TV Time', 'spotifyplus_music':'Musique', 'spotifyplus_maps':'Maps', 'spotifyplus_todos':'To do',
     'spotifyplus_notes':'Note', 'spotifyplus_mdp_vault':'Mot de passe' })[k] || k.replace('spotifyplus_', '');
   return `⚠ Stockage local saturé : ${f.length} section(s) NON restaurée(s) — ${[...new Set(f.map(nom))].join(', ')}.`
     + ' Libère de la place (purge tes écoutes, allège un import Maps) puis relance la restauration.';
@@ -26777,10 +26779,10 @@ function restoreFailMsg(res) {
 //   prudente des compteurs cumulés uniquement (pas les compteurs mois/année, liés aux
 //   marqueurs de reset locaux).
 // - todos / todos_done / rappels / remembers : REMPLACÉS par la sauvegarde (si présents).
-// - tvtime : FUSIONNÉ — union par clé (type+id), progression la plus avancée conservée.
+// - tvtime : REMPLACÉ par la liste du fichier (dédoublonnée par type+id).
 // - finance (historique local des prix) : FUSIONNÉ — union par série, jamais écrasé.
-// - music (table `tracks`) : UPSERT prudent — pistes du feed (en attente) + historique
-//   restaurées, état écouté/liké jamais régressé (MAX), listened_at conservé.
+// - music (table `tracks`) : REMPLACÉE par les pistes du fichier (feed + historique, état
+//   écouté/liké compris), en transaction.
 // ⚠ Identifiants VENUS D'UN FICHIER : `obj['__proto__'] = v` ne crée PAS une propriété, il
 // remplace le PROTOTYPE de l'objet (setter d'Object.prototype). Une sauvegarde trafiquée avec
 // une note d'id « __proto__ » ou une sous-collection nommée ainsi voyait donc son entrée
@@ -26861,31 +26863,41 @@ function applyBackup(data) {
       statsRestored = true;
     } catch {}
   }
-  // Musique : restaure les pistes (feed en attente + historique). UPSERT prudent —
-  // une piste existante n'est jamais régressée (listened/liked au MAX, listened_at conservé).
-  let musicRestored = 0;
-  for (const t of (Array.isArray(data.music) ? data.music : [])) {
-    if (!t?.spotify_uri || !t?.artist_name || !t?.title) continue;
-    try {
-      dbRun(
-        `INSERT INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms, listened, liked, listened_at, added_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
-         ON CONFLICT(spotify_uri) DO UPDATE SET
-           listened    = MAX(listened, excluded.listened),
-           liked       = MAX(liked, excluded.liked),
-           listened_at = COALESCE(listened_at, excluded.listened_at)`,
-        [t.spotify_uri, t.artist_name, t.title, t.release_title || null, t.release_type || null,
-         t.release_date || null, t.cover_url || null, t.duration_ms || null,
-         t.listened ? 1 : 0, t.liked ? 1 : 0, t.listened_at || null, t.added_at || null]
-      );
-      musicRestored++;
-    } catch {}
-  }
   // ⚠ Un localStorage SATURÉ ne se voit pas : `setItem` jette ici, `lsSet` renvoie false
   // ailleurs, et tout était avalé — la restauration se déclarait réussie sans avoir rien
   // écrit, et l'appareil retrouvait ses anciennes données au premier F5. On collecte donc
   // les sections non écrites pour que l'appelant les dise à l'utilisateur.
   const failed = [];
+  // Musique : la table `tracks` est REMPLACÉE par celle du fichier (feed en attente +
+  // historique, état écouté/liké compris). ⚠ Ce n'est plus une fusion : un UPSERT « au MAX »
+  // gardait les pistes locales absentes du fichier et ne rendait jamais « à écouter » un
+  // titre marqué écouté ici — l'import semblait ne rien faire. Transaction : une erreur
+  // remet la table d'avant, jamais une table à moitié vidée. Un fichier dont AUCUNE ligne
+  // n'est lisible (≠ tableau vide) est refusé plutôt que de vider la Musique.
+  let musicRestored = 0;
+  if (Array.isArray(data.music)) {
+    const rows = data.music.filter(t => t && typeof t.spotify_uri === 'string' && t.spotify_uri && t.artist_name && t.title);
+    if (rows.length || !data.music.length) {
+      try {
+        dbRun('BEGIN');
+        dbRun('DELETE FROM tracks');
+        for (const t of rows) {
+          dbRun(
+            `INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms, listened, liked, listened_at, added_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+            [t.spotify_uri, String(t.artist_name), String(t.title), t.release_title || null, t.release_type || null,
+             t.release_date || null, t.cover_url || null, t.duration_ms || null,
+             t.listened ? 1 : 0, t.liked ? 1 : 0, t.listened_at || null, t.added_at || null]
+          );
+        }
+        dbRun('COMMIT');
+        musicRestored = dbGet("SELECT COUNT(*) c FROM tracks")?.c || 0;
+      } catch {
+        try { dbRun('ROLLBACK'); } catch {}
+        failed.push('spotifyplus_music');
+      }
+    } else failed.push('spotifyplus_music');
+  }
   const put = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { failed.push(k); return false; } };
   if (Array.isArray(data.todos))      put('spotifyplus_todos', data.todos);
   if (Array.isArray(data.todos_done)) put('spotifyplus_todos_done', data.todos_done);
@@ -26909,14 +26921,16 @@ function applyBackup(data) {
   // 🤖 IA Action — REMPLACÉS (unir deux historiques de 10 n'aurait pas de sens)
   if (Array.isArray(data.ia_history)) put('spotifyplus_ia_history', data.ia_history.slice(0, 10));
   if (data.ia_modules && typeof data.ia_modules === 'object' && !Array.isArray(data.ia_modules)) put('spotifyplus_ia_modules', data.ia_modules);
-  // TV Time — FUSIONNÉ avec la liste locale (union par type+id, progression la plus avancée conservée)
+  // TV Time — REMPLACÉ par la liste du fichier. ⚠ Plus une fusion : l'union gardait les fiches
+  // locales absentes du fichier et leur progression la plus avancée, l'import semblait donc ne
+  // rien changer. `mergeTvImport([], …)` ne sert qu'à dédoublonner le fichier par type+id.
   if (Array.isArray(data.tvtime)) {
     // ⚠ C'est LE plus gros objet de la sauvegarde (chaque chaîne YouTube porte sa liste de
     // vidéos, Shorts compris) : c'est donc lui qui sature le quota en premier. En cas d'échec
     // on REMET LE CACHE MÉMOIRE À NULL — sinon l'écran affiche la fusion pendant que le disque
     // a gardé l'ancienne liste, et l'utilisateur ne découvre la perte qu'au rechargement.
     let ok = false;
-    try { ok = saveTvItems(mergeTvImport(loadTvItems(), data.tvtime)); } catch {}
+    try { ok = saveTvItems(tvNormalizeItems(mergeTvImport([], data.tvtime)).items); } catch {}
     if (!ok) { tvCacheReload(); failed.push('spotifyplus_tvtime'); }
   }
   // Clé API TMDB : chaîne brute (PAS de JSON.stringify — tmdbKey() la lit telle quelle)
@@ -29975,6 +29989,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.91', date:'2026-09-29', title:'⇅ Import Musique et TV Time : le fichier remplace', items:[
+    'Musique : restaurer une sauvegarde remplace maintenant les pistes de l’appareil (feed + historique, écouté/liké compris) au lieu de garder celles qui n’étaient pas dans le fichier.',
+    'TV Time : même chose, la liste du fichier remplace celle de l’appareil (fiches absentes retirées, progression reprise telle quelle).',
+  ] },
   { v:'13.21.90', date:'2026-09-29', title:'▶️ Lecteur vidéo : la barre de boutons ne disparaît plus', items:[
     'TV Time / Actu : quand le plein écran ne s’activait pas (ou après en être sorti), le haut de l’app recouvrait la barre du lecteur (← Retour, ⏮, ⏸, ⏭, 💬). Le lecteur passe maintenant toujours au-dessus.',
   ] },
@@ -29989,10 +30007,6 @@ const RELEASE_NOTES = [
   { v:'13.21.87', date:'2026-09-28', title:'🌍 Carte des guerres', items:[
     'Actu → Cartographie → Guerre : une carte du monde s’affiche au-dessus de la liste, avec un point sur chaque pays touché par un conflit en cours.',
     'Couleur et taille du point = intensité du conflit le plus grave (guerre majeure, mineure, conflit, escarmouches) ; toucher un point donne le pays et ses conflits.',
-  ] },
-  { v:'13.21.86', date:'2026-09-28', title:'✅ To do : vue « Toutes » par défaut', items:[
-    'To do : la vue « ⏳ Courtes » s’appelle maintenant « ⏳ Sans alertes » (alertes du jour, de la semaine et du mois seulement).',
-    'En arrivant sur To do, la vue affichée par défaut est « 🏷️ Toutes » ; le bouton passe ensuite à Sans alertes → Travail → Massy.',
   ] },
 ];
 
@@ -30723,7 +30737,7 @@ function VosEcoutesPanel() {
         if (!data || data.app !== 'spotifyplus') { alert('Fichier invalide : ce n\'est pas une sauvegarde Spotify+.'); return; }
         const n = Array.isArray(data.artists) ? data.artists.length : 0;
         const when = data.exported_at ? new Date(data.exported_at).toLocaleDateString('fr-FR') : '?';
-        if (!confirm(`Restaurer la sauvegarde du ${when} ?\n\n· ${n} artiste(s) — dates de scan fusionnées (jamais régressées)\n· Stats d'écoute — fusion prudente\n· To do / Alertes / TV Time / Maps / Coffre MDP — REMPLACÉS par la sauvegarde (seulement s'ils sont présents dans le fichier)`)) return;
+        if (!confirm(`Restaurer la sauvegarde du ${when} ?\n\n· ${n} artiste(s) — dates de scan fusionnées (jamais régressées)\n· Stats d'écoute — fusion prudente\n· Musique / To do / Alertes / TV Time / Maps / Coffre MDP — REMPLACÉS par la sauvegarde (seulement s'ils sont présents dans le fichier)`)) return;
         const res = await restoreBackup(data);
         const warn = restoreFailMsg(res);
         alert(`${warn ? warn + '\n\n' : '✓ '}Sauvegarde restaurée : ${res.artistsRestored} artiste(s)${res.musicRestored ? ` + ${res.musicRestored} piste(s)` : ''}${res.statsRestored ? ' + stats' : ''} + to do / remember.\nRecharge la page pour voir les to do / rappels restaurés.`);
