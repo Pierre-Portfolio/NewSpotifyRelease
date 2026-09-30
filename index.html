@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.112';
+const APP_VERSION = '13.21.113';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30405,6 +30405,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.113', date:'2026-09-30', title:'🧩 Extension YouTube → TV Time : passe par Google Drive', items:[
+    'L’extension navigateur n’utilise plus Dropbox : les vidéos vues sur le PC sont écrites dans ton Google Drive (HUB_Pierre/hub-youtube-vus.json), et le Hub les coche dans TV Time dès que Google Drive y est connecté (À propos → Sauvegardes cloud).',
+    'À faire une fois : ajouter l’adresse de redirection affichée dans les options de l’extension aux « URI de redirection autorisés » de l’ID client Google du Hub, puis « Connecter Google Drive » avec le même compte que dans le Hub.',
+  ] },
   { v:'13.21.112', date:'2026-09-30', title:'🔗 Liens modules : tout est affiché en arrivant', items:[
     'En ouvrant 🔗 Liens modules, toutes les bulles et tous les liens sont maintenant affichés, y compris ceux des modules désactivés dans le Paramétrage (🤖 IA et ses flèches vers Note, Alertes, To do…).',
     'Le bouton « 👁 Bulles » marche comme avant pour masquer ou réafficher un module (« Activés » ne garde que les modules activés), mais ce tri n’est plus retenu : chaque ouverture repart de tout.',
@@ -30420,10 +30424,6 @@ const RELEASE_NOTES = [
   { v:'13.21.109', date:'2026-09-30', title:'🗺️ Maps → Santé : tes trajets à pied et à vélo comptent comme sport', items:[
     'Dans Santé → 🏃 Séances de sport, les trajets du jour importés dans Maps (Timeline) apparaissent en tête : « 🚶 Marche · 3,7 km · 45 min », « 🚴 Vélo · 7,4 km · 30 min », avec les calories estimées pour ton poids.',
     'Rien n’est ajouté tout seul (tu as peut-être déjà saisi la sortie à la main) : touche + pour l’enregistrer, la ligne passe alors à ✓ ajoutée. Les trajets en voiture ou en transports ne sont pas proposés.',
-  ] },
-  { v:'13.21.108', date:'2026-09-30', title:'🧊 Santé : un repas peut venir du frigo', items:[
-    'Chaque repas de ta liste Santé a maintenant un bouton 🧊 : touche-le, choisis l’aliment du frigo (ceux dont le nom ressemble au repas sont proposés en premier) et il est retiré du Frigo, puisqu’il est mangé. Le repas affiche « 🧊 du frigo : … ».',
-    'Erreur ? Retouche 🧊 sur le repas : l’aliment retourne dans son compartiment. Supprimer le repas, lui, ne le remet pas dans le frigo.',
   ] },
 ];
 
@@ -32460,23 +32460,43 @@ function ytSeenMarkAnywhere(v) {
 }
 // ── 🧩 EXTENSION « YouTube → TV Time » (dépôt GitHub `extension`) ─────────────────
 // L'extension (PC) écrit les vidéos regardées (25 % lus par défaut, ou ✨ résumées) dans le
-// dossier Dropbox du Hub, fichier `EXT_YT_PATH` ; chaque appareil connecté à Dropbox le relit
-// au démarrage et au retour sur l'onglet, puis coche via `ytSeenMarkAnywhere` (+ range le
-// résumé dans le cache `ytSumSave`).
+// Google Drive, fichier `EXT_YT_NAME` (dans HUB_Pierre), avec le MÊME ID client que le Hub :
+// le scope drive.file le rend visible ici. Chaque appareil où Google Drive est connecté le
+// relit au démarrage et au retour sur l'onglet, puis coche via `ytSeenMarkAnywhere` (+ range
+// le résumé dans le cache `ytSumSave`). Pas de jeton Drive valide (~1 h, sans refresh) ⇒
+// rien ; la connexion Drive recharge la page, donc l'import repart aussitôt.
 // ⚠ Le Hub ne RÉÉCRIT JAMAIS ce fichier (seul auteur : l'extension). Ce qui est déjà importé
 // sur CET appareil est noté dans `EXT_YT_DONE_LS` : une vidéo décochée à la main ne revient
 // pas au passage suivant. Marqueur par appareil ⇒ hors `buildBackup`.
-const EXT_YT_PATH = '/hub-youtube-vus.json';
+const EXT_YT_NAME = 'hub-youtube-vus.json';
 const EXT_YT_DONE_LS = 'spotifyplus_ext_yt_done';
 const EXT_YT_GAP = 5 * 60 * 1000;
 let _extYtAt = 0, _extYtBusy = false;
+// Deux navigateurs équipés peuvent avoir créé chacun leur fichier au même instant : on les
+// lit TOUS (l'extension, elle, écrit dans le plus ancien).
+async function extYtDriveRead(token) {
+  const auth = { Authorization: `Bearer ${token}` };
+  const q = encodeURIComponent(`name='${EXT_YT_NAME}' and trashed=false`);
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id)&pageSize=10`, { headers: auth, signal: fetchSig(15000) });
+  if (res.status === 401) { gdriveLogout(); throw new Error('Session Google expirée'); }
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const byId = new Map();
+  for (const f of ((await res.json()).files || [])) {
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(f.id)}?alt=media`, { headers: auth, signal: fetchSig(15000) });
+    if (!r.ok) continue;
+    let d = null;
+    try { d = JSON.parse(await r.text()); } catch {}
+    for (const v of (d && Array.isArray(d.videos) ? d.videos : [])) if (v && v.id) byId.set(v.id, { ...(byId.get(v.id) || {}), ...v });
+  }
+  return { videos: [...byId.values()] };
+}
 async function extYtImport(force) {
-  if (_extYtBusy || !_tvReady || !dropboxConnected()) return 0;
+  if (_extYtBusy || !_tvReady || !gdriveConnected()) return 0;
   if (!force && Date.now() - _extYtAt < EXT_YT_GAP) return 0;
   _extYtBusy = true; _extYtAt = Date.now();
   try {
     let data;
-    try { data = await dropboxDownload(EXT_YT_PATH); } catch (e) { return 0; }   // 409 = extension jamais utilisée
+    try { data = await extYtDriveRead(gdriveToken()); } catch (e) { return 0; }
     const list = data && Array.isArray(data.videos) ? data.videos : [];
     let done = [];
     try { done = JSON.parse(lsGet(EXT_YT_DONE_LS) || '[]'); } catch {}

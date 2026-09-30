@@ -1,13 +1,19 @@
-// Service worker : file d'attente des vidéos vues → fichier Dropbox lu par le Hub, et résumé IA.
+// Service worker : file d'attente des vidéos vues → fichier Google Drive lu par le Hub, et résumé IA.
 //
 // ⚠ TRANSPORT : le Hub n'a pas de serveur et garde TV Time sur chaque appareil. L'extension
-// écrit donc dans le dossier d'application Dropbox du Hub (MÊME App key ⇒ MÊME dossier) le
-// fichier `DBX_PATH` ; le Hub le relit à l'ouverture (mobile compris) et coche les vidéos.
-// Le Hub ne réécrit JAMAIS ce fichier : l'extension en est le seul auteur (jusqu'à `KEEP`
-// entrées, les plus récentes). Deux navigateurs équipés ⇒ écriture en mode `update` sur la
-// révision lue, rejouée une fois en cas de conflit.
-const DROPBOX_APP_KEY = 'x9y0bei8lo9lx5i';   // App key PUBLIQUE du Hub (PKCE, pas de secret)
-const DBX_PATH = '/hub-youtube-vus.json';
+// écrit donc dans le Google Drive de l'utilisateur, avec le MÊME ID client OAuth que le Hub :
+// le scope drive.file ne montre que les fichiers créés par ce projet Google, le Hub voit donc
+// `DRIVE_NAME` (rangé dans `HUB_FOLDER`) et le relit à l'ouverture, mobile compris. Le Hub ne
+// réécrit JAMAIS ce fichier : l'extension en est le seul auteur (jusqu'à `KEEP` entrées, les
+// plus récentes).
+const GOOGLE_CLIENT_ID = '968594008637-12ssdcr5i1uutq9vru5f8444bfchephd.apps.googleusercontent.com';   // = GDRIVE_CLIENT_ID du Hub (public)
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_NAME = 'hub-youtube-vus.json';
+const HUB_FOLDER = 'HUB_Pierre';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const DAPI = 'https://www.googleapis.com/drive/v3/files';
+const UAPI = 'https://www.googleapis.com/upload/drive/v3/files';
+const RELOGIN = 'Session Google expirée — clique « Reconnecter Google Drive »';
 const KEEP = 500;
 const GEMINI_MODELS = ['gemini-3.6-flash', 'gemini-flash-latest', 'gemini-2.5-flash'];
 const DEF = { threshold: 25, auto: true, sumMarks: true, geminiKey: '' };
@@ -16,70 +22,98 @@ const get = keys => chrome.storage.local.get(keys);
 const set = obj => chrome.storage.local.set(obj);
 const settings = async () => ({ ...DEF, ...((await get('settings')).settings || {}) });
 
-// ── Dropbox (OAuth PKCE via chrome.identity) ───────────────────────────────
+// ── Google Drive (OAuth via chrome.identity) ───────────────────────────────
 const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const rnd = n => b64url(crypto.getRandomValues(new Uint8Array(n)));
-async function dropboxLogin() {
-  const verifier = rnd(48);
-  const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+// Flux implicite : un client « Application Web » exige un client_secret pour échanger un code,
+// donc aucun refresh token. Le jeton (~1 h) est renouvelé SANS fenêtre (`prompt=none` +
+// `login_hint` = compte choisi à la connexion) ; si la session Google de ce navigateur est
+// fermée, la file attend un clic sur « Reconnecter ».
+// ⚠ `include_granted_scopes=false` : le client du Hub a aussi le scope youtube, que Google
+// refuse de mélanger à drive.file (Erreur 400, cf. GDRIVE_SCOPE_YT dans index.html).
+// ⚠ L'adresse de retour (`getRedirectURL()`) doit figurer dans les « URI de redirection
+// autorisés » de cet ID client, sinon Google affiche redirect_uri_mismatch.
+async function googleAuth(interactive) {
+  const { google: g } = await get('google');
   const state = rnd(16);
-  const redirect = chrome.identity.getRedirectURL();
-  const url = 'https://www.dropbox.com/oauth2/authorize?' + new URLSearchParams({
-    client_id: DROPBOX_APP_KEY, response_type: 'code', redirect_uri: redirect,
-    code_challenge: challenge, code_challenge_method: 'S256', token_access_type: 'offline', state,
-  });
-  const back = await chrome.identity.launchWebAuthFlow({ url, interactive: true });
-  const q = new URL(back).searchParams;
-  if (q.get('state') !== state) throw new Error('Réponse Dropbox inattendue (state).');
-  if (!q.get('code')) throw new Error(q.get('error_description') || q.get('error') || 'Connexion refusée.');
-  const r = await fetch('https://api.dropboxapi.com/oauth2/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ code: q.get('code'), grant_type: 'authorization_code', redirect_uri: redirect, client_id: DROPBOX_APP_KEY, code_verifier: verifier }),
-  });
+  const p = { client_id: GOOGLE_CLIENT_ID, response_type: 'token', redirect_uri: chrome.identity.getRedirectURL(),
+    scope: DRIVE_SCOPE, include_granted_scopes: 'false', state, prompt: interactive ? 'select_account' : 'none' };
+  if (g && g.email) p.login_hint = g.email;
+  const details = { url: 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams(p), interactive };
+  // Sans fenêtre, Google enchaîne des redirections en JS : laisser les pages charger.
+  if (!interactive) Object.assign(details, { abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: 15000 });
+  const back = new URL(await chrome.identity.launchWebAuthFlow(details));
+  const q = new URLSearchParams(back.hash.slice(1) || back.search.slice(1));
+  if (q.get('state') !== state) throw new Error('Réponse Google inattendue (state).');
+  const access = q.get('access_token');
+  if (!access) throw new Error(q.get('error_description') || q.get('error') || 'Connexion refusée.');
+  let email = (g && g.email) || '';
+  if (interactive || !email) {
+    const r = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + access } });
+    const d = await r.json().catch(() => ({}));
+    email = (d.user && d.user.emailAddress) || email;
+  }
+  await set({ google: { access, expiry: Date.now() + (parseInt(q.get('expires_in'), 10) || 3600) * 1000, email } });
+  return access;
+}
+async function driveToken(renew) {
+  const { google: g } = await get('google');
+  if (!g) return null;
+  if (!renew && g.access && Date.now() < (g.expiry || 0) - 60000) return g.access;
+  try { return await googleAuth(false); } catch { await set({ google: { ...g, access: '', expiry: 0 } }); return null; }
+}
+async function gfetch(url, init) {
+  let tok = await driveToken();
+  for (let i = 0; tok && i < 2; i++) {
+    const r = await fetch(url, { ...init, headers: { ...((init && init.headers) || {}), Authorization: 'Bearer ' + tok } });
+    if (r.status !== 401 || i) return r;
+    tok = await driveToken(true);   // jeton révoqué avant l'heure : un renouvellement, un seul rejeu
+  }
+  throw new Error(RELOGIN);
+}
+async function driveFind(q) {
+  const r = await gfetch(DAPI + '?' + new URLSearchParams({ q, spaces: 'drive', fields: 'files(id)', orderBy: 'createdTime', pageSize: '1' }));
+  if (!r.ok) throw new Error('Google Drive HTTP ' + r.status);
   const d = await r.json();
-  if (!d.access_token) throw new Error(d.error_description || 'Échange du code refusé.');
-  await set({ dropbox: { access: d.access_token, expiry: Date.now() + (d.expires_in || 14400) * 1000, refresh: d.refresh_token || '' } });
-  flush();
-  return true;
+  return (d.files && d.files[0] && d.files[0].id) || null;
 }
-async function dropboxToken() {
-  const { dropbox: t } = await get('dropbox');
-  if (!t) return null;
-  if (Date.now() < (t.expiry || 0) - 60000) return t.access;
-  if (!t.refresh) return t.access || null;
-  const r = await fetch('https://api.dropboxapi.com/oauth2/token', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: t.refresh, client_id: DROPBOX_APP_KEY }),
-  });
-  const d = await r.json().catch(() => ({}));
-  if (!d.access_token) { if (r.status === 400 || r.status === 401) await chrome.storage.local.remove('dropbox'); return null; }
-  await set({ dropbox: { ...t, access: d.access_token, expiry: Date.now() + (d.expires_in || 14400) * 1000 } });
-  return d.access_token;
-}
-async function dbxRead(token) {
-  const r = await fetch('https://content.dropboxapi.com/2/files/download', {
-    method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Dropbox-API-Arg': JSON.stringify({ path: DBX_PATH }) },
-  });
-  if (r.status === 409) return { data: { v: 1, videos: [] }, rev: null };
-  if (!r.ok) throw new Error('Dropbox HTTP ' + r.status);
-  let rev = null;
-  try { rev = JSON.parse(r.headers.get('Dropbox-API-Result') || '{}').rev || null; } catch {}
+// Le plus ANCIEN fichier de ce nom : deux navigateurs qui l'ont créé en même temps finissent
+// par écrire dans le même (le Hub, lui, les lit tous).
+async function driveRead() {
+  const id = await driveFind(`name='${DRIVE_NAME}' and trashed=false`);
+  if (!id) return { id: null, data: { v: 1, videos: [] } };
+  const r = await gfetch(`${DAPI}/${id}?alt=media`);
+  if (!r.ok) throw new Error('Google Drive HTTP ' + r.status);
   let data = null;
   try { data = JSON.parse(await r.text()); } catch {}
-  return { data: data && Array.isArray(data.videos) ? data : { v: 1, videos: [] }, rev };
+  return { id, data: data && Array.isArray(data.videos) ? data : { v: 1, videos: [] } };
 }
-async function dbxWrite(token, data, rev) {
-  const mode = rev ? { '.tag': 'update', update: rev } : { '.tag': 'add' };
-  return fetch('https://content.dropboxapi.com/2/files/upload', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/octet-stream',
-      'Dropbox-API-Arg': JSON.stringify({ path: DBX_PATH, mode, autorename: false, mute: true }) },
-    body: JSON.stringify(data),
+async function driveWrite(id, data) {
+  const body = JSON.stringify(data);
+  if (id) {
+    const r = await gfetch(`${UAPI}/${id}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+    if (!r.ok) throw new Error('Google Drive HTTP ' + r.status);
+    return;
+  }
+  // Première écriture : dans le dossier des photos du Hub, créé au besoin (sinon à la racine).
+  let folder = await driveFind(`mimeType='${FOLDER_MIME}' and name='${HUB_FOLDER}' and trashed=false`);
+  if (!folder) {
+    const r = await gfetch(DAPI + '?fields=id', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: HUB_FOLDER, mimeType: FOLDER_MIME }) });
+    folder = r.ok ? (await r.json()).id : null;
+  }
+  const b = 'hubp' + rnd(12);
+  const meta = { name: DRIVE_NAME, mimeType: 'application/json', ...(folder ? { parents: [folder] } : {}) };
+  const r = await gfetch(UAPI + '?uploadType=multipart&fields=id', {
+    method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + b },
+    body: `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n`
+      + `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${body}\r\n--${b}--`,
   });
+  if (!r.ok) throw new Error('Google Drive HTTP ' + r.status);
 }
 
 // ── File d'attente ─────────────────────────────────────────────────────────
-// `queue` = pas encore dans Dropbox · `recent` = historique local (popup), 50 dernières.
+// `queue` = pas encore dans Drive · `recent` = historique local (popup), 50 dernières.
 async function enqueue(video) {
   const { queue = [], recent = [] } = await get(['queue', 'recent']);
   const known = queue.find(x => x.id === video.id) || recent.find(x => x.id === video.id);
@@ -94,19 +128,20 @@ async function enqueue(video) {
 let flushing = null;
 function flush() { if (!flushing) flushing = doFlush().finally(() => { flushing = null; }); return flushing; }
 async function doFlush() {
-  const { queue = [] } = await get('queue');
+  const { queue = [], google } = await get(['queue', 'google']);
   if (!queue.length) return { ok: true, sent: 0 };
-  const token = await dropboxToken();
-  if (!token) { await set({ lastError: 'Dropbox non connecté' }); return { ok: false }; }
+  if (!google) { await set({ lastError: 'Google Drive non connecté' }); return { ok: false }; }
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const { data, rev } = await dbxRead(token);
+      const { id, data } = await driveRead();
       const byId = new Map(data.videos.map(v => [v.id, v]));
       for (const v of queue) byId.set(v.id, { ...(byId.get(v.id) || {}), ...v });
       const videos = [...byId.values()].sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, KEEP);
-      const r = await dbxWrite(token, { v: 1, updated: Date.now(), videos }, rev);
-      if (r.status === 409 && attempt === 0) continue;   // quelqu'un a écrit entre-temps : relire
-      if (!r.ok) throw new Error('Dropbox HTTP ' + r.status);
+      await driveWrite(id, { v: 1, updated: Date.now(), videos });
+      // Drive n'a pas d'écriture conditionnelle : on RELIT, et si un autre navigateur équipé a
+      // écrasé l'envoi entre la lecture et l'écriture, on refait le tour une fois.
+      const have = new Set((await driveRead()).data.videos.map(v => v && v.id));
+      if (attempt === 0 && queue.some(v => !have.has(v.id))) continue;
       // ⚠ Seules les entrées envoyées TELLES QUELLES quittent la file : une vidéo complétée
       // (résumé arrivé) pendant l'envoi y reste pour le passage suivant.
       const sentKeys = new Set(queue.map(v => JSON.stringify(v)));
@@ -170,8 +205,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         return { text, added };
       } catch (e) { return { error: String((e && e.message) || e) }; }
     }
-    if (msg.type === 'login') { try { await dropboxLogin(); return { ok: true }; } catch (e) { return { error: String((e && e.message) || e) }; } }
-    if (msg.type === 'logout') { await chrome.storage.local.remove('dropbox'); return { ok: true }; }
+    if (msg.type === 'login') {
+      try { await googleAuth(true); await set({ lastError: '' }); flush(); return { ok: true }; }
+      catch (e) { return { error: String((e && e.message) || e) }; }
+    }
+    // ⚠ Pas de révocation du jeton : elle retirerait l'accès à tout l'ID client, Hub compris.
+    if (msg.type === 'logout') { await chrome.storage.local.remove('google'); return { ok: true }; }
     if (msg.type === 'flush') return await flush();
     if (msg.type === 'redirect') return { url: chrome.identity.getRedirectURL() };
     return null;

@@ -16,22 +16,24 @@ regardées sur youtube.com — y compris quand le Hub est ouvert sur le téléph
 ## Comment ça arrive dans le Hub
 
 Le Hub n'a pas de serveur et garde TV Time sur chaque appareil. L'extension écrit donc les
-vidéos dans le **dossier Dropbox du Hub** (même application Dropbox), fichier
-`/hub-youtube-vus.json` (500 dernières). Le Hub le relit à l'ouverture et à chaque retour
-sur l'onglet, puis coche chaque vidéo — dans sa chaîne si tu la suis, sinon dans
-« Hub Pierre ». Une vidéo décochée à la main dans le Hub ne revient pas.
+vidéos dans ton **Google Drive**, avec la même application Google que le Hub, fichier
+`HUB_Pierre/hub-youtube-vus.json` (500 dernières). Le Hub le relit à l'ouverture et à chaque
+retour sur l'onglet **tant que Google Drive y est connecté** (session d'environ 1 h), puis
+coche chaque vidéo — dans sa chaîne si tu la suis, sinon dans « Hub Pierre ». Une vidéo
+décochée à la main dans le Hub ne revient pas.
 
 ## Installation
 
 1. `chrome://extensions` → activer le **mode développeur** → **Charger l'extension non
    empaquetée** → choisir ce dossier.
 2. L'ID est fixe (clé dans `manifest.json`) : `ipoiohljgccegcbenelbcoggecloogak`.
-3. **Une seule fois**, dans la console Dropbox de l'app du Hub
-   (dropbox.com/developers/apps → *Settings* → *OAuth 2 · Redirect URIs*), ajouter :
+3. **Une seule fois**, dans Google Cloud (console.cloud.google.com → *API et services* →
+   *Identifiants* → ID client OAuth « Application Web » du Hub, `968594008637-12ss…`),
+   ajouter aux **URI de redirection autorisés** :
    `https://ipoiohljgccegcbenelbcoggecloogak.chromiumapp.org/`
-4. Options de l'extension → **Connecter Dropbox**, et coller la **clé Gemini** (la même que
-   dans le module 🔌 API du Hub) pour le résumé.
-5. Dans le Hub, Dropbox doit être connecté sur chaque appareil (À propos → Sauvegarde).
+4. Options de l'extension → **Connecter Google Drive** (le **même compte** que dans le Hub),
+   et coller la **clé Gemini** (la même que dans le module 🔌 API du Hub) pour le résumé.
+5. Dans le Hub, Google Drive doit être connecté sur l'appareil (À propos → Sauvegardes cloud).
 
 ## Fichiers
 
@@ -39,10 +41,10 @@ sur l'onglet, puis coche chaque vidéo — dans sa chaîne si tu la suis, sinon 
 |---|---|
 | `page.js` | Monde MAIN de YouTube : lit titre / chaîne / durée depuis le lecteur et les passe à `content.js` |
 | `content.js` / `content.css` | Compte le temps lu, bouton et panneau ✨ Résumé IA, toast |
-| `background.js` | File d'attente, envoi Dropbox (PKCE, écriture sur révision, rejeu si conflit), appel Gemini |
+| `background.js` | File d'attente, envoi Google Drive (jeton renouvelé sans fenêtre, relecture après écriture), appel Gemini |
 | `popup.*`, `options.*`, `ui.css` | État, dernières vidéos, réglages |
 
 ## Vie privée
 
-L'extension ne lit que les pages youtube.com. Rien ne part ailleurs que vers Dropbox (ton
-dossier d'application) et, pour le résumé, vers l'API Gemini avec ta clé. Aucun serveur tiers.
+L'extension ne lit que les pages youtube.com. Rien ne part ailleurs que vers ton Google Drive (accès
+limité aux fichiers du Hub, scope `drive.file`) et, pour le résumé, vers l'API Gemini avec ta clé. Aucun serveur tiers.
