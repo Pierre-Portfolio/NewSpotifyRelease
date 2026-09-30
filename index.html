@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.104';
+const APP_VERSION = '13.21.105';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3400,6 +3400,8 @@ function StoreProvider({ children }) {
         try { syncRemembersToTodos(); } catch {}
         // Frigo → To do : aliments qui périment dans 2 jours ou moins (100 % local).
         try { syncFrigoToTodos(); } catch {}
+        // Bon Plan → To do + alerte : jeu suivi passé sous son prix cible (fire-and-forget).
+        try { if (moduleEnabled(loadModuleToggles(), 'compare')) cmpTargetSync().catch(() => {}); } catch {}
         // Speedrun → To do : même chose pour les runs à valider, mais sur le SEUL cache
         // (aucune requête au boot ; la synchro complète a lieu à l'ouverture d'Alertes).
         try { syncSpeedrunToTodoFromCache(); } catch {}
@@ -29785,6 +29787,7 @@ const MODULE_LINKS = [
   ['frigo',    'remember',   'aliments bientôt périmés affichés dans Alertes'],
   ['frigo',    'todo',       'aliment qui périme dans 2 j ou moins ⇒ tâche (retirée quand l’aliment quitte le frigo)'],
   ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
+  ['compare',  'todo',       'jeu suivi passé sous son prix cible ⇒ tâche + alerte à la connexion'],
   ['mdp',      'contact',    'même chiffrement AES-GCM (mot de passe propre)'],
   ['actu',     'tvtime',     'vidéo YouTube vue ⇒ marquée vue'],
   ['finance',  'actu',       'Bull Run (crypto) affiché dans Actu'],
@@ -30294,6 +30297,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.105', date:'2026-09-30', title:'🛒 Bon Plan : alerte et tâche quand un jeu atteint ton prix cible', items:[
+    'Si un jeu de ⭐ Ma liste passe sous le prix cible que tu lui as donné, une alerte s’affiche à la connexion (notification si tu les as autorisées) et une tâche « 🛒 Bon Plan : … à acheter » arrive dans To do → Aujourd’hui.',
+    'Une seule alerte par baisse : si le prix remonte au-dessus de la cible puis redescend, tu es prévenu à nouveau.',
+  ] },
   { v:'13.21.104', date:'2026-09-30', title:'🧊 Frigo → To do : les aliments à finir deviennent des tâches', items:[
     'Un aliment qui périme dans 2 jours ou moins (ou déjà périmé) crée une tâche dans To do → Aujourd’hui : « 🧊 Frigo : manger le lait (périme dans 1 j) ».',
     'Quand tu retires l’aliment du frigo (mangé ou jeté) ou changes sa date, la tâche s’en va toute seule. Une tâche supprimée à la main ne revient pas.',
@@ -30308,10 +30315,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.101', date:'2026-09-30', title:'🧩 L’extension YouTube → TV Time est dans le dépôt du Hub', items:[
     'Elle se trouve maintenant dans le dossier extension/ du dépôt GitHub du Hub : chrome://extensions → mode développeur → « Charger l’extension non empaquetée » → choisir ce dossier. Le mode d’emploi est dans extension/README.md.',
-  ] },
-  { v:'13.21.100', date:'2026-09-30', title:'🧩 TV Time : les vidéos YouTube vues sur le PC arrivent toutes seules', items:[
-    'Nouvelle extension navigateur « YouTube → TV Time » (dossier extension du dépôt du Hub) : sur youtube.com, une vidéo lue à 25 % (réglable) ou résumée avec son bouton ✨ Résumé IA est envoyée dans ton Dropbox.',
-    'À l’ouverture du Hub (téléphone compris, Dropbox connecté), ces vidéos sont cochées vues dans TV Time — dans leur chaîne si tu la suis, sinon dans « Hub Pierre » — et leur résumé IA est repris. Une vidéo décochée à la main ne revient pas.',
   ] },
 ];
 
@@ -37065,6 +37068,57 @@ function CompareDeals({ isWatched, toggleWatch }) {
       )}
     </div>
   );
+}
+
+// ── 🛒 BON PLAN → TO DO + ALERTE (à la connexion) ─────────────────────────────────
+// Un jeu suivi dont le meilleur prix passe SOUS son prix cible (€) crée une tâche
+// « Aujourd'hui » et déclenche UNE alerte, la première fois qu'on le voit à la connexion.
+// ⚠ « Première fois » = par ÉPISODE : `CMP_TARGET_LS` garde les jeux actuellement sous la
+// cible ; un jeu qui repasse au-dessus en sort, et une nouvelle baisse ré-alerte.
+// ⚠ Prix relus chez CheapShark seulement si le plus vieux relevé a plus de
+// `CMP_TARGET_REFRESH_MS` (une requête groupée) ; la liste est RELUE avant d'écrire.
+// Alerte = notification système si elle est autorisée, sinon `alert()` (l'utilisateur a
+// demandé une alerte, pas une ligne qu'il pourrait ne pas voir).
+const CMP_TARGET_LS = 'spotifyplus_cmp_target_hit';   // { gameID: prix € au moment de l'alerte }
+const CMP_TARGET_REFRESH_MS = 6 * 3600 * 1000;
+async function cmpTargetSync() {
+  const withTarget = loadCmpWatch().filter(w => w && w.gameID && w.target != null);
+  if (!withTarget.length) return 0;
+  const oldest = Math.min(...withTarget.map(w => w.lastCheck || 0));
+  if (Date.now() - oldest > CMP_TARGET_REFRESH_MS) {
+    const fresh = await cmpRefreshWatch(withTarget);
+    const byId = new Map(fresh.map(w => [w.gameID, w]));
+    saveCmpWatch(loadCmpWatch().map(w => {
+      const f = byId.get(w.gameID);
+      return f ? { ...w, lastPrice: f.lastPrice, dealID: f.dealID, lastCheck: f.lastCheck } : w;
+    }));
+  }
+  const eur = await cmpUsdToEur();
+  if (!eur) return 0;
+  let hit = {};
+  try { hit = JSON.parse(lsGet(CMP_TARGET_LS) || '{}') || {}; } catch {}
+  const next = {}, fresh = [];
+  for (const w of loadCmpWatch()) {
+    if (!w || w.target == null || w.lastPrice == null) continue;
+    const p = Math.round(w.lastPrice * eur * 100) / 100;
+    if (p > w.target) continue;
+    const k = String(w.gameID);
+    next[k] = hit[k] != null ? hit[k] : p;
+    if (hit[k] == null) fresh.push({ w, p });
+  }
+  lsSet(CMP_TARGET_LS, JSON.stringify(next));
+  if (!fresh.length) return 0;
+  const todos = loadTodos();
+  for (const { w, p } of fresh) {
+    todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), bucket:'today', fav:false, cmpKey: String(w.gameID),
+      text: `🛒 Bon Plan : ${w.title || 'jeu suivi'} à ${cmpFmtEur(p)} (ta cible : ${cmpFmtEur(w.target)}) — à acheter` });
+  }
+  saveTodos(todos);
+  const msg = fresh.map(({ w, p }) => `${w.title || 'Jeu'} : ${cmpFmtEur(p)} (cible ${cmpFmtEur(w.target)})`).join('\n');
+  const title = fresh.length === 1 ? '🛒 Bon Plan : prix cible atteint' : `🛒 Bon Plan : ${fresh.length} prix cibles atteints`;
+  if ('Notification' in window && Notification.permission === 'granted') notify(title, msg);
+  else setTimeout(() => { try { window.alert(title + '\n\n' + msg + '\n\nUne tâche a été ajoutée dans To do → Aujourd\'hui.'); } catch {} }, 1500);
+  return fresh.length;
 }
 
 // ⭐ Ma liste — jeux suivis : meilleur prix actuel (refresh 30 min), prix cible optionnel
