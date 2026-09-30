@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.101';
+const APP_VERSION = '13.21.102';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29747,6 +29747,8 @@ const MODULE_LINKS = [
   ['actu',     'mdp',        'fuites de données croisées avec les sites du coffre'],
   ['food',     'todo',       'repas, pesée, course ⇒ coche la tâche quotidienne'],
   ['contact',  'remember',   'anniversaire 🔔 ⇒ alerte'],
+  ['frigo',    'remember',   'aliments bientôt périmés affichés dans Alertes'],
+  ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
   ['mdp',      'contact',    'même chiffrement AES-GCM (mot de passe propre)'],
   ['actu',     'tvtime',     'vidéo YouTube vue ⇒ marquée vue'],
   ['finance',  'actu',       'Bull Run (crypto) affiché dans Actu'],
@@ -29825,11 +29827,25 @@ function useGraphDrag(initial, W, H, pad) {
   const [st, setSt] = React.useState({ base: initial, pos: initial });
   const pos = st.base === initial ? st.pos : initial;
   const setPos = fn => setSt(s0 => ({ base: initial, pos: fn(s0.base === initial ? s0.pos : initial) }));
-  const svgRef = React.useRef(null);
   const dragRef = React.useRef(null);      // { i, x0, y0, moved }
   const movedRef = React.useRef(false);    // le dernier geste était un déplacement
+  // ⚠ SUR MOBILE, `touchAction:'none'` posé sur un élément SVG (<g>, <circle>) n'est PAS
+  // respecté par Chrome Android : glisser une bulle faisait défiler la page en même temps.
+  // D'où ce `touchmove` NATIF non passif sur le <svg> (React pose les siens en passif) : tant
+  // qu'un doigt tient une bulle (`dragRef` posé au pointerdown, qui précède le touchmove), il
+  // annule le défilement. Rien au `touchstart` : l'annuler supprimerait le clic du simple
+  // toucher, qui sélectionne. Ref-callback et non useEffect : le <svg> peut naître après.
+  const svgEl = React.useRef(null);
+  const svgRef = React.useCallback(el => {
+    if (svgEl.current && svgEl.current._gdOff) svgEl.current._gdOff();
+    svgEl.current = el;
+    if (!el) return;
+    const tm = e => { if (dragRef.current && e.cancelable) e.preventDefault(); };
+    el.addEventListener('touchmove', tm, { passive: false });
+    el._gdOff = () => el.removeEventListener('touchmove', tm);
+  }, []);
   const toSvg = e => {
-    const svg = svgRef.current, m = svg && svg.getScreenCTM && svg.getScreenCTM();
+    const svg = svgEl.current, m = svg && svg.getScreenCTM && svg.getScreenCTM();
     if (!m) return null;
     const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
     return pt.matrixTransform(m.inverse());
@@ -29858,9 +29874,11 @@ function useGraphDrag(initial, W, H, pad) {
   const wasDrag = () => { const m = movedRef.current; movedRef.current = false; return m; };
   return { pos, svgRef, nodeProps, wasDrag, moved: pos !== initial, reset: () => setSt({ base: initial, pos: initial }) };
 }
-// Taper une bulle surligne ses liens et les liste dessous ; retaper (ou le fond) désélectionne.
+// Taper une bulle surligne ses liens et les liste dessous ; taper un TRAIT explique ce lien-là
+// (les deux sens s'il existe aussi à l'envers) ; retaper (ou le fond) désélectionne.
 function ModuleLinksGraph() {
   const [sel, setSel] = React.useState(null);
+  const [selLink, setSelLink] = React.useState(null);   // 'from>to'
   const W = 360, H = 400, PAD = 26;
   const g = React.useMemo(() => {
     const toggles = loadModuleToggles();
@@ -29876,16 +29894,23 @@ function ModuleLinksGraph() {
   const P = drag.pos;
   const rOf = i => 11 + Math.min(9, g.deg[i] * 0.8);
   const selLinks = sel ? g.links.filter(l => l.from === sel || l.to === sel) : [];
-  const near = new Set(selLinks.flatMap(l => [l.from, l.to]));
+  const lk = selLink ? g.links.find(l => l.from + '>' + l.to === selLink) : null;
+  const lkBoth = lk ? g.links.filter(l => (l.from === lk.from && l.to === lk.to) || (l.from === lk.to && l.to === lk.from)) : [];
+  const near = new Set(lk ? [lk.from, lk.to] : selLinks.flatMap(l => [l.from, l.to]));
+  const focus = sel || lk;   // quelque chose est sélectionné : le reste s'estompe
   const modOf = id => g.nodes[g.idx.get(id)];
+  const pickNode = id => { setSelLink(null); setSel(s => (s === id ? null : id)); };
+  const pickLink = key => { setSel(null); setSelLink(s => (s === key ? null : key)); };
   return (
     <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ display:'flex', alignItems:'flex-start', gap:8 }}>
-        <div style={{ flex:1, fontSize:10, color:C.muted }}>{g.nodes.length} modules activés · {g.links.length} liens. Plus une bulle est grosse, plus le module échange avec les autres. Touche une bulle pour voir ses liens, fais-la glisser pour la déplacer.</div>
-        {drag.moved && <button onClick={drag.reset} title="Remettre les bulles à leur place"
-          style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10.5, padding:'3px 8px', cursor:'pointer', flexShrink:0, fontFamily:'inherit' }}>↺ Replacer</button>}
+        <div style={{ flex:1, fontSize:10, color:C.muted }}>{g.nodes.length} modules activés · {g.links.length} liens. Plus une bulle est grosse, plus le module échange avec les autres. Touche une bulle pour voir ses liens, un trait pour l'expliquer ; fais glisser une bulle pour la déplacer.</div>
+        {/* ⚠ Toujours rendu (caché tant que rien n'a bougé) : apparaître au 1er déplacement
+            faisait sauter le graphe de quelques pixels sous le doigt. */}
+        <button onClick={drag.reset} title="Remettre les bulles à leur place" disabled={!drag.moved}
+          style={{ visibility: drag.moved ? 'visible' : 'hidden', background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10.5, padding:'3px 8px', cursor:'pointer', flexShrink:0, fontFamily:'inherit' }}>↺ Replacer</button>
       </div>
-      <svg ref={drag.svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', touchAction:'manipulation', userSelect:'none', WebkitUserSelect:'none' }} onClick={() => setSel(null)}>
+      <svg ref={drag.svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', touchAction:'manipulation', userSelect:'none', WebkitUserSelect:'none' }} onClick={() => { setSel(null); setSelLink(null); }}>
         <defs>
           {/* Une pointe par module source : `fill="context-stroke"` n'est pas lu partout */}
           {g.nodes.map((m, i) => (
@@ -29897,18 +29922,26 @@ function ModuleLinksGraph() {
         {g.links.map(l => {
           const a = g.idx.get(l.from), b = g.idx.get(l.to), A = P[a], B = P[b];
           const dx = B.x - A.x, dy = B.y - A.y, d = Math.max(1, Math.hypot(dx, dy));
-          const on = sel && (l.from === sel || l.to === sel);
+          const on = lk ? lkBoth.includes(l) : sel && (l.from === sel || l.to === sel);
           const col = g.nodes[a].color;
           return (
             <line key={l.from + '>' + l.to} x1={A.x + dx / d * rOf(a)} y1={A.y + dy / d * rOf(a)} x2={B.x - dx / d * (rOf(b) + 2)} y2={B.y - dy / d * (rOf(b) + 2)}
-              stroke={col} strokeWidth={on ? 2 : 1} strokeOpacity={sel ? (on ? 0.95 : 0.08) : 0.4} markerEnd={`url(#mlg-a${a})`} />
+              stroke={col} strokeWidth={on ? (lk ? 3 : 2) : 1} strokeOpacity={focus ? (on ? 0.95 : 0.08) : 0.4} markerEnd={`url(#mlg-a${a})`} style={{ pointerEvents:'none' }} />
           );
         })}
+        {/* Zones de toucher des traits : un trait de 1 px est impossible à viser au doigt, on
+            pose dessus un trait INVISIBLE de 14 px. Sous les bulles (dessinées après) : un
+            toucher sur une bulle reste une bulle. */}
+        {g.links.map(l => {
+          const A = P[g.idx.get(l.from)], B = P[g.idx.get(l.to)], key = l.from + '>' + l.to;
+          return <line key={'hit' + key} x1={A.x} y1={A.y} x2={B.x} y2={B.y} stroke="transparent" strokeWidth="14"
+            style={{ pointerEvents:'stroke', cursor:'pointer' }} onClick={e => { e.stopPropagation(); pickLink(key); }} />;
+        })}
         {g.nodes.map((m, i) => {
-          const p = P[i], r = rOf(i), dimmed = sel && !near.has(m.id), np = drag.nodeProps(i);
+          const p = P[i], r = rOf(i), dimmed = focus && !near.has(m.id), np = drag.nodeProps(i);
           return (
             <g key={m.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.25 : 1 }}
-              onClick={e => { e.stopPropagation(); if (drag.wasDrag()) return; setSel(s => (s === m.id ? null : m.id)); }}>
+              onClick={e => { e.stopPropagation(); if (drag.wasDrag()) return; pickNode(m.id); }}>
               <circle cx={p.x} cy={p.y} r={r} fill={m.color + '30'} stroke={m.color} strokeWidth={sel === m.id ? 3 : 1.5} />
               <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" fontSize={r * 0.95}>{m.icon}</text>
               <text x={p.x} y={p.y + r + 9} textAnchor="middle" fontSize="9" fontWeight="700" fill={m.color} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{m.label}</text>
@@ -29916,6 +29949,20 @@ function ModuleLinksGraph() {
           );
         })}
       </svg>
+      {lk && (
+        <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
+          <div style={{ fontSize:11, fontWeight:800, color:C.text }}>
+            <span style={{ color: modOf(lk.from).color }}>{modOf(lk.from).icon} {modOf(lk.from).label}</span>
+            <span style={{ color:C.muted }}> {lkBoth.length > 1 ? '⇄' : '→'} </span>
+            <span style={{ color: modOf(lk.to).color }}>{modOf(lk.to).icon} {modOf(lk.to).label}</span>
+          </div>
+          {lkBoth.map(l => (
+            <div key={l.from + '>' + l.to} style={{ fontSize:10.5, lineHeight:1.45, color:C.text }}>
+              Ce que <b style={{ color: modOf(l.from).color }}>{modOf(l.from).label}</b> envoie à <b style={{ color: modOf(l.to).color }}>{modOf(l.to).label}</b> : {l.label}.
+            </div>
+          ))}
+        </div>
+      )}
       {sel && (
         <div style={{ display:'flex', flexDirection:'column', gap:5 }}>
           <div style={{ fontSize:11, fontWeight:800, color: modOf(sel).color }}>{modOf(sel).icon} {modOf(sel).label} · {selLinks.length} lien(s)</div>
@@ -30215,6 +30262,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.102', date:'2026-09-30', title:'🔗 Graphes : on déplace une bulle sans faire défiler la page', items:[
+    'Sur le téléphone, faire glisser une bulle (Stats → 🔗 LIENS MODULES et graphe des mots de passe) faisait défiler la page en même temps : c’est corrigé, la page ne bouge plus tant que le doigt tient une bulle ; glisser ailleurs sur le graphe fait toujours défiler.',
+    'Touche un trait entre deux modules : le lien est expliqué dessous (dans les deux sens s’il existe aussi à l’envers). Dans le graphe des mots de passe, toucher un trait dit si c’est le même mot de passe, une variante, ou l’email de connexion.',
+    'Deux liens qui manquaient sont ajoutés : Frigo → Alertes (aliments bientôt périmés) et Bon Plan → Alertes (promos Steam de ta liste de souhaits).',
+  ] },
   { v:'13.21.101', date:'2026-09-30', title:'🧩 L’extension YouTube → TV Time est dans le dépôt du Hub', items:[
     'Elle se trouve maintenant dans le dossier extension/ du dépôt GitHub du Hub : chrome://extensions → mode développeur → « Charger l’extension non empaquetée » → choisir ce dossier. Le mode d’emploi est dans extension/README.md.',
   ] },
@@ -30229,11 +30281,6 @@ const RELEASE_NOTES = [
   { v:'13.21.98', date:'2026-09-30', title:'🔗 Stats : les bulles des liens modules se déplacent', items:[
     'Dans Stats → 🔗 LIENS MODULES, fais glisser une bulle (doigt ou souris) pour dégager un lien caché derrière d’autres. Un simple toucher sélectionne toujours la bulle.',
     'Rien n’est enregistré : en revenant, les bulles reprennent leur place. ↺ Replacer les remet en place tout de suite.',
-  ] },
-  { v:'13.21.97', date:'2026-09-30', title:'🔑 Mots de passe : le graphe de santé du coffre', items:[
-    'À la fin du 🩺 check-up, et dans Stats → 🔑 MOTS DE PASSE : un verdict (« ✓ Tout est bon » ou « ⚠ N comptes à traiter »), une barre critique / à revoir / à savoir / OK, et un graphe avec une bulle par compte.',
-    'Couleur de la bulle = pire problème trouvé, contour et taille = criticité P1 à P5 ; un trait rouge relie les comptes qui ont le même mot de passe, un pointillé orange ceux qui en sont des variantes. Touche une bulle pour lire ses constats.',
-    'Aucun mot de passe n’y apparaît, et Stats ne montre rien tant que le coffre est verrouillé (rien n’est gardé après verrouillage).',
   ] },
 ];
 
@@ -50364,6 +50411,7 @@ function mdpTopCrit(nodes) {
 function MdpCheckupGraph({ g }) {
   const [sel, setSel] = React.useState(null);
   const [group, setGroup] = React.useState('mail');   // 'mail' | 'crit' | 'none' — jamais persisté
+  const [selLink, setSelLink] = React.useState(null);  // { a, b, kind } — trait touché
   const W = 360, H = 340, PAD = 30;
   const lay = React.useMemo(() => {
     const byId = new Map(g.nodes.map(n => [n.id, n]));
@@ -50407,7 +50455,12 @@ function MdpCheckupGraph({ g }) {
   const many = g.nodes.length > 40;
   const noMail = g.nodes.filter(n => !n.mail).length;
   if (!g.nodes.length) return null;
-  const tap = id => e => { e.stopPropagation(); if (drag.wasDrag()) return; setSel(s => (s === id ? null : id)); };
+  const tap = id => e => { e.stopPropagation(); if (drag.wasDrag()) return; setSelLink(null); setSel(s => (s === id ? null : id)); };
+  const tapLink = l => e => { e.stopPropagation(); setSel(null); setSelLink(s => (s && s.a === l.a && s.b === l.b ? null : l)); };
+  const isSelLink = l => !!selLink && selLink.a === l.a && selLink.b === l.b;
+  const nameOf = id => { const h = lay.hubs.find(x => x.id === id); if (h) return group === 'mail' ? h.key : h.label; const n = g.nodes.find(x => x.id === id); return n ? n.label : '—'; };
+  // Trait invisible de 14 px posé sur chaque lien : un trait fin est impossible à viser au doigt.
+  const hitLine = (l, kind) => { const A = at(l.a), B = at(l.b); return <line key={'hit' + l.a + '|' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y} stroke="transparent" strokeWidth="14" style={{ pointerEvents:'stroke', cursor:'pointer' }} onClick={tapLink({ a: l.a, b: l.b, kind })} />; };
   const GROUPS = [['mail', '✉ Email'], ['crit', '🎯 Priorité'], ['none', 'Aucun']];
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:7 }}>
@@ -50430,63 +50483,77 @@ function MdpCheckupGraph({ g }) {
             style={{ background: group === k ? `${MDP_AMBER}22` : 'none', border:`1px solid ${group === k ? MDP_AMBER + '88' : C.border}`, borderRadius:6,
               color: group === k ? MDP_AMBER : C.muted, fontSize:10, fontWeight:700, padding:'2px 8px', cursor:'pointer', fontFamily:'inherit' }}>{lbl}</button>
         ))}
-        {drag.moved && <button onClick={drag.reset} title="Remettre les bulles à leur place"
-          style={{ marginLeft:'auto', background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'2px 8px', cursor:'pointer', fontFamily:'inherit' }}>↺ Replacer</button>}
       </div>
-      <svg ref={drag.svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', background:'#0000001a', borderRadius:8, touchAction:'manipulation', userSelect:'none', WebkitUserSelect:'none' }} onClick={() => setSel(null)}>
-        {/* Halos des groupes = enveloppe convexe épaissie d'un trait rond (le « blob »),
-            recalculée sur les positions COURANTES : elle suit les bulles déplacées. ⚠ L'opacité
-            est posée sur le <g> : sur le tracé, remplissage et trait se superposeraient en bande. */}
-        {lay.hubs.map(h => {
-          const hull = graphHull([at(h.id), ...h.members.map(at)]);
-          const d = 'M' + hull.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join('L') + 'Z';
-          const on = !sel || sel === h.id || h.members.includes(sel);
-          return (
-            <g key={'halo' + h.id} opacity={on ? 0.16 : 0.05} style={{ pointerEvents:'none' }}>
-              <path d={d} fill={h.color} stroke={h.color} strokeWidth={2 * (MDP_CRIT_R.P1 + 8)} strokeLinejoin="round" strokeLinecap="round" />
-            </g>
-          );
-        })}
-        {lay.hubLinks.map(l => {
-          const A = at(l.a), B = at(l.b), h = lay.hubs.find(x => x.id === l.a);
-          const on = !sel || l.a === sel || l.b === sel;
-          return <line key={l.a + '>' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y} stroke={h.color} strokeWidth="1" strokeOpacity={on ? 0.55 : 0.08} />;
-        })}
-        {lay.links.map(l => {
-          const A = at(l.a), B = at(l.b);
-          const on = !sel || l.a === sel || l.b === sel;
-          return <line key={l.a + '|' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y}
-            stroke={l.kind === 'same' ? MDP_SEV.crit.color : MDP_SEV.warn.color} strokeWidth={l.kind === 'same' ? 2.2 : 1.5}
-            strokeDasharray={l.kind === 'same' ? undefined : '4 3'} strokeOpacity={on ? 0.85 : 0.1} />;
-        })}
-        {lay.hubs.map(h => {
-          const i = lay.idx.get(h.id), p = P[i], np = drag.nodeProps(i);
-          const dimmed = sel && sel !== h.id && !near.has(h.id);
-          return (
-            <g key={h.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.25 : 1 }} onClick={tap(h.id)}>
-              <circle cx={p.x} cy={p.y} r={MDP_HUB_R} fill={h.color} stroke="#fff" strokeWidth={sel === h.id ? 2 : 1} />
-              <text x={graphLabelX(p.x, h.label, 8.5, W)} y={p.y - MDP_HUB_R - 4} textAnchor="middle" fontSize="8.5" fontWeight="800" fill={h.color} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{h.label}</text>
-            </g>
-          );
-        })}
-        {g.nodes.map((n, i) => {
-          const p = P[i], r = rOf(n), cd = mdpCritDef(n.crit), np = drag.nodeProps(i);
-          const dimmed = sel && sel !== n.id && !near.has(n.id);
-          const showLabel = !many || n.worst === 'crit' || n.worst === 'warn' || sel === n.id || near.has(n.id);
-          const lbl = n.label.length > 14 ? n.label.slice(0, 13) + '…' : n.label;
-          return (
-            <g key={n.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.2 : 1 }} onClick={tap(n.id)}>
-              <circle cx={p.x} cy={p.y} r={r} fill={fillOf(n)} fillOpacity="0.8" stroke={cd ? cd[2] : C.dim} strokeWidth={sel === n.id ? 3.5 : 2} />
-              {cd && <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" fontSize={Math.max(7, r * 0.7)} fontWeight="800" fill="#fff" style={{ pointerEvents:'none' }}>{cd[0]}</text>}
-              {showLabel && <text x={graphLabelX(p.x, lbl, 8.5, W)} y={p.y + r + 8} textAnchor="middle" fontSize="8.5" fontWeight="700" fill={C.text} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{lbl}</text>}
-            </g>
-          );
-        })}
-      </svg>
+      <div style={{ position:'relative', alignSelf:'center', width:'100%', maxWidth:560 }}>
+        <svg ref={drag.svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', background:'#0000001a', borderRadius:8, touchAction:'manipulation', userSelect:'none', WebkitUserSelect:'none' }} onClick={() => { setSel(null); setSelLink(null); }}>
+          {/* Halos des groupes = enveloppe convexe épaissie d'un trait rond (le « blob »),
+              recalculée sur les positions COURANTES : elle suit les bulles déplacées. ⚠ L'opacité
+              est posée sur le <g> : sur le tracé, remplissage et trait se superposeraient en bande. */}
+          {lay.hubs.map(h => {
+            const hull = graphHull([at(h.id), ...h.members.map(at)]);
+            const d = 'M' + hull.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join('L') + 'Z';
+            const on = !sel || sel === h.id || h.members.includes(sel);
+            return (
+              <g key={'halo' + h.id} opacity={on ? 0.16 : 0.05} style={{ pointerEvents:'none' }}>
+                <path d={d} fill={h.color} stroke={h.color} strokeWidth={2 * (MDP_CRIT_R.P1 + 8)} strokeLinejoin="round" strokeLinecap="round" />
+              </g>
+            );
+          })}
+          {lay.hubLinks.map(l => {
+            const A = at(l.a), B = at(l.b), h = lay.hubs.find(x => x.id === l.a);
+            const on = selLink ? isSelLink(l) : !sel || l.a === sel || l.b === sel;
+            return <line key={l.a + '>' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y} stroke={h.color} strokeWidth={isSelLink(l) ? 2.5 : 1} strokeOpacity={on ? 0.55 : 0.08} style={{ pointerEvents:'none' }} />;
+          })}
+          {lay.links.map(l => {
+            const A = at(l.a), B = at(l.b);
+            const on = selLink ? isSelLink(l) : !sel || l.a === sel || l.b === sel;
+            return <line key={l.a + '|' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y}
+              stroke={l.kind === 'same' ? MDP_SEV.crit.color : MDP_SEV.warn.color} strokeWidth={(l.kind === 'same' ? 2.2 : 1.5) + (isSelLink(l) ? 1.5 : 0)}
+              strokeDasharray={l.kind === 'same' ? undefined : '4 3'} strokeOpacity={on ? 0.85 : 0.1} style={{ pointerEvents:'none' }} />;
+          })}
+          {lay.hubLinks.map(l => hitLine(l, 'hub'))}
+          {lay.links.map(l => hitLine(l, l.kind))}
+          {lay.hubs.map(h => {
+            const i = lay.idx.get(h.id), p = P[i], np = drag.nodeProps(i);
+            const dimmed = selLink ? selLink.a !== h.id && selLink.b !== h.id : sel && sel !== h.id && !near.has(h.id);
+            return (
+              <g key={h.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.25 : 1 }} onClick={tap(h.id)}>
+                <circle cx={p.x} cy={p.y} r={MDP_HUB_R} fill={h.color} stroke="#fff" strokeWidth={sel === h.id ? 2 : 1} />
+                <text x={graphLabelX(p.x, h.label, 8.5, W)} y={p.y - MDP_HUB_R - 4} textAnchor="middle" fontSize="8.5" fontWeight="800" fill={h.color} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{h.label}</text>
+              </g>
+            );
+          })}
+          {g.nodes.map((n, i) => {
+            const p = P[i], r = rOf(n), cd = mdpCritDef(n.crit), np = drag.nodeProps(i);
+            const dimmed = selLink ? selLink.a !== n.id && selLink.b !== n.id : sel && sel !== n.id && !near.has(n.id);
+            const showLabel = !many || n.worst === 'crit' || n.worst === 'warn' || sel === n.id || near.has(n.id);
+            const lbl = n.label.length > 14 ? n.label.slice(0, 13) + '…' : n.label;
+            return (
+              <g key={n.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.2 : 1 }} onClick={tap(n.id)}>
+                <circle cx={p.x} cy={p.y} r={r} fill={fillOf(n)} fillOpacity="0.8" stroke={cd ? cd[2] : C.dim} strokeWidth={sel === n.id ? 3.5 : 2} />
+                {cd && <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" fontSize={Math.max(7, r * 0.7)} fontWeight="800" fill="#fff" style={{ pointerEvents:'none' }}>{cd[0]}</text>}
+                {showLabel && <text x={graphLabelX(p.x, lbl, 8.5, W)} y={p.y + r + 8} textAnchor="middle" fontSize="8.5" fontWeight="700" fill={C.text} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{lbl}</text>}
+              </g>
+            );
+          })}
+        </svg>
+        {/* Par-dessus le graphe (coin haut droit) : dans la rangée des boutons, il y prenait
+            une ligne à lui sur mobile, et l'y faire apparaître décalait le graphe sous le doigt. */}
+        {drag.moved && <button onClick={drag.reset} title="Remettre les bulles à leur place"
+          style={{ position:'absolute', top:6, right:6, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'2px 8px', cursor:'pointer', fontFamily:'inherit' }}>↺ Replacer</button>}
+      </div>
       <div style={{ fontSize:9, color:C.dim, lineHeight:1.45 }}>
         Couleur = pire constat · contour et taille = criticité (P1 la plus grosse) · <span style={{ color:MDP_SEV.crit.color }}>━ même mot de passe</span> · <span style={{ color:MDP_SEV.warn.color }}>┅ variante (même racine)</span>
-        {group === 'mail' ? <> · ● ✉ = email de connexion, halo à la couleur de sa priorité la plus haute{noMail ? ` (${noMail} compte(s) sans email en identifiant, hors groupe)` : ''}</> : group === 'crit' ? ' · ● = priorité, halo à sa couleur' : ''}. Touche une bulle pour le détail, fais-la glisser pour la déplacer.
+        {group === 'mail' ? <> · ● ✉ = email de connexion, halo à la couleur de sa priorité la plus haute{noMail ? ` (${noMail} compte(s) sans email en identifiant, hors groupe)` : ''}</> : group === 'crit' ? ' · ● = priorité, halo à sa couleur' : ''}. Touche une bulle ou un trait pour le détail, fais glisser une bulle pour la déplacer.
       </div>
+      {selLink && (
+        <div style={{ borderLeft:`2px solid ${selLink.kind === 'same' ? MDP_SEV.crit.color : selLink.kind === 'root' ? MDP_SEV.warn.color : C.muted}`, paddingLeft:7, fontSize:10.5, lineHeight:1.45, color:C.text }}>
+          {selLink.kind === 'same' ? <><b>{nameOf(selLink.a)}</b> et <b>{nameOf(selLink.b)}</b> ont <b style={{ color:MDP_SEV.crit.color }}>exactement le même mot de passe</b> : s'il fuit sur l'un, l'autre est ouvert aussi. Change au moins celui du compte le moins critique.</>
+            : selLink.kind === 'root' ? <><b>{nameOf(selLink.a)}</b> et <b>{nameOf(selLink.b)}</b> ont des mots de passe <b style={{ color:MDP_SEV.warn.color }}>variantes l'un de l'autre</b> (même racine, chiffres ou symboles changés) : qui devine l'un devine vite l'autre.</>
+            : group === 'mail' ? <><b>{nameOf(selLink.b)}</b> se connecte avec l'email <b style={{ wordBreak:'break-all' }}>{nameOf(selLink.a)}</b>.</>
+            : <><b>{nameOf(selLink.b)}</b> est classé <b>{nameOf(selLink.a)}</b>.</>}
+        </div>
+      )}
       {selHub && (
         <div style={{ borderLeft:`2px solid ${selHub.color}`, paddingLeft:7, display:'flex', flexDirection:'column', gap:2 }}>
           <div style={{ fontSize:11, fontWeight:700, color:selHub.color, wordBreak:'break-all' }}>{group === 'mail' ? '✉ ' + selHub.key : selHub.label} · {selHub.members.length} compte(s)</div>
