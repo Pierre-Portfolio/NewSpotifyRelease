@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.108';
+const APP_VERSION = '13.21.109';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29822,6 +29822,7 @@ const MODULE_LINKS = [
   ['frigo',    'remember',   'aliments bientôt périmés affichés dans Alertes'],
   ['frigo',    'todo',       'aliment qui périme dans 2 j ou moins ⇒ tâche (retirée quand l’aliment quitte le frigo)'],
   ['frigo',    'food',       '🧊 sur un repas de Santé : l’aliment choisi quitte le frigo (consommé)'],
+  ['maps',     'food',       'trajets à pied, en courant ou à vélo du jour proposés comme séances de sport'],
   ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
   ['compare',  'todo',       'jeu suivi passé sous son prix cible ⇒ tâche + alerte à la connexion'],
   ['meteo',    'todo',       'pluie prévue entre 8 h 30 et 10 h ou 17 h et 18 h ⇒ tâche « parapluie »'],
@@ -30336,6 +30337,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.109', date:'2026-09-30', title:'🗺️ Maps → Santé : tes trajets à pied et à vélo comptent comme sport', items:[
+    'Dans Santé → 🏃 Séances de sport, les trajets du jour importés dans Maps (Timeline) apparaissent en tête : « 🚶 Marche · 3,7 km · 45 min », « 🚴 Vélo · 7,4 km · 30 min », avec les calories estimées pour ton poids.',
+    'Rien n’est ajouté tout seul (tu as peut-être déjà saisi la sortie à la main) : touche + pour l’enregistrer, la ligne passe alors à ✓ ajoutée. Les trajets en voiture ou en transports ne sont pas proposés.',
+  ] },
   { v:'13.21.108', date:'2026-09-30', title:'🧊 Santé : un repas peut venir du frigo', items:[
     'Chaque repas de ta liste Santé a maintenant un bouton 🧊 : touche-le, choisis l’aliment du frigo (ceux dont le nom ressemble au repas sont proposés en premier) et il est retiré du Frigo, puisqu’il est mangé. Le repas affiche « 🧊 du frigo : … ».',
     'Erreur ? Retouche 🧊 sur le repas : l’aliment retourne dans son compartiment. Supprimer le repas, lui, ne le remet pas dans le frigo.',
@@ -30351,10 +30356,6 @@ const RELEASE_NOTES = [
   { v:'13.21.105', date:'2026-09-30', title:'🛒 Bon Plan : alerte et tâche quand un jeu atteint ton prix cible', items:[
     'Si un jeu de ⭐ Ma liste passe sous le prix cible que tu lui as donné, une alerte s’affiche à la connexion (notification si tu les as autorisées) et une tâche « 🛒 Bon Plan : … à acheter » arrive dans To do → Aujourd’hui.',
     'Une seule alerte par baisse : si le prix remonte au-dessus de la cible puis redescend, tu es prévenu à nouveau.',
-  ] },
-  { v:'13.21.104', date:'2026-09-30', title:'🧊 Frigo → To do : les aliments à finir deviennent des tâches', items:[
-    'Un aliment qui périme dans 2 jours ou moins (ou déjà périmé) crée une tâche dans To do → Aujourd’hui : « 🧊 Frigo : manger le lait (périme dans 1 j) ».',
-    'Quand tu retires l’aliment du frigo (mangé ou jeté) ou changes sa date, la tâche s’en va toute seule. Une tâche supprimée à la main ne revient pas.',
   ] },
 ];
 
@@ -46668,6 +46669,27 @@ function FoodResultRow({ r, onAdd, defaultGrams, fav, onFav, onGrams }) {
 // aucun : les deux cartes doivent toujours parler de la même journée.
 // ⚠ `onChange` reçoit la liste COMPLÈTE du jour ; c'est le parent qui persiste (une seule
 // écriture localStorage, et lui seul sait si le quota l'a refusée).
+// ── 🗺️ MAPS → SANTÉ ─────────────────────────────────────────────────────────────
+// Les trajets À PIED / EN COURANT / À VÉLO du jour (Timeline importée dans Maps) sont
+// PROPOSÉS comme séances dans Santé, jamais ajoutés d'office : l'utilisateur a pu saisir la
+// même sortie à la main (ou via une capture Strava) et elle compterait deux fois.
+// Une ligne par mode, durée = somme des (fin − début) des trajets, repli sur une vitesse type
+// quand l'export n'a pas d'heures. Séance ajoutée ⇒ `maps: '<jour>|<mode>'`, la ligne passe à ✓.
+const MAPS_TO_SPORT = { walk:['marche', 5], run:['course', 10], bike:['velo', 15] };   // [sport Santé, km/h de repli]
+function mapsActiveMoves(day) {
+  const segs = (loadMaps().days || {})[day] || [];
+  const agg = {};
+  for (const sg of segs) {
+    if (!sg || sg.kind !== 'move' || !MAPS_TO_SPORT[sg.mode]) continue;
+    const km = (sg.distance_m || 0) / 1000;
+    let min = (new Date(sg.end) - new Date(sg.start)) / 60000;
+    if (!(min > 0 && min < 600)) min = km / MAPS_TO_SPORT[sg.mode][1] * 60;
+    const a = agg[sg.mode] || (agg[sg.mode] = { mode: sg.mode, sport: MAPS_TO_SPORT[sg.mode][0], km: 0, min: 0 });
+    a.km += km; a.min += min;
+  }
+  return Object.values(agg).filter(a => a.km >= 0.3 && a.min >= 3)
+    .map(a => ({ ...a, km: Math.round(a.km * 10) / 10, min: Math.round(a.min) }));
+}
 function FoodSportSection({ day, dayLabel, isToday, weight, profile, list, onChange }) {
   const [open, setOpen]     = React.useState(false);   // repliée à l'arrivée, comme les autres cartes de Santé
   const [sport, setSport]   = React.useState('course');
@@ -46731,6 +46753,13 @@ function FoodSportSection({ day, dayLabel, isToday, weight, profile, list, onCha
   const inSt  = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'5px 8px', fontSize:11, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box', width:'100%' };
   const btnSt = (on) => ({ background: on ? `${FOOD_COLOR}22` : 'none', border:`1px solid ${on ? FOOD_COLOR + '66' : C.border}`, borderRadius:6, color: on ? FOOD_COLOR : C.muted, fontSize:10, padding:'4px 8px', cursor:'pointer' });
 
+  const mapsMoves = React.useMemo(() => { try { return mapsActiveMoves(day); } catch { return []; } }, [day]);
+  const addFromMaps = (a) => {
+    const key = day + '|' + a.mode;
+    if ((list || []).some(x => x && x.maps === key)) return;
+    onChange([...(list || []), { id: Date.now() + '_' + Math.random().toString(36).slice(2), sport: a.sport, intens:'mod', min: a.min,
+      kcal: foodSportKcal(a.sport, 'mod', a.min, weight), maps: key }]);
+  };
   const addSession = () => {
     const m = parseInt(min, 10) || 0;
     if (m <= 0 || kcal <= 0) return;
@@ -46769,6 +46798,26 @@ function FoodSportSection({ day, dayLabel, isToday, weight, profile, list, onCha
         </span>
       </div>
       {open && <>
+        {/* 🗺️ Trajets du jour importés dans Maps : proposés, jamais ajoutés d'office */}
+        {mapsMoves.length > 0 && (
+          <div style={{ display:'flex', flexDirection:'column', gap:4, background:C.surfaceHigh, border:`1px solid ${MAPS_COLOR}44`, borderRadius:8, padding:'6px 8px' }}>
+            <div style={{ fontSize:9, fontWeight:700, color:MAPS_COLOR }}>🗺️ D'APRÈS MAPS (Timeline du jour)</div>
+            {mapsMoves.map(a => {
+              const done = (list || []).some(x => x && x.maps === day + '|' + a.mode);
+              const def = foodSportDef(a.sport), md = MAPS_MODES[a.mode] || MAPS_MODES.other;
+              return (
+                <div key={a.mode} style={{ display:'flex', alignItems:'center', gap:6 }}>
+                  <span style={{ flex:1, minWidth:0, fontSize:10.5, color: done ? C.muted : C.text }}>{md.icon} {def[2]} · {String(a.km).replace('.', ',')} km · {a.min} min</span>
+                  <span style={{ fontSize:10, color:'#e07b54', fontFamily:'DM Mono,monospace', flexShrink:0 }}>🔥 {foodSportKcal(a.sport, 'mod', a.min, weight)} kcal</span>
+                  {done
+                    ? <span style={{ fontSize:10, color:'#4caf50', flexShrink:0 }}>✓ ajoutée</span>
+                    : <button onClick={() => addFromMaps(a)} title="Ajouter ce trajet comme séance de sport"
+                        style={{ background:`${FOOD_COLOR}22`, border:`1px solid ${FOOD_COLOR}66`, borderRadius:6, color:FOOD_COLOR, fontSize:14, lineHeight:1, padding:'1px 9px', cursor:'pointer', flexShrink:0 }}>+</button>}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {/* Saisie : sport, intensité, durée → calories estimées en direct */}
         <label style={{ fontSize:9, color:C.muted }}>Sport
           <select value={sport} onChange={e => setSport(e.target.value)} style={inSt}>
