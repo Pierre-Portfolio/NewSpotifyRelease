@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.107';
+const APP_VERSION = '13.21.108';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29821,6 +29821,7 @@ const MODULE_LINKS = [
   ['contact',  'remember',   'anniversaire 🔔 ⇒ alerte'],
   ['frigo',    'remember',   'aliments bientôt périmés affichés dans Alertes'],
   ['frigo',    'todo',       'aliment qui périme dans 2 j ou moins ⇒ tâche (retirée quand l’aliment quitte le frigo)'],
+  ['frigo',    'food',       '🧊 sur un repas de Santé : l’aliment choisi quitte le frigo (consommé)'],
   ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
   ['compare',  'todo',       'jeu suivi passé sous son prix cible ⇒ tâche + alerte à la connexion'],
   ['meteo',    'todo',       'pluie prévue entre 8 h 30 et 10 h ou 17 h et 18 h ⇒ tâche « parapluie »'],
@@ -30335,6 +30336,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.108', date:'2026-09-30', title:'🧊 Santé : un repas peut venir du frigo', items:[
+    'Chaque repas de ta liste Santé a maintenant un bouton 🧊 : touche-le, choisis l’aliment du frigo (ceux dont le nom ressemble au repas sont proposés en premier) et il est retiré du Frigo, puisqu’il est mangé. Le repas affiche « 🧊 du frigo : … ».',
+    'Erreur ? Retouche 🧊 sur le repas : l’aliment retourne dans son compartiment. Supprimer le repas, lui, ne le remet pas dans le frigo.',
+  ] },
   { v:'13.21.107', date:'2026-09-30', title:'🏷️ Revendre un vêtement ou un objet de collection en un clic', items:[
     'Nouveau bouton 🏷️ Revendre sur chaque fiche Vêtement, et 🏷️ dans la fenêtre de modification d’un objet de Collection : il crée un brouillon d’annonce dans Revente avec le nom, la marque, la taille, la couleur, l’état et le prix déjà remplis.',
     'Une alerte te prévient qu’un brouillon va être créé avant de le faire ; redemander pour la même fiche te dit qu’il existe déjà au lieu d’en créer un deuxième. La photo reste dans ton Drive : ajoute-la dans Revente.',
@@ -30350,9 +30355,6 @@ const RELEASE_NOTES = [
   { v:'13.21.104', date:'2026-09-30', title:'🧊 Frigo → To do : les aliments à finir deviennent des tâches', items:[
     'Un aliment qui périme dans 2 jours ou moins (ou déjà périmé) crée une tâche dans To do → Aujourd’hui : « 🧊 Frigo : manger le lait (périme dans 1 j) ».',
     'Quand tu retires l’aliment du frigo (mangé ou jeté) ou changes sa date, la tâche s’en va toute seule. Une tâche supprimée à la main ne revient pas.',
-  ] },
-  { v:'13.21.103', date:'2026-09-30', title:'🔗 Liens modules déménage dans À propos', items:[
-    'Le graphe des liens entre modules quitte Stats : il est maintenant dans À propos, entre 📦 Limite data et 📋 Release note. Il fonctionne pareil (toucher une bulle ou un trait, glisser une bulle).',
   ] },
 ];
 
@@ -47033,6 +47035,40 @@ function NourriturePanel() {
     setName(''); setKcal(''); setResults(null); setSearchErr('');
   };
   const removeMeal = id => { setMealEdit(e => (e && e.id === id ? null : e)); commitMeals({ ...meals, [selDay]: dayMeals.filter(m => m.id !== id) }); };
+  // ── 🧊 « Vient du frigo » (lien Frigo → Santé, demande utilisateur) ───────────────
+  // Sur un repas DÉJÀ ajouté, 🧊 ouvre la liste du frigo ; choisir un aliment le RETIRE du
+  // frigo (consommé) et le garde sur le repas (`m.frigo = { sec, item }`). Retoucher 🧊 sur
+  // un repas marqué propose de le remettre dans son compartiment. Supprimer le repas ne
+  // remet RIEN : l'aliment a été mangé, seule la ligne de suivi disparaît.
+  const [frigoPick, setFrigoPick] = React.useState(null);   // id du repas dont la liste est ouverte
+  const frigoChoices = m => {
+    const norm = x => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const words = new Set(norm(m.name).split(/[^a-z0-9]+/).filter(w => w.length >= 3));
+    const d = frigoLoad(), out = [];
+    FRIGO_SECTIONS.forEach(([sec, lbl, emo]) => (d.sections[sec] || []).forEach(it => {
+      const hit = norm(it.name).split(/[^a-z0-9]+/).filter(w => words.has(w)).length;
+      const st = frigoExpStatus(it.exp);
+      out.push({ sec, lbl, emo, it, hit, days: st ? st.days : 9999 });
+    }));
+    return out.sort((a, b) => b.hit - a.hit || a.days - b.days);
+  };
+  const mealFromFrigo = (m, c) => {
+    const d = frigoLoad();
+    frigoSave({ sections: { ...d.sections, [c.sec]: (d.sections[c.sec] || []).filter(x => x.id !== c.it.id) } });
+    try { syncFrigoToTodos(); } catch {}
+    commitMeals({ ...meals, [selDay]: dayMeals.map(x => (x.id === m.id ? { ...x, frigo: { sec: c.sec, item: c.it } } : x)) });
+    setFrigoPick(null);
+  };
+  const mealFrigoUndo = m => {
+    const f = m.frigo;
+    if (!f || !f.item) return;
+    if (!window.confirm(`Remettre « ${f.item.name} » dans le frigo ?`)) return;
+    const d = frigoLoad();
+    const list = d.sections[f.sec] || [];
+    if (!list.some(x => x.id === f.item.id)) frigoSave({ sections: { ...d.sections, [f.sec]: [...list, f.item] } });
+    try { syncFrigoToTodos(); } catch {}
+    commitMeals({ ...meals, [selDay]: dayMeals.map(x => { if (x.id !== m.id) return x; const { frigo, ...rest } = x; return rest; }) });
+  };
   // ✏️ Édition d'un repas DÉJÀ ajouté (nom, catégorie, kcal, macros) — indispensable pour
   // corriger une estimation de l'IA (photo du plat, suggestion) qui tombe à côté.
   // ⚠ `commitMeals` recalcule le total du jour depuis la composition : il n'y a rien
@@ -47621,9 +47657,11 @@ function NourriturePanel() {
                   </div>
                 );
                 return (
-                <div key={m.id} style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'5px 8px' }}>
+                <React.Fragment key={m.id}>
+                <div style={{ display:'flex', alignItems:'center', gap:6, background:C.surfaceHigh, borderRadius:8, padding:'5px 8px' }}>
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontSize:11, color:C.text, wordBreak:'break-word' }}>{m.name}{m.ai && <span style={{ color:C.dim }}> ✨</span>}</div>
+                    {m.frigo && m.frigo.item && <div style={{ fontSize:8.5, color:FRIGO_COLOR, marginTop:1 }}>🧊 du frigo : {m.frigo.item.name}</div>}
                     {hasM && (
                       <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:2 }}>
                         {FOOD_MACROS.map(x => m[x.key] == null ? null : (
@@ -47637,9 +47675,36 @@ function NourriturePanel() {
                   <span style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{m.kcal} kcal</span>
                   <button onClick={() => startMealEdit(m)} title="Modifier ce repas (nom, calories, macros)"
                     style={{ background:'none', border:'none', color:C.dim, fontSize:11, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>✏️</button>
+                  <button onClick={() => (m.frigo ? mealFrigoUndo(m) : setFrigoPick(p => (p === m.id ? null : m.id)))}
+                    title={m.frigo ? 'Vient du frigo — toucher pour remettre l’aliment dans le frigo' : 'Ce repas vient du frigo : choisir l’aliment (il sera retiré du frigo)'}
+                    aria-pressed={!!m.frigo}
+                    style={{ background: m.frigo ? `${FRIGO_COLOR}22` : 'none', border:`1px solid ${m.frigo || frigoPick === m.id ? FRIGO_COLOR + '88' : 'transparent'}`, borderRadius:5,
+                      fontSize:11, lineHeight:1, padding:'2px 3px', cursor:'pointer', flexShrink:0, opacity: m.frigo || frigoPick === m.id ? 1 : 0.55 }}>🧊</button>
                   <button onClick={() => removeMeal(m.id)} title="Supprimer"
                     style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
                 </div>
+                {frigoPick === m.id && (() => {
+                  const ch = frigoChoices(m);
+                  return (
+                    <div style={{ background:'#111', border:`1px solid ${FRIGO_COLOR}55`, borderRadius:8, padding:'7px 9px', display:'flex', flexDirection:'column', gap:5 }}>
+                      <div style={{ fontSize:9.5, color:FRIGO_COLOR, fontWeight:700 }}>🧊 Quel aliment du frigo ? (il sera retiré du frigo)</div>
+                      {!ch.length && <div style={{ fontSize:10, color:C.dim, fontStyle:'italic' }}>Le frigo est vide.</div>}
+                      <div style={{ display:'flex', flexWrap:'wrap', gap:5 }}>
+                        {ch.slice(0, 24).map(c => {
+                          const st = frigoExpStatus(c.it.exp);
+                          return (
+                            <button key={c.sec + c.it.id} onClick={() => mealFromFrigo(m, c)} title={`${c.lbl}${st ? ' · ' + frigoExpText(st) : ''}`}
+                              style={{ background: c.hit ? `${FRIGO_COLOR}22` : 'none', border:`1px solid ${c.hit ? FRIGO_COLOR + '88' : C.border}`, borderRadius:6,
+                                color:C.text, fontSize:10, padding:'3px 8px', cursor:'pointer', fontFamily:'inherit' }}>
+                              {c.emo} {c.it.name}{st && st.level !== 'ok' ? <span style={{ color:FRIGO_EXP_COLOR[st.level] }}> · {frigoExpText(st)}</span> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+                </React.Fragment>
                 );
               })}
             </div>
