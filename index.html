@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.99';
+const APP_VERSION = '13.21.100';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3426,6 +3426,12 @@ function StoreProvider({ children }) {
         // demain ou aujourd'hui. 100 % local (aucune requête) — d'où le double appel : une
         // fois TOUT DE SUITE sur le cache, une fois quand la synchro a rafraîchi `nextEp`.
         try { syncTvEpisodeAlerts(); } catch {}
+        // 🧩 Vidéos YouTube vues sur le PC (extension) → TV Time, puis à chaque retour sur l'onglet.
+        try { extYtImport(true); } catch {}
+        if (!window._extYtVis) {
+          window._extYtVis = true;
+          document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { try { extYtImport(); } catch {} } });
+        }
 
         // Init local DB
         await initDB();
@@ -30209,6 +30215,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.100', date:'2026-09-30', title:'🧩 TV Time : les vidéos YouTube vues sur le PC arrivent toutes seules', items:[
+    'Nouvelle extension navigateur « YouTube → TV Time » (dépôt GitHub extension) : sur youtube.com, une vidéo lue à 25 % (réglable) ou résumée avec son bouton ✨ Résumé IA est envoyée dans ton Dropbox.',
+    'À l’ouverture du Hub (téléphone compris, Dropbox connecté), ces vidéos sont cochées vues dans TV Time — dans leur chaîne si tu la suis, sinon dans « Hub Pierre » — et leur résumé IA est repris. Une vidéo décochée à la main ne revient pas.',
+  ] },
   { v:'13.21.99', date:'2026-09-30', title:'🔑 Graphe des mots de passe : regroupé par email', items:[
     'Chaque email de connexion devient un point ✉ relié à ses comptes, entouré d’une zone à la couleur de la priorité la plus haute de ses comptes (P1 rouge, P2 orange…) : tu vois d’un coup quel site est relié à quel email.',
     'Bouton « Regrouper par » : ✉ Email, 🎯 Priorité (une zone par P1…P5) ou Aucun. Toucher le point d’un email liste ses comptes ; les bulles se déplacent au doigt (rien n’est enregistré).',
@@ -30225,10 +30235,6 @@ const RELEASE_NOTES = [
   { v:'13.21.96', date:'2026-09-30', title:'✅ To do : les sous-tâches', items:[
     'Nouvelle petite icône ↳ à gauche de l’étoile de chaque tâche : elle ouvre un champ pour ajouter une ou plusieurs sous-tâches (le champ reste ouvert après + pour enchaîner).',
     'Chaque sous-tâche se coche (barrée) ou se supprime (×) ; la tâche affiche son avancement (1/3). Dans Quotidien, les sous-tâches cochées repartent à zéro chaque jour avec la tâche.',
-  ] },
-  { v:'13.21.95', date:'2026-09-30', title:'🔗 Stats : le graphe des liens entre modules', items:[
-    'Nouveau collapse 🔗 LIENS MODULES dans Stats : une bulle par module activé, une flèche quand un module envoie des données à un autre (Alertes → To do, Contact → Alertes, API → TV Time, l’IA vers tout ce qu’elle sait piloter…). Plus la bulle est grosse, plus le module est connecté.',
-    'Touche une bulle : ses liens s’allument et la liste dessous dit ce qui passe de l’un à l’autre. Retouche-la (ou le fond) pour tout revoir.',
   ] },
 ];
 
@@ -32257,6 +32263,44 @@ function ytSeenMarkAnywhere(v) {
   if (next === items) return false;
   saveTvItems(next);
   return true;
+}
+// ── 🧩 EXTENSION « YouTube → TV Time » (dépôt GitHub `extension`) ─────────────────
+// L'extension (PC) écrit les vidéos regardées (25 % lus par défaut, ou ✨ résumées) dans le
+// dossier Dropbox du Hub, fichier `EXT_YT_PATH` ; chaque appareil connecté à Dropbox le relit
+// au démarrage et au retour sur l'onglet, puis coche via `ytSeenMarkAnywhere` (+ range le
+// résumé dans le cache `ytSumSave`).
+// ⚠ Le Hub ne RÉÉCRIT JAMAIS ce fichier (seul auteur : l'extension). Ce qui est déjà importé
+// sur CET appareil est noté dans `EXT_YT_DONE_LS` : une vidéo décochée à la main ne revient
+// pas au passage suivant. Marqueur par appareil ⇒ hors `buildBackup`.
+const EXT_YT_PATH = '/hub-youtube-vus.json';
+const EXT_YT_DONE_LS = 'spotifyplus_ext_yt_done';
+const EXT_YT_GAP = 5 * 60 * 1000;
+let _extYtAt = 0, _extYtBusy = false;
+async function extYtImport(force) {
+  if (_extYtBusy || !_tvReady || !dropboxConnected()) return 0;
+  if (!force && Date.now() - _extYtAt < EXT_YT_GAP) return 0;
+  _extYtBusy = true; _extYtAt = Date.now();
+  try {
+    let data;
+    try { data = await dropboxDownload(EXT_YT_PATH); } catch (e) { return 0; }   // 409 = extension jamais utilisée
+    const list = data && Array.isArray(data.videos) ? data.videos : [];
+    let done = [];
+    try { done = JSON.parse(lsGet(EXT_YT_DONE_LS) || '[]'); } catch {}
+    const seen = new Set(done);
+    let n = 0;
+    // Plus ancienne d'abord : la pseudo-chaîne « Hub Pierre » trie par date de visionnage.
+    for (const v of list.slice().sort((a, b) => (a.at || 0) - (b.at || 0))) {
+      if (!v || typeof v.id !== 'string' || !/^[\w-]{6,20}$/.test(v.id) || seen.has(v.id)) continue;
+      try {
+        if (ytSeenMarkAnywhere({ id: v.id, title: String(v.title || '').slice(0, 300), channel: String(v.channel || '').slice(0, 120),
+          channelId: String(v.channelId || ''), dur: Number(v.dur) || 0, pubDate: String(v.pubDate || '').slice(0, 10) })) n++;
+        if (v.sum && !ytSumGet(v.id)) ytSumSave(v.id, String(v.sum).slice(0, 4000));
+      } catch {}
+      seen.add(v.id); done.push(v.id);
+    }
+    lsSet(EXT_YT_DONE_LS, JSON.stringify(done.slice(-1000)));
+    return n;
+  } finally { _extYtBusy = false; }
 }
 // Tous les ids de vidéos DÉJÀ cochées « vues » dans TV Time (vraies chaînes + pseudo-chaîne
 // « Hub Pierre »). Actu s'en sert pour afficher l'état de son bouton 👁 dès le montage :
