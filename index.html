@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.97';
+const APP_VERSION = '13.21.98';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29807,6 +29807,47 @@ function moduleGraphLayout(n, edges, W, H, pad, grav) {
   }
   return P;
 }
+// Bulles DÉPLAÇABLES au doigt / à la souris, pour dégager un lien caché (demande utilisateur).
+// ⚠ JAMAIS enregistré : chaque ouverture repart du placement calculé (↺ y revient aussi).
+// ⚠ `touchAction:'none'` sur les BULLES seulement (via `nodeProps`) : le fond du graphe laisse
+// défiler la page. Un déplacement de plus de 4 unités avale le clic qui suit (piège 12), sinon
+// lâcher une bulle la sélectionnerait.
+function useGraphDrag(initial, W, H, pad) {
+  const [pos, setPos] = React.useState(initial);
+  React.useEffect(() => { setPos(initial); }, [initial]);
+  const svgRef = React.useRef(null);
+  const dragRef = React.useRef(null);      // { i, x0, y0, moved }
+  const movedRef = React.useRef(false);    // le dernier geste était un déplacement
+  const toSvg = e => {
+    const svg = svgRef.current, m = svg && svg.getScreenCTM && svg.getScreenCTM();
+    if (!m) return null;
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    return pt.matrixTransform(m.inverse());
+  };
+  const nodeProps = i => ({
+    style: { touchAction:'none' },
+    onPointerDown: e => {
+      if (e.button != null && e.button !== 0) return;
+      const p = toSvg(e); if (!p) return;
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+      dragRef.current = { i, x0: p.x, y0: p.y, moved: false };
+      movedRef.current = false;
+    },
+    onPointerMove: e => {
+      const d = dragRef.current; if (!d || d.i !== i) return;
+      const p = toSvg(e); if (!p) return;
+      if (!d.moved && Math.hypot(p.x - d.x0, p.y - d.y0) < 4) return;
+      d.moved = true;
+      const x = Math.min(W - pad, Math.max(pad, p.x)), y = Math.min(H - pad, Math.max(pad, p.y));
+      setPos(P => P.map((q, k) => (k === i ? { x, y } : q)));
+    },
+    onPointerUp: () => { const d = dragRef.current; dragRef.current = null; movedRef.current = !!(d && d.moved); },
+    onPointerCancel: () => { dragRef.current = null; },
+  });
+  // À appeler en tête du onClick d'une bulle : true = c'était un déplacement, ignorer le clic.
+  const wasDrag = () => { const m = movedRef.current; movedRef.current = false; return m; };
+  return { pos, svgRef, nodeProps, wasDrag, moved: pos !== initial, reset: () => setPos(initial) };
+}
 // Taper une bulle surligne ses liens et les liste dessous ; retaper (ou le fond) désélectionne.
 function ModuleLinksGraph() {
   const [sel, setSel] = React.useState(null);
@@ -29821,14 +29862,20 @@ function ModuleLinksGraph() {
     const pos = moduleGraphLayout(nodes.length, links.map(l => [idx.get(l.from), idx.get(l.to)]), W, H, PAD);
     return { nodes, idx, links, deg, pos };
   }, []);
+  const drag = useGraphDrag(g.pos, W, H, PAD);
+  const P = drag.pos;
   const rOf = i => 11 + Math.min(9, g.deg[i] * 0.8);
   const selLinks = sel ? g.links.filter(l => l.from === sel || l.to === sel) : [];
   const near = new Set(selLinks.flatMap(l => [l.from, l.to]));
   const modOf = id => g.nodes[g.idx.get(id)];
   return (
     <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
-      <div style={{ fontSize:10, color:C.muted }}>{g.nodes.length} modules activés · {g.links.length} liens. Plus une bulle est grosse, plus le module échange avec les autres. Touche une bulle pour voir ses liens.</div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', touchAction:'manipulation' }} onClick={() => setSel(null)}>
+      <div style={{ display:'flex', alignItems:'flex-start', gap:8 }}>
+        <div style={{ flex:1, fontSize:10, color:C.muted }}>{g.nodes.length} modules activés · {g.links.length} liens. Plus une bulle est grosse, plus le module échange avec les autres. Touche une bulle pour voir ses liens, fais-la glisser pour la déplacer.</div>
+        {drag.moved && <button onClick={drag.reset} title="Remettre les bulles à leur place"
+          style={{ background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10.5, padding:'3px 8px', cursor:'pointer', flexShrink:0, fontFamily:'inherit' }}>↺ Replacer</button>}
+      </div>
+      <svg ref={drag.svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', touchAction:'manipulation', userSelect:'none', WebkitUserSelect:'none' }} onClick={() => setSel(null)}>
         <defs>
           {/* Une pointe par module source : `fill="context-stroke"` n'est pas lu partout */}
           {g.nodes.map((m, i) => (
@@ -29838,7 +29885,7 @@ function ModuleLinksGraph() {
           ))}
         </defs>
         {g.links.map(l => {
-          const a = g.idx.get(l.from), b = g.idx.get(l.to), A = g.pos[a], B = g.pos[b];
+          const a = g.idx.get(l.from), b = g.idx.get(l.to), A = P[a], B = P[b];
           const dx = B.x - A.x, dy = B.y - A.y, d = Math.max(1, Math.hypot(dx, dy));
           const on = sel && (l.from === sel || l.to === sel);
           const col = g.nodes[a].color;
@@ -29848,10 +29895,10 @@ function ModuleLinksGraph() {
           );
         })}
         {g.nodes.map((m, i) => {
-          const p = g.pos[i], r = rOf(i), dimmed = sel && !near.has(m.id);
+          const p = P[i], r = rOf(i), dimmed = sel && !near.has(m.id), np = drag.nodeProps(i);
           return (
-            <g key={m.id} style={{ cursor:'pointer', opacity: dimmed ? 0.25 : 1 }}
-              onClick={e => { e.stopPropagation(); setSel(s => (s === m.id ? null : m.id)); }}>
+            <g key={m.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.25 : 1 }}
+              onClick={e => { e.stopPropagation(); if (drag.wasDrag()) return; setSel(s => (s === m.id ? null : m.id)); }}>
               <circle cx={p.x} cy={p.y} r={r} fill={m.color + '30'} stroke={m.color} strokeWidth={sel === m.id ? 3 : 1.5} />
               <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" fontSize={r * 0.95}>{m.icon}</text>
               <text x={p.x} y={p.y + r + 9} textAnchor="middle" fontSize="9" fontWeight="700" fill={m.color} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{m.label}</text>
@@ -30158,6 +30205,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.98', date:'2026-09-30', title:'🔗 Stats : les bulles des liens modules se déplacent', items:[
+    'Dans Stats → 🔗 LIENS MODULES, fais glisser une bulle (doigt ou souris) pour dégager un lien caché derrière d’autres. Un simple toucher sélectionne toujours la bulle.',
+    'Rien n’est enregistré : en revenant, les bulles reprennent leur place. ↺ Replacer les remet en place tout de suite.',
+  ] },
   { v:'13.21.97', date:'2026-09-30', title:'🔑 Mots de passe : le graphe de santé du coffre', items:[
     'À la fin du 🩺 check-up, et dans Stats → 🔑 MOTS DE PASSE : un verdict (« ✓ Tout est bon » ou « ⚠ N comptes à traiter »), une barre critique / à revoir / à savoir / OK, et un graphe avec une bulle par compte.',
     'Couleur de la bulle = pire problème trouvé, contour et taille = criticité P1 à P5 ; un trait rouge relie les comptes qui ont le même mot de passe, un pointillé orange ceux qui en sont des variantes. Touche une bulle pour lire ses constats.',
@@ -30174,12 +30225,6 @@ const RELEASE_NOTES = [
   { v:'13.21.94', date:'2026-09-30', title:'🔔 Alertes : les dates se tapent au clavier numérique', items:[
     'Sur le téléphone, toucher la date d’un rappel ne faisait rien : le champ attendait le sélecteur de date du navigateur. Toutes les dates d’Alertes (Mes rappels, Mes garanties, rubriques) se tapent maintenant au clavier numérique : JJ/MM/AAAA, ou 8 chiffres d’affilée (15102026) ; « 15/10 » = la prochaine fois.',
     'Même chose pour l’heure (930 → 09:30). C’est enregistré en quittant le champ ou avec ✓ ; une date impossible est refusée (bordure rouge) et l’ancienne reste.',
-  ] },
-  { v:'13.21.93', date:'2026-09-30', title:'📇 Nouveau module Contact : ton carnet d’adresses chiffré', items:[
-    'Collapses 📞 Téléphone, 📸 Instagram, 👻 Snapchat et 📘 Facebook (+ 📇 Autres et 🎂 Anniversaires) : une fiche par personne, visible dans chaque réseau où elle a une coordonnée. Ajout, modification, suppression, recherche, favoris ★ et groupes.',
-    'Chiffré comme le coffre 🔑 (AES-GCM 256) avec son propre mot de passe, reverrouillé après 10 min sans activité. L’IA n’y a jamais accès.',
-    'Un tap pour appeler, envoyer un SMS, ouvrir WhatsApp, le profil Instagram / Snapchat / Facebook ou écrire un e-mail. Les anniversaires proches s’affichent en tête, 🔔 les ajoute aux Alertes.',
-    'Import depuis le téléphone (Chrome Android) ou d’un fichier .vcf (Google Contacts, iPhone), export .vcf. Les sauvegardes du Hub emportent le carnet toujours chiffré et la restauration le fusionne : rien n’est écrasé ni dupliqué.',
   ] },
 ];
 
