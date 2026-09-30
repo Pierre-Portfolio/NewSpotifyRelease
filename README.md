@@ -47,7 +47,7 @@
 | **🎮 Jeux** | 27 mini-jeux hors ligne (2048, Dobble à deux en 5 modes, Doodle Jump, Motus, Des chiffres et des lettres, Osu, Puissance 4…) et **Flip 7**, le tableau des scores de la partie de cartes (export CSV) |
 | **🗺️ Maps** | Historique Google Timeline sur une carte, et **📸 Trouver un lieu par photo** : 1 à 4 photos → coordonnées et lien Google Maps (position GPS de la photo si elle l'a gardée, sinon estimation de l'IA avec sa confiance) |
 | **🌤️ Météo** | 3 lieux, prévisions 3 ou 7 jours, **notification de pluie dans les 2 h** |
-| **🔐 Mot de passe** | Coffre chiffré (AES-GCM, PBKDF2 600 000), espaces **Perso / Pro**, criticité, expiration, verrouillage après 10 min. **🩺 Check-up** : réutilisations, faiblesses, fuites connues (seuls 5 caractères de l'empreinte sortent), sites piratés. ⚠ Mot de passe maître oublié = coffre perdu |
+| **🔐 Mot de passe** | Coffre chiffré (AES-GCM, PBKDF2 600 000), espaces **Perso / Pro**, criticité, expiration, verrouillage après 10 min. **🩺 Check-up** : réutilisations, faiblesses, fuites connues (seuls 5 caractères de l'empreinte sortent), sites piratés, puis un **graphe** (couleur = problème, contour = criticité, traits = mots de passe partagés ou variantes), repris dans Stats. ⚠ Mot de passe maître oublié = coffre perdu |
 | **🗒️ Note** | Notes libres + espace **crypté**, notes vocales et photos jointes |
 | **♻️ Revente** | Annonces Vinted / Leboncoin / eBay rédigées par l'IA |
 | **🩺 Santé** | Calories (Open Food Facts, IA, photo d'assiette ou d'addition), macros, favoris, repas corrigeables, **séances de sport** (capture Strava lue par l'IA) qui relèvent l'objectif du jour, pesées détaillées, **📉 prévision** de perte de poids |
@@ -55,7 +55,7 @@
 | **✅ To do** | 8 rubriques (quotidien → un jour, + à deux) ; **chaque alerte datée s'y affiche** dans la rubrique de son échéance. **Double tap** sur une tâche = 📍 Massy → 💼 Travail → sans tag. Le bouton à gauche du ♻️ change la vue : **🏷️ Toutes** (défaut) → **⏳ Sans alertes** (alertes du mois seulement) → Travail → Massy. **↳** (à gauche de l'étoile) = ajouter des sous-tâches, cochables. ♻️ = 3 dernières supprimées. Le Quotidien se coche depuis Santé (pesée, repas, course) |
 | **🎬 TV Time** | Séries et films (TMDB), chaînes YouTube (onglets YT / Short), livres ; lecteur plein écran avec résumé IA ; 🔔 « Suivre cette série » = tâche et notification la veille d'un épisode |
 | **👕 Vêtement** | Garde-robe détaillée (coupe, ressenti, tag 👔), photos sur Google Drive **gardées sur l'appareil**, recherche par image, **📏 Mes tailles** avec conseil IA |
-| **📊 Stats** | Écoutes, tâches, séries, poids, alertes, jeux, API ; volet 🏋️ Sport pour tes chronos de course ; 🔗 Liens modules : graphe des échanges entre modules (touche une bulle) |
+| **📊 Stats** | Écoutes, tâches, séries, poids, alertes, jeux, API ; volet 🏋️ Sport pour tes chronos de course ; 🔗 Liens modules : graphe des échanges entre modules (touche une bulle) ; 🔑 graphe de santé des mots de passe (coffre déverrouillé) |
 
 ---
 
