@@ -55,7 +55,7 @@
 | **✅ To do** | 8 rubriques (quotidien → un jour, + à deux) ; **chaque alerte datée s'y affiche** dans la rubrique de son échéance. **Double tap** sur une tâche = 📍 Massy → 💼 Travail → sans tag. Le bouton à gauche du ♻️ change la vue : **🏷️ Toutes** (défaut) → **⏳ Sans alertes** (alertes du mois seulement) → Travail → Massy. **↳** (à gauche de l'étoile) = ajouter des sous-tâches, cochables. ♻️ = 3 dernières supprimées. Le Quotidien se coche depuis Santé (pesée, repas, course) |
 | **🎬 TV Time** | Séries et films (TMDB), chaînes YouTube (onglets YT / Short), livres ; lecteur plein écran avec résumé IA ; 🔔 « Suivre cette série » = tâche et notification la veille d'un épisode ; 🧩 extension navigateur [YouTube → TV Time](extension/) (dossier `extension/`, à charger dans Chrome) : les vidéos vues sur le PC (25 % ou ✨ résumé IA) sont cochées ici via Dropbox |
 | **👕 Vêtement** | Garde-robe détaillée (coupe, ressenti, tag 👔), photos sur Google Drive **gardées sur l'appareil**, recherche par image, **📏 Mes tailles** avec conseil IA |
-| **📊 Stats** | Écoutes, tâches, séries, poids, alertes, jeux, API ; volet 🏋️ Sport pour tes chronos de course ; 🔗 Liens modules : graphe des échanges entre modules (touche une bulle ou un trait, fais glisser une bulle pour la déplacer) ; 🔑 graphe de santé des mots de passe (coffre déverrouillé) |
+| **📊 Stats** | Écoutes, tâches, séries, poids, alertes, jeux, API ; volet 🏋️ Sport pour tes chronos de course ; 🔑 graphe de santé des mots de passe (coffre déverrouillé) |
 
 ---
 
@@ -80,6 +80,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 - **Tes clés ne passent jamais par un relais public**, sauf si tu coches « Relais publics pour les clés » (module API).
 - **Ordre des IA** : À propos → 🤖 Ordre des IA. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
 - **Stockage saturé ?** À propos → 📦 Limite data montre le poids de chaque module.
+- **Liens entre modules** : À propos → 🔗 Liens modules, graphe des échanges (touche une bulle ou un trait, fais glisser une bulle pour la déplacer).
 - **Quoi de neuf ?** À propos → 📋 Release note : les 5 dernières versions et ce qu'elles changent.
 
 ---
