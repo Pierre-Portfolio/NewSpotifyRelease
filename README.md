@@ -80,7 +80,7 @@ Tout marche sans configuration, sauf les services tiers. **Les clés restent sur
 - **Tes clés ne passent jamais par un relais public**, sauf si tu coches « Relais publics pour les clés » (module API).
 - **Ordre des IA** : À propos → 🤖 Ordre des IA. Une IA qui ne répond plus passe la main à la suivante (badge orange **⤵ Gemini → Groq**).
 - **Stockage saturé ?** À propos → 📦 Limite data montre le poids de chaque module.
-- **Liens entre modules** : À propos → 🔗 Liens modules, graphe des échanges (touche une bulle ou un trait, fais glisser une bulle pour la déplacer ; 👁 Bulles choisit les modules affichés, même désactivés, avec leurs liens).
+- **Liens entre modules** : À propos → 🔗 Liens modules, graphe des échanges (touche une bulle ou un trait, fais glisser une bulle pour la déplacer ; tous les modules y sont à l'ouverture, même désactivés ; 👁 Bulles en masque ou réaffiche avec leurs liens).
 - **Quoi de neuf ?** À propos → 📋 Release note : les 5 dernières versions et ce qu'elles changent.
 
 ---
