@@ -26,14 +26,12 @@ décochée à la main dans le Hub ne revient pas.
 
 1. `chrome://extensions` → activer le **mode développeur** → **Charger l'extension non
    empaquetée** → choisir ce dossier.
-2. L'ID est fixe (clé dans `manifest.json`) : `ipoiohljgccegcbenelbcoggecloogak`.
-3. **Une seule fois**, dans Google Cloud (console.cloud.google.com → *API et services* →
-   *Identifiants* → ID client OAuth « Application Web » du Hub, `968594008637-12ss…`),
-   ajouter aux **URI de redirection autorisés** :
-   `https://ipoiohljgccegcbenelbcoggecloogak.chromiumapp.org/`
-4. Options de l'extension → **Connecter Google Drive** (le **même compte** que dans le Hub),
+2. L'ID est fixe (clé dans `manifest.json`) : `ipoiohljgccegcbenelbcoggecloogak`. Aucun réglage
+   Google à faire : Google renvoie la connexion sur l'adresse du Hub (déjà autorisée), qui la
+   relaie aussitôt à l'extension.
+3. Options de l'extension → **Connecter Google Drive** (le **même compte** que dans le Hub),
    et coller la **clé Gemini** (la même que dans le module 🔌 API du Hub) pour le résumé.
-5. Dans le Hub, Google Drive doit être connecté sur l'appareil (À propos → Sauvegardes cloud).
+4. Dans le Hub, Google Drive doit être connecté sur l'appareil (À propos → Sauvegardes cloud).
 
 ## Fichiers
 

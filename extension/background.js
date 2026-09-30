@@ -7,6 +7,7 @@
 // réécrit JAMAIS ce fichier : l'extension en est le seul auteur (jusqu'à `KEEP` entrées, les
 // plus récentes).
 const GOOGLE_CLIENT_ID = '968594008637-12ssdcr5i1uutq9vru5f8444bfchephd.apps.googleusercontent.com';   // = GDRIVE_CLIENT_ID du Hub (public)
+const HUB_URL = 'https://pierre-portfolio.github.io/NewSpotifyRelease/';   // adresse de retour déjà déclarée chez Google
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_NAME = 'hub-youtube-vus.json';
 const HUB_FOLDER = 'HUB_Pierre';
@@ -31,12 +32,14 @@ const rnd = n => b64url(crypto.getRandomValues(new Uint8Array(n)));
 // fermée, la file attend un clic sur « Reconnecter ».
 // ⚠ `include_granted_scopes=false` : le client du Hub a aussi le scope youtube, que Google
 // refuse de mélanger à drive.file (Erreur 400, cf. GDRIVE_SCOPE_YT dans index.html).
-// ⚠ L'adresse de retour (`getRedirectURL()`) doit figurer dans les « URI de redirection
-// autorisés » de cet ID client, sinon Google affiche redirect_uri_mismatch.
+// ⚠ ADRESSE DE RETOUR = LE HUB (`HUB_URL`), pas `getRedirectURL()` : celle-ci aurait dû être
+// ajoutée à la main dans la console Google (sinon redirect_uri_mismatch). Le 1er <script>
+// du Hub relaie tout fragment `state=hubext.…` vers `getRedirectURL()`, que
+// `launchWebAuthFlow` intercepte ⇒ le préfixe du `state` est un contrat avec index.html.
 async function googleAuth(interactive) {
   const { google: g } = await get('google');
-  const state = rnd(16);
-  const p = { client_id: GOOGLE_CLIENT_ID, response_type: 'token', redirect_uri: chrome.identity.getRedirectURL(),
+  const state = 'hubext.' + rnd(16);
+  const p = { client_id: GOOGLE_CLIENT_ID, response_type: 'token', redirect_uri: HUB_URL,
     scope: DRIVE_SCOPE, include_granted_scopes: 'false', state, prompt: interactive ? 'select_account' : 'none' };
   if (g && g.email) p.login_hint = g.email;
   const details = { url: 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams(p), interactive };
@@ -212,7 +215,6 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     // ⚠ Pas de révocation du jeton : elle retirerait l'accès à tout l'ID client, Hub compris.
     if (msg.type === 'logout') { await chrome.storage.local.remove('google'); return { ok: true }; }
     if (msg.type === 'flush') return await flush();
-    if (msg.type === 'redirect') return { url: chrome.identity.getRedirectURL() };
     return null;
   })().then(reply);
   return true;   // réponse asynchrone
