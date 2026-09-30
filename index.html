@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.105';
+const APP_VERSION = '13.21.106';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4757,7 +4757,7 @@ function StoreProvider({ children }) {
   React.useEffect(() => {
     if (authState !== 'connected' || otherTab) return;
     if (!moduleEnabled(moduleToggles, 'meteo')) return;
-    const run = () => { meteoRainCheck().catch(() => {}); };
+    const run = () => { meteoRainCheck().catch(() => {}); meteoCommuteTodo().catch(() => {}); };
     const t  = setTimeout(run, METEO_RAIN_DELAY_MS);
     const iv = setInterval(run, METEO_RAIN_CHECK_MS);
     return () => { clearTimeout(t); clearInterval(iv); };
@@ -29788,6 +29788,7 @@ const MODULE_LINKS = [
   ['frigo',    'todo',       'aliment qui périme dans 2 j ou moins ⇒ tâche (retirée quand l’aliment quitte le frigo)'],
   ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
   ['compare',  'todo',       'jeu suivi passé sous son prix cible ⇒ tâche + alerte à la connexion'],
+  ['meteo',    'todo',       'pluie prévue entre 8 h 30 et 10 h ou 17 h et 18 h ⇒ tâche « parapluie »'],
   ['mdp',      'contact',    'même chiffrement AES-GCM (mot de passe propre)'],
   ['actu',     'tvtime',     'vidéo YouTube vue ⇒ marquée vue'],
   ['finance',  'actu',       'Bull Run (crypto) affiché dans Actu'],
@@ -30297,6 +30298,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.106', date:'2026-09-30', title:'☔ Météo → To do : le parapluie aux heures de trajet', items:[
+    'S’il doit pleuvoir aujourd’hui entre 8 h 30 et 10 h ou entre 17 h et 18 h, une tâche « ☔ Pluie prévue … : prends un parapluie » arrive dans To do → Aujourd’hui (une fois par créneau et par jour, avec la probabilité de pluie).',
+    'Le lieu est ta position si tu l’as déjà autorisée, sinon le premier lieu de Météo. (Et Bon Plan : la ligne du guide mentionne maintenant l’alerte de prix cible.)',
+  ] },
   { v:'13.21.105', date:'2026-09-30', title:'🛒 Bon Plan : alerte et tâche quand un jeu atteint ton prix cible', items:[
     'Si un jeu de ⭐ Ma liste passe sous le prix cible que tu lui as donné, une alerte s’affiche à la connexion (notification si tu les as autorisées) et une tâche « 🛒 Bon Plan : … à acheter » arrive dans To do → Aujourd’hui.',
     'Une seule alerte par baisse : si le prix remonte au-dessus de la cible puis redescend, tu es prévenu à nouveau.',
@@ -30312,9 +30317,6 @@ const RELEASE_NOTES = [
     'Sur le téléphone, faire glisser une bulle (Stats → 🔗 LIENS MODULES et graphe des mots de passe) faisait défiler la page en même temps : c’est corrigé, la page ne bouge plus tant que le doigt tient une bulle ; glisser ailleurs sur le graphe fait toujours défiler.',
     'Touche un trait entre deux modules : le lien est expliqué dessous (dans les deux sens s’il existe aussi à l’envers). Dans le graphe des mots de passe, toucher un trait dit si c’est le même mot de passe, une variante, ou l’email de connexion.',
     'Deux liens qui manquaient sont ajoutés : Frigo → Alertes (aliments bientôt périmés) et Bon Plan → Alertes (promos Steam de ta liste de souhaits).',
-  ] },
-  { v:'13.21.101', date:'2026-09-30', title:'🧩 L’extension YouTube → TV Time est dans le dépôt du Hub', items:[
-    'Elle se trouve maintenant dans le dossier extension/ du dépôt GitHub du Hub : chrome://extensions → mode développeur → « Charger l’extension non empaquetée » → choisir ce dossier. Le mode d’emploi est dans extension/README.md.',
   ] },
 ];
 
@@ -37573,6 +37575,59 @@ async function meteoAlertCoords() {
   } catch {}
   const l = METEO_LOCS[0];
   return { lat: l.lat, lon: l.lon, name: l.name };
+}
+
+// ── ☔ MÉTÉO → TO DO : pluie aux heures de trajet ─────────────────────────────────
+// Pluie prévue AUJOURD'HUI entre 8 h 30 et 10 h ou entre 17 h et 18 h ⇒ une tâche
+// « Aujourd'hui » (un parapluie à prendre). Une fois par créneau et par jour
+// (`METEO_TODO_LS`) ; un créneau déjà passé n'est plus regardé.
+// ⚠ Chez Open-Meteo, `precipitation` / `precipitation_probability` à l'heure T valent pour
+// l'heure PRÉCÉDENTE (T-1 → T) : 8 h 30–10 h se lit donc sur 09:00 et 10:00, 17–18 h sur 18:00
+// (09:00 couvre 8–9 h : une demi-heure de trop, assumée plutôt que de rater une averse à 8 h 45).
+// Même critère de pluie que l'alerte (`meteoIsRainCode` + mm ou probabilité). Relancé par
+// l'effet de l'alerte pluie (toutes les 15 min), mais au plus 1 requête par heure.
+const METEO_TODO_LS = 'spotifyplus_meteo_todo';   // { day, done: ['am'|'pm'] }
+const METEO_TODO_SLOTS = [
+  { key:'am', label:'8 h 30 – 10 h', hours:['09:00', '10:00'], end:'10:00' },
+  { key:'pm', label:'17 h – 18 h',   hours:['18:00'],          end:'18:00' },
+];
+let _meteoTodoAt = 0;
+async function meteoCommuteTodo() {
+  const day = localDayStr();
+  const nowHm = new Date().toTimeString().slice(0, 5);
+  let st = {};
+  try { st = JSON.parse(lsGet(METEO_TODO_LS) || '{}') || {}; } catch {}
+  const done = st.day === day && Array.isArray(st.done) ? st.done : [];
+  const todo = METEO_TODO_SLOTS.filter(sl => !done.includes(sl.key) && nowHm < sl.end);
+  if (!todo.length || Date.now() - _meteoTodoAt < 60 * 60 * 1000) return 0;
+  _meteoTodoAt = Date.now();
+  const { lat, lon, name } = await meteoAlertCoords();
+  let h;
+  try {
+    const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
+      + `&hourly=precipitation,precipitation_probability,weather_code&timezone=Europe%2FParis&forecast_days=1`, { signal: fetchSig(12000) });
+    if (!res.ok) { _meteoTodoAt = 0; return 0; }
+    h = (await res.json())?.hourly;
+  } catch { _meteoTodoAt = 0; return 0; }
+  if (!h?.time?.length) return 0;
+  const hits = [];
+  for (const sl of todo) {
+    let prob = 0, wet = false;
+    for (const hh of sl.hours) {
+      const i = h.time.indexOf(day + 'T' + hh);
+      if (i < 0) continue;
+      const p = h.precipitation_probability?.[i] ?? 0;
+      if (meteoIsRainCode(h.weather_code?.[i]) && ((h.precipitation?.[i] ?? 0) >= METEO_RAIN_MM_MIN || p >= METEO_RAIN_PROB_MIN)) { wet = true; prob = Math.max(prob, p); }
+    }
+    if (wet) hits.push({ sl, prob });
+  }
+  if (!hits.length) return 0;
+  const todos = loadTodos();
+  todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), bucket:'today', fav:false, meteoKey: day,
+    text: `☔ Pluie prévue ${hits.map(x => x.sl.label + (x.prob ? ` (${x.prob} %)` : '')).join(' et ')}${name ? ' à ' + name : ''} : prends un parapluie` });
+  saveTodos(todos);
+  lsSet(METEO_TODO_LS, JSON.stringify({ day, done: [...done, ...hits.map(x => x.sl.key)] }));
+  return hits.length;
 }
 
 async function meteoRainCheck() {
