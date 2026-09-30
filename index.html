@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.98';
+const APP_VERSION = '13.21.99';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29813,8 +29813,12 @@ function moduleGraphLayout(n, edges, W, H, pad, grav) {
 // défiler la page. Un déplacement de plus de 4 unités avale le clic qui suit (piège 12), sinon
 // lâcher une bulle la sélectionnerait.
 function useGraphDrag(initial, W, H, pad) {
-  const [pos, setPos] = React.useState(initial);
-  React.useEffect(() => { setPos(initial); }, [initial]);
+  // ⚠ Positions RATTACHÉES au placement dont elles partent (`base`) : quand le placement change
+  // (regroupement du graphe des mots de passe), l'ancien tableau n'a plus le même nombre de
+  // bulles — le relire, même le temps d'un rendu, plantait le graphe.
+  const [st, setSt] = React.useState({ base: initial, pos: initial });
+  const pos = st.base === initial ? st.pos : initial;
+  const setPos = fn => setSt(s0 => ({ base: initial, pos: fn(s0.base === initial ? s0.pos : initial) }));
   const svgRef = React.useRef(null);
   const dragRef = React.useRef(null);      // { i, x0, y0, moved }
   const movedRef = React.useRef(false);    // le dernier geste était un déplacement
@@ -29846,7 +29850,7 @@ function useGraphDrag(initial, W, H, pad) {
   });
   // À appeler en tête du onClick d'une bulle : true = c'était un déplacement, ignorer le clic.
   const wasDrag = () => { const m = movedRef.current; movedRef.current = false; return m; };
-  return { pos, svgRef, nodeProps, wasDrag, moved: pos !== initial, reset: () => setPos(initial) };
+  return { pos, svgRef, nodeProps, wasDrag, moved: pos !== initial, reset: () => setSt({ base: initial, pos: initial }) };
 }
 // Taper une bulle surligne ses liens et les liste dessous ; retaper (ou le fond) désélectionne.
 function ModuleLinksGraph() {
@@ -30205,6 +30209,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.99', date:'2026-09-30', title:'🔑 Graphe des mots de passe : regroupé par email', items:[
+    'Chaque email de connexion devient un point ✉ relié à ses comptes, entouré d’une zone à la couleur de la priorité la plus haute de ses comptes (P1 rouge, P2 orange…) : tu vois d’un coup quel site est relié à quel email.',
+    'Bouton « Regrouper par » : ✉ Email, 🎯 Priorité (une zone par P1…P5) ou Aucun. Toucher le point d’un email liste ses comptes ; les bulles se déplacent au doigt (rien n’est enregistré).',
+  ] },
   { v:'13.21.98', date:'2026-09-30', title:'🔗 Stats : les bulles des liens modules se déplacent', items:[
     'Dans Stats → 🔗 LIENS MODULES, fais glisser une bulle (doigt ou souris) pour dégager un lien caché derrière d’autres. Un simple toucher sélectionne toujours la bulle.',
     'Rien n’est enregistré : en revenant, les bulles reprennent leur place. ↺ Replacer les remet en place tout de suite.',
@@ -30221,10 +30229,6 @@ const RELEASE_NOTES = [
   { v:'13.21.95', date:'2026-09-30', title:'🔗 Stats : le graphe des liens entre modules', items:[
     'Nouveau collapse 🔗 LIENS MODULES dans Stats : une bulle par module activé, une flèche quand un module envoie des données à un autre (Alertes → To do, Contact → Alertes, API → TV Time, l’IA vers tout ce qu’elle sait piloter…). Plus la bulle est grosse, plus le module est connecté.',
     'Touche une bulle : ses liens s’allument et la liste dessous dit ce qui passe de l’un à l’autre. Retouche-la (ou le fond) pour tout revoir.',
-  ] },
-  { v:'13.21.94', date:'2026-09-30', title:'🔔 Alertes : les dates se tapent au clavier numérique', items:[
-    'Sur le téléphone, toucher la date d’un rappel ne faisait rien : le champ attendait le sélecteur de date du navigateur. Toutes les dates d’Alertes (Mes rappels, Mes garanties, rubriques) se tapent maintenant au clavier numérique : JJ/MM/AAAA, ou 8 chiffres d’affilée (15102026) ; « 15/10 » = la prochaine fois.',
-    'Même chose pour l’heure (930 → 09:30). C’est enregistré en quittant le champ ou avec ✓ ; une date impossible est refusée (bordure rouge) et l’ancienne reste.',
   ] },
 ];
 
@@ -50276,39 +50280,92 @@ async function mdpCheckup(entries, opts) {
 // Une bulle par compte : REMPLISSAGE = pire constat (rouge critique, orange à revoir, ambre à
 // savoir, vert rien), CONTOUR + TAILLE = criticité P1…P5. Trait rouge plein = même mot de
 // passe, pointillé orange = même racine (`links` de `mdpCheckup`).
-// ⚠ `mdpGraphData` ne garde NI mot de passe NI longueur : titre, criticité, constats. C'est
-// ce qui survit dans `_mdpLastGraph` pour Stats — vidé au verrouillage, et Stats ne l'affiche
-// que coffre déverrouillé.
+// GROUPES (bouton ✉ / 🎯) : un « moyeu » par EMAIL de connexion (identifiant contenant un @)
+// ou par PRIORITÉ, relié à ses comptes, sous un halo coloré. Halo d'un email = couleur de la
+// priorité la plus haute de ses comptes (P1 rouge…). Bulles déplaçables (`useGraphDrag`).
+// ⚠ `mdpGraphData` ne garde NI mot de passe NI longueur : titre, email, criticité, constats.
+// C'est ce qui survit dans `_mdpLastGraph` pour Stats — vidé au verrouillage, et Stats ne
+// l'affiche que coffre déverrouillé.
 const MDP_OK_COLOR = '#4caf50';
 const MDP_CRIT_R = { P1:15, P2:13, P3:11, P4:10, P5:9 };
+const MDP_HUB_R = 6;
 function mdpGraphData(r) {
   return {
-    nodes: r.rows.map(x => ({ id: x.e.id, label: x.e.titre || x.e.identifiant || mdpHost(x.e.url) || '—', crit: x.e.crit || '',
-      worst: x.worst, findings: x.findings.map(f => ({ sev: f.sev, txt: f.txt })) })),
+    nodes: r.rows.map(x => {
+      const ident = String(x.e.identifiant || '').trim().toLowerCase();
+      return { id: x.e.id, label: x.e.titre || x.e.identifiant || mdpHost(x.e.url) || '—', crit: x.e.crit || '',
+        mail: /^[^\s@]+@[^\s@]+$/.test(ident) ? ident : '',
+        worst: x.worst, findings: x.findings.map(f => ({ sev: f.sev, txt: f.txt })) };
+    }),
     links: (r.links || []).slice(),
     score: r.score, total: r.total, at: r.at,
   };
 }
+// Enveloppe convexe (chaîne monotone) — le halo d'un groupe épouse ses bulles au lieu d'un
+// cercle qui débordait du cadre.
+function graphHull(pts) {
+  const P = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
+  if (P.length < 3) return P;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lo = [], up = [];
+  for (const p of P) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (const p of P.slice().reverse()) { while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  return lo.slice(0, -1).concat(up.slice(0, -1));
+}
+// x d'une étiquette centrée, ramené dans le cadre (≈ 0,55 em par caractère).
+const graphLabelX = (x, txt, fs, W) => { const w = String(txt).length * fs * 0.55; return Math.min(W - w / 2 - 2, Math.max(w / 2 + 2, x)); };
+// Priorité la plus haute d'une liste de comptes (index dans MDP_CRITS, 99 = aucune).
+function mdpTopCrit(nodes) {
+  return nodes.reduce((best, n) => { const i = MDP_CRITS.findIndex(c => c[0] === n.crit); return i >= 0 && i < best ? i : best; }, 99);
+}
 function MdpCheckupGraph({ g }) {
   const [sel, setSel] = React.useState(null);
-  const W = 360, H = 320, PAD = 30;
+  const [group, setGroup] = React.useState('mail');   // 'mail' | 'crit' | 'none' — jamais persisté
+  const W = 360, H = 340, PAD = 30;
   const lay = React.useMemo(() => {
-    const idx = new Map(g.nodes.map((n, i) => [n.id, i]));
+    const byId = new Map(g.nodes.map(n => [n.id, n]));
+    const hubs = [], hubOf = new Map();
+    if (group !== 'none') g.nodes.forEach(n => {
+      const key = group === 'mail' ? n.mail : n.crit;
+      if (!key) return;
+      if (!hubOf.has(key)) { const h = { id: 'hub:' + key, key, members: [] }; hubOf.set(key, h); hubs.push(h); }
+      hubOf.get(key).members.push(n.id);
+    });
+    hubs.forEach(h => {
+      const top = mdpTopCrit(h.members.map(id => byId.get(id)));
+      h.color = group === 'crit' ? mdpCritColor(h.key, C.muted) : (top < 99 ? MDP_CRITS[top][2] : C.muted);
+      h.label = group === 'crit' ? (mdpCritDef(h.key) || [h.key, h.key])[1] : '✉ ' + (h.key.length > 24 ? h.key.slice(0, 23) + '…' : h.key);
+    });
+    const ids = [...g.nodes.map(n => n.id), ...hubs.map(h => h.id)];
+    const idx = new Map(ids.map((id, i) => [id, i]));
     const links = g.links.filter(l => idx.has(l.a) && idx.has(l.b));
-    return { idx, links, pos: moduleGraphLayout(g.nodes.length, links.map(l => [idx.get(l.a), idx.get(l.b)]), W, H, PAD, 0.3) };
-  }, [g]);
+    const hubLinks = hubs.flatMap(h => h.members.map(m => ({ a: h.id, b: m })));
+    // Les traits compte ↔ moyeu comptent DOUBLE dans le placement : c'est eux qui font les grappes.
+    const edges = [...links, ...hubLinks, ...hubLinks].map(l => [idx.get(l.a), idx.get(l.b)]);
+    return { idx, links, hubs, hubLinks, pos: moduleGraphLayout(ids.length, edges, W, H, PAD, 0.3) };
+  }, [g, group]);
+  const drag = useGraphDrag(lay.pos, W, H, PAD);
+  const P = drag.pos;
   const fillOf = n => (n.worst ? MDP_SEV[n.worst].color : MDP_OK_COLOR);
   const rOf = n => MDP_CRIT_R[n.crit] || 8;
+  const at = id => P[lay.idx.get(id)] || { x: W / 2, y: H / 2 };
   // Répartition des comptes par PIRE constat : la réponse à « est-ce que tout est bon ? ».
   const buckets = [['crit', MDP_SEV.crit.label, MDP_SEV.crit.color], ['warn', MDP_SEV.warn.label, MDP_SEV.warn.color],
     ['info', MDP_SEV.info.label, MDP_SEV.info.color], [null, 'OK', MDP_OK_COLOR]]
     .map(([k, label, color]) => ({ k, label, color, n: g.nodes.filter(x => x.worst === k).length }));
   const bad = buckets[0].n + buckets[1].n;
   const reused = g.links.filter(l => l.kind === 'same').length, variants = g.links.filter(l => l.kind === 'root').length;
-  const near = new Set(sel ? lay.links.filter(l => l.a === sel || l.b === sel).flatMap(l => [l.a, l.b]) : []);
-  const selNode = sel ? g.nodes[lay.idx.get(sel)] : null;
+  const selHub = sel ? lay.hubs.find(h => h.id === sel) : null;
+  const near = new Set(sel ? [
+    ...lay.links.filter(l => l.a === sel || l.b === sel).flatMap(l => [l.a, l.b]),
+    ...lay.hubLinks.filter(l => l.a === sel || l.b === sel).flatMap(l => [l.a, l.b]),
+  ] : []);
+  const selNode = sel && !selHub ? g.nodes.find(n => n.id === sel) : null;
   const many = g.nodes.length > 40;
+  const noMail = g.nodes.filter(n => !n.mail).length;
   if (!g.nodes.length) return null;
+  const tap = id => e => { e.stopPropagation(); if (drag.wasDrag()) return; setSel(s => (s === id ? null : id)); };
+  const GROUPS = [['mail', '✉ Email'], ['crit', '🎯 Priorité'], ['none', 'Aucun']];
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:7 }}>
       <div style={{ fontSize:11, fontWeight:800, color: bad ? MDP_SEV.crit.color : MDP_OK_COLOR }}>
@@ -50323,34 +50380,84 @@ function MdpCheckupGraph({ g }) {
           <span key={b.label} style={{ fontSize:9.5, color: b.n ? b.color : C.dim, fontFamily:'DM Mono,monospace' }}>● {b.label} {b.n}</span>
         ))}
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', background:'#0000001a', borderRadius:8, touchAction:'manipulation' }} onClick={() => setSel(null)}>
+      <div style={{ display:'flex', alignItems:'center', gap:5, flexWrap:'wrap' }}>
+        <span style={{ fontSize:9.5, color:C.dim }}>Regrouper par</span>
+        {GROUPS.map(([k, lbl]) => (
+          <button key={k} onClick={() => { setGroup(k); setSel(null); }} aria-pressed={group === k}
+            style={{ background: group === k ? `${MDP_AMBER}22` : 'none', border:`1px solid ${group === k ? MDP_AMBER + '88' : C.border}`, borderRadius:6,
+              color: group === k ? MDP_AMBER : C.muted, fontSize:10, fontWeight:700, padding:'2px 8px', cursor:'pointer', fontFamily:'inherit' }}>{lbl}</button>
+        ))}
+        {drag.moved && <button onClick={drag.reset} title="Remettre les bulles à leur place"
+          style={{ marginLeft:'auto', background:'none', border:`1px solid ${C.border}`, borderRadius:6, color:C.muted, fontSize:10, padding:'2px 8px', cursor:'pointer', fontFamily:'inherit' }}>↺ Replacer</button>}
+      </div>
+      <svg ref={drag.svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', maxWidth:560, alignSelf:'center', display:'block', background:'#0000001a', borderRadius:8, touchAction:'manipulation', userSelect:'none', WebkitUserSelect:'none' }} onClick={() => setSel(null)}>
+        {/* Halos des groupes = enveloppe convexe épaissie d'un trait rond (le « blob »),
+            recalculée sur les positions COURANTES : elle suit les bulles déplacées. ⚠ L'opacité
+            est posée sur le <g> : sur le tracé, remplissage et trait se superposeraient en bande. */}
+        {lay.hubs.map(h => {
+          const hull = graphHull([at(h.id), ...h.members.map(at)]);
+          const d = 'M' + hull.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join('L') + 'Z';
+          const on = !sel || sel === h.id || h.members.includes(sel);
+          return (
+            <g key={'halo' + h.id} opacity={on ? 0.16 : 0.05} style={{ pointerEvents:'none' }}>
+              <path d={d} fill={h.color} stroke={h.color} strokeWidth={2 * (MDP_CRIT_R.P1 + 8)} strokeLinejoin="round" strokeLinecap="round" />
+            </g>
+          );
+        })}
+        {lay.hubLinks.map(l => {
+          const A = at(l.a), B = at(l.b), h = lay.hubs.find(x => x.id === l.a);
+          const on = !sel || l.a === sel || l.b === sel;
+          return <line key={l.a + '>' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y} stroke={h.color} strokeWidth="1" strokeOpacity={on ? 0.55 : 0.08} />;
+        })}
         {lay.links.map(l => {
-          const A = lay.pos[lay.idx.get(l.a)], B = lay.pos[lay.idx.get(l.b)];
+          const A = at(l.a), B = at(l.b);
           const on = !sel || l.a === sel || l.b === sel;
           return <line key={l.a + '|' + l.b} x1={A.x} y1={A.y} x2={B.x} y2={B.y}
             stroke={l.kind === 'same' ? MDP_SEV.crit.color : MDP_SEV.warn.color} strokeWidth={l.kind === 'same' ? 2.2 : 1.5}
             strokeDasharray={l.kind === 'same' ? undefined : '4 3'} strokeOpacity={on ? 0.85 : 0.1} />;
         })}
+        {lay.hubs.map(h => {
+          const i = lay.idx.get(h.id), p = P[i], np = drag.nodeProps(i);
+          const dimmed = sel && sel !== h.id && !near.has(h.id);
+          return (
+            <g key={h.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.25 : 1 }} onClick={tap(h.id)}>
+              <circle cx={p.x} cy={p.y} r={MDP_HUB_R} fill={h.color} stroke="#fff" strokeWidth={sel === h.id ? 2 : 1} />
+              <text x={graphLabelX(p.x, h.label, 8.5, W)} y={p.y - MDP_HUB_R - 4} textAnchor="middle" fontSize="8.5" fontWeight="800" fill={h.color} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{h.label}</text>
+            </g>
+          );
+        })}
         {g.nodes.map((n, i) => {
-          const p = lay.pos[i], r = rOf(n), cd = mdpCritDef(n.crit);
+          const p = P[i], r = rOf(n), cd = mdpCritDef(n.crit), np = drag.nodeProps(i);
           const dimmed = sel && sel !== n.id && !near.has(n.id);
           const showLabel = !many || n.worst === 'crit' || n.worst === 'warn' || sel === n.id || near.has(n.id);
           const lbl = n.label.length > 14 ? n.label.slice(0, 13) + '…' : n.label;
           return (
-            <g key={n.id} style={{ cursor:'pointer', opacity: dimmed ? 0.2 : 1 }} onClick={e => { e.stopPropagation(); setSel(s => (s === n.id ? null : n.id)); }}>
+            <g key={n.id} {...np} style={{ ...np.style, cursor:'grab', opacity: dimmed ? 0.2 : 1 }} onClick={tap(n.id)}>
               <circle cx={p.x} cy={p.y} r={r} fill={fillOf(n)} fillOpacity="0.8" stroke={cd ? cd[2] : C.dim} strokeWidth={sel === n.id ? 3.5 : 2} />
               {cd && <text x={p.x} y={p.y} textAnchor="middle" dominantBaseline="central" fontSize={Math.max(7, r * 0.7)} fontWeight="800" fill="#fff" style={{ pointerEvents:'none' }}>{cd[0]}</text>}
-              {showLabel && <text x={p.x} y={p.y + r + 8} textAnchor="middle" fontSize="8.5" fontWeight="700" fill={C.text} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{lbl}</text>}
+              {showLabel && <text x={graphLabelX(p.x, lbl, 8.5, W)} y={p.y + r + 8} textAnchor="middle" fontSize="8.5" fontWeight="700" fill={C.text} stroke={C.surfaceHigh} strokeWidth="3" paintOrder="stroke" style={{ pointerEvents:'none' }}>{lbl}</text>}
             </g>
           );
         })}
       </svg>
       <div style={{ fontSize:9, color:C.dim, lineHeight:1.45 }}>
-        Couleur = pire constat · contour et taille = criticité (P1 la plus grosse) · <span style={{ color:MDP_SEV.crit.color }}>━ même mot de passe</span> · <span style={{ color:MDP_SEV.warn.color }}>┅ variante (même racine)</span>. Touche une bulle pour ses constats.
+        Couleur = pire constat · contour et taille = criticité (P1 la plus grosse) · <span style={{ color:MDP_SEV.crit.color }}>━ même mot de passe</span> · <span style={{ color:MDP_SEV.warn.color }}>┅ variante (même racine)</span>
+        {group === 'mail' ? <> · ● ✉ = email de connexion, halo à la couleur de sa priorité la plus haute{noMail ? ` (${noMail} compte(s) sans email en identifiant, hors groupe)` : ''}</> : group === 'crit' ? ' · ● = priorité, halo à sa couleur' : ''}. Touche une bulle pour le détail, fais-la glisser pour la déplacer.
       </div>
+      {selHub && (
+        <div style={{ borderLeft:`2px solid ${selHub.color}`, paddingLeft:7, display:'flex', flexDirection:'column', gap:2 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:selHub.color, wordBreak:'break-all' }}>{group === 'mail' ? '✉ ' + selHub.key : selHub.label} · {selHub.members.length} compte(s)</div>
+          {selHub.members.map(id => { const n = g.nodes.find(x => x.id === id); return (
+            <div key={id} style={{ fontSize:9.5, color:C.muted, lineHeight:1.4 }}>
+              <span style={{ color:fillOf(n), fontWeight:700 }}>●</span> {n.label}{n.crit ? <b style={{ marginLeft:5, color:mdpCritColor(n.crit, C.dim), fontFamily:'DM Mono,monospace' }}>{n.crit}</b> : null}{n.findings.length ? ` — ${n.findings.length} constat(s)` : ' — ✓'}
+            </div>
+          ); })}
+        </div>
+      )}
       {selNode && (
         <div style={{ borderLeft:`2px solid ${fillOf(selNode)}`, paddingLeft:7, display:'flex', flexDirection:'column', gap:2 }}>
           <div style={{ fontSize:11, fontWeight:700, color:C.text }}>{selNode.label}{selNode.crit ? <span style={{ marginLeft:6, fontSize:9, fontWeight:800, color:mdpCritColor(selNode.crit, C.dim), fontFamily:'DM Mono,monospace' }}>{selNode.crit}</span> : null}</div>
+          {selNode.mail && <div style={{ fontSize:9.5, color:C.muted, wordBreak:'break-all' }}>✉ {selNode.mail}</div>}
           {selNode.findings.length === 0
             ? <div style={{ fontSize:9.5, color:MDP_OK_COLOR }}>✓ Rien à signaler</div>
             : selNode.findings.map((f, i) => (
