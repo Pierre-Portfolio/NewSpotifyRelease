@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.109';
+const APP_VERSION = '13.21.110';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -29859,14 +29859,17 @@ function moduleLinksAll() {
     const parts = [];
     if (act[m]) parts.push(`${act[m]} action(s) pilotable(s)`);
     if (read[m]) parts.push('lu pour répondre aux questions');
-    out.push({ from:'ia', to:m, label:'IA : ' + parts.join(', ') });
+    out.push({ from:'ia', to:m, label: parts.join(', ') });   // la bulle source nomme déjà l'IA
   });
   return out;
 }
 // Placement par forces (Fruchterman-Reingold), CALCULÉ UNE FOIS (pas d'animation) : départ
 // en cercle dans l'ordre des modules ⇒ même dessin à chaque ouverture. Réutilisé par le
 // graphe du check-up (`MdpCheckupGraph`, `grav` plus fort : ses comptes sont surtout isolés).
-function moduleGraphLayout(n, edges, W, H, pad, grav) {
+// `rad` (rayon de chaque bulle, facultatif) ⇒ passe finale anti-chevauchement : 🤖 IA et
+// 📊 Stats, reliés à presque tout, finissaient au même point du centre et Stats recouvrait la
+// bulle IA, libellé compris (on croyait le module absent du graphe).
+function moduleGraphLayout(n, edges, W, H, pad, grav, rad) {
   if (!n) return [];
   const P = Array.from({ length:n }, (_, i) => {
     const a = 2 * Math.PI * i / n - Math.PI / 2;
@@ -29891,6 +29894,39 @@ function moduleGraphLayout(n, edges, W, H, pad, grav) {
       P[i].y = Math.min(H - pad, Math.max(pad, P[i].y + D[i].y * s));
     }
     t = Math.max(0.5, t * 0.985);
+  }
+  // Écart mini = somme des rayons + 14 (le libellé, sous la bulle, ne touche pas la voisine).
+  // Les 80 premiers tours écartent aussi une bulle d'un trait qui la TRAVERSE (IA → Note passait
+  // sous Stats et semblait en partir) ; les derniers ne font que l'anti-chevauchement.
+  if (rad) for (let it = 0; it < 160; it++) {
+    let moved = false;
+    if (it < 80) edges.forEach(([a, b]) => {
+      const ex = P[b].x - P[a].x, ey = P[b].y - P[a].y, L2 = ex * ex + ey * ey;
+      if (L2 < 1) return;
+      for (let c = 0; c < n; c++) {
+        if (c === a || c === b) continue;
+        const u = ((P[c].x - P[a].x) * ex + (P[c].y - P[a].y) * ey) / L2;
+        if (u <= 0.02 || u >= 0.98) continue;
+        let nx = P[c].x - (P[a].x + ex * u), ny = P[c].y - (P[a].y + ey * u), d = Math.hypot(nx, ny);
+        const need = rad[c] + 4;
+        if (d >= need) continue;
+        if (d < 0.01) { const L = Math.sqrt(L2); nx = -ey / L; ny = ex / L; d = 1; }   // pile sur le trait : écart perpendiculaire
+        const s = (need - d) / d;
+        P[c].x = Math.min(W - pad, Math.max(pad, P[c].x + nx * s)); P[c].y = Math.min(H - pad, Math.max(pad, P[c].y + ny * s));
+        moved = true;
+      }
+    });
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+      let dx = P[j].x - P[i].x, dy = P[j].y - P[i].y, d = Math.hypot(dx, dy);
+      const need = rad[i] + rad[j] + 14;
+      if (d >= need) continue;
+      if (d < 0.01) { dx = 1; dy = 0; d = 1; }   // confondues : écartées à l'horizontale
+      const s = (need - d) / 2 / d;
+      P[i].x = Math.min(W - pad, Math.max(pad, P[i].x - dx * s)); P[i].y = Math.min(H - pad, Math.max(pad, P[i].y - dy * s));
+      P[j].x = Math.min(W - pad, Math.max(pad, P[j].x + dx * s)); P[j].y = Math.min(H - pad, Math.max(pad, P[j].y + dy * s));
+      moved = true;
+    }
+    if (!moved) break;
   }
   return P;
 }
@@ -29966,12 +30002,13 @@ function ModuleLinksGraph() {
     const links = moduleLinksAll().filter(l => idx.has(l.from) && idx.has(l.to));
     const deg = nodes.map(() => 0);
     links.forEach(l => { deg[idx.get(l.from)]++; deg[idx.get(l.to)]++; });
-    const pos = moduleGraphLayout(nodes.length, links.map(l => [idx.get(l.from), idx.get(l.to)]), W, H, PAD);
-    return { nodes, idx, links, deg, pos };
+    const rad = deg.map(d => 11 + Math.min(9, d * 0.8));
+    const pos = moduleGraphLayout(nodes.length, links.map(l => [idx.get(l.from), idx.get(l.to)]), W, H, PAD, null, rad);
+    return { nodes, idx, links, rad, pos };
   }, []);
   const drag = useGraphDrag(g.pos, W, H, PAD);
   const P = drag.pos;
-  const rOf = i => 11 + Math.min(9, g.deg[i] * 0.8);
+  const rOf = i => g.rad[i];
   const selLinks = sel ? g.links.filter(l => l.from === sel || l.to === sel) : [];
   const lk = selLink ? g.links.find(l => l.from + '>' + l.to === selLink) : null;
   const lkBoth = lk ? g.links.filter(l => (l.from === lk.from && l.to === lk.to) || (l.from === lk.to && l.to === lk.from)) : [];
@@ -30337,6 +30374,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.110', date:'2026-09-30', title:'🔗 Liens modules : la bulle 🤖 IA réapparaît', items:[
+    'Dans À propos → 🔗 Liens modules, la bulle 🤖 IA était cachée pile sous 📊 Stats (les deux sont reliés à presque tous les modules) : elle est maintenant à part, avec son nom et toutes ses flèches (Note, Alertes, To do, Musique…).',
+    'Plus aucune bulle ne se superpose à une autre, et une flèche ne passe plus sous une bulle qui n’est pas la sienne : la flèche IA → Note ne semble plus partir de Stats.',
+  ] },
   { v:'13.21.109', date:'2026-09-30', title:'🗺️ Maps → Santé : tes trajets à pied et à vélo comptent comme sport', items:[
     'Dans Santé → 🏃 Séances de sport, les trajets du jour importés dans Maps (Timeline) apparaissent en tête : « 🚶 Marche · 3,7 km · 45 min », « 🚴 Vélo · 7,4 km · 30 min », avec les calories estimées pour ton poids.',
     'Rien n’est ajouté tout seul (tu as peut-être déjà saisi la sortie à la main) : touche + pour l’enregistrer, la ligne passe alors à ✓ ajoutée. Les trajets en voiture ou en transports ne sont pas proposés.',
@@ -30352,10 +30393,6 @@ const RELEASE_NOTES = [
   { v:'13.21.106', date:'2026-09-30', title:'☔ Météo → To do : le parapluie aux heures de trajet', items:[
     'S’il doit pleuvoir aujourd’hui entre 8 h 30 et 10 h ou entre 17 h et 18 h, une tâche « ☔ Pluie prévue … : prends un parapluie » arrive dans To do → Aujourd’hui (une fois par créneau et par jour, avec la probabilité de pluie).',
     'Le lieu est ta position si tu l’as déjà autorisée, sinon le premier lieu de Météo. (Et Bon Plan : la ligne du guide mentionne maintenant l’alerte de prix cible.)',
-  ] },
-  { v:'13.21.105', date:'2026-09-30', title:'🛒 Bon Plan : alerte et tâche quand un jeu atteint ton prix cible', items:[
-    'Si un jeu de ⭐ Ma liste passe sous le prix cible que tu lui as donné, une alerte s’affiche à la connexion (notification si tu les as autorisées) et une tâche « 🛒 Bon Plan : … à acheter » arrive dans To do → Aujourd’hui.',
-    'Une seule alerte par baisse : si le prix remonte au-dessus de la cible puis redescend, tu es prévenu à nouveau.',
   ] },
 ];
 
