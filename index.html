@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.95';
+const APP_VERSION = '13.21.96';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30152,6 +30152,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.96', date:'2026-09-30', title:'✅ To do : les sous-tâches', items:[
+    'Nouvelle petite icône ↳ à gauche de l’étoile de chaque tâche : elle ouvre un champ pour ajouter une ou plusieurs sous-tâches (le champ reste ouvert après + pour enchaîner).',
+    'Chaque sous-tâche se coche (barrée) ou se supprime (×) ; la tâche affiche son avancement (1/3). Dans Quotidien, les sous-tâches cochées repartent à zéro chaque jour avec la tâche.',
+  ] },
   { v:'13.21.95', date:'2026-09-30', title:'🔗 Stats : le graphe des liens entre modules', items:[
     'Nouveau collapse 🔗 LIENS MODULES dans Stats : une bulle par module activé, une flèche quand un module envoie des données à un autre (Alertes → To do, Contact → Alertes, API → TV Time, l’IA vers tout ce qu’elle sait piloter…). Plus la bulle est grosse, plus le module est connecté.',
     'Touche une bulle : ses liens s’allument et la liste dessous dit ce qui passe de l’un à l’autre. Retouche-la (ou le fond) pour tout revoir.',
@@ -30168,10 +30172,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.92', date:'2026-09-29', title:'🔔 Alertes : le champ « Nouveau rappel » redevient utilisable sur mobile', items:[
     'Sur un téléphone étroit, la date, l’heure et le bouton + écrasaient le champ texte au point qu’on ne pouvait plus le toucher : il passe maintenant sur sa propre ligne (même chose pour garanties et anniversaires).',
-  ] },
-  { v:'13.21.91', date:'2026-09-29', title:'⇅ Import Musique et TV Time : le fichier remplace', items:[
-    'Musique : restaurer une sauvegarde remplace maintenant les pistes de l’appareil (feed + historique, écouté/liké compris) au lieu de garder celles qui n’étaient pas dans le fichier.',
-    'TV Time : même chose, la liste du fichier remplace celle de l’appareil (fiches absentes retirées, progression reprise telle quelle).',
   ] },
 ];
 
@@ -49151,10 +49151,16 @@ function todoTrashLoad() {
 // tâche faite (croix ×). Absent pour un arrêt de récurrence, qui n'est pas une complétion.
 function todoTrashPush(t, how, doneTs) {
   if (!t || !t.text) return todoTrashLoad();
-  const next = [{ text: t.text, bucket: t.bucket, fav: !!t.fav, tag: todoTagOf(t), how, at: Date.now(), doneTs }, ...todoTrashLoad()].slice(0, TODO_TRASH_MAX);
+  const next = [{ text: t.text, bucket: t.bucket, fav: !!t.fav, tag: todoTagOf(t), subs: todoSubsOf(t).length ? todoSubsOf(t) : undefined, how, at: Date.now(), doneTs }, ...todoTrashLoad()].slice(0, TODO_TRASH_MAX);
   lsSet(TODO_TRASH_LS, JSON.stringify(next));
   return next;
 }
+// ── ↳ SOUS-TÂCHES : `t.subs = [{ id, text, done, doneDate }]` DANS la tâche (même clé,
+// même sauvegarde, parties avec elle à la suppression). Lire par `todoSubsOf`, jamais `t.subs` nu.
+// ⚠ En Quotidien une sous-tâche cochée ne vaut que pour le jour (`doneDate`, comme sa tâche),
+// sinon une habitude resterait cochée pour toujours dès le premier jour.
+function todoSubsOf(t) { return t && Array.isArray(t.subs) ? t.subs.filter(x => x && x.text) : []; }
+function todoSubDone(sub, daily, today) { return daily ? sub.doneDate === today : !!sub.done; }
 function todoTrashRemove(i) {
   const next = todoTrashLoad().filter((_, k) => k !== i);
   lsSet(TODO_TRASH_LS, JSON.stringify(next));
@@ -49206,6 +49212,28 @@ function TodoPanel() {
   };
   // Étoile favorite
   const toggleFav = id => update(todos.map(t => t.id === id ? { ...t, fav: !t.fav } : t));
+  // ↳ Sous-tâches (cf. `todoSubsOf`). Le champ d'ajout reste ouvert après « + » pour en
+  // enchaîner plusieurs ; le ↳ de la ligne l'ouvre et le referme.
+  const [subOpen, setSubOpen] = React.useState(null);
+  const [subText, setSubText] = React.useState('');
+  const subsPatch = (id, fn) => update(todos.map(t => {
+    if (t.id !== id) return t;
+    const next = fn(todoSubsOf(t));
+    const { subs, ...rest } = t;
+    return next.length ? { ...rest, subs: next } : rest;
+  }));
+  const subAdd = id => {
+    const v = subText.trim();
+    if (!v) return;
+    subsPatch(id, l => [...l, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: v }]);
+    setSubText('');
+  };
+  const subToggle = (id, sid) => subsPatch(id, l => l.map(x => {
+    if (x.id !== sid) return x;
+    const on = todoSubDone(x, isDaily, today);
+    return isDaily ? { ...x, doneDate: on ? undefined : today } : { ...x, done: !on };
+  }));
+  const subRemove = (id, sid) => subsPatch(id, l => l.filter(x => x.id !== sid));
   // ── 🏷️ DOUBLE TAP SUR LE LIBELLÉ = tag suivant (rien → Massy → Travail → rien) ──
   // ⚠ Une ref et non un état : le premier appui ne doit RIEN re-rendre, sinon la ligne
   // clignote à chaque simple clic (piège 6, même raison que l'appui long).
@@ -49265,7 +49293,7 @@ function TodoPanel() {
   const restoreTrash = (e, i) => {
     const bi = TODO_BUCKETS.findIndex(b => b[0] === e.bucket);
     const dest = bi >= 0 ? bi : TODO_BUCKETS.findIndex(b => b[0] === 'today');
-    update([...todos, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: e.text, bucket: TODO_BUCKETS[dest][0], fav: !!e.fav, tag: todoTagOf(e) }]);
+    update([...todos, { id: Date.now() + '_' + Math.random().toString(36).slice(2), text: e.text, bucket: TODO_BUCKETS[dest][0], fav: !!e.fav, tag: todoTagOf(e), ...(todoSubsOf(e).length ? { subs: todoSubsOf(e) } : {}) }]);
     todoDoneUndo(e.doneTs);
     setTrash(todoTrashRemove(i));
     setBucketIdx(dest);
@@ -49469,16 +49497,24 @@ function TodoPanel() {
             const faded = doneToday || doneCecile;   // grisée + barrée (validée du jour / activité faite)
             const dragging = dragId === t.id;
             const rowTag = todoTagOf(t), rowTagDef = todoTagDef(rowTag);
+            const subs = todoSubsOf(t), subsDone = subs.filter(x => todoSubDone(x, isDaily, today)).length;
+            const subsShown = subOpen === t.id || subs.length > 0;
             return (
               <div key={t.id} ref={el => { if (el) rowRefs.current[t.id] = el; else delete rowRefs.current[t.id]; }}
-                style={{ display:'flex', alignItems:'center', gap:8, background: dragging ? `${TODO_GREEN}1e` : C.surfaceHigh, borderRadius:8, padding:'6px 8px',
+                style={{ display:'flex', flexDirection:'column', gap:5, background: dragging ? `${TODO_GREEN}1e` : C.surfaceHigh, borderRadius:8, padding:'6px 8px',
                          opacity: dragging ? 0.9 : (faded ? 0.5 : 1),
                          boxShadow: dragging ? `0 0 0 1px ${TODO_GREEN}77` : 'none' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
                 <span onPointerDown={e => dragStart(e, t.id)} onPointerMove={dragMove}
                   onPointerUp={dragEnd} onPointerCancel={dragEnd}
                   title="Glisser pour changer l'ordre" aria-label="Réordonner cette tâche"
                   style={{ color: dragging ? TODO_GREEN : C.dim, fontSize:14, lineHeight:1, padding:'2px 3px', cursor:'grab',
                            flexShrink:0, touchAction:'none', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }}>⠿</span>
+                {/* ↳ À GAUCHE de l'étoile (demande utilisateur) : ouvre l'ajout de sous-tâches */}
+                <button onClick={() => { setSubOpen(o => (o === t.id ? null : t.id)); setSubText(''); }}
+                  title={subOpen === t.id ? 'Fermer l’ajout de sous-tâches' : 'Ajouter une ou plusieurs sous-tâches'}
+                  aria-label="Ajouter une sous-tâche" aria-pressed={subOpen === t.id}
+                  style={{ background:'none', border:'none', color: subOpen === t.id || subs.length ? TODO_GREEN : C.dim, fontSize:14, fontWeight:700, lineHeight:1, padding:'2px 2px', cursor:'pointer', flexShrink:0 }}>↳</button>
                 <button onClick={() => toggleFav(t.id)} title={t.fav ? 'Retirer des favorites' : 'Marquer comme favorite'}
                   style={{ background:'none', border:'none', color: t.fav ? '#f5c518' : C.dim, fontSize:15, lineHeight:1, padding:'2px 4px', cursor:'pointer', flexShrink:0 }}>{t.fav ? '★' : '☆'}</button>
                 {/* ⚠ Le libellé porte MAINTENANT un clic : double tap = tag suivant (📍 Massy en
@@ -49499,7 +49535,9 @@ function TodoPanel() {
                            fontWeight: rowTagDef ? 700 : 400,
                            wordBreak:'break-word', textDecoration: faded ? 'line-through' : 'none',
                            cursor:'pointer', touchAction:'manipulation',
-                           userSelect: isDaily ? 'none' : 'auto', WebkitUserSelect: isDaily ? 'none' : 'auto', WebkitTouchCallout:'none' }}>{t.text}</div>
+                           userSelect: isDaily ? 'none' : 'auto', WebkitUserSelect: isDaily ? 'none' : 'auto', WebkitTouchCallout:'none' }}>{t.text}
+                  {subs.length > 0 && <span style={{ marginLeft:6, fontSize:9, fontWeight:700, fontFamily:'DM Mono,monospace', color: subsDone === subs.length ? '#4caf50' : C.muted }}>{subsDone}/{subs.length}</span>}
+                </div>
                 <button onClick={() => move(t.id, -1)} disabled={bi === 0} title="Échéance plus proche"
                   style={{ background:'none', border:`1px solid ${bi === 0 ? C.border : TODO_GREEN + '55'}`, borderRadius:7, color: bi === 0 ? C.dim : TODO_GREEN, fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 10px', cursor: bi === 0 ? 'default' : 'pointer', flexShrink:0 }}>‹</button>
                 <button onClick={() => move(t.id, 1)} disabled={bi === TODO_BUCKETS.length - 1} title="Échéance plus lointaine"
@@ -49509,6 +49547,33 @@ function TodoPanel() {
                        : isCecile ? (doneCecile ? 'Activité faite — cliquer pour la rouvrir' : 'Marquer comme faite (elle passe en bas, barrée)')
                        : 'Supprimer'}
                   style={{ background:'none', border:`1px solid ${faded ? '#4caf5055' : '#e0505055'}`, borderRadius:7, color: faded ? '#4caf50' : '#e05050', fontSize:20, fontWeight:700, lineHeight:1, padding:'4px 11px', cursor: doneToday ? 'default' : 'pointer', flexShrink:0 }}>{faded ? '✓' : '×'}</button>
+              </div>
+              {subsShown && (
+                <div style={{ display:'flex', flexDirection:'column', gap:4, marginLeft:30, paddingLeft:8, borderLeft:`2px solid ${TODO_GREEN}44` }}>
+                  {subs.map(x => {
+                    const ok = todoSubDone(x, isDaily, today);
+                    return (
+                      <div key={x.id} style={{ display:'flex', alignItems:'center', gap:6 }}>
+                        <button onClick={() => subToggle(t.id, x.id)} title={ok ? 'Décocher' : 'Cocher comme faite'} aria-pressed={ok}
+                          style={{ background:'none', border:`1px solid ${ok ? '#4caf50' : C.border}`, borderRadius:4, color:'#4caf50', width:18, height:18, fontSize:11, lineHeight:1, padding:0, cursor:'pointer', flexShrink:0 }}>{ok ? '✓' : ''}</button>
+                        <span onClick={() => subToggle(t.id, x.id)} style={{ flex:1, minWidth:0, fontSize:10.5, color: ok ? C.muted : C.text, textDecoration: ok ? 'line-through' : 'none', wordBreak:'break-word', cursor:'pointer', touchAction:'manipulation' }}>{x.text}</span>
+                        <button onClick={() => subRemove(t.id, x.id)} title="Supprimer la sous-tâche" aria-label="Supprimer la sous-tâche"
+                          style={{ background:'none', border:'none', color:C.dim, fontSize:14, lineHeight:1, padding:'2px 6px', cursor:'pointer', flexShrink:0 }}>×</button>
+                      </div>
+                    );
+                  })}
+                  {subOpen === t.id && (
+                    <div style={{ display:'flex', gap:6 }}>
+                      <input type="text" value={subText} placeholder="Sous-tâche…" autoFocus
+                        onChange={e => setSubText(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') subAdd(t.id); else if (e.key === 'Escape') setSubOpen(null); }}
+                        style={{ flex:1, minWidth:0, background:'#111', border:`1px solid ${subText ? TODO_GREEN : C.border}`, borderRadius:6, padding:'4px 8px', fontSize:10.5, color:C.text, outline:'none', fontFamily:'inherit', boxSizing:'border-box' }} />
+                      <button onClick={() => subAdd(t.id)} title="Ajouter la sous-tâche (le champ reste ouvert pour en ajouter d’autres)"
+                        style={{ background:`${TODO_GREEN}22`, border:`1px solid ${TODO_GREEN}66`, borderRadius:6, color:TODO_GREEN, fontSize:14, lineHeight:1, padding:'0 9px', cursor:'pointer', flexShrink:0 }}>+</button>
+                    </div>
+                  )}
+                </div>
+              )}
               </div>
             );
           })}
