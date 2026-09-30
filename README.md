@@ -55,7 +55,7 @@
 | **✅ To do** | 8 rubriques (quotidien → un jour, + à deux) ; **chaque alerte datée s'y affiche** dans la rubrique de son échéance. **Double tap** sur une tâche = 📍 Massy → 💼 Travail → sans tag. Le bouton à gauche du ♻️ change la vue : **🏷️ Toutes** (défaut) → **⏳ Sans alertes** (alertes du mois seulement) → Travail → Massy. ♻️ = 3 dernières supprimées. Le Quotidien se coche depuis Santé (pesée, repas, course) |
 | **🎬 TV Time** | Séries et films (TMDB), chaînes YouTube (onglets YT / Short), livres ; lecteur plein écran avec résumé IA ; 🔔 « Suivre cette série » = tâche et notification la veille d'un épisode |
 | **👕 Vêtement** | Garde-robe détaillée (coupe, ressenti, tag 👔), photos sur Google Drive **gardées sur l'appareil**, recherche par image, **📏 Mes tailles** avec conseil IA |
-| **📊 Stats** | Écoutes, tâches, séries, poids, alertes, jeux, API ; volet 🏋️ Sport pour tes chronos de course |
+| **📊 Stats** | Écoutes, tâches, séries, poids, alertes, jeux, API ; volet 🏋️ Sport pour tes chronos de course ; 🔗 Liens modules : graphe des échanges entre modules (touche une bulle) |
 
 ---
 
