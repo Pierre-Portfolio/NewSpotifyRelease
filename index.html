@@ -233,7 +233,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.103';
+const APP_VERSION = '13.21.104';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3398,6 +3398,8 @@ function StoreProvider({ children }) {
         // ⚠ AVANT notifyDueReminders : les rappels hebdomadaires ne notifient que si leur
         // tâche est présente dans le To do — elle doit donc être créée d'abord.
         try { syncRemembersToTodos(); } catch {}
+        // Frigo → To do : aliments qui périment dans 2 jours ou moins (100 % local).
+        try { syncFrigoToTodos(); } catch {}
         // Speedrun → To do : même chose pour les runs à valider, mais sur le SEUL cache
         // (aucune requête au boot ; la synchro complète a lieu à l'ouverture d'Alertes).
         try { syncSpeedrunToTodoFromCache(); } catch {}
@@ -15333,9 +15335,42 @@ function FrigoAiSection({ data, onAdd }) {
   );
 }
 
+// ── 🧊 FRIGO → TO DO ─────────────────────────────────────────────────────────
+// Un aliment qui périme dans `FRIGO_TODO_DAYS` jours ou moins (ou déjà périmé) devient UNE
+// tâche « Aujourd'hui » ; le retirer du frigo (mangé, jeté) ou changer sa date retire la tâche
+// si elle est encore là. Clé = id de l'aliment + date (`frigoKey` sur la tâche) : supprimer la
+// tâche à la main ne la fait pas revenir (marqueur `FRIGO_TODO_LS`, purgé des aliments
+// disparus), repousser la date en recrée une le moment venu.
+// Appelée au démarrage (`bootLocal`) et à chaque écriture du Frigo.
+const FRIGO_TODO_DAYS = 2;
+const FRIGO_TODO_LS = 'spotifyplus_frigo_todo';   // { "<id>|<exp>": "YYYY-MM-DD" }
+function syncFrigoToTodos() {
+  const d = frigoLoad();
+  const live = new Map();
+  FRIGO_SECTIONS.forEach(([k]) => (d.sections[k] || []).forEach(it => { if (it && it.id && it.exp) live.set(it.id + '|' + it.exp, it); }));
+  let mark = {};
+  try { mark = JSON.parse(lsGet(FRIGO_TODO_LS) || '{}') || {}; } catch {}
+  let todos = loadTodos(), changed = false;
+  const kept = todos.filter(t => !t || !t.frigoKey || live.has(t.frigoKey));
+  if (kept.length !== todos.length) { todos = kept; changed = true; }
+  for (const [key, it] of live) {
+    const st = frigoExpStatus(it.exp);
+    if (!st || st.days > FRIGO_TODO_DAYS || mark[key]) continue;
+    todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), bucket:'today', fav:false, frigoKey: key,
+      text: st.level === 'expired' ? `🧊 Frigo : ${it.name} ${frigoExpText(st)} — à vérifier ou jeter` : `🧊 Frigo : manger ${it.name} (${frigoExpText(st)})` });
+    mark[key] = localDayStr();
+    changed = true;
+  }
+  const keep = {};
+  for (const k of Object.keys(mark)) if (live.has(k)) keep[k] = mark[k];
+  if (changed) saveTodos(todos);
+  lsSet(FRIGO_TODO_LS, JSON.stringify(keep));
+  return changed;
+}
+
 function FrigoPanel() {
   const [data, setData] = React.useState(frigoLoad);
-  const save = next => { setData(next); frigoSave(next); };
+  const save = next => { setData(next); frigoSave(next); try { syncFrigoToTodos(); } catch {} };
   const onAdd = (sec, name, exp) => { const s = { ...data.sections }; s[sec] = [...s[sec], { id: Date.now() + '' + Math.floor(Math.random() * 1000), name: name.trim(), exp: exp || '' }]; save({ sections: s }); };
   const onDel = (sec, id) => { const s = { ...data.sections }; s[sec] = s[sec].filter(i => i.id !== id); save({ sections: s }); };
   const onExp = (sec, id, exp) => { const s = { ...data.sections }; s[sec] = s[sec].map(i => i.id === id ? { ...i, exp } : i); save({ sections: s }); };
@@ -29748,6 +29783,7 @@ const MODULE_LINKS = [
   ['food',     'todo',       'repas, pesée, course ⇒ coche la tâche quotidienne'],
   ['contact',  'remember',   'anniversaire 🔔 ⇒ alerte'],
   ['frigo',    'remember',   'aliments bientôt périmés affichés dans Alertes'],
+  ['frigo',    'todo',       'aliment qui périme dans 2 j ou moins ⇒ tâche (retirée quand l’aliment quitte le frigo)'],
   ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
   ['mdp',      'contact',    'même chiffrement AES-GCM (mot de passe propre)'],
   ['actu',     'tvtime',     'vidéo YouTube vue ⇒ marquée vue'],
@@ -30258,6 +30294,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.104', date:'2026-09-30', title:'🧊 Frigo → To do : les aliments à finir deviennent des tâches', items:[
+    'Un aliment qui périme dans 2 jours ou moins (ou déjà périmé) crée une tâche dans To do → Aujourd’hui : « 🧊 Frigo : manger le lait (périme dans 1 j) ».',
+    'Quand tu retires l’aliment du frigo (mangé ou jeté) ou changes sa date, la tâche s’en va toute seule. Une tâche supprimée à la main ne revient pas.',
+  ] },
   { v:'13.21.103', date:'2026-09-30', title:'🔗 Liens modules déménage dans À propos', items:[
     'Le graphe des liens entre modules quitte Stats : il est maintenant dans À propos, entre 📦 Limite data et 📋 Release note. Il fonctionne pareil (toucher une bulle ou un trait, glisser une bulle).',
   ] },
@@ -30272,10 +30312,6 @@ const RELEASE_NOTES = [
   { v:'13.21.100', date:'2026-09-30', title:'🧩 TV Time : les vidéos YouTube vues sur le PC arrivent toutes seules', items:[
     'Nouvelle extension navigateur « YouTube → TV Time » (dossier extension du dépôt du Hub) : sur youtube.com, une vidéo lue à 25 % (réglable) ou résumée avec son bouton ✨ Résumé IA est envoyée dans ton Dropbox.',
     'À l’ouverture du Hub (téléphone compris, Dropbox connecté), ces vidéos sont cochées vues dans TV Time — dans leur chaîne si tu la suis, sinon dans « Hub Pierre » — et leur résumé IA est repris. Une vidéo décochée à la main ne revient pas.',
-  ] },
-  { v:'13.21.99', date:'2026-09-30', title:'🔑 Graphe des mots de passe : regroupé par email', items:[
-    'Chaque email de connexion devient un point ✉ relié à ses comptes, entouré d’une zone à la couleur de la priorité la plus haute de ses comptes (P1 rouge, P2 orange…) : tu vois d’un coup quel site est relié à quel email.',
-    'Bouton « Regrouper par » : ✉ Email, 🎯 Priorité (une zone par P1…P5) ou Aucun. Toucher le point d’un email liste ses comptes ; les bulles se déplacent au doigt (rien n’est enregistré).',
   ] },
 ];
 
