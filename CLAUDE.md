@@ -139,7 +139,8 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 | **Stats** | `StatsPanel` | `_sport_times` | Lecture seule sauf 🏋️ SPORT (`sportTimeNorm`). |
 | **À propos** | `VosEcoutesPanel` | — | **Release note** : `RELEASE_NOTES` (5 dernières versions, cf. règle `APP_VERSION`). **Limite data** : `LSU_RULES`, splits `lsuTvSplit` / `lsuCollSplit` / `lsuMusiqueSplit`, `lsuIdbScan` ; plafond **sondé** par `lsuProbeFree`. **Autorisations** : `AUTH_PERMS` table unique, cocher = `ask`, décocher = `revoke` (+ reload) ; pas de « tout autoriser » possible. **🔗 Liens modules** : `MODULE_LINKS` **tenu à la main** (nouveau croisement entre modules ⇒ l'y ajouter), flèches IA déduites d'`IA_ACTIONS`/`IA_READ` ; bulles 👁 : TOUS les modules à l'ouverture (même désactivés), tri jamais enregistré |
 
-**Layout** : `WebApp` (desktop) · `MobileApp` (menu ⋯) · `CompactPlayer` (viewport court) · `HubHome` · `Home` (login).
+**Layout** : `WebApp` (ordinateur : barre latérale `DeskSidebar`, repliée sous 1100 px ou par `DESK_NAV_LS` ; en-tête de page ; `wide` dans `SECTION` = pleine largeur) · `MobileApp` (menu ⋯) · `CompactPlayer` (viewport court) · `HubHome` · `Home` (login).
+**Ordi** : `useDesk()` n'est vrai que sous `WebApp` ⇒ toute branche `desk ?` laisse le mobile intact (comparer le DOM mobile avant/après). `DeskCols` = colonnes indépendantes (⚠ changer de colonne remonte l'enfant : placer par `DeskCol` dès qu'un enfant est conditionnel). Pas de `zoom` CSS (unités `vw` et `offsetX` faussés).
 
 ---
 
@@ -153,7 +154,7 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 5. **`StatsCollapse` démonte ses enfants** : l'état à préserver vit **module-level** (objet + `subs:Set` + publieur, cf. `_finance`).
 6. **Refs anti-closure** dans les boucles `rAF`/`setInterval` et les écouteurs posés par élément.
 7. **Nouvel onglet mobile** : bloc de rendu dans `MobileApp` + entrée `allOverflowTabs` + remap des anciennes valeurs de `spotifyplus_active_tab`.
-8. `selfHeading:true` dans `SECTION` **et** heading retiré de `MobileApp`.
+8. `selfHeading:true` dans `SECTION` **et** heading retiré de `MobileApp` ; la rangée de titre du module = `ModHead` + `ModTitle` (ordinateur : titre dans l'en-tête de page, boutons téléportés).
 9. **`position:fixed` piégé par un ancêtre `transform`** → portal sur `document.body`. ⚠ En **plein écran natif**, un portal est invisible : rendre en enfant du lecteur.
 10. **`useImmersiveLock(active)`** sur tout overlay plein écran (sinon une rotation bascule en `CompactPlayer` et démonte l'overlay).
 11. **Appui long** : ref `{timer, fired}` qui neutralise le `click` suivant ; bloquer `onContextMenu` + `userSelect`. ⚠ `installButtonTips` (infobulle au survol / appui 3 s sur TOUT bouton, clic avalé) : un bouton qui a son propre appui long porte `data-hold`, un plateau de jeu `data-notip`.
