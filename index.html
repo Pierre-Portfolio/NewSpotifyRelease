@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.157';
+const APP_VERSION = '13.21.158';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30775,6 +30775,9 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.158', date:'2026-10-04', title:'🔔 TV Time : abonné ou pas ?', items:[
+    'La fiche d’une chaîne YouTube affiche à droite de son nom si tu y es abonné (🔔 Abonné / Non abonné). Aucune autorisation n’est demandée en l’ouvrant : sans accès YouTube valide, elle indique « Non connecté à YouTube ».',
+  ] },
   { v:'13.21.157', date:'2026-10-04', title:'📺 TV Time : chaînes YouTube à accent', items:[
     'Une chaîne dont le @nom contient un accent (ex. @LesInachevés) s’ajoute enfin depuis son lien : le lien copié de la barre d’adresse (« %C3%A9 ») est relu correctement au lieu d’être coupé avant l’accent.',
   ] },
@@ -30790,9 +30793,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.154', date:'2026-10-02', title:'⚙️ Ordinateur : À propos sur deux colonnes', items:[
     'Sur ordinateur, les sections d’À propos (configuration, autorisations, IA, limite data, liens, release note, import / export) se rangent sur deux colonnes ; « Réinitialiser le quota », « Purger les écoutes » et « Déconnecter » tiennent sur une rangée.',
-  ] },
-  { v:'13.21.153', date:'2026-10-02', title:'📊 Ordinateur : Stats sur trois colonnes', items:[
-    'Sur ordinateur, les douze sections de Stats (Alertes, API, Collection, Films… To do) se rangent sur trois colonnes ; chacune s’ouvre dans sa colonne sans pousser les autres.',
   ] },
 ];
 
@@ -32682,6 +32682,22 @@ async function ytSubsListChannels() {
     if (!pageToken) break;
   }
   return { subs };
+}
+
+// Abonné à UNE chaîne ? (badge de la fiche TV Time) → 'yes' | 'no' | 'auth' | null (inconnu).
+// ⚠ Lit le jeton YouTube DÉJÀ accordé, sans jamais ouvrir de consentement ni lancer
+// `ytgAutoLogin` (qui recharge la page) : pas de jeton ⇒ 'auth' (« Non connecté à YouTube »).
+// subscriptions?mine&forChannelId = 1 unité ; seul un oui/non est gardé, 10 min en mémoire.
+const _ytSubOf = new Map();   // channelId → { at, sub }
+async function ytIsSubscribed(channelId) {
+  const c = _ytSubOf.get(channelId);
+  if (c && Date.now() - c.at < 10 * 60 * 1000) return c.sub ? 'yes' : 'no';
+  if (!ytgConnected()) return 'auth';
+  const d = await ytSubApi('subscriptions', { part: 'id', mine: 'true', forChannelId: channelId, maxResults: '1' });
+  if (d.__error) return d.__error === 'AUTH' ? 'auth' : null;
+  const sub = !!(d.items && d.items.length);
+  _ytSubOf.set(channelId, { at: Date.now(), sub });
+  return sub ? 'yes' : 'no';
 }
 
 // Vidéos les plus récentes de tous les abonnements, triées par date desc.
@@ -44814,6 +44830,25 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
   );
 }
 
+// Pastille « Abonné / Non abonné / Non connecté à YouTube » de la fiche d'une chaîne
+// (`ytIsSubscribed`) ; rien tant que la réponse n'est pas là, ni si YouTube est injoignable.
+function YtSubBadge({ channelId }) {
+  const [st, setSt] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    ytIsSubscribed(channelId).then(r => { if (alive) setSt(r); });
+    return () => { alive = false; };
+  }, [channelId]);
+  if (!st) return null;
+  const [txt, col, tip] = st === 'yes' ? ['🔔 Abonné', '#4caf50', 'Tu es abonné à cette chaîne sur YouTube']
+    : st === 'no' ? ['Non abonné', C.muted, "Tu n'es pas abonné à cette chaîne sur YouTube"]
+    : ['Non connecté à YouTube', '#f5b81f', 'Autorisation YouTube absente ou expirée : se reconnecter depuis Actu → Vidéos YouTube'];
+  return (
+    <span title={tip} style={{ flexShrink:0, marginTop:1, marginRight:6, fontSize:9.5, fontWeight:700, fontFamily:'DM Mono,monospace',
+      color:col, border:`1px solid ${col}66`, background:`${col}14`, borderRadius:10, padding:'2px 7px', whiteSpace:'nowrap' }}>{txt}</span>
+  );
+}
+
 // ── Fiche YouTube (clic sur l'affiche d'une chaîne/playlist suivie) — vidéos groupées
 // en SAISONS = ANNÉES de publication, cochage INDIVIDUEL par vidéo (watchedIds).
 function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCartoon, onRefresh, refreshing, onUnlimited, onRelock, onKeepShorts, onShortsOnly, onIgnore, onUnignoreVideo, onPlay, wlAdded, wlBusyId, onWatchLater, onRemoveVideo }) {
@@ -44884,7 +44919,10 @@ function YtDetailModal({ item, onClose, onSetWatched, onStatus, onManga, onCarto
             ? <img src={item.poster} alt="" style={{ width:56, height:56, borderRadius:'50%', objectFit:'cover', flexShrink:0, background:'#111' }} />
             : <div style={{ width:56, height:56, borderRadius:'50%', background:'#111', display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, flexShrink:0 }}>▶️</div>}
           <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:15, fontWeight:800, color:C.text, lineHeight:1.25 }}>{item.title}</div>
+            <div style={{ display:'flex', alignItems:'flex-start', gap:8 }}>
+              <div style={{ flex:1, minWidth:0, fontSize:15, fontWeight:800, color:C.text, lineHeight:1.25 }}>{item.title}</div>
+              {!item.local && item.ytKind !== 'playlist' && /^UC[\w-]{20,}$/.test(item.id || '') && <YtSubBadge key={item.id} channelId={item.id} />}
+            </div>
             <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace', marginTop:3 }}>
               {item.local ? '📺 Vidéos vues hors chaîne suivie' : item.ytKind === 'playlist' ? '▶️ Playlist' : '▶️ Chaîne'} · {years.length} année(s) · {total} vidéo(s)
               {iset.size > 0 && <span style={{ color:TV_IGNORED_COLOR }}> · 🙈 {iset.size} ignorée{iset.size > 1 ? 's' : ''}</span>}
