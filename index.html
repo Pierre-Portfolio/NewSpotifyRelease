@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.160';
+const APP_VERSION = '13.21.161';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30794,6 +30794,9 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.161', date:'2026-10-04', title:'🗑 Liste de course : supprimer un article', items:[
+    'À côté du ✏️, le bouton 🗑 supprime un article ajouté par erreur (il ne compte pas comme un achat) ; « ↩ Annuler » le remet à sa place pendant quelques secondes.',
+  ] },
   { v:'13.21.160', date:'2026-10-04', title:'🛒 Liste de course : où trouver chaque article', items:[
     'Chaque article porte un tag 🧂 Généraliste (sel, huile, beurre… qui servent à tout) ou 🍽️ Repas (acheté pour un plat) — touche-le pour le changer.',
     'Chance de le trouver selon le magasin : P · M · G = petite surface (supérette), moyenne (supermarché), grande (hypermarché), en %, avec « dès la supérette », « en hypermarché » ou le magasin spécialisé où le chercher (≈ = estimé d’après le rayon). Choisis « je vais en Petite / Moyenne / Grande » : ce qui risque de manquer est signalé.',
@@ -30811,10 +30814,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.157', date:'2026-10-04', title:'📺 TV Time : chaînes YouTube à accent', items:[
     'Une chaîne dont le @nom contient un accent (ex. @LesInachevés) s’ajoute enfin depuis son lien : le lien copié de la barre d’adresse (« %C3%A9 ») est relu correctement au lieu d’être coupé avant l’accent.',
-  ] },
-  { v:'13.21.156', date:'2026-10-02', title:'📈 Marché financier + Mes finances = Finance', items:[
-    'Un seul module 📈 Finance : à droite de Calculatrice, le bouton Finance (tes actifs, classeur Google Drive) puis Prévision (scénarios budgétaires : combien tu peux placer).',
-    'Tes scénarios, ta sauvegarde et l’IA Action ne bougent pas ; l’ancien onglet Mes finances ouvre désormais Finance.',
   ] },
 ];
 
@@ -51482,10 +51481,11 @@ function todoTrashWhen(ts) {
 // tâches : ses articles vivent dans leur propre clé (`COURSES_LS`, sauvegardée avec To do) et
 // sont rendus par `CoursesPanel`. Une tâche n'y entre jamais : ‹ › et l'IA Action s'arrêtent
 // à Cécile (`TODO_TASK_BUCKETS`).
-// ⚠ RIEN NE SE SUPPRIME (demande utilisateur) : ✓ barre l'article (dans le caddie), 🏠 le
-// barre aussi (déjà à la maison). Seul « 🏁 J'ai fini mes courses » retire les lignes barrées :
-// les achats partent dans l'historique (`trips`, source des ⭐ habituels), les non barrés
-// RESTENT pour la prochaine fois. Une recette se barre (✓ cuisinée) ; au-delà de
+// ✓ barre l'article (dans le caddie), 🏠 le barre aussi (déjà à la maison) ; « 🏁 J'ai fini mes
+// courses » retire les lignes barrées : les achats partent dans l'historique (`trips`, source
+// des ⭐ habituels), les non barrés RESTENT pour la prochaine fois. 🗑 (13.21.161, demande
+// utilisateur) supprime une ligne ajoutée par erreur — sans historique, ↩ pendant quelques
+// secondes. Une recette se barre (✓ cuisinée), elle ne se supprime pas ; au-delà de
 // `COURSES_DISH_MAX`, les plus anciennes (cuisinées d'abord) s'effacent seules.
 // ⚠ Toute écriture passe par `coursesPut` (relit le stockage, écrit, prévient `_coursesSubs`) :
 // l'IA Action et le Frigo écrivent aussi ici, l'écran ouvert doit suivre.
@@ -51493,6 +51493,7 @@ const COURSES_LS = 'spotifyplus_courses';
 const COURSES_DISH_MAX = 15;
 const COURSES_TRIP_MAX = 20;
 const COURSES_ITEM_MAX = 150;      // garde-fou : le localStorage est partagé par tout le Hub
+const COURSES_UNDO_MS = 6000;      // durée du ↩ après un 🗑
 const COURSES_REC_COLOR = '#ff8a5c';   // les liens « recette » (orange, distinct du jaune To do)
 // Rayons dans l'ordre d'un parcours de supermarché : la liste se lit dans le sens des allées.
 // ⚠ La CLÉ est persistée sur chaque article : ne jamais renommer une clé (le libellé, si).
@@ -52611,6 +52612,32 @@ function CoursesPanel() {
   const pickBrand = (id, b) => patch(id, x => ({ ...x, brand: x.brand === b ? '' : b }));
   // 🧂 ⇄ 🍽️ : choix à la main, que ni l'IA ni un plat ne réécrivent plus (`kindSet`).
   const toggleKind = id => patch(id, x => ({ ...x, kind: coursesKindOf(x) === 'base' ? 'repas' : 'base', kindSet: true }));
+  // 🗑 Suppression d'un article (erreur de saisie, plus besoin) : ni achat ni historique.
+  // ↩ le remet à SA place tant que le bandeau est là (`COURSES_UNDO_MS`).
+  const [undo, setUndo] = React.useState(null);   // { item, pos }
+  const undoTimer = React.useRef(null);
+  React.useEffect(() => () => clearTimeout(undoTimer.current), []);
+  const removeItem = id => {
+    const cur = coursesLoad().items, pos = cur.findIndex(x => x.id === id);
+    if (pos < 0) return;
+    if (!put(c => ({ ...c, items: c.items.filter(x => x.id !== id) }))) return;
+    if (editId === id) { setEditId(null); setDraft(null); }
+    setUndo({ item: cur[pos], pos });
+    clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndo(null), COURSES_UNDO_MS);
+  };
+  const undoRemove = () => {
+    if (!undo) return;
+    const { item, pos } = undo;
+    put(c => {
+      if (c.items.some(x => x.id === item.id)) return c;
+      const items = c.items.slice();
+      items.splice(Math.min(pos, items.length), 0, item);
+      return { ...c, items };
+    });
+    clearTimeout(undoTimer.current);
+    setUndo(null);
+  };
   const startEdit = x => {
     if (editId === x.id) { setEditId(null); setDraft(null); return; }
     setEditId(x.id); setDraft({ name: x.name, qty: x.qty || '', rayon: x.rayon });
@@ -52878,6 +52905,12 @@ function CoursesPanel() {
       )}
 
       {note && <div style={{ fontSize:10.5, color:TODO_GREEN, textAlign:'center', lineHeight:1.4 }}>{note}</div>}
+      {undo && (
+        <div style={{ display:'flex', alignItems:'center', gap:8, background:C.surfaceHigh, border:'1px solid #e0505055', borderRadius:8, padding:'5px 9px' }}>
+          <span style={{ flex:1, minWidth:0, fontSize:10.5, color:C.muted, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>🗑 « {undo.item.name} » supprimé</span>
+          <button onClick={undoRemove} style={{ ...ghost(true), padding:'3px 9px' }}>↩ Annuler</button>
+        </div>
+      )}
 
       {/* La liste, rayon par rayon */}
       {items.length === 0 ? (
@@ -52924,6 +52957,8 @@ function CoursesPanel() {
                     style={{ background: x.have ? `${TODO_GREEN}22` : 'none', border:`1px solid ${x.have ? TODO_GREEN + '88' : C.border}`, borderRadius:7, fontSize:12, lineHeight:1, padding:'4px 6px', cursor:'pointer', flexShrink:0, filter: x.have ? 'none' : 'grayscale(1)', opacity: x.have ? 1 : 0.7 }}>🏠</button>
                   <button onClick={() => startEdit(x)} aria-pressed={editId === x.id} title="Corriger le nom, la quantité ou le rayon"
                     style={{ background:'none', border:`1px solid ${editId === x.id ? TODO_GREEN + '88' : C.border}`, borderRadius:7, color:C.muted, fontSize:11, lineHeight:1, padding:'4px 6px', cursor:'pointer', flexShrink:0 }}>✏️</button>
+                  <button onClick={() => removeItem(x.id)} title="Supprimer l’article (↩ possible quelques secondes)" aria-label={`Supprimer ${x.name}`}
+                    style={{ background:'none', border:'1px solid #e0505055', borderRadius:7, color:'#e05050', fontSize:11, lineHeight:1, padding:'4px 6px', cursor:'pointer', flexShrink:0 }}>🗑</button>
                 </div>
                 {!off && (
                   <div style={{ display:'flex', flexWrap:'wrap', gap:4, marginLeft:30 }}>
@@ -53121,7 +53156,7 @@ function CoursesPanel() {
       )}
 
       <div style={{ fontSize:9, color:C.dim, textAlign:'center', fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
-        ✓ ou toucher l’article = dans le caddie · 🏠 = déjà à la maison · 🧂/🍽️ = généraliste ou repas (toucher pour changer) · P · M · G = chance en petite, moyenne, grande surface (≈ estimée d’après le rayon) · ✏️ corrige nom, quantité, rayon · rien ne se supprime : 🏁 retire les lignes barrées
+        ✓ ou toucher l’article = dans le caddie · 🏠 = déjà à la maison · 🧂/🍽️ = généraliste ou repas (toucher pour changer) · P · M · G = chance en petite, moyenne, grande surface (≈ estimée d’après le rayon) · ✏️ corrige nom, quantité, rayon · 🗑 supprime (↩ possible) · 🏁 retire les lignes barrées
       </div>
     </div>
   );
@@ -61800,7 +61835,7 @@ const IA_ACTIONS = [
     p:{ cible:IA_CIBLE }, target:{ find: p => iaTodoCands(p.cible) },
     label: (p, t) => `🗑 Supprimer la tâche ${t ? t.label : p.cible}`,
     run: (p, t) => { todoTrashPush(t.raw, 'supprimée'); return { msg:'Tâche supprimée.', undo:[iaListDel('todos', null, t.id)] }; } },
-  // 🛒 Liste de course : AJOUT seulement (rien ne s'y supprime, cf. `COURSES_LS`). Rayon deviné ;
+  // 🛒 Liste de course : AJOUT seulement (la suppression reste un geste de l'écran). Rayon deviné ;
   // un article déjà à acheter n'est pas doublé (`coursesMerge`), sa quantité est complétée.
   { id:'courses.add', mod:'todo', d:'Ajouter des articles à la liste de course (To do → 🛒 Liste de course)',
     p:{ articles:{ t:'str', req:1, d:'articles séparés par des virgules, quantité devant si besoin (ex. « lait, 6 œufs, 500 g de farine »)' } },
