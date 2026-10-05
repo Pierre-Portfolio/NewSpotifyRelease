@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.164';
+const APP_VERSION = '13.21.165';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28712,11 +28712,26 @@ async function dbxDevicesUpdate(fn) {
   if (fn) fn(reg);
   if (JSON.stringify(reg) !== before) await dropboxUpload(reg, DBX_DEVICES_PATH);
   _dbxDevCache = { at: Date.now(), reg };
+  _dbxDevSubs.forEach(f => { try { f(reg); } catch {} });
   return reg;
 }
-async function dbxIsDefaultDevice() {
-  if (!_dbxDevCache || Date.now() - _dbxDevCache.at > DBX_DEV_TTL_MS) await dbxDevicesUpdate();
+// `fresh` : relit Dropbox même si le cache est jeune (juste avant un envoi automatique).
+async function dbxIsDefaultDevice(fresh) {
+  if (fresh || !_dbxDevCache || Date.now() - _dbxDevCache.at > DBX_DEV_TTL_MS) await dbxDevicesUpdate();
   return _dbxDevCache.reg.default === deviceId();
+}
+// Registre vu par l'interface (interrupteur ⏰ d'À propos, 📱 Appareil par défaut) : le cache,
+// relu au montage s'il manque ou a vieilli, puis republié à chaque lecture / écriture.
+const _dbxDevSubs = new Set();
+function useDbxDevReg() {
+  const [reg, setReg] = React.useState(() => _dbxDevCache ? _dbxDevCache.reg : null);
+  React.useEffect(() => {
+    _dbxDevSubs.add(setReg);
+    if (dropboxConfigured() && dropboxConnected() && (!_dbxDevCache || Date.now() - _dbxDevCache.at > DBX_DEV_TTL_MS))
+      dbxDevicesUpdate().catch(() => {});
+    return () => { _dbxDevSubs.delete(setReg); };
+  }, []);
+  return reg;
 }
 
 let _dbxAutoBusy = false;
@@ -28724,11 +28739,16 @@ async function dropboxAutoDailySave() {
   if (_dbxAutoBusy || !dbxAutoOn() || !dropboxConfigured() || !dropboxConnected()) return '';
   if (lsGet(DBX_AUTO_DAY_LS) === localDayStr()) return '';
   if (backupEncOn() && !backupKeyReady()) return '';   // clé absente : pas de relance en boucle du message
-  // Pas l'appareil par défaut (ou registre injoignable) ⇒ rien, en silence : l'intervalle
-  // retentera, et le choix se fait dans la Configuration générale.
-  try { if (!(await dbxIsDefaultDevice())) return ''; } catch { return ''; }
-  _dbxAutoBusy = true;
+  _dbxAutoBusy = true;   // AVANT les lectures du registre : deux tentatives ne passent pas ensemble
   try {
+    // ⚠ Seul l'APPAREIL PAR DÉFAUT envoie. Pas lui, aucun défaut choisi ou registre injoignable
+    // ⇒ rien, en silence (l'intervalle retentera ; le choix se fait dans la Configuration
+    // générale). Le cache suffit pour renoncer (pas une lecture Dropbox toutes les 10 min sur
+    // les autres appareils), mais le registre est RELU avant d'envoyer : le défaut a pu passer
+    // à un autre appareil depuis la mise en cache, et ce fichier écraserait alors le sien.
+    const c = _dbxDevCache;
+    if (c && Date.now() - c.at <= DBX_DEV_TTL_MS && c.reg.default !== deviceId()) return '';
+    try { if (!(await dbxIsDefaultDevice(true))) return ''; } catch { return ''; }
     const sealed = await backupSeal(await buildBackupFull(), { auto:true });
     if (sealed === null) return '';
     await dropboxUpload(sealed);
@@ -28751,7 +28771,11 @@ function DefaultDeviceField() {
     setBusy(true); setErr('');
     dbxDevicesUpdate(fn).then(r => setReg(r)).catch(e => setErr('✗ Dropbox injoignable : ' + ((e && e.message) || 'erreur'))).finally(() => setBusy(false));
   };
-  React.useEffect(() => { if (connected) run(); }, []);
+  React.useEffect(() => {
+    _dbxDevSubs.add(setReg);   // choix fait depuis ⏰ Lancement automatique
+    if (connected) run();
+    return () => { _dbxDevSubs.delete(setReg); };
+  }, []);
   const rename = () => {
     const n = name.trim().slice(0, 40);
     if (!n) { setName(deviceName()); return; }
@@ -30807,6 +30831,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.165', date:'2026-10-05', title:'☁︎ Sauvegarde Dropbox automatique : l’appareil par défaut seul', items:[
+    'Dans À propos → ⏰ Lancement automatique, la sauvegarde Dropbox automatique dit maintenant ce qui se passe sur CET appareil : « depuis cet appareil » s’il est l’appareil par défaut, sinon elle reste grisée avec l’appareil qui s’en charge, et « Choisir cet appareil » le désigne en un geste.',
+    'Avant chaque envoi automatique, la liste des appareils est relue sur Dropbox : un appareil qui vient de perdre sa place d’appareil par défaut n’écrase plus la sauvegarde de l’autre.',
+  ] },
   { v:'13.21.164', date:'2026-10-04', title:'💞 Passion commune devient « Goût »', items:[
     'Le module s’appelle maintenant Goût (menu ⋯, accueil, titre en haut à gauche) et se range à la lettre G ; le bandeau garde son titre « Passion commune ».',
     'À la première ouverture, il demande qui tu es (Pierre ou Cécile), une seule fois par téléphone. Les notes déjà données sont gardées ; si elles étaient rangées sous l’autre prénom, il te demande avant de les passer dans ton profil.',
@@ -30825,12 +30853,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.161', date:'2026-10-04', title:'🗑 Liste de course : supprimer un article', items:[
     'À côté du ✏️, le bouton 🗑 supprime un article ajouté par erreur (il ne compte pas comme un achat) ; « ↩ Annuler » le remet à sa place pendant quelques secondes.',
-  ] },
-  { v:'13.21.160', date:'2026-10-04', title:'🛒 Liste de course : où trouver chaque article', items:[
-    'Chaque article porte un tag 🧂 Généraliste (sel, huile, beurre… qui servent à tout) ou 🍽️ Repas (acheté pour un plat) — touche-le pour le changer.',
-    'Chance de le trouver selon le magasin : P · M · G = petite surface (supérette), moyenne (supermarché), grande (hypermarché), en %, avec « dès la supérette », « en hypermarché » ou le magasin spécialisé où le chercher (≈ = estimé d’après le rayon). Choisis « je vais en Petite / Moyenne / Grande » : ce qui risque de manquer est signalé.',
-    'Regroupe la liste par 🧭 Rayon (ordre du magasin), 🏬 Magasin ou 🍽️ Repas (chaque plat, puis les généralistes) ; touche l’en-tête d’un groupe pour le replier. L’aperçu de l’IA est lui aussi rangé par rayon.',
-    'Et aussi : 🤖 Compléter (un seul appel pour donner type, magasins, prix et marques aux articles tapés à la main), 💶 budget estimé, 🌱 de saison / ⏳ hors saison sur les fruits et légumes, et la liste envoyée précise ce qui ne se trouve qu’en hypermarché ou en magasin spécialisé.',
   ] },
 ];
 
@@ -31603,6 +31625,21 @@ function VosEcoutesPanel() {
     dbxAutoSet(on); setAutoDbx(on);
     if (on) { try { dropboxAutoTry(); } catch {} }
   };
+  // ⚠ Le réglage voyage avec les sauvegardes (coché partout), mais la sauvegarde ne part que
+  // de l'APPAREIL PAR DÉFAUT : l'interrupteur dit donc ce qui se passe SUR CET APPAREIL.
+  // 'here' | 'other' | 'none' (aucun défaut) | 'off' (Dropbox non connecté) | 'unknown' (pas encore lu).
+  const dbxReg = useDbxDevReg();
+  const [dbxBusy, setDbxBusy] = React.useState(false);
+  const dbxHere = !(dropboxConfigured() && dropboxConnected()) ? 'off' : !dbxReg ? 'unknown'
+    : dbxReg.default === deviceId() ? 'here' : dbxReg.default ? 'other' : 'none';
+  const dbxDefName = dbxHere === 'other' ? dbxReg.devices[dbxReg.default].name : '';
+  const dbxMakeDefault = () => {
+    setDbxBusy(true);
+    dbxDevicesUpdate(r => { r.default = deviceId(); })
+      .then(() => { try { dropboxAutoTry(); } catch {} })
+      .catch(e => alert('✗ Dropbox injoignable : ' + ((e && e.message) || 'erreur')))
+      .finally(() => setDbxBusy(false));
+  };
   // Gabarit commun des deux interrupteurs (même famille visuelle que les boutons voisins)
   const autoSwitch = (on, onClick, label, hint, title, color) => (
     <button onClick={onClick} role="switch" aria-checked={on} title={title}
@@ -31697,11 +31734,32 @@ function VosEcoutesPanel() {
             ? 'Activé : une fois par jour à la connexion, chaque chaîne YouTube est vérifiée (nouvelles vidéos et Shorts) puis chaque série suivie (nouvelles saisons). Interrompue, elle reprend dans la journée là où elle s\'était arrêtée.'
             : 'Désactivé : la vérification n\'a lieu que quand tu ouvres TV Time (et seulement si elle date de plus de 6 h / 24 h), ou quand tu cliques sur le bouton ↻.',
           TVTIME_COLOR)}
-        {autoSwitch(autoDbx, toggleAutoDbx, '☁︎ Sauvegarde automatique Dropbox', '1×/jour, sauvegarde complète',
-          autoDbx
-            ? 'Activé : une fois par jour à la connexion, une sauvegarde complète part sur Dropbox (après le scraping s\'il tourne), depuis l\'appareil par défaut seulement (Configuration générale). Il faut Dropbox connecté et le coffre 🔑 déverrouillé au moins une fois sur cet appareil.'
-            : 'Désactivé : la sauvegarde Dropbox ne part que si tu cliques sur « Sauvegarder sur Dropbox ».',
-          '#4ea3f5')}
+        {autoSwitch(autoDbx, toggleAutoDbx, '☁︎ Sauvegarde automatique Dropbox',
+          dbxHere === 'here' ? '1×/jour, depuis cet appareil'
+            : dbxHere === 'other' ? 'pas depuis cet appareil'
+            : dbxHere === 'none' ? 'aucun appareil par défaut'
+            : dbxHere === 'off' ? 'Dropbox non connecté'
+            : '1×/jour, appareil par défaut seulement',
+          !autoDbx
+            ? 'Désactivé : la sauvegarde Dropbox ne part que si tu cliques sur « Sauvegarder sur Dropbox ».'
+            : dbxHere === 'other' ? `Activé, mais pas ici : seul l'appareil par défaut (« ${dbxDefName} ») envoie la sauvegarde, pour que les appareils n'écrasent pas tour à tour le même fichier.`
+            : dbxHere === 'none' ? 'Activé, mais aucun appareil par défaut n\'est choisi : aucune sauvegarde automatique ne part. Choisis-en un dans Configuration générale → 📱 Appareil par défaut.'
+            : dbxHere === 'off' ? 'Activé, mais Dropbox n\'est pas connecté sur cet appareil : rien ne part.'
+            : 'Activé : une fois par jour à la connexion, une sauvegarde complète part sur Dropbox (après le scraping s\'il tourne), depuis l\'appareil par défaut seulement (Configuration générale). Il faut Dropbox connecté et le coffre 🔑 déverrouillé au moins une fois sur cet appareil.',
+          autoDbx && dbxHere !== 'here' && dbxHere !== 'unknown' ? C.muted : '#4ea3f5')/* gris : coché mais sans effet ici */}
+        {autoDbx && (dbxHere === 'other' || dbxHere === 'none') && (
+          <div style={{ display:'flex', alignItems:'center', gap:8, padding:'0 4px' }}>
+            <span style={{ flex:1, minWidth:0, fontSize:10, color:'#e0a050', lineHeight:1.45 }}>
+              ⚠ {dbxHere === 'other'
+                ? `La sauvegarde automatique part de « ${dbxDefName} », pas de cet appareil.`
+                : 'Aucun appareil par défaut : la sauvegarde automatique ne part d\'aucun appareil.'}
+            </span>
+            <button onClick={dbxMakeDefault} disabled={dbxBusy}
+              style={{ background:'#e0a05018', border:'1px solid #e0a05055', color:'#e0a050', borderRadius:8, padding:'6px 10px', fontSize:10.5, fontWeight:700, cursor: dbxBusy ? 'default' : 'pointer', flexShrink:0, opacity: dbxBusy ? 0.5 : 1 }}>
+              {dbxBusy ? '…' : 'Choisir cet appareil'}
+            </button>
+          </div>
+        )}
       </StatsCollapse>
       <StatsCollapse title="🤖 ORDRE DES IA" color={APROPOS_COLORS.ia}>
         <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5, padding:'0 4px 4px' }}>
