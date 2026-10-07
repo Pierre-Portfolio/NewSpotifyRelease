@@ -23,8 +23,8 @@
 - **Quota de 100 artistes / 24 h glissantes**, pause / reprise, arrêt de 15 min minimum dès la première limite Spotify (429). **Scraping automatique** au lancement (À propos → ⏰ Lancement automatique).
 - **Feed** jusqu'à 1000 titres, filtres et tri sur toute la base. Clic = lecture, **×** = écouté et retiré (↩ Annuler 5 s), **❤** = like. Fin de titre ⇒ marqué écouté + **auto-avance**, sans voler une lecture lancée ailleurs.
 - **Découvertes de la semaine** : bouton violet dans ⚙ Scraping, ou simplement **lancer la playlist** — le Hub range ses titres dans « En attente ».
-- **🔀 Delta** : likes absents de tes playlists, artistes suivis sans titre rangé (⊘ pour te désabonner), artistes présents chez toi mais non suivis (➕), et 🤖 10 artistes + 10 titres suggérés par l'IA.
-- **💿 Musique locale** (dernier collapse) : importe tes fichiers audio (un par un ou un dossier) ; ils sont copiés sur l'appareil et se lisent hors ligne, sans Spotify. Pas dans les sauvegardes (trop lourds).
+- **💿 Musique locale** : importe tes fichiers audio (un par un ou un dossier) ; ils sont copiés sur l'appareil et se lisent hors ligne, sans Spotify. Pas dans les sauvegardes (trop lourds).
+- **🔀 Delta** (dernier collapse) : likes absents de tes playlists, artistes suivis sans titre rangé (⊘ pour te désabonner), artistes présents chez toi mais non suivis (➕), et 🤖 10 artistes + 10 titres suggérés par l'IA. **🎤 Télécharger mes artistes suivis** : la liste complète en .txt, sans lancer l'analyse (base locale si Spotify ne répond pas).
 - Se désabonner d'un artiste ne l'efface jamais : il reste marqué **⊘ Désabonné** et, si tu te réabonnes, repart de sa dernière date.
 
 ---

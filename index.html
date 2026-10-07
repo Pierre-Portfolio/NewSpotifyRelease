@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.183';
+const APP_VERSION = '13.21.184';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -30836,6 +30836,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.184', date:'2026-10-07', title:'🎵 Musique : liste des artistes suivis', items:[
+    'Le collapse 💿 Musique locale passe avant 🔀 Delta, qui devient le dernier du module.',
+    'Delta : nouveau bouton 🎤 « Télécharger mes artistes suivis (.txt) », utilisable sans lancer l’analyse. Il lit tous tes abonnements sur Spotify et les trie de A à Z, avec leur lien. Si Spotify ne répond pas (pause 429, hors ligne), la liste vient de la base locale et le fichier le précise.',
+  ] },
   { v:'13.21.183', date:'2026-10-06', title:'👶 Goûts : prénoms français', items:[
     'Prénoms d’enfant : les prénoms arabo-musulmans sont retirés (16 de garçon : Mohamed, Ibrahim, Youssef, Hamza, Mehdi, Naël… ; 6 de fille : Yasmine, Aya, Fatima, Selma, Naëlle…) et remplacés par des prénoms français qui manquaient : Lilian, Edgar, Célestin, Joachim, Éloi, Elouan, Aurèle, Étienne, Grégoire, Julien… et Louison, Pénélope, Justine, Océane, Marion, Ophélie. Toujours 95 de garçon et 105 de fille. Le code 📤 change : mettez à jour les deux téléphones.',
   ] },
@@ -30847,10 +30851,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.180', date:'2026-10-05', title:'👶 Goût : prénoms moins exotiques', items:[
     'Prénoms d’enfant : les 45 prénoms de garçon et les 45 de fille les plus étranges ou exotiques sont retirés (Ezio, Zayn, Souleymane, Côme, Pablo, Zeynep, Khadija, Isis, Paloma, Zélie…). Il en reste 200 : 95 de garçon et 105 de fille. Le code 📤 change : mettez à jour les deux téléphones.',
-  ] },
-  { v:'13.21.179', date:'2026-10-05', title:'👶 Goût : prénoms d’aujourd’hui', items:[
-    'Prénoms d’enfant : 50 prénoms de garçon et 50 de fille trop anciens ou trop rares retirés (Hippolyte, Clovis, Ernest, Marguerite, Hortense, Sixtine…).',
-    'Ajout des prénoms du top 200 des naissances qui manquaient : 40 garçons (Noé, Eliott, Charlie, Lino, Kenzo…) et 50 filles (Alya, Victoria, Esmée, Théa, Lilou…). Il y a maintenant 140 prénoms de garçon et 150 de fille. Le code 📤 change : mettez à jour les deux téléphones.',
   ] },
 ];
 
@@ -62267,13 +62267,16 @@ async function deltaFetchLiked(onProgress, artistSink) {
 
 // Artistes suivis (mêmes pages que le scraping : /me/following?type=artist, 50 par page).
 // Sert au collapse « artistes sans titre en playlist » : on n'en garde que l'identité.
-async function deltaFetchFollowed(onProgress) {
+// `meta` (facultatif) reçoit `total` (annoncé par Spotify) : une page en erreur arrête la
+// lecture SANS lever, seul ce total permet à l'export de dire que la liste est incomplète.
+async function deltaFetchFollowed(onProgress, meta) {
   const out = [], seen = new Set();
   let url = 'https://api.spotify.com/v1/me/following?type=artist&limit=50', pages = 0;
   while (url && out.length < DELTA_FOLLOW_MAX && pages < 60) {
     const d = deltaGuard(await apiGet(url));
     const items = d?.artists?.items;
     if (!Array.isArray(items)) break;
+    if (meta && typeof d.artists.total === 'number') meta.total = d.artists.total;
     for (const a of items) {
       if (!a?.id || seen.has(a.id)) continue;
       seen.add(a.id);
@@ -62487,7 +62490,7 @@ function deltaErrMsg(e) {
 
 // État PARTAGÉ module-level (pattern _finance) : StatsCollapse démonte ses enfants à la
 // fermeture — sans ça, replier le collapse pendant un scan perdrait le résultat en cours.
-const _delta = { state:'idle', progress:'', err:'', data:null, cached:true, loaded:false, subs:new Set() };
+const _delta = { state:'idle', progress:'', err:'', data:null, cached:true, loaded:false, subs:new Set(), folBusy:false, folMsg:'' };
 function deltaSet(patch) {
   Object.assign(_delta, patch);
   _delta.subs.forEach(f => { try { f(); } catch {} });
@@ -62531,6 +62534,41 @@ function deltaExportTxt(data) {
     out.push('');
   }
   flip7Download(new Blob([out.join('\r\n')], { type:'text/plain;charset=utf-8' }), 'delta-musique-' + localDayStr() + '.txt');
+}
+
+// 🎤 Liste INTÉGRALE des abonnements, SANS lancer l'analyse (demande utilisateur) : les mêmes
+// pages /me/following que l'analyse, un .txt « Nom ||| lien Spotify » trié A-Z. Spotify
+// injoignable, en pause 429 ou hors ligne ⇒ repli sur la base locale (abonnements vus par le
+// dernier scan, `following` ≠ 0), et l'en-tête du fichier le dit. État dans `_delta` : replier
+// le collapse pendant la lecture ne la perd pas (piège 5).
+async function deltaFollowedExport() {
+  if (_delta.folBusy) return;
+  deltaSet({ folBusy:true, folMsg:'Lecture de tes abonnements…' });
+  let rows = null, head = '', warn = '';
+  try {
+    const meta = {};
+    const got = await deltaFetchFollowed(n => deltaSet({ folMsg:`Abonnements : ${n} lus…` }), meta);
+    if (!got.length && meta.total !== 0) throw new Error('EMPTY');
+    rows = got.map(a => ({ name: a.name, url: a.url || 'https://open.spotify.com/artist/' + a.id }));
+    head = 'lus sur Spotify';
+    if (meta.total != null && got.length < meta.total) warn = `⚠ ${got.length} sur ${meta.total} : Spotify a interrompu la lecture, la liste est incomplète.`;
+  } catch (e) {
+    try {
+      rows = dbAll("SELECT spotify_id, name, spotify_url FROM artists_scraped WHERE COALESCE(following, 1) != 0")
+        .map(a => ({ name: a.name || '(sans nom)', url: a.spotify_url || 'https://open.spotify.com/artist/' + a.spotify_id }));
+      head = 'base locale (dernier scan)';
+      warn = String(e?.message || '') === 'RATE_LIMIT'
+        ? '⚠ Spotify est en pause forcée (429) : liste tirée de la base locale, elle peut dater du dernier scan.'
+        : '⚠ Spotify injoignable : liste tirée de la base locale, elle peut dater du dernier scan.';
+    } catch { rows = null; }
+  }
+  if (!rows) { deltaSet({ folBusy:false, folMsg:'⚠ Impossible de lire tes abonnements (ni Spotify ni la base locale).' }); return; }
+  rows.sort((x, y) => x.name.localeCompare(y.name, 'fr', { sensitivity:'base' }));
+  const out = [`Spotify+ · Artistes suivis — ${deltaWhen(Date.now())} · ${rows.length} artiste(s), ${head}`];
+  if (warn) out.push(warn);
+  out.push('', ...rows.map(a => `${a.name} ||| ${a.url}`));
+  flip7Download(new Blob([out.join('\r\n')], { type:'text/plain;charset=utf-8' }), 'artistes-suivis-' + localDayStr() + '.txt');
+  deltaSet({ folBusy:false, folMsg: warn || `✓ ${rows.length} artiste(s) téléchargé(s).` });
 }
 
 // React.memo : props de données seules.
@@ -63072,7 +63110,7 @@ function DeltaPanel() {
     return () => { _delta.subs.delete(force); };
   }, []);
 
-  const { state, progress, err, data, cached, showAll } = _delta;
+  const { state, progress, err, data, cached, showAll, folBusy, folMsg } = _delta;
   const loading = state === 'loading';
   const cnt = n => <span style={{ color:C.dim, fontWeight:400 }}>· {n}</span>;
   // ⚠ CAUSE N°1 d'une liste de playlists incomplète : sans le scope playlist-read-private,
@@ -63177,6 +63215,15 @@ function DeltaPanel() {
         <span style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
           {data ? `Analyse du ${deltaWhen(data.at)}` : 'Aucune analyse — rien n\'est interrogé tant que tu ne cliques pas.'}
         </span>
+      </div>
+      {/* 🎤 Hors analyse : la liste de TOUS les abonnements, sans lancer Delta (`deltaFollowedExport`). */}
+      <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+        <button onClick={deltaFollowedExport} disabled={folBusy}
+          title="Tous les artistes auxquels tu es abonné, « Nom ||| lien Spotify », triés de A à Z — sans lancer l'analyse"
+          style={{ background:'none', border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px', fontSize:11, fontWeight:700, cursor: folBusy ? 'default' : 'pointer', opacity: folBusy ? 0.5 : 1, fontFamily:'inherit' }}>
+          {folBusy ? '⏳ Lecture…' : '🎤 Télécharger mes artistes suivis (.txt)'}
+        </button>
+        {folMsg && <span style={{ fontSize:10, color: folMsg[0] === '⚠' ? '#f5a623' : C.dim, fontFamily:'DM Mono,monospace' }}>{folMsg}</span>}
       </div>
       {showAll && (
         <div style={{ fontSize:10, color:DELTA_COLOR, fontFamily:'DM Mono,monospace' }}>
@@ -63308,7 +63355,7 @@ function DeltaPanel() {
 }
 
 // ════════════════════════════════════════════════
-// 💿 MUSIQUE LOCALE — dernier collapse de Musique : les fichiers audio de l'appareil
+// 💿 MUSIQUE LOCALE — avant-dernier collapse de Musique (avant Delta) : les fichiers audio de l'appareil
 // (mp3, m4a, flac, ogg, wav…) importés un par un ou par dossier, lus DANS le Hub.
 // ⚠ Base IndexedDB DÉDIÉE (piège 20), DEUX stores : `meta` (titre, artiste, durée — petit,
 // relu en entier à l'ouverture) et `blobs` (le fichier tel quel, lu seulement à la lecture).
@@ -63669,7 +63716,7 @@ function MusiquePanel() {
           tout le reste. Ils ne sont donc plus des onglets de la barre du haut, ni une
           colonne permanente du layout desktop. */}
       {/* 🖥️ Ordinateur : à gauche ce qu'on ÉCOUTE (en attente, likés, historique), à droite les
-          OUTILS (scraping, artistes, delta, musique locale). Mobile : la même pile qu'avant. */}
+          OUTILS (scraping, artistes, musique locale, delta). Mobile : la même pile qu'avant. */}
       <DeskCols cols={2} template="minmax(0,1.4fr) minmax(0,1fr)" gap={12}>
       <DeskCol n={1}>
       <StatsCollapse defaultOpen={false} color={C.accent} title={<span>⚙ SCRAPING</span>}>
@@ -63699,12 +63746,12 @@ function MusiquePanel() {
       <StatsCollapse defaultOpen={false} color="#6f7bf5" title={<span>🎤 ARTISTES SUIVIS {cnt(artOff ? `${artists.length - artOff} + ${artOff} désabonné(s)` : artists.length)}</span>}>
         <ArtistsPanel />
       </StatsCollapse>
-      <StatsCollapse defaultOpen={false} color={DELTA_COLOR} title={<span>🔀 DELTA</span>}>
-        <DeltaPanel />
-      </StatsCollapse>
-      {/* 💿 En DERNIER (demande utilisateur). Son lecteur vit hors du collapse : le replier ne coupe pas le son. */}
+      {/* 💿 Avant Delta (demande utilisateur). Son lecteur vit hors du collapse : le replier ne coupe pas le son. */}
       <StatsCollapse defaultOpen={false} color={LOCALMUSIC_COLOR} title={<span>💿 MUSIQUE LOCALE</span>}>
         <LocalMusicPanel />
+      </StatsCollapse>
+      <StatsCollapse defaultOpen={false} color={DELTA_COLOR} title={<span>🔀 DELTA</span>}>
+        <DeltaPanel />
       </StatsCollapse>
       </DeskCol>
       </DeskCols>
