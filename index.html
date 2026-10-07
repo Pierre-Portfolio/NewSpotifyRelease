@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.188';
+const APP_VERSION = '13.21.189';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -31841,6 +31841,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.189', date:'2026-10-07', title:'🧩 Extension YouTube : les playlists se cochent', items:[
+    'Une vidéo vue sur le PC (extension YouTube → TV Time) est maintenant cochée dans TOUTES les chaînes et playlists suivies qui la contiennent. Avant, seule la première était cochée : si tu suivais aussi la chaîne du vidéaste, la playlist restait « à voir ».',
+    'Lancée depuis une playlist suivie, la vidéo y est cochée même si TV Time n’a pas encore relu la playlist (il faut recharger l’extension dans chrome://extensions pour la version 1.1.2).',
+    'Correction : TV Time ouvert pendant l’import ne voyait pas les nouvelles coches et pouvait les effacer à l’action suivante. Il se met maintenant à jour tout seul.',
+  ] },
   { v:'13.21.188', date:'2026-10-07', title:'🎵 Musique : Musique locale avant Artistes suivis', items:[
     'Dans le module Musique, les collapses 💿 Musique locale et 🎤 Artistes suivis échangent leur place : Musique locale passe au-dessus.',
   ] },
@@ -31856,10 +31861,6 @@ const RELEASE_NOTES = [
     'Ajouter : tape un nom de plat ou colle une recette (l’IA en fait une fiche que tu relis), « 🧊 Une idée avec mon frigo », ou à la main. Fiche : portions recalculées, ce qui est déjà au frigo (⏳ ce qui périme), 👨‍🍳 pas à pas avec l’écran allumé et ⏲ minuteur, 🛒 ce qui manque vers la Liste de course, 🍎 une portion dans Santé, 📤 partage. 🎲 « On mange quoi ? » tire une recette au sort.',
     'Frigo : nouveau collapse 📖 Recettes (celles de ton carnet faisables avec ce qu’il y a, ingrédients et préparation sur place). 💾 Garder dans Recette depuis l’assistant du Frigo, la Liste de course et Goûts.',
     'Correction : l’assistant IA du Frigo ne réclame plus une clé Gemini. Il utilise toutes les IA du module 🔌 API (la photo marchait seulement avec Gemini).',
-  ] },
-  { v:'13.21.184', date:'2026-10-07', title:'🎵 Musique : liste des artistes suivis', items:[
-    'Le collapse 💿 Musique locale passe avant 🔀 Delta, qui devient le dernier du module.',
-    'Delta : nouveau bouton 🎤 « Télécharger mes artistes suivis (.txt) », utilisable sans lancer l’analyse. Il lit tous tes abonnements sur Spotify et les trie de A à Z, avec leur lien. Si Spotify ne répond pas (pause 429, hors ligne), la liste vient de la base locale et le fichier le précise.',
   ] },
 ];
 
@@ -33921,10 +33922,29 @@ function ytVideoListWith(item, v) {
     seasons: Object.keys(byYear).sort().map(y => ({ n: y, eps: byYear[y] })),
     year: (videos[videos.length - 1].date || '').slice(0, 4) };
 }
+// ⚠ 13.21.189 — UNE VIDÉO VUE EST COCHÉE PARTOUT OÙ ELLE EST SUIVIE (bug utilisateur : « si
+// la vidéo vient d'une playlist suivie, elle ne finit pas cochée »). Deux trous :
+//   · seule la PREMIÈRE chaîne/playlist qui listait la vidéo était cochée — la chaîne du
+//     vidéaste passait devant sa playlist, qui restait à voir ;
+//   · une vidéo ajoutée récemment à la playlist (refresh TTL 6 h, plafond 500) n'était dans
+//     AUCUNE liste ⇒ chaîne ou « Hub Pierre », jamais la playlist. D'où `v.playlistId` : la
+//     playlist d'où la vidéo a été lancée (paramètre `list` de l'URL, envoyé par l'extension),
+//     cochée même si elle ne liste pas encore la vidéo (`ytVideoListWith` l'y insère).
+// Propriétaires = toutes les listes qui contiennent la vidéo + la playlist d'origine ; à
+// défaut, la chaîne du vidéaste ; à défaut, « Hub Pierre ».
 function ytSeenMarkAnywhere(v) {
   if (!v || !v.id) return false;
   const items = loadTvItems();
-  const found = items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.videos || []).some(x => x.id === v.id));
+  const real = it => it.type === 'youtube' && !ytIsUnsaved(it);
+  // Playlist / chaîne cochée alors qu'elle ne liste pas (encore) la vidéo : même garde de
+  // format que la chaîne ci-dessous (un Short chez une liste « vidéos longues » y resterait
+  // orphelin pour toujours).
+  const adopts = it => !it.dropped && ytItemAcceptsVideo(it, v);
+  const owners = new Set(items.filter(it => real(it) && (it.videos || []).some(x => x.id === v.id)).map(it => it.id));
+  if (v.playlistId) {
+    const pl = items.find(it => real(it) && it.id === v.playlistId && adopts(it));
+    if (pl) owners.add(pl.id);
+  }
   // ⚠ 11.5.0 — À DÉFAUT, LA CHAÎNE DU VIDÉASTE SI ELLE EST SUIVIE (demande utilisateur :
   // « OU SUR LE YOUTUBEUR si je suis sa chaîne »). Les vidéos listées par Actu sont les
   // toutes DERNIÈRES sorties des abonnements : la chaîne suivie dans TV Time ne les a
@@ -33932,23 +33952,24 @@ function ytSeenMarkAnywhere(v) {
   // et le visionnage partait dans « Hub Pierre » alors que la chaîne est bien suivie.
   // Cocher un id absent de `videos` est SANS DANGER : `ytOrphanSeen` le compte déjà dans le
   // dénominateur, et le prochain refresh fait apparaître la vidéo, déjà cochée.
-  // ⚠ …À CONDITION que la chaîne accepte ce format : cocher un Short chez une chaîne qui
-  // ne suit QUE les vidéos longues (ou l'inverse) y laisserait un « orphelin » définitif,
-  // compté au numérateur ET au dénominateur, que jamais aucun refresh ne viendrait ranger.
-  const owner = found || (v.channelId
-    ? items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && it.id === v.channelId
-        && !it.dropped && ytItemAcceptsVideo(it, v))
-    : null);
-  if (owner) {
-    if ((owner.watchedIds || []).includes(v.id)) return false;
-    saveTvItems(items.map(it => {
-      if (it.type !== 'youtube' || it.id !== owner.id) return it;
+  if (!owners.size && v.channelId) {
+    const ch = items.find(it => real(it) && it.id === v.channelId && adopts(it));
+    if (ch) owners.add(ch.id);
+  }
+  if (owners.size) {
+    let changed = false;
+    const next = items.map(it => {
+      if (!real(it) || !owners.has(it.id) || (it.watchedIds || []).includes(v.id)) return it;
+      changed = true;
       const clean = [...new Set([...(it.watchedIds || []), v.id])];
       const nx = { ...it, watchedIds: clean, ...(ytVideoListWith(it, v) || {}) };
       const tot = ytCountedTotal(nx);
       if (tot > 0 && clean.length >= tot && it.status !== 'done') { nx.status = 'done'; nx.doneAt = Date.now(); }
       return nx;
-    }));
+    });
+    if (!changed) return false;
+    // Une vidéo rangée plus tôt dans « Hub Pierre » rejoint ses propriétaires.
+    saveTvItems(ytUnsavedReconcile(next));
     return true;
   }
   const next = ytUnsavedAdd(items, { ...v, pubDate: v.pubDate || v.date || '' });
@@ -33970,6 +33991,12 @@ const EXT_YT_NAME = 'hub-youtube-vus.json';
 const EXT_YT_DONE_LS = 'spotifyplus_ext_yt_done';
 const EXT_YT_GAP = 5 * 60 * 1000;
 let _extYtAt = 0, _extYtBusy = false;
+// ⚠ L'import tourne aussi au RETOUR SUR L'ONGLET, panneau TV Time déjà monté : sans ce
+// signal, son state gardait l'ancienne liste (vidéo « pas cochée » à l'écran) et sa
+// prochaine écriture (`update`) l'écrasait — import perdu pour de bon, puisque déjà noté
+// dans `EXT_YT_DONE_LS`. `TvTimePanel` s'abonne et relit `loadTvItems()`.
+const _tvBg = new Set();
+function tvBgNotify() { _tvBg.forEach(f => { try { f(); } catch {} }); }
 // Deux navigateurs équipés peuvent avoir créé chacun leur fichier au même instant : on les
 // lit TOUS (l'extension, elle, écrit dans le plus ancien).
 async function extYtDriveRead(token) {
@@ -34004,13 +34031,16 @@ async function extYtImport(force) {
     for (const v of list.slice().sort((a, b) => (a.at || 0) - (b.at || 0))) {
       if (!v || typeof v.id !== 'string' || !/^[\w-]{6,20}$/.test(v.id) || seen.has(v.id)) continue;
       try {
+        // `list` = playlist d'où la vidéo a été lancée (extension ≥ 1.1.2), absent sinon.
+        const list = typeof v.list === 'string' && /^[\w-]{2,64}$/.test(v.list) ? v.list : '';
         if (ytSeenMarkAnywhere({ id: v.id, title: String(v.title || '').slice(0, 300), channel: String(v.channel || '').slice(0, 120),
-          channelId: String(v.channelId || ''), dur: Number(v.dur) || 0, pubDate: String(v.pubDate || '').slice(0, 10) })) n++;
+          channelId: String(v.channelId || ''), playlistId: list, dur: Number(v.dur) || 0, pubDate: String(v.pubDate || '').slice(0, 10) })) n++;
         if (v.sum && !ytSumGet(v.id)) ytSumSave(v.id, String(v.sum).slice(0, 4000));
       } catch {}
       seen.add(v.id); done.push(v.id);
     }
     lsSet(EXT_YT_DONE_LS, JSON.stringify(done.slice(-1000)));
+    if (n) tvBgNotify();
     return n;
   } finally { _extYtBusy = false; }
 }
@@ -34040,10 +34070,11 @@ function ytSeenIdSet() {
 function ytSeenUnmarkAnywhere(id) {
   if (!id) return false;
   const items = loadTvItems();
-  const owner = items.find(it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.watchedIds || []).includes(id));
-  if (owner) {
+  // Décochée PARTOUT, comme `ytSeenMarkAnywhere` la coche partout.
+  const has = it => it.type === 'youtube' && !ytIsUnsaved(it) && (it.watchedIds || []).includes(id);
+  if (items.some(has)) {
     saveTvItems(items.map(it => {
-      if (it.type !== 'youtube' || it.id !== owner.id) return it;
+      if (!has(it)) return it;
       const nx = { ...it, watchedIds: (it.watchedIds || []).filter(x => x !== id) };
       if (nx.status === 'done') { nx.status = 'watching'; nx.doneAt = null; }
       return nx;
@@ -44662,22 +44693,23 @@ function ytUnsavedRemove(items, videoId) {
 // « vues » dans SA chaîne — et on les retire de la pseudo-chaîne, qui DISPARAÎT si elle se
 // vide (7.6.88, demande utilisateur). Réconciliation GLOBALE (toutes les chaînes suivies),
 // donc idempotente et auto-réparante ; renvoie `items` inchangé par identité s'il n'y a rien
-// à déplacer. ⚠ Une vidéo présente dans plusieurs chaînes suivies va à la PREMIÈRE trouvée.
+// à déplacer. Une vidéo présente dans plusieurs chaînes/playlists suivies est rendue à TOUTES
+// (13.21.189, même règle que `ytSeenMarkAnywhere`).
 function ytUnsavedReconcile(items) {
   const pseudo = items.find(ytIsUnsaved);
   if (!pseudo || !(pseudo.videos || []).length) return items;
-  const owner = new Map();   // id de vidéo → id de la chaîne RÉELLE qui la contient
+  const owner = new Set();   // ids de vidéos contenues dans au moins une chaîne RÉELLE
   for (const it of items) {
     if (it.type !== 'youtube' || ytIsUnsaved(it)) continue;
-    for (const v of (it.videos || [])) if (!owner.has(v.id)) owner.set(v.id, it.id);
+    for (const v of (it.videos || [])) owner.add(v.id);
   }
-  const claimed = (pseudo.videos || []).filter(v => owner.has(v.id));
-  if (!claimed.length) return items;
-  const byChannel = new Map();
-  for (const v of claimed) {
-    const cid = owner.get(v.id);
-    if (!byChannel.has(cid)) byChannel.set(cid, []);
-    byChannel.get(cid).push(v.id);
+  const claimed = new Set((pseudo.videos || []).filter(v => owner.has(v.id)).map(v => v.id));
+  if (!claimed.size) return items;
+  const byChannel = new Map();   // id de chaîne → ids de vidéos à lui rendre
+  for (const it of items) {
+    if (it.type !== 'youtube' || ytIsUnsaved(it)) continue;
+    const ids = (it.videos || []).filter(v => claimed.has(v.id)).map(v => v.id);
+    if (ids.length) byChannel.set(it.id, ids);
   }
   const rest = (pseudo.videos || []).filter(v => !owner.has(v.id));
   const nextPseudo = rest.length
@@ -47566,6 +47598,12 @@ function TvTimePanel() {
     _tvSync.subs.add(h);
     setSync(_tvSync.state);   // rattrape une synchro déjà en cours au montage
     return () => { _tvSync.subs.delete(h); };
+  }, []);
+  // 🧩 Import de l'extension pendant que le panneau est ouvert (`tvBgNotify`) : relire la liste.
+  React.useEffect(() => {
+    const h = () => setItems(loadTvItems());
+    _tvBg.add(h);
+    return () => { _tvBg.delete(h); };
   }, []);
   // ⚠ Délai relu depuis le localStorage à l'init : sans lui, recharger la page (ou changer
   // d'onglet et revenir) remettrait le compteur à zéro et le « délai anti-spam » demandé ne

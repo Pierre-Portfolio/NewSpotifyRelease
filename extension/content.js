@@ -24,11 +24,14 @@
     meta = e.data;
   });
   // Format attendu par le Hub (`ytSeenMarkAnywhere`) : `dur` en MINUTES arrondies.
+  // `list` = playlist d'où la vidéo est lancée (`watch?v=…&list=PL…`) : le Hub la coche dans
+  // cette playlist si elle y est suivie, même avant qu'il ait relu son contenu.
+  const listId = () => { const l = new URL(location.href).searchParams.get('list') || ''; return /^[\w-]{2,64}$/.test(l) ? l : ''; };
   const videoFor = (id, how, video) => {
     const m = meta && meta.id === id ? meta : null;
     const secs = (m && m.lengthSeconds) || (video && isFinite(video.duration) ? video.duration : 0);
     return { id, how, at: Date.now(), title: (m && m.title) || document.title.replace(/ - YouTube$/, ''),
-      channel: (m && m.channel) || '', channelId: (m && m.channelId) || '',
+      channel: (m && m.channel) || '', channelId: (m && m.channelId) || '', list: listId(),
       dur: Math.round(secs / 60), pubDate: (m && m.pubDate) || '', short: isShort() };
   };
 

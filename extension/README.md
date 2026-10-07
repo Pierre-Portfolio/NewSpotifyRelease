@@ -19,7 +19,8 @@ Le Hub n'a pas de serveur et garde TV Time sur chaque appareil. L'extension écr
 vidéos dans ton **Google Drive**, avec la même application Google que le Hub, fichier
 `HUB_Pierre/hub-youtube-vus.json` (500 dernières). Le Hub le relit à l'ouverture et à chaque
 retour sur l'onglet **tant que Google Drive y est connecté** (session d'environ 1 h), puis
-coche chaque vidéo — dans sa chaîne si tu la suis, sinon dans « Hub Pierre ». Une vidéo
+coche chaque vidéo — dans **toutes** les chaînes et playlists suivies qui la contiennent, et
+dans la playlist d'où tu l'as lancée si tu la suis ; à défaut dans sa chaîne si tu la suis, sinon dans « Hub Pierre ». Une vidéo
 décochée à la main dans le Hub ne revient pas.
 
 ## Installation
