@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.189';
+const APP_VERSION = '13.21.190';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -31841,6 +31841,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.190', date:'2026-10-07', title:'🔔 TV Time : abonnements YouTube ↔ chaînes suivies', items:[
+    'Onglet ▶️ YT de TV Time, sous « Vus », deux nouvelles sections. 🔔 Abonnements YouTube non suivis : les chaînes auxquelles tu es abonné sur YouTube mais absentes de TV Time, avec ＋ pour les suivre ici. 🔕 Suivies sans abonnement YouTube : les chaînes suivies dans TV Time auxquelles tu n’es pas abonné sur YouTube, avec ↗ pour t’y abonner.',
+    'Tes abonnements sont lus à l’ouverture d’une des deux sections (compte YouTube connecté nécessaire), puis gardés 30 min ; ↻ pour les relire.',
+  ] },
   { v:'13.21.189', date:'2026-10-07', title:'🧩 Extension YouTube : les playlists se cochent', items:[
     'Une vidéo vue sur le PC (extension YouTube → TV Time) est maintenant cochée dans TOUTES les chaînes et playlists suivies qui la contiennent. Avant, seule la première était cochée : si tu suivais aussi la chaîne du vidéaste, la playlist restait « à voir ».',
     'Lancée depuis une playlist suivie, la vidéo y est cochée même si TV Time n’a pas encore relu la playlist (il faut recharger l’extension dans chrome://extensions pour la version 1.1.2).',
@@ -31855,12 +31859,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.186', date:'2026-10-07', title:'✨ « Demander à l’IA » toujours sur l’accueil', items:[
     'Le bouton « ✨ Demander à l’IA » disparaissait de l’accueil (ordinateur, et parfois téléphone) quand le module 🤖 IA était désactivé dans la Configuration de module — un réglage que la restauration d’une sauvegarde recopie d’un appareil à l’autre. Il est maintenant toujours là ; désactiver le module ne retire plus que l’onglet IA.',
-  ] },
-  { v:'13.21.185', date:'2026-10-07', title:'📖 Nouveau module Recette', items:[
-    'Un carnet de recettes gardé pour de bon (et dans la sauvegarde), rangé en listes : Entrées, Plats, Desserts, Apéro, Petit-déj, Boissons, Sauces, plus tes propres listes (« Recettes de mamie »…). Étiquettes végé, rapide, léger…, favoris ⭐, note, recherche par nom ou par ingrédient.',
-    'Ajouter : tape un nom de plat ou colle une recette (l’IA en fait une fiche que tu relis), « 🧊 Une idée avec mon frigo », ou à la main. Fiche : portions recalculées, ce qui est déjà au frigo (⏳ ce qui périme), 👨‍🍳 pas à pas avec l’écran allumé et ⏲ minuteur, 🛒 ce qui manque vers la Liste de course, 🍎 une portion dans Santé, 📤 partage. 🎲 « On mange quoi ? » tire une recette au sort.',
-    'Frigo : nouveau collapse 📖 Recettes (celles de ton carnet faisables avec ce qu’il y a, ingrédients et préparation sur place). 💾 Garder dans Recette depuis l’assistant du Frigo, la Liste de course et Goûts.',
-    'Correction : l’assistant IA du Frigo ne réclame plus une clé Gemini. Il utilise toutes les IA du module 🔌 API (la photo marchait seulement avec Gemini).',
   ] },
 ];
 
@@ -33776,22 +33774,48 @@ async function ytWlIdSet() {
   return out;
 }
 
-// Toutes les chaînes suivies → [{ id, title }] (paginé, cap YTSUB_MAX_CHANNELS)
-async function ytSubsListChannels() {
+// Toutes les chaînes suivies → [{ id, title, thumb }] (paginé, cap `max`, YTSUB_MAX_CHANNELS
+// par défaut — la comparaison de TV Time, elle, a besoin de la liste ENTIÈRE)
+async function ytSubsListChannels(max = YTSUB_MAX_CHANNELS) {
   const subs = [];
   let pageToken = '';
-  while (subs.length < YTSUB_MAX_CHANNELS) {
+  while (subs.length < max) {
     const d = await ytSubApi('subscriptions', { part: 'snippet', mine: 'true', maxResults: '50', ...(pageToken ? { pageToken } : {}) });
     if (d.__error) return d;
     for (const it of (d.items || [])) {
       const cid = it.snippet && it.snippet.resourceId && it.snippet.resourceId.channelId;
-      if (cid) subs.push({ id: cid, title: (it.snippet && it.snippet.title) || 'Chaîne' });
+      const th = (it.snippet && it.snippet.thumbnails) || {};
+      if (cid) subs.push({ id: cid, title: (it.snippet && it.snippet.title) || 'Chaîne', thumb: (th.default || th.medium || {}).url || '' });
     }
     pageToken = d.nextPageToken || '';
     if (!pageToken) break;
   }
   return { subs };
 }
+
+// ── 🔔 / 🔕 TV Time → YT : abonnements YouTube ↔ chaînes suivies ici (13.21.190) ──────────
+// Deux sections sous « Vus » : « Abonnements YouTube non suivis » (abonné sur YouTube, absent
+// de TV Time) et « Suivies sans abonnement YouTube » (l'inverse). Une seule lecture de
+// `subscriptions?mine` (1 unité / 50 chaînes), faite à l'OUVERTURE d'une des deux sections,
+// gardée 30 min en mémoire (re-fetchable ⇒ ni localStorage ni sauvegarde).
+// ⚠ Comparaison par id de CHAÎNE (`UC…`) : une playlist suivie ne « couvre » pas sa chaîne
+// (l'item n'en garde pas l'id), elle n'entre dans aucune des deux listes.
+// ⚠ Liste lue jusqu'à `YTSUB_CMP_MAX` : au-delà elle serait tronquée et la 2e section
+// annoncerait « pas abonné » à tort — `capped` le dit à l'écran.
+const YTSUB_CMP_MAX = 1000;
+const YTSUB_CMP_TTL = 30 * 60 * 1000;
+const _ytSubCmp = { at:0, subs:null, err:'', busy:false, capped:false, fns:new Set() };
+function ytSubCmpSet(p) { Object.assign(_ytSubCmp, p); _ytSubCmp.fns.forEach(f => { try { f(); } catch {} }); }
+async function ytSubCmpLoad(force) {
+  if (_ytSubCmp.busy) return;
+  if (!force && _ytSubCmp.subs && Date.now() - _ytSubCmp.at < YTSUB_CMP_TTL) return;
+  if (!ytgConnected()) { ytSubCmpSet({ err:'AUTH' }); return; }
+  ytSubCmpSet({ busy:true, err:'' });
+  const r = await ytSubsListChannels(YTSUB_CMP_MAX);
+  if (r.__error) ytSubCmpSet({ busy:false, err:r.__error });
+  else ytSubCmpSet({ busy:false, subs:r.subs, at:Date.now(), capped: r.subs.length >= YTSUB_CMP_MAX });
+}
+const ytChannelUrl = id => safeHref('https://www.youtube.com/channel/' + encodeURIComponent(id));
 
 // Abonné à UNE chaîne ? (badge de la fiche TV Time) → 'yes' | 'no' | 'auth' | null (inconnu).
 // ⚠ Lit le jeton YouTube DÉJÀ accordé, sans jamais ouvrir de consentement ni lancer
@@ -47474,7 +47498,7 @@ function TvTimePanel() {
   const [ytRefreshingId, setYtRefreshingId] = React.useState(null);
   const hasYtKey = !!ytKey();
   // Sections repliables (header cliquable + chevron) — seule EN COURS ouverte par défaut
-  const [secOpen, setSecOpen] = React.useState({ watching: true, paused: false, towatch: false, upcoming: false, done: false, ytWatching: true, ytTowatch: false, ytDone: false, bkReading: true, bkTowatch: false, bkDone: false });
+  const [secOpen, setSecOpen] = React.useState({ watching: true, paused: false, towatch: false, upcoming: false, done: false, ytWatching: true, ytTowatch: false, ytDone: false, ytSubOnly: false, ytNoSub: false, bkReading: true, bkTowatch: false, bkDone: false });
   const toggleSec = k => setSecOpen(o => ({ ...o, [k]: !o[k] }));
   // Fiche série ouverte au clic sur l'affiche — { type, id } ; l'item est relu dans `items`
   // à chaque render pour que la fiche reflète les ±1 / coches saison en direct
@@ -47605,6 +47629,14 @@ function TvTimePanel() {
     _tvBg.add(h);
     return () => { _tvBg.delete(h); };
   }, []);
+  // 🔔 / 🔕 Abonnements YouTube : lus à l'ouverture d'une des deux sections seulement.
+  const [, ytSubTick] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { _ytSubCmp.fns.add(ytSubTick); return () => { _ytSubCmp.fns.delete(ytSubTick); }; }, []);
+  React.useEffect(() => {
+    if (mediaFilter === 'youtube' && (secOpen.ytSubOnly || secOpen.ytNoSub)) ytSubCmpLoad(false);
+  }, [mediaFilter, secOpen.ytSubOnly, secOpen.ytNoSub]);
+  const [subAddId, setSubAddId] = React.useState(null);
+  const [subMsg, setSubMsg]     = React.useState('');
   // ⚠ Délai relu depuis le localStorage à l'init : sans lui, recharger la page (ou changer
   // d'onglet et revenir) remettrait le compteur à zéro et le « délai anti-spam » demandé ne
   // vaudrait que pour la session en cours.
@@ -47632,12 +47664,16 @@ function TvTimePanel() {
     setYtKeyInput(''); setShowYtKey(false); setYtMsg('Clé YouTube enregistrée ✓');
   };
   // Ajoute (ou met à jour) une chaîne / playlist YouTube depuis un lien
-  const addYoutube = async () => {
+  // `arg` = id/lien passé par le ➕ de « Abonnements YouTube non suivis » (sinon le champ
+  // de saisie ; un clic passe un événement, d'où le test de type). Messages doublés dans `subMsg`.
+  const addYoutube = async (arg) => {
     if (ytBusy) return;
-    if (!ytKey()) { setYtMsg('Ajoute d\'abord ta clé API YouTube (bouton ⚙).'); setShowYtKey(true); return; }
-    const raw = ytInput.trim();
+    const fromSub = typeof arg === 'string';
+    const say = m => { setYtMsg(m); if (fromSub) setSubMsg(m); };
+    if (!ytKey()) { say('Ajoute d\'abord ta clé API YouTube (bouton ⚙).'); setShowYtKey(true); return; }
+    const raw = (fromSub ? arg : ytInput).trim();
     if (!raw) return;
-    setYtBusy(true); setYtMsg('Récupération des vidéos… (peut prendre quelques secondes)');
+    setYtBusy(true); say('Récupération des vidéos… (peut prendre quelques secondes)');
     let built = await ytBuildItem(raw);
     // Chaîne qui ne fait QUE des Shorts : le build normal ne renvoie aucune vidéo ≥ 3 min.
     // On retente en « uniquement les Shorts » et, si ça donne des Shorts, on demande à
@@ -47648,17 +47684,17 @@ function TvTimePanel() {
         setYtBusy(false);
         const alreadyShorts = items.some(x => x.type === 'youtube' && x.id === shortsBuilt.id && x.shortsOnly);
         if (!alreadyShorts && !confirm(`« ${shortsBuilt.title} » ne publie que des Shorts (< 3 min).\n\nC'est volontaire ? OK = l'ajouter en « garder uniquement les Shorts » (tu ne seras notifié·e que pour un Short qui sort).`)) {
-          setYtMsg('Ajout annulé.'); return;
+          say('Ajout annulé.'); return;
         }
         built = shortsBuilt;
       } else {
         setYtBusy(false);
-        setYtMsg('⚠ ' + (built.error || 'Échec de la récupération.')); return;
+        say('⚠ ' + (built.error || 'Échec de la récupération.')); return;
       }
     } else {
       setYtBusy(false);
     }
-    if (!built || built.error) { setYtMsg('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
+    if (!built || built.error) { say('⚠ ' + ((built && built.error) || 'Échec de la récupération.')); return; }
     const exist = items.find(x => x.type === 'youtube' && x.id === built.id);
     if (exist) {
       // Si l'existant avait le plafond retiré, on re-fetch sans limite pour ne pas régresser à 500
@@ -47670,7 +47706,7 @@ function TvTimePanel() {
       // Maj : nouvelles vidéos + métadonnées, mais on PRÉSERVE les vues / statut / manga / dessin animé / plafond / tags Shorts
       update(ytUnsavedReconcile(items.map(x => (x.type === 'youtube' && x.id === built.id)
         ? { ...merged, watchedIds: x.watchedIds || [], status: x.status, doneAt: x.doneAt, manga: x.manga, cartoon: x.cartoon, dropped: x.dropped, addedAt: x.addedAt, unlimited: x.unlimited || merged.unlimited, keepShorts: x.keepShorts, shortsOnly: x.shortsOnly } : x)));
-      setYtMsg(`Mis à jour : ${merged.title} (${merged.totalEps} vidéos)`);
+      say(`Mis à jour : ${merged.title} (${merged.totalEps} vidéos)`);
     } else {
       // ⚠ 7.6.88 : la chaîne récupère au passage les vidéos que j'avais déjà regardées via
       // « Hub Pierre » — elles sont cochées vues chez elle et quittent la pseudo-chaîne.
@@ -47687,10 +47723,10 @@ function TvTimePanel() {
       const pending = new Set(loadYtWlAdded());
       const toDrop = claimed.filter(id => pending.has(id));
       if (toDrop.length) (async () => { for (const id of toDrop) await ytWlDropSeen(id); setWlAdded(new Set(loadYtWlAdded())); })();
-      setYtMsg(`Ajouté : ${built.title} (${built.totalEps} vidéos)`
+      say(`Ajouté : ${built.title} (${built.totalEps} vidéos)`
         + (claimed.length ? ` · ${claimed.length} déjà vue(s) ailleurs, cochée(s) et retirée(s) de l'attente` : ''));
     }
-    setYtInput('');
+    if (!fromSub) setYtInput('');
   };
   // Actualise une chaîne/playlist déjà suivie (bouton ↻ de la fiche) — préserve le plafond retiré
   const ytRefreshItem = async item => {
@@ -48451,6 +48487,75 @@ function TvTimePanel() {
       {buttons}
     </div>
   );
+  // 🔔 / 🔕 Abonnements YouTube ↔ chaînes suivies ici (voir `_ytSubCmp`), sous les VUS de l'onglet ▶️ YT.
+  const ytSubSections = () => {
+    const { subs, err, busy, capped } = _ytSubCmp;
+    const dim = { fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' };
+    const extLink = (id, title) => {
+      const href = ytChannelUrl(id);
+      return href ? <a href={href} target="_blank" rel="noopener noreferrer" title={title} style={{ ...abtn(YT_COLOR), textDecoration:'none', fontSize:14 }}>↗</a> : null;
+    };
+    // Lecture impossible / en cours : même message dans les deux sections.
+    const state = () => {
+      if (busy) return <div style={dim}>Lecture de tes abonnements YouTube…</div>;
+      if (err === 'AUTH' || err === 'SCOPE') return (
+        <div style={{ ...dim, display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+          <span>{err === 'AUTH' ? 'Connecte ton compte YouTube pour comparer avec tes abonnements.' : 'YouTube refuse la lecture de tes abonnements (autorisation incomplète) : reconnecte-toi.'}</span>
+          <button onClick={() => ytgLogin()} style={{ background:`${YT_COLOR}18`, border:`1px solid ${YT_COLOR}66`, color:YT_COLOR, borderRadius:8, padding:'5px 11px', fontSize:10.5, fontWeight:700, cursor:'pointer', fontFamily:'inherit', fontStyle:'normal' }}>🔑 Connecter YouTube</button>
+        </div>
+      );
+      if (err) return <div style={dim}>{err === 'QUOTA' ? 'Quota YouTube épuisé pour aujourd’hui — réessaie demain.' : 'YouTube injoignable — réessaie avec ↻.'}</div>;
+      if (!subs) return <div style={dim}>…</div>;
+      return null;
+    };
+    const reload = (
+      <button onClick={e => { e.stopPropagation(); ytSubCmpLoad(true); }} disabled={busy} title="Relire mes abonnements YouTube"
+        style={{ ...abtn(C.dim), fontSize:12, opacity: busy ? 0.4 : 0.7 }}>↻</button>
+    );
+    const chans = items.filter(it => it.type === 'youtube' && !ytIsUnsaved(it) && it.ytKind !== 'playlist' && /^UC[\w-]{20,}$/.test(it.id));
+    const here = new Set(chans.map(it => it.id));
+    const subSet = subs ? new Set(subs.map(x => x.id)) : null;
+    const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', 'fr', { sensitivity:'base' });
+    const notHere = subs ? subs.filter(x => !here.has(x.id) && (!nameQ || (x.title || '').toLowerCase().includes(nameQ))).sort(byTitle) : [];
+    const noSub = subSet ? chans.filter(it => !it.dropped && !subSet.has(it.id) && (!nameQ || (it.title || '').toLowerCase().includes(nameQ))).sort(byTitle) : [];
+    const st = state();
+    return (
+      <div style={{ display:'flex', flexDirection:'column', gap:6, marginTop:6 }}>
+        {secTitle('ytSubOnly', '🔔', 'ABONNEMENTS YOUTUBE NON SUIVIS', subs ? notHere.length : 0, subs ? reload : null, YT_COLOR)}
+        {secOpen.ytSubOnly && (st || (
+          <>
+            <div style={{ ...dim, fontStyle:'normal', textAlign:'left' }}>Chaînes où tu es abonné sur YouTube, absentes de TV Time. ＋ = la suivre ici.</div>
+            {subMsg && <div style={{ ...dim, fontStyle:'normal', color:C.muted }}>{subMsg}</div>}
+            {notHere.length === 0
+              ? <div style={dim}>Tous tes abonnements YouTube sont suivis ici</div>
+              : notHere.map(x => (
+                <div key={x.id} style={{ display:'flex', alignItems:'center', gap:8, background:C.surfaceHigh, borderRadius:8, padding:'6px 8px' }}>
+                  {x.thumb
+                    ? <img src={x.thumb} alt="" loading="lazy" referrerPolicy="no-referrer" style={{ width:26, height:26, borderRadius:'50%', objectFit:'cover', flexShrink:0, background:'#111' }} />
+                    : <div style={{ width:26, height:26, borderRadius:'50%', flexShrink:0, background:'#111', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12 }}>▶️</div>}
+                  <div style={{ flex:1, minWidth:0, fontSize:11, fontWeight:600, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{x.title}</div>
+                  {extLink(x.id, 'Ouvrir la chaîne sur YouTube')}
+                  <button onClick={async () => { setSubAddId(x.id); setSubMsg(''); await addYoutube(x.id); setSubAddId(null); }}
+                    disabled={ytBusy} title="Suivre cette chaîne dans TV Time"
+                    style={{ ...abtn(YT_COLOR), fontSize:16, fontWeight:700, opacity: ytBusy ? 0.4 : 1 }}>{subAddId === x.id ? '⏳' : '＋'}</button>
+                </div>
+              ))}
+            {capped && <div style={dim}>⚠ Plus de {YTSUB_CMP_MAX} abonnements : liste incomplète.</div>}
+          </>
+        ))}
+        {secTitle('ytNoSub', '🔕', 'SUIVIES SANS ABONNEMENT YOUTUBE', subSet ? noSub.length : 0, subs ? reload : null, YT_COLOR)}
+        {secOpen.ytNoSub && (st || (
+          <>
+            <div style={{ ...dim, fontStyle:'normal', textAlign:'left' }}>Chaînes suivies dans TV Time, sans abonnement sur YouTube. ↗ = l'ouvrir sur YouTube pour t'y abonner.</div>
+            {noSub.length === 0
+              ? <div style={dim}>Tu es abonné sur YouTube à toutes les chaînes suivies ici</div>
+              : noSub.map(it => row(it, ytProgressLabel(it), extLink(it.id, "S'abonner sur YouTube")))}
+            {capped && <div style={dim}>⚠ Plus de {YTSUB_CMP_MAX} abonnements lus : certaines chaînes peuvent être listées à tort.</div>}
+          </>
+        ))}
+      </div>
+    );
+  };
   // Libellé de progression d'une série en cours : "5/20 ép. · prochain S2E5" / "à jour ✓"
   const progLabel = it => {
     if (it.type === 'movie') return `Film${it.runtime ? ` · ${it.runtime} min` : ''}`;
@@ -48922,6 +49027,7 @@ function TvTimePanel() {
                           </>
                         )))}
                   </div>}
+              {!shortsTab && ytSubSections()}
             </div>
             );
           })()}
