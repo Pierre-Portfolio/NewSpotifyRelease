@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.193';
+const APP_VERSION = '13.21.194';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -5350,6 +5350,7 @@ const GAMES_COLOR = '#39b2d1';   // bleu-cyan de l'arc-en-ciel (entre IA et Maps
 const GAMES = [
   { id:'2048',       label:'2048',            min:1, max:1 },
   { id:'airhockey',  label:'Air Hockey',      min:2, max:2 },
+  { id:'coderouge',  label:'Code Rouge',      min:1, max:6 },
   { id:'crossy',     label:'Crossy Road',     min:1, max:1 },
   { id:'demineur',   label:'Démineur',        min:1, max:1 },
   { id:'cdl',        label:'Des chiffres et des lettres', min:1, max:8 },
@@ -5547,6 +5548,7 @@ function GameHost({ game, label, dobMode }) {
   switch (game) {
     case '2048':       return <Game2048 />;
     case 'airhockey':  return <GameAirHockey />;
+    case 'coderouge':  return <GameCodeRouge />;
     case 'crossy':     return <GameCrossy />;
     case 'demineur':   return <GameDemineur />;
     case 'cdl':        return <GameChiffresLettres />;
@@ -11517,6 +11519,350 @@ function GameChiffresLettres() {
         </div>
       </div>
       {board}
+    </GameWrap>
+  );
+}
+
+// ════════ Code Rouge (lettres bleues obligatoires, lettre rouge interdite — 1 à 6 joueurs) ════════
+// Demande utilisateur : « des lettres bleues et pas la lettre rouge, le premier qui trouve a
+// gagné ». À chaque manche, 2 à 4 lettres BLEUES que le mot doit toutes contenir et une lettre
+// ROUGE qu'il ne doit pas contenir. Chacun a son buzzer à l'écran : le premier qui buzze tape
+// son mot (le chrono s'arrête) ; juste ⇒ il gagne la manche, faux ⇒ il en est éliminé et les
+// autres peuvent encore buzzer. Seul : pas de buzzer, autant d'essais qu'on veut.
+// ⚠ L'ARBITRE est le dictionnaire de Motus, qui ne va que de 6 à 9 lettres (cf. `cdlWordsFrom`) :
+// moins de 6 lettres = refus (règle du jeu) ; plus de 9, ou mot inconnu du dictionnaire = refus
+// DISCUTABLE, la tablée peut l'« Accepter quand même » — même parti pris que Des chiffres et
+// des lettres : un humain tranche ce que le Hub ne sait pas.
+// ⚠ Tirage GARANTI jouable : les bleues sont prises dans un mot COURANT (listes de Motus), la
+// rouge hors de ce mot, puis les solutions du dictionnaire sont comptées (`CRG_LEVELS`).
+// ⚠ Rien n'est persisté : une partie dure une soirée.
+const CRG_COLOR = '#e8434b';
+const CRG_BLUE  = '#3d8bfd';
+const CRG_MAX_P = 6;
+// `min`/`max` = nombre de solutions du dictionnaire accepté pour un tirage : sans plafond, trois
+// lettres courantes laissent des milliers de mots et la manche se gagne au premier réflexe.
+const CRG_LEVELS = [
+  { id:'easy',   label:'Facile', blue:2, min:300, max:Infinity },
+  { id:'normal', label:'Normal', blue:3, min:30,  max:1500 },
+  { id:'hard',   label:'Corsé',  blue:4, min:4,   max:200 },
+];
+const CRG_ROUNDS = [5, 10, 15];
+const CRG_DURS = [30, 45, 60, 90];
+const CRG_MIN_LEN = 6;
+// La rouge est prise parmi les lettres les PLUS fréquentes : interdire un W ne gênerait personne.
+const CRG_REDS = ['E', 'A', 'I', 'S', 'R', 'N', 'T', 'O', 'L', 'U'];
+const CRG_SHOW = 6;     // solutions montrées à la fin d'une manche
+let _crgCommon = null;  // { list, set } — mots COURANTS de Motus (tirage + exemples)
+function crgCommon() {
+  if (_crgCommon && _crgCommon.list.length) return _crgCommon;
+  const W = window.MOTUS_WORDS || {}, list = [];
+  for (const len of Object.keys(W)) for (const k of ['tres_facile', 'facile', 'moyen']) {
+    const a = W[len] && W[len][k];
+    if (Array.isArray(a)) list.push(...a);
+  }
+  _crgCommon = { list, set: new Set(list) };
+  return _crgCommon;
+}
+function crgSolutions(blue, red) {
+  const D = window.MOTUS_DICO || {}, out = [];
+  for (const len of Object.keys(D)) for (const w of D[len]) {
+    if (w.indexOf(red) >= 0) continue;
+    let ok = true;
+    for (const b of blue) if (w.indexOf(b) < 0) { ok = false; break; }
+    if (ok) out.push(w);
+  }
+  return out;
+}
+// ⚠ Au pire ~200 essais (niveau Corsé, ~60 ms en moyenne) : jamais pendant un rendu, seulement
+// au clic qui lance la manche. Faute de tirage dans la fourchette, le dernier tirage jouable sert.
+function crgDraw(lv, used) {
+  const { list, set } = crgCommon();
+  if (!list.length || !window.MOTUS_DICO) return null;
+  let spare = null;
+  for (let t = 0; t < 200; t++) {
+    const w = list[Math.floor(Math.random() * list.length)];
+    const letters = ouaShuffle([...new Set(w)]);
+    if (letters.length < lv.blue) continue;
+    const blue = letters.slice(0, lv.blue).sort();
+    const reds = CRG_REDS.filter(l => w.indexOf(l) < 0);
+    if (!reds.length) continue;
+    const red = reds[Math.floor(Math.random() * reds.length)];
+    const key = blue.join('') + '/' + red;
+    if (used.has(key)) continue;
+    const sols = crgSolutions(blue, red);
+    if (!sols.length) continue;
+    const ex = ouaShuffle(sols.filter(s => set.has(s))).concat(ouaShuffle(sols.filter(s => !set.has(s)))).slice(0, CRG_SHOW);
+    const r = { blue, red, key, n: sols.length, ex };
+    if (sols.length >= lv.min && sols.length <= lv.max) return r;
+    if (!spare) spare = r;
+  }
+  return spare;
+}
+function crgCheck(raw, r) {
+  const w = todoNorm(String(raw || '').replace(/œ/gi, 'oe').replace(/æ/gi, 'ae')).toUpperCase().replace(/[^A-Z]/g, '');
+  if (!w) return { ok:false, why:'Tape un mot.' };
+  if (w.indexOf(r.red) >= 0) return { ok:false, why:`« ${w} » contient la lettre rouge ${r.red} !` };
+  const miss = r.blue.filter(b => w.indexOf(b) < 0);
+  if (miss.length) return { ok:false, why:`« ${w} » : il manque ${miss.join(', ')}.` };
+  if (w.length < CRG_MIN_LEN) return { ok:false, why:`« ${w} » est trop court (${CRG_MIN_LEN} lettres minimum).` };
+  const D = window.MOTUS_DICO || {};
+  if (w.length > 9) return { ok:false, soft:true, w, why:`« ${w} » : le dictionnaire du Hub s'arrête à 9 lettres.` };
+  if (!(D[w.length] && D[w.length].has(w))) return { ok:false, soft:true, w, why:`« ${w} » n'est pas dans le dictionnaire du Hub.` };
+  return { ok:true, w };
+}
+function CrgTiles({ r, size }) {
+  const S = size || 46;
+  const tile = (l, bg, red) => (
+    <div key={(red ? 'r' : 'b') + l} style={{ width:S, height:S, borderRadius:S * 0.22, display:'flex', alignItems:'center', justifyContent:'center',
+      background:bg, color:'#fff', fontSize:S * 0.5, fontWeight:900, fontFamily:'DM Mono,monospace', position:'relative',
+      boxShadow:`0 0 ${S * 0.3}px ${bg}66` }}>
+      {l}
+      {red && <div style={{ position:'absolute', left:'12%', right:'12%', top:'50%', height:Math.max(2, S * 0.07), background:'#fff', transform:'rotate(-35deg)', borderRadius:2 }} />}
+    </div>
+  );
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:S * 0.16, flexWrap:'wrap', justifyContent:'center' }}>
+      {r.blue.map(l => tile(l, CRG_BLUE, false))}
+      <div style={{ width:S * 0.25 }} />
+      {tile(r.red, CRG_COLOR, true)}
+    </div>
+  );
+}
+function GameCodeRouge() {
+  const [phase, setPhase] = React.useState('setup');   // setup | load | run | round | over
+  const [count, setCount] = React.useState(2);
+  const [names, setNames] = React.useState(() => Array(CRG_MAX_P).fill(''));
+  const [lvl, setLvl]     = React.useState('normal');
+  const [nRounds, setNRounds] = React.useState(10);
+  const [dur, setDur]     = React.useState(45);
+  const [err, setErr]     = React.useState('');
+  const [game, setGame]   = React.useState(null);      // { players, scores, log:[{ r, who, word }] }
+  const [rnd, setRnd]     = React.useState(null);      // { blue, red, key, n, ex }
+  const [left, setLeft]   = React.useState(0);
+  const [out, setOut]     = React.useState([]);        // joueurs éliminés de la manche
+  const [buzz, setBuzz]   = React.useState(null);      // joueur qui a la main (null = personne)
+  const [word, setWord]   = React.useState('');
+  const [msg, setMsg]     = React.useState(null);      // { txt, soft, w, who } — dernier refus
+  const [win, setWin]     = React.useState(null);      // { who, word } — who = -1 : personne
+  const usedRef = React.useRef(new Set());
+  const lv = CRG_LEVELS.find(x => x.id === lvl) || CRG_LEVELS[1];
+  const solo = !!(game && game.players.length === 1);
+  const newRound = () => {
+    const r = crgDraw(lv, usedRef.current);
+    if (!r) { setErr('Tirage impossible : dictionnaire vide.'); setPhase('setup'); return; }
+    usedRef.current.add(r.key);
+    setRnd(r); setLeft(dur); setOut([]); setBuzz(null); setWord(''); setMsg(null); setWin(null); setPhase('run');
+  };
+  const start = () => {
+    setErr(''); setPhase('load');
+    loadMotusData().then(() => {
+      const players = names.slice(0, count).map((n, i) => n.trim() || `Joueur ${i + 1}`);
+      usedRef.current = new Set();
+      setGame({ players, scores: players.map(() => 0), log: [] });
+      newRound();
+    }).catch(e => { setErr('Dictionnaire injoignable : ' + ((e && e.message) || e)); setPhase('setup'); });
+  };
+  const closeRound = (who, w) => {
+    setGame(g => ({ ...g, scores: g.scores.map((s, i) => (i === who ? s + 1 : s)),
+      log: g.log.concat([{ r: rnd, who, word: w || '' }]) }));
+    setWin({ who, word: w || '' }); setBuzz(null); setMsg(null); setPhase('round');
+  };
+  const reject = (who, why) => {
+    setMsg({ txt: why, soft:false }); setWord('');
+    if (solo) return;                    // seul : autant d'essais qu'on veut
+    const nOut = out.concat(who);
+    setOut(nOut); setBuzz(null);
+    if (nOut.length >= game.players.length) closeRound(-1);
+  };
+  const submit = () => {
+    const who = solo ? 0 : buzz;
+    if (who == null || !rnd) return;
+    const v = crgCheck(word, rnd);
+    if (v.ok) { closeRound(who, v.w); return; }
+    if (v.soft) { setMsg({ txt: v.why, soft:true, w: v.w, who }); return; }
+    reject(who, v.why);
+  };
+  // Chrono : ⚠ ARRÊTÉ tant qu'un joueur a la main (`buzz`), sinon la fin de manche pourrait
+  // tomber pendant qu'il tape. `setTimeout` relancé à chaque seconde (piège 6, cf. CDL).
+  React.useEffect(() => {
+    if (phase !== 'run' || buzz != null || (msg && msg.soft)) return;
+    if (left <= 0) { closeRound(-1); return; }
+    const t = setTimeout(() => setLeft(x => x - 1), 1000);
+    return () => clearTimeout(t);
+  }, [phase, left, buzz, msg]);
+
+  const card = partyCard(CRG_COLOR);
+  const big  = extra => gameBtn({ padding:'11px 20px', fontSize:13, ...(extra || {}) });
+  const chip = on => gameBtn({ padding:'6px 12px', fontSize:12,
+    background: on ? `${CRG_COLOR}2e` : 'none', border:`1px solid ${on ? CRG_COLOR : C.border}`, color: on ? CRG_COLOR : C.muted });
+  const pick = (title, opts, val, set, fmt) => (
+    <div style={{ width:'100%' }}>
+      <div style={{ fontSize:11.5, color:C.muted, marginBottom:6, textAlign:'center' }}>{title}</div>
+      <div style={{ display:'flex', gap:6, justifyContent:'center', flexWrap:'wrap' }}>
+        {opts.map(o => <button key={String(o)} onClick={() => set(o)} style={chip(val === o)}>{fmt ? fmt(o) : o}</button>)}
+      </div>
+    </div>
+  );
+
+  if (phase === 'setup' || phase === 'load') return (
+    <GameWrap hint="Tout le monde autour de l'appareil : chacun son buzzer. Le dictionnaire du Hub arbitre ; en cas de doute, c'est la tablée qui tranche.">
+      <PartySetup color={CRG_COLOR} icon="🟥" title="CODE ROUGE" min={1} max={CRG_MAX_P}
+        rules={`Trouve un mot d'au moins ${CRG_MIN_LEN} lettres qui contient TOUTES les lettres bleues et JAMAIS la lettre rouge. Le premier qui buzze propose son mot : juste, il gagne la manche ; faux, il est éliminé de la manche.`}
+        count={count} setCount={setCount} names={names} setNames={setNames}
+        cta={phase === 'load' ? 'Chargement du dictionnaire…' : 'Commencer →'} onStart={phase === 'load' ? () => {} : start}>
+        {pick('Difficulté', CRG_LEVELS.map(x => x.id), lvl, setLvl, id => { const x = CRG_LEVELS.find(y => y.id === id); return `${x.label} · ${x.blue} bleues`; })}
+        {pick('Manches', CRG_ROUNDS, nRounds, setNRounds)}
+        {pick('Temps par manche', CRG_DURS, dur, setDur, d => d + ' s')}
+        {err && <div style={{ fontSize:11.5, color:'#e05050' }}>⚠ {err}</div>}
+      </PartySetup>
+    </GameWrap>
+  );
+
+  const roundNo = game.log.length + (phase === 'round' || phase === 'over' ? 0 : 1);
+  const board = (
+    <div style={{ width:'100%', maxWidth:360, display:'flex', flexWrap:'wrap', gap:6, justifyContent:'center' }}>
+      {game.players.map((p, i) => (
+        <div key={p + i} style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 9px', borderRadius:9, background:C.surface,
+          border:`1px solid ${win && win.who === i ? CRG_BLUE : C.border}` }}>
+          <PartyAvatar name={p} idx={i} size={22} />
+          <span style={{ fontSize:11.5, color:C.text, maxWidth:96, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p}</span>
+          <b style={{ fontSize:13, color:CRG_COLOR, fontFamily:'DM Mono,monospace' }}>{game.scores[i]}</b>
+        </div>
+      ))}
+    </div>
+  );
+  const bar = (
+    <>
+      <span style={{ fontSize:12, color:C.muted }}>Manche <b style={{ color:CRG_COLOR }}>{Math.min(roundNo, nRounds)}</b> / {nRounds} · {lv.label}</span>
+      <button onClick={() => setPhase('setup')} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted })}>↻ Nouvelle partie</button>
+    </>
+  );
+
+  if (phase === 'run') {
+    const typing = solo || buzz != null;
+    const who = solo ? 0 : buzz;
+    return (
+      <GameWrap bar={bar}>
+        <div style={card}>
+          <div style={{ fontSize:34, fontWeight:900, fontFamily:'DM Mono,monospace', color: left <= 10 ? CRG_COLOR : C.text, lineHeight:1 }}>
+            {left}<span style={{ fontSize:13, color:C.dim }}> s</span>{buzz != null && <span style={{ fontSize:11, color:C.dim, fontWeight:600 }}> · en pause</span>}
+          </div>
+          <CrgTiles r={rnd} />
+          <div style={{ fontSize:11, color:C.muted }}>
+            <b style={{ color:CRG_BLUE }}>{rnd.blue.join(' · ')}</b> obligatoires · <b style={{ color:CRG_COLOR }}>{rnd.red}</b> interdite · {CRG_MIN_LEN} lettres min.
+          </div>
+          {msg && (
+            <div style={{ width:'100%', fontSize:12, lineHeight:1.5, color: msg.soft ? '#f0a93c' : '#e05050', background:`${msg.soft ? '#f0a93c' : '#e05050'}14`, borderRadius:8, padding:'7px 10px' }}>
+              {msg.soft ? '🤔 ' : '❌ '}{msg.txt}
+              {msg.soft && (
+                <div style={{ display:'flex', gap:6, justifyContent:'center', marginTop:7 }}>
+                  <button onClick={() => closeRound(msg.who, msg.w)} style={gameBtn({ padding:'6px 11px' })}>✔ Accepter quand même</button>
+                  <button onClick={() => reject(msg.who, msg.txt)} style={gameBtn({ padding:'6px 11px', background:'none', border:`1px solid ${C.border}`, color:C.muted })}>✖ Refuser</button>
+                </div>
+              )}
+            </div>
+          )}
+          {typing && !(msg && msg.soft) && (
+            <div style={{ width:'100%', display:'flex', flexDirection:'column', gap:6 }}>
+              {!solo && <div style={{ fontSize:12.5, fontWeight:800, color:UCD_COLORS[who % UCD_COLORS.length] }}>🔔 {game.players[who]}, ton mot :</div>}
+              <div style={{ display:'flex', gap:6 }}>
+                <input autoFocus value={word} onChange={e => setWord(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+                  autoCapitalize="characters" autoComplete="off" autoCorrect="off" spellCheck={false} placeholder="Ton mot…"
+                  style={{ flex:1, minWidth:0, background:C.surface, border:`1px solid ${CRG_BLUE}88`, borderRadius:8, color:C.text,
+                    padding:'9px 11px', fontSize:16, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', outline:'none', fontFamily:'DM Mono,monospace' }} />
+                <button onClick={submit} style={gameBtn({ padding:'9px 14px', fontSize:13 })}>OK</button>
+              </div>
+              {!solo && <button onClick={() => reject(buzz, `${game.players[buzz]} passe son tour.`)}
+                style={gameBtn({ padding:'6px 11px', background:'none', border:`1px solid ${C.border}`, color:C.muted, alignSelf:'center' })}>✖ Je n'ai pas de mot</button>}
+              {solo && <button onClick={() => closeRound(-1)}
+                style={gameBtn({ padding:'6px 11px', background:'none', border:`1px solid ${C.border}`, color:C.muted, alignSelf:'center' })}>🏳️ J'abandonne la manche</button>}
+            </div>
+          )}
+          {!typing && (
+            <div style={{ width:'100%', display:'grid', gridTemplateColumns: game.players.length > 1 ? '1fr 1fr' : '1fr', gap:8 }}>
+              {game.players.map((p, i) => {
+                const gone = out.includes(i), col = UCD_COLORS[i % UCD_COLORS.length];
+                return (
+                  <button key={p + i} disabled={gone} onClick={() => { setMsg(null); setWord(''); setBuzz(i); }}
+                    style={{ minHeight:58, borderRadius:12, border:`2px solid ${gone ? C.border : col}`, background: gone ? 'none' : `${col}22`,
+                      color: gone ? C.dim : C.text, fontSize:14, fontWeight:900, cursor: gone ? 'default' : 'pointer', fontFamily:'inherit',
+                      touchAction:'manipulation', opacity: gone ? 0.5 : 1 }}>
+                    {gone ? '✖ ' : '🔔 '}{p}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {board}
+      </GameWrap>
+    );
+  }
+
+  if (phase === 'round') {
+    const last = game.log.length >= nRounds;
+    return (
+      <GameWrap bar={bar}>
+        <div style={card}>
+          <CrgTiles r={rnd} size={34} />
+          {win && win.who >= 0
+            ? <div style={{ fontSize:15, fontWeight:900, color:C.text }}>🏆 {game.players[win.who]} gagne la manche avec <span style={{ color:CRG_BLUE, fontFamily:'DM Mono,monospace' }}>{win.word}</span></div>
+            : <div style={{ fontSize:15, fontWeight:900, color:CRG_COLOR }}>⏱ Personne n'a trouvé</div>}
+          <div style={{ width:'100%' }}>
+            <div style={{ fontSize:11, color:C.muted, marginBottom:5 }}>Il y avait par exemple ({cartoNum(rnd.n)} mots dans le dictionnaire) :</div>
+            <div style={{ display:'flex', gap:5, flexWrap:'wrap', justifyContent:'center' }}>
+              {rnd.ex.map(w => <span key={w} style={{ fontSize:12, fontWeight:800, fontFamily:'DM Mono,monospace', color:C.text, background:`${CRG_BLUE}1c`, border:`1px solid ${CRG_BLUE}55`, borderRadius:6, padding:'3px 7px' }}>{w}</span>)}
+            </div>
+          </div>
+          <button onClick={() => (last ? setPhase('over') : newRound())} style={big()}>{last ? '🏁 Voir le résultat' : 'Manche suivante →'}</button>
+        </div>
+        {board}
+      </GameWrap>
+    );
+  }
+
+  // 🏁 Résultat final : classement, puis le film de la partie manche par manche.
+  const rank = game.players.map((n, i) => ({ n, i, s: game.scores[i] })).sort((a, b) => b.s - a.s);
+  const top = rank.filter(r => r.s === rank[0].s);
+  const found = game.log.filter(x => x.who >= 0).length;
+  return (
+    <GameWrap>
+      <div style={{ width:'100%', maxWidth:360, display:'flex', flexDirection:'column', gap:8 }}>
+        <div style={{ textAlign:'center', fontSize:28 }}>🟥</div>
+        <div style={{ textAlign:'center', fontSize:15, fontWeight:900, color:CRG_COLOR }}>
+          {solo ? `${found} manche${found > 1 ? 's' : ''} trouvée${found > 1 ? 's' : ''} sur ${game.log.length}`
+            : rank[0].s === 0 ? 'Personne n’a marqué…'
+            : top.length > 1 ? `🤝 Égalité : ${top.map(r => r.n).join(' et ')} (${rank[0].s} pts)`
+            : `🏆 ${rank[0].n} l'emporte avec ${rank[0].s} pt${rank[0].s > 1 ? 's' : ''}`}
+        </div>
+        {!solo && rank.map((r, k) => (
+          <div key={r.i} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:8, padding:'8px 12px', borderRadius:8,
+            background: r.s === rank[0].s && r.s > 0 ? `${CRG_COLOR}18` : C.surface, border:`1px solid ${r.s === rank[0].s && r.s > 0 ? CRG_COLOR + '55' : C.border}` }}>
+            <span style={{ display:'flex', alignItems:'center', gap:8, minWidth:0 }}>
+              <span style={{ fontSize:11, color:C.dim, width:14 }}>{k + 1}</span>
+              <PartyAvatar name={r.n} idx={r.i} size={26} />
+              <span style={{ fontSize:12.5, fontWeight:700, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{r.n}</span>
+            </span>
+            <span style={{ fontSize:12.5, fontWeight:900, color: r.s === rank[0].s && r.s > 0 ? CRG_COLOR : C.muted, flexShrink:0 }}>{r.s} pt{r.s > 1 ? 's' : ''}</span>
+          </div>
+        ))}
+        <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.08em', textTransform:'uppercase', color:C.dim, marginTop:6 }}>Manche par manche</div>
+        {game.log.map((x, k) => (
+          <div key={x.r.key} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', borderRadius:8, background:C.surface, border:`1px solid ${C.border}` }}>
+            <span style={{ fontSize:10.5, color:C.dim, width:16, flexShrink:0 }}>{k + 1}</span>
+            <span style={{ fontSize:12, fontWeight:900, fontFamily:'DM Mono,monospace', flexShrink:0 }}>
+              <span style={{ color:CRG_BLUE }}>{x.r.blue.join('')}</span> <span style={{ color:CRG_COLOR, textDecoration:'line-through' }}>{x.r.red}</span>
+            </span>
+            <span style={{ flex:1, minWidth:0, fontSize:11.5, color: x.who >= 0 ? C.text : C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', textAlign:'right' }}>
+              {x.who >= 0 ? <>{solo ? '' : game.players[x.who] + ' · '}<b style={{ fontFamily:'DM Mono,monospace' }}>{x.word}</b></> : `personne (ex. ${x.r.ex[0] || '—'})`}
+            </span>
+          </div>
+        ))}
+        <div style={{ display:'flex', gap:6, justifyContent:'center', marginTop:4, flexWrap:'wrap' }}>
+          <button onClick={start} style={big()}>🔄 Rejouer (mêmes joueurs)</button>
+          <button onClick={() => setPhase('setup')} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted })}>🏠 Accueil</button>
+        </div>
+      </div>
     </GameWrap>
   );
 }
@@ -32156,6 +32502,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.194', date:'2026-10-09', title:'🟥 Jeux : Code Rouge', items:[
+    'Nouveau jeu de lettres, de 1 à 6 joueurs sur le même appareil : trouve un mot d’au moins 6 lettres qui contient TOUTES les lettres bleues et JAMAIS la lettre rouge. Chacun a son buzzer : le premier qui buzze propose son mot (le chrono s’arrête). Juste, il gagne la manche ; faux, il est éliminé de la manche et les autres peuvent encore tenter.',
+    'Trois difficultés (2, 3 ou 4 lettres bleues), 5 à 15 manches, 30 à 90 s par manche. Le dictionnaire du Hub arbitre ; un mot qu’il ne connaît pas peut être accepté par la tablée. À chaque manche, des exemples de mots possibles ; à la fin, le classement et le récapitulatif manche par manche.',
+  ] },
   { v:'13.21.193', date:'2026-10-09', title:'🤔 Jeux : L’un ou l’autre', items:[
     'Nouveau jeu solo dans Jeux, sur le principe des sites de devinettes : 10 questions, deux réponses possibles. 🏢 Crous ou Prison (chambre d’étudiant ou cellule ?), 🥢 Chinois ou Coréen (devine d’où vient le plat), 👀 Le plus vu (lequel de deux personnages a eu le plus de vues sur Wikipédia ce mois-ci).',
     'Les photos et les chiffres viennent de Wikimedia, relus à chaque partie (réseau nécessaire). À la fin : ton score, ta meilleure série, ton record par mode et le récapitulatif de chaque question.',
@@ -32171,11 +32521,6 @@ const RELEASE_NOTES = [
   { v:'13.21.190', date:'2026-10-07', title:'🔔 TV Time : abonnements YouTube ↔ chaînes suivies', items:[
     'Onglet ▶️ YT de TV Time, sous « Vus », deux nouvelles sections. 🔔 Abonnements YouTube non suivis : les chaînes auxquelles tu es abonné sur YouTube mais absentes de TV Time, avec ＋ pour les suivre ici. 🔕 Suivies sans abonnement YouTube : les chaînes suivies dans TV Time auxquelles tu n’es pas abonné sur YouTube, avec ↗ pour t’y abonner.',
     'Tes abonnements sont lus à l’ouverture d’une des deux sections (compte YouTube connecté nécessaire), puis gardés 30 min ; ↻ pour les relire.',
-  ] },
-  { v:'13.21.189', date:'2026-10-07', title:'🧩 Extension YouTube : les playlists se cochent', items:[
-    'Une vidéo vue sur le PC (extension YouTube → TV Time) est maintenant cochée dans TOUTES les chaînes et playlists suivies qui la contiennent. Avant, seule la première était cochée : si tu suivais aussi la chaîne du vidéaste, la playlist restait « à voir ».',
-    'Lancée depuis une playlist suivie, la vidéo y est cochée même si TV Time n’a pas encore relu la playlist (il faut recharger l’extension dans chrome://extensions pour la version 1.1.2).',
-    'Correction : TV Time ouvert pendant l’import ne voyait pas les nouvelles coches et pouvait les effacer à l’action suivante. Il se met maintenant à jour tout seul.',
   ] },
 ];
 
