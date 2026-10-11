@@ -4013,13 +4013,65 @@ function doodleShuffleTiles(s, H) {
   const pos = vis.map(p => ({ x: p.x, y: p.y }));
   for (let i = pos.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const tmp = pos[i]; pos[i] = pos[j]; pos[j] = tmp; }   // Fisher-Yates
   vis.forEach((p, i) => {
-    const nx = Math.max(4, Math.min(DOODLE_W - p.w - 4, pos[i].x)), dx = nx - p.x, dy = pos[i].y - p.y;
-    p.x = nx; p.y = pos[i].y;
-    if (p.y0 != null) p.y0 += dy;                                          // 🛗 l'ascenseur emporte l'axe de sa course
-    for (const c of s.chests) if (c.plat === p) { c.x += dx; c.y += dy; }   // 📦 le coffre posé voyage avec sa dalle
+    doodleMovePlat(s, p, pos[i].x, pos[i].y);
     for (let k = 0; k < 3; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y + p.h / 2, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, life: 20, max: 20, sz: 2.5, c: k % 2 ? '#ffe9a8' : '#8e5bd8' });
   });
   return vis.length;
+}
+// Déplace UNE dalle avec ce qu'elle PORTE : l'axe de la course de l'🛗 ascenseur (`y0`), l'ancre
+// de la 👀 Vivante (`ax`/`ay`) et les 📦 coffres posés dessus. ⚠ Source UNIQUE du 🔀 Randomiseur
+// et du ➕ Chaos + : deux copies, et l'une finirait par oublier un passager que l'autre emporte.
+function doodleMovePlat(s, p, x, y) {
+  const nx = Math.max(4, Math.min(DOODLE_W - p.w - 4, x)), dx = nx - p.x, dy = y - p.y;
+  p.x = nx; p.y = y;
+  if (p.y0 != null) p.y0 += dy;
+  if (p.ay != null) { p.ax += dx; p.ay += dy; }
+  for (const c of s.chests) if (c.plat === p) { c.x += dx; c.y += dy; }
+}
+// ➕ MODE CHAOS + (demande utilisateur : « en plus du mode Chaos, toutes les 1 [s], 2 tuiles
+// échangent de place »). Tout le Chaos, plus un échange de DEUX dalles visibles par seconde.
+// ⚠ Compté en temps de JEU (`sf`) : le ⏱️ ralentisseur étire aussi la cadence des échanges,
+// sinon ce serait la seule chose du jeu à ne pas ralentir.
+// ⚠ Échange CENTRE contre centre (et non coin haut-gauche) : une dalle 🔺 fractale, plus étroite,
+// aurait sinon atterri décalée par rapport à la place qu'occupait l'autre.
+// ⚠ Écartées du tirage (doodleChaosSwapOk) : les dalles d'une ⛓️ chaîne ou d'une 🪜 échelle — la
+// liaison s'étirerait à travers l'écran et `doodleClimbClear` effacerait tout ce qu'elle coupe,
+// une fois par seconde — et celle qui TIENT le doodler (🌳 cime, 🪗 accordéon / 🍯 colle, 🟦
+// TARDIS, 🧷 barbelé, 🪝 grappin) : il serait téléporté avec elle.
+const D_CHAOSP_EVERY = 60;          // 1 s à 60 fps entre deux échanges
+const D_CHAOSP_FX = 22;             // durée du trait qui relie les deux dalles échangées
+function doodleChaosSwapOk(s, p, H) {
+  if (p.dead || p.y < 0 || p.y > H - p.h || p.chain || doodleEffType(p) === 'ladder') return false;
+  for (const o of [s.tride, s.acc, s.tardis, s.barb, s.grab]) if (o && o.p === p) return false;
+  return true;
+}
+function doodleChaosSwap(s, H) {
+  const pool = s.platforms.filter(p => doodleChaosSwapOk(s, p, H));
+  if (pool.length < 2) return false;
+  const i = Math.floor(Math.random() * pool.length);
+  let j = Math.floor(Math.random() * (pool.length - 1)); if (j >= i) j++;
+  const a = pool[i], b = pool[j];
+  const ax = a.x + a.w / 2, ay = a.y, bx = b.x + b.w / 2, by = b.y;
+  doodleMovePlat(s, a, bx - a.w / 2, by);
+  doodleMovePlat(s, b, ax - b.w / 2, ay);
+  // La série de rebonds sur une même dalle ne survit pas à son déplacement (comme au 🔀 Randomiseur).
+  if (s.lastPlat === a || s.lastPlat === b) { s.lastPlat = null; s.lastLine = null; s.bounceStreak = 0; }
+  s.swapFx = { a, b, life: D_CHAOSP_FX };
+  for (const p of [a, b]) for (let k = 0; k < 5; k++) s.parts.push({ x: p.x + Math.random() * p.w, y: p.y + p.h / 2, vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3, life: 18, max: 18, sz: 2.5, c: k % 2 ? '#ff8fc8' : '#6b3fd4' });
+  return true;
+}
+// Le trait pointillé qui relie les deux dalles qu'on vient d'échanger : sans lui, on voit le décor
+// sauter sans comprendre ce qui a bougé. Lu sur les dalles ELLES-MÊMES, il suit la caméra.
+function doodleChaosSwapDraw(ctx, s) {
+  const fx = s.swapFx;
+  if (!fx || fx.life <= 0 || fx.a.dead || fx.b.dead) return;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, fx.life / D_CHAOSP_FX * 1.4);
+  ctx.strokeStyle = '#ff5fb8'; ctx.lineWidth = 2; ctx.setLineDash([6, 5]); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(fx.a.x + fx.a.w / 2, fx.a.y + fx.a.h / 2); ctx.lineTo(fx.b.x + fx.b.w / 2, fx.b.y + fx.b.h / 2); ctx.stroke();
+  ctx.setLineDash([]); ctx.strokeStyle = '#6b3fd4';
+  for (const p of [fx.a, fx.b]) ctx.strokeRect(p.x - 2, p.y - 2, p.w + 4, p.h + 4);
+  ctx.restore();
 }
 function doodleTileUnlock(s) {
   // ⚠ 🕊️ Les tuiles bannies par la miséricordieuse sont exclues du tirage : sans ce filtre, le
@@ -8240,6 +8292,7 @@ function doodleDraw(ctx, s, W, H) {
     // 🟫 Les deux moitiés de la cassante, sur la même couche que les dalles. ⚠ Le 🌁 Brouillard
     // ne les efface PAS : il masque ce sur quoi on peut se poser, et un débris n'en est plus.
     if (s.wrecks) for (const wk of s.wrecks) doodleWreck(ctx, wk);
+    if (!s.blind) doodleChaosSwapDraw(ctx, s);   // ➕ Chaos + : ⚠ pas sous le 🌁 Brouillard, le trait trahirait les dalles qu'il cache
     // 🪝 Grappins en vol : chaîne depuis la dalle jusqu'à la tête, et corde tendue vers le
     // doodler tant qu'il est ramené — sans elle, on serait tiré par du vide.
     ctx.save(); ctx.lineCap = 'round';
@@ -9433,6 +9486,10 @@ function doodleRules() {
   // Bandes au départ (score 0, renfort de début inclus) et à saturation (700 points).
   const lo = doodleBands(0, 1), hi = doodleBands(700, 1);
   return [
+    { t:'Modes de jeu', c:'#ff8fc8', rows:[
+      { i:'🌀', n:'Chaos',   d:'le jeu complet : biomes, tuiles débloquées, coffres, boss et tout le reste.' },
+      { i:'➕', n:'Chaos +', d:`tout le Chaos, et en plus DEUX dalles visibles échangent leur place toutes les ${D_CHAOSP_EVERY / 60} s (jamais celles d'une chaîne ou d'une échelle, ni celle qui te tient). Record séparé.` },
+    ] },
     { t:'Taux d\'apparition', c:'#9bd93f', rows:[
       { i:'🟩', n:'Plateformes',  d:`sur une rangée ordinaire : cassante ${doodlePct(lo.b)} à ${doodlePct(hi.b)}, bleue ${doodlePct(lo.m)} à ${doodlePct(hi.m)}, blanche ${doodlePct(lo.v)} à ${doodlePct(hi.v)} — le reste est vert. Les parts montent avec l'altitude et saturent vers 700 points ; blanche, bleue et multicolore sont en plus renforcées avant ${D_EARLY_SCORE} points.` },
       { i:'🌈', n:'Multicolore',  d:`${doodlePct(D_RAINBOW_P * (1 + D_MORE_RAINBOW * D_EARLY_MUL))} des rangées avant 1000 points, ${doodlePct(D_RAINBOW_P_HI)} au-delà. Jamais deux en vie à la fois.` },
@@ -9493,4 +9550,7 @@ const D_SLOT_STOPS = [560, 900, 1240];
 // `!doodleClassic(s)` a donc disparu, jamais son contenu : le Chaos est le comportement gardé.
 // ⚠ L'ancienne clé `spotifyplus_doodle_mode` n'est plus ni lue ni écrite ; elle traîne peut-être
 // encore chez l'utilisateur, mais plus rien ne s'en sert — ne pas la ressusciter.
+// ➕ Le mode « Chaos + » N'EST PAS un retour du Classique : c'est le Chaos plus un drapeau
+// (`s.plus`, voir doodleChaosSwap), choisi à l'accueil du jeu et mémorisé dans sa PROPRE clé
+// (`spotifyplus_doodle_plus`), avec son propre record (`doodle_plus`).
 window.DOODLE_READY = true;
