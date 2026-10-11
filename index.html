@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.198';
+const APP_VERSION = '13.21.199';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -7110,6 +7110,12 @@ const AH_WALL = 0.9;                   // restitution sur les bandes
 const AH_VMAX = 16;                    // vitesse max du palet (px/frame)
 const AH_WIN = 7;                      // manche en 7 buts
 const AH_SUB = 5;                      // pas d'intégration max (px) — anti-tunneling
+// 🏒 Vitesse max d'un maillet (px/frame). ⚠ Le doigt ne POSE plus le maillet, il lui donne une
+// CIBLE (`tx`/`ty`) que le maillet rejoint à cette vitesse au plus (demande utilisateur) : un
+// simple tapotement le téléportait à l'autre bout de sa moitié, et ce saut, lu comme une vitesse
+// par `ahStep`, devenait un tir surpuissant. 12 suffit à saturer AH_VMAX (renvoi + 55 % du
+// geste), un vrai glissé garde donc toute sa force.
+const AH_MALLET_V = 12;
 // Joueur 0 = HAUT (rouge), joueur 1 = BAS (cyan). L'ordre suit celui de l'écran.
 const AH_P = [
   { name:'Joueur 1', col:'#e8524f', glow:'#ff8a86' },
@@ -7118,8 +7124,8 @@ const AH_P = [
 function ahBuild() {
   return {
     p:{ x:AH_W / 2, y:AH_H / 2, vx:0, vy:0 },
-    m:[{ x:AH_W / 2, y:AH_H * 0.16, px:AH_W / 2, py:AH_H * 0.16, vx:0, vy:0, id:null },
-       { x:AH_W / 2, y:AH_H * 0.84, px:AH_W / 2, py:AH_H * 0.84, vx:0, vy:0, id:null }],
+    m:[{ x:AH_W / 2, y:AH_H * 0.16, px:AH_W / 2, py:AH_H * 0.16, tx:AH_W / 2, ty:AH_H * 0.16, vx:0, vy:0, id:null },
+       { x:AH_W / 2, y:AH_H * 0.84, px:AH_W / 2, py:AH_H * 0.84, tx:AH_W / 2, ty:AH_H * 0.84, vx:0, vy:0, id:null }],
     score:[0, 0], flash:0, flashBy:0, trail:[], t:0,
   };
 }
@@ -7128,12 +7134,16 @@ function ahServe(s, to) {
   s.p.x = AH_W / 2; s.p.y = AH_H / 2 + (to === 1 ? 70 : -70); s.p.vx = 0; s.p.vy = 0; s.trail = [];
 }
 // Contrainte d'un maillet : dans le plateau ET dans SA moitié (jamais de maillet chez l'autre).
+// Appliquée à sa CIBLE (n'importe quel `{x, y}`) : le maillet, qui la rejoint en ligne droite
+// depuis sa moitié, ne peut donc jamais en sortir.
 function ahClampMallet(m, side) {
   const r = AH_MALLET;
   m.x = Math.max(r, Math.min(AH_W - r, m.x));
   if (side === 0) m.y = Math.max(r, Math.min(AH_H / 2 - r, m.y));
   else m.y = Math.max(AH_H / 2 + r, Math.min(AH_H - r, m.y));
 }
+// Le doigt donne la CIBLE du maillet, jamais sa position (voir AH_MALLET_V).
+function ahAim(m, x, y, side) { const t = { x, y }; ahClampMallet(t, side); m.tx = t.x; m.ty = t.y; }
 // Un sous-pas de physique. Renvoie 0 (rien), 1 (but du joueur du BAS), 2 (but du joueur du HAUT).
 function ahSub(s, dt) {
   const p = s.p, r = AH_PUCK, gx = (AH_W - AH_GOAL) / 2;
@@ -7168,6 +7178,12 @@ function ahSub(s, dt) {
 // maillet ou une bande d'une frame à l'autre.
 function ahStep(s) {
   s.t++;
+  // Chaque maillet avance vers sa cible d'au plus AH_MALLET_V, AVANT la mesure de sa vitesse :
+  // c'est ce pas borné, et non plus le saut du doigt, que le palet reçoit au contact.
+  for (const m of s.m) {
+    const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy);
+    if (d > AH_MALLET_V) { m.x += dx / d * AH_MALLET_V; m.y += dy / d * AH_MALLET_V; } else { m.x = m.tx; m.y = m.ty; }
+  }
   for (const m of s.m) { m.vx = m.x - m.px; m.vy = m.y - m.py; m.px = m.x; m.py = m.y; }
   let sp = Math.hypot(s.p.vx, s.p.vy);
   if (sp > AH_VMAX) { s.p.vx *= AH_VMAX / sp; s.p.vy *= AH_VMAX / sp; sp = AH_VMAX; }
@@ -7326,14 +7342,14 @@ function GameAirHockey() {
     if (m.id !== null && m.id !== e.pointerId) return;      // ce maillet est déjà pris
     m.id = e.pointerId;
     try { canvasRef.current.setPointerCapture(e.pointerId); } catch {}
-    m.x = x; m.y = y; ahClampMallet(m, side);
+    ahAim(m, x, y, side);
   };
   const move = e => {
     const s = g.current; if (!s || phaseRef.current !== 'playing') return;
     const side = s.m.findIndex(m => m.id === e.pointerId);
     if (side < 0) return;
     const { x, y } = pos(e);
-    s.m[side].x = x; s.m[side].y = y; ahClampMallet(s.m[side], side);
+    ahAim(s.m[side], x, y, side);
   };
   const up = e => {
     const s = g.current; if (!s) return;
@@ -32559,6 +32575,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.199', date:'2026-10-11', title:'🏒 Air Hockey : plus de maillet téléporté', items:[
+    'Dans l’Air Hockey, toucher un point de ta moitié ne téléporte plus ton maillet : il y glisse à la vitesse normale d’un déplacement. Tapoter n’importe où ne permet donc plus de surprendre l’autre joueur ni d’envoyer un tir surpuissant.',
+    'Un vrai glissé du doigt garde toute sa force de frappe.',
+  ] },
   { v:'13.21.198', date:'2026-10-11', title:'🔴 Puissance 4 : victoire bien visible', items:[
     'Quand une partie de Puissance 4 se termine, un grand bandeau aux couleurs du gagnant s’affiche au-dessus de la grille (« 🏆 ROUGE GAGNE ! », ou « 🤝 Match nul »), avec un bouton ↻ Rejouer.',
     'Les jetons de l’alignement gagnant sont cerclés de blanc et pulsent, tous les autres sont estompés : on voit tout de suite où la partie s’est jouée.',
@@ -32574,10 +32594,6 @@ const RELEASE_NOTES = [
   { v:'13.21.195', date:'2026-10-09', title:'⚡ Cartographie : électricité', items:[
     'Nouvelle fiche ⚡ Électricité dans Actu → 🗺️ Cartographie, sur le principe d’Electricity Maps : le CO₂ par kWh de l’électricité française au dernier quart d’heure, le mix de production (nucléaire, hydraulique, éolien…), la part bas carbone et le solde avec les pays voisins.',
     'En dessous : une frise du CO₂ des dernières 24 h (le moment le plus propre et le plus carboné), puis la carte des 12 régions — vert si la région produit plus qu’elle ne consomme, rouge sinon. Touche une région pour la situer.',
-  ] },
-  { v:'13.21.194', date:'2026-10-09', title:'🟥 Jeux : Code Rouge', items:[
-    'Nouveau jeu de lettres, de 1 à 6 joueurs sur le même appareil : trouve un mot d’au moins 6 lettres qui contient TOUTES les lettres bleues et JAMAIS la lettre rouge. Chacun a son buzzer : le premier qui buzze propose son mot (le chrono s’arrête). Juste, il gagne la manche ; faux, il est éliminé de la manche et les autres peuvent encore tenter.',
-    'Trois difficultés (2, 3 ou 4 lettres bleues), 5 à 15 manches, 30 à 90 s par manche. Le dictionnaire du Hub arbitre ; un mot qu’il ne connaît pas peut être accepté par la tablée. À chaque manche, des exemples de mots possibles ; à la fin, le classement et le récapitulatif manche par manche.',
   ] },
 ];
 
