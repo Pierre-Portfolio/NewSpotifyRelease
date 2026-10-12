@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.201';
+const APP_VERSION = '13.21.202';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -15069,7 +15069,13 @@ function tlScrollParent(el) {
   }
   return null;
 }
+// Deux tier lists : la tienne à images (`tierlist-v1`) et 📺 Mes séries (notes TV Time).
+// Choix non mémorisé : on rouvre toujours sur les images.
 function GameTierList() {
+  const [series, setSeries] = React.useState(false);
+  return series ? <GameTierSeries onBack={() => setSeries(false)} /> : <GameTierImages onSeries={() => setSeries(true)} />;
+}
+function GameTierImages({ onSeries }) {
   const [data, setData] = React.useState(tlLoad);
   const [edit, setEdit] = React.useState(false);
   const rootRef = React.useRef(null);
@@ -15250,6 +15256,7 @@ function GameTierList() {
           <label style={gameBtn({ display:'inline-flex', alignItems:'center' })}>
             📥 Images<input type="file" multiple accept="image/*" onChange={onUpload} style={{ display:'none' }} />
           </label>
+          <button onClick={onSeries} title="Tier list de tes séries TV Time, rangées de S à D selon ta note ⭐" style={gameBtn()}>📺 Mes séries</button>
           <button onClick={() => setEdit(v => !v)} style={gameBtn(edit ? { background:'#10b98133', border:'1px solid #10b98188', color:'#10b981' } : {})}>⚙️ Mode Édition</button>
           {edit && <button onClick={addTier} style={gameBtn()}>➕ Ajouter un rang</button>}
           {edit && <button onClick={resetAll} style={gameBtn({ background:'#e0505018', border:'1px solid #e0505055', color:'#e05050' })}>♻️ Réinitialiser</button>}
@@ -15274,6 +15281,178 @@ function GameTierList() {
           {!totalImgs && <div style={{ fontSize:11, color:C.dim, alignSelf:'center', margin:'0 auto' }}>Aucune image — commence par 📥 Images.</div>}
         </div>
       </div>
+    </GameWrap>
+  );
+}
+
+// ════════ TierList 📺 Mes séries ════════
+// VUE des notes ⭐ de TV Time (`tvRatingOf`) : rien n'est stocké ici, la note de la fiche
+// série fait foi. Rang = tranche de notes (`TLS_TIERS`) ; « À noter » = séries commencées ou
+// vues, sans note (une série « À voir » jamais entamée n'y est pas).
+// ⚠ Glisser une série dans un autre rang RÉÉCRIT sa note TV Time (`tlsNoteFor` : la note la
+// plus proche de l'ancienne dans la tranche, la plus haute si elle n'en avait pas) ; la lâcher
+// dans « À noter » la retire. Un simple toucher ouvre le choix exact 1–10.
+const TLS_TIERS = [['S', '#7fff7f', 9, 10], ['A', '#ffff7f', 7, 8], ['B', '#ffbf7f', 5, 6], ['C', '#ff7f7f', 3, 4], ['D', '#d79bff', 1, 2]];
+const TLS_POSTER = 'https://image.tmdb.org/t/p/w154';
+function tlsTierOf(r) { return r ? TLS_TIERS.findIndex(t => r >= t[2] && r <= t[3]) : -1; }
+function tlsNoteFor(tier, old) { const lo = TLS_TIERS[tier][2], hi = TLS_TIERS[tier][3]; return old ? Math.min(hi, Math.max(lo, old)) : hi; }
+function GameTierSeries({ onBack }) {
+  const [items, setItems] = React.useState(loadTvItems);
+  const [pick, setPick] = React.useState(null);   // id de la série dont on choisit la note
+  const [msg, setMsg] = React.useState('');
+  const rootRef = React.useRef(null);
+  const dragRef = React.useRef(null);              // { id, el, pid, x, y, sx, sy, active, raf }
+  const hoverRef = React.useRef(null);
+  const dragEndAt = React.useRef(0);               // le `click` qui suit un glisser n'ouvre pas le choix
+  // ⚠ Jamais un 2e `tvItemsPreload` ici : lancé en parallèle de celui de `bootLocal`, il
+  // pouvait remettre en cache une liste lue AVANT une écriture. On relit jusqu'à `_tvReady`.
+  React.useEffect(() => {
+    let t = null;
+    const sync = () => { setItems(loadTvItems()); if (!_tvReady) t = setTimeout(sync, 500); };
+    sync();
+    const h = () => setItems(loadTvItems());
+    _tvBg.add(h);
+    return () => { clearTimeout(t); _tvBg.delete(h); };
+  }, []);
+  const rate = (id, v) => {
+    if (!tvRatingSet(id, v)) { setMsg('⚠ TV Time n’est pas encore chargé : réessaie dans un instant.'); return; }
+    setMsg(''); setItems(loadTvItems());
+  };
+  React.useEffect(() => {
+    const clearHover = () => { if (hoverRef.current) { hoverRef.current.style.outline = 'none'; hoverRef.current = null; } };
+    const zoneAt = (x, y) => { const el = document.elementFromPoint(x, y); return el && el.closest('[data-tls-zone]'); };
+    const updateHover = d => {
+      const t = zoneAt(d.x, d.y);
+      if (t !== hoverRef.current) { clearHover(); if (t) { t.style.outline = '2px solid #3b82f6'; t.style.outlineOffset = '-3px'; hoverRef.current = t; } }
+    };
+    const place = d => { d.el.style.left = (d.x - 25) + 'px'; d.el.style.top = (d.y - 37) + 'px'; };
+    const autoScroll = () => {
+      const d = dragRef.current;
+      if (!d || !d.active) return;
+      const sc = tlScrollParent(rootRef.current);
+      if (sc) {
+        const r = sc.getBoundingClientRect();
+        if (d.y < r.top + TL_SCROLL_MARGIN) sc.scrollTop -= (r.top + TL_SCROLL_MARGIN - d.y) / 4;
+        else if (d.y > r.bottom - TL_SCROLL_MARGIN) sc.scrollTop += (d.y - (r.bottom - TL_SCROLL_MARGIN)) / 4;
+        updateHover(d);
+      }
+      d.raf = requestAnimationFrame(autoScroll);
+    };
+    const onMove = e => {
+      const d = dragRef.current;
+      if (!d || e.pointerId !== d.pid) return;
+      d.x = e.clientX; d.y = e.clientY;
+      if (!d.active) {
+        if (Math.hypot(d.x - d.sx, d.y - d.sy) < TL_DRAG_THRESHOLD) return;   // tap potentiel
+        d.active = true;
+        const s = d.el.style;
+        s.position = 'fixed'; s.zIndex = 1000; s.opacity = 0.75; s.transform = 'scale(1.15)';
+        s.boxShadow = '0 6px 18px rgba(0,0,0,0.6)'; s.pointerEvents = 'none';
+        d.raf = requestAnimationFrame(autoScroll);
+      }
+      place(d); updateHover(d);
+    };
+    const onUp = e => {
+      const d = dragRef.current;
+      if (!d || e.pointerId !== d.pid) return;
+      dragRef.current = null;                      // TOUJOURS en tête : jamais de drag fantôme
+      if (d.raf) cancelAnimationFrame(d.raf);
+      clearHover();
+      if (!d.active) return;                       // simple toucher : c'est le `click` qui ouvre le choix
+      dragEndAt.current = Date.now();
+      const t = e.type === 'pointerup' ? zoneAt(d.x, d.y) : null;
+      // ⚠ `position` revient à 'relative' et non à '' : React ne la réécrirait pas (même piège
+      // que width/height dans la tier list à images).
+      ['zIndex','left','top','opacity','transform','boxShadow','pointerEvents'].forEach(p => { d.el.style[p] = ''; });
+      d.el.style.position = 'relative';
+      if (!t) return;
+      const it = loadTvItems().find(x => x.type === 'tv' && x.id === d.id);
+      const old = tvRatingOf(it);
+      if (t.dataset.tlsZone === 'pool') { if (old) rate(d.id, null); return; }
+      const tier = +t.dataset.tlsZone;
+      if (tlsTierOf(old) !== tier) rate(d.id, tlsNoteFor(tier, old));
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+    return () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+    };
+  }, []);
+  const onDown = (e, id) => {
+    if (dragRef.current || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    const el = e.currentTarget;
+    try { el.setPointerCapture(e.pointerId); } catch {}
+    dragRef.current = { id, el, pid: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, active: false, raf: null };
+  };
+  const shows = items.filter(it => it && it.type === 'tv');
+  const byTitle = (a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'fr');
+  const tiers = TLS_TIERS.map(() => []);
+  const pool = [];
+  shows.forEach(it => {
+    const r = tvRatingOf(it), k = tlsTierOf(r);
+    if (k >= 0) tiers[k].push(it);
+    else if (it.status !== 'towatch' || tvWatchedSet(it).length > 0) pool.push(it);
+  });
+  tiers.forEach(l => l.sort((a, b) => (tvRatingOf(b) - tvRatingOf(a)) || byTitle(a, b)));
+  pool.sort((a, b) => ((b.status === 'done') - (a.status === 'done')) || byTitle(a, b));
+  const rated = tiers.reduce((n, l) => n + l.length, 0);
+  const picked = pick != null ? shows.find(it => it.id === pick) : null;
+  const poster = it => {
+    const r = tvRatingOf(it);
+    return (
+      <div key={it.id} data-tls-id={it.id} title={it.title} onPointerDown={e => onDown(e, it.id)} onContextMenu={e => e.preventDefault()}
+        onClick={() => { if (Date.now() - dragEndAt.current > 400) setPick(it.id); }}
+        style={{ position:'relative', width:50, height:75, flexShrink:0, borderRadius:6, overflow:'hidden', background:'#222', cursor:'grab',
+          touchAction:'none', userSelect:'none', WebkitUserSelect:'none', WebkitTouchCallout:'none' }}>
+        {it.poster
+          ? <img src={TLS_POSTER + it.poster} alt={it.title} draggable={false} referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block', pointerEvents:'none' }} />
+          : <div style={{ padding:3, fontSize:8.5, lineHeight:1.2, color:C.muted, overflowWrap:'anywhere', pointerEvents:'none' }}>{it.title}</div>}
+        {r && <span style={{ position:'absolute', right:2, bottom:2, background:'#000000cc', color:'#f5b81f', fontSize:10, fontWeight:800, borderRadius:4, padding:'0 4px', fontFamily:'DM Mono,monospace', pointerEvents:'none' }}>{r}</span>}
+      </div>
+    );
+  };
+  return (
+    <GameWrap hint="📺 Tes séries de TV Time rangées selon ta note ⭐ : S = 9–10, A = 7–8, B = 5–6, C = 3–4, D = 1–2. Glisse une série dans un autre rang pour changer sa note (dans « À noter » pour la retirer), ou touche-la pour choisir la note exacte. La note se donne aussi sur la fiche de la série dans TV Time.">
+      <div ref={rootRef} style={{ width:'100%', display:'flex', flexDirection:'column', gap:10 }}>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', justifyContent:'center', alignItems:'center' }}>
+          <button onClick={onBack} style={gameBtn()}>🖼️ Mes images</button>
+          <span style={{ fontSize:11, color:C.muted }}>{rated} série{rated > 1 ? 's' : ''} notée{rated > 1 ? 's' : ''}</span>
+        </div>
+        {msg && <div style={{ fontSize:11, color:'#e05050', textAlign:'center' }}>{msg}</div>}
+        {!shows.length && <div style={{ fontSize:12, color:C.dim, textAlign:'center', padding:'10px 0' }}>Aucune série dans 🎬 TV Time pour l’instant : ajoute-en, puis note-les ici ou sur leur fiche.</div>}
+        {TLS_TIERS.map(([n, c, lo, hi], i) => (
+          <div key={n} data-tls-zone={i} style={{ display:'flex', minHeight:95, borderRadius:10, overflow:'hidden', background:C.surface }}>
+            <div style={{ width:64, flexShrink:0, background:c, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', color:'#1a1a1a' }}>
+              <div style={{ fontWeight:800, fontSize:20 }}>{n}</div>
+              <div style={{ fontSize:9.5, fontWeight:700, opacity:0.7, fontFamily:'DM Mono,monospace' }}>{lo}–{hi}</div>
+            </div>
+            <div style={{ flex:1, display:'flex', flexWrap:'wrap', gap:6, padding:10, alignContent:'flex-start' }}>{tiers[i].map(poster)}</div>
+          </div>
+        ))}
+        <div style={{ fontSize:12, color:C.muted, fontWeight:700, marginTop:4 }}>À noter {pool.length > 0 && <span style={{ color:C.dim, fontWeight:400 }}>· {pool.length} série{pool.length > 1 ? 's' : ''} commencée{pool.length > 1 ? 's' : ''} ou vue{pool.length > 1 ? 's' : ''}, sans note</span>}</div>
+        <div data-tls-zone="pool" style={{ background:C.surface, minHeight:95, padding:12, borderRadius:12, display:'flex', flexWrap:'wrap', gap:6, border:`2px dashed ${C.border}`, alignContent:'flex-start' }}>
+          {pool.map(poster)}
+          {!pool.length && <div style={{ fontSize:11, color:C.dim, alignSelf:'center', margin:'0 auto' }}>Rien à noter.</div>}
+        </div>
+      </div>
+      {picked && ReactDOM.createPortal(
+        <div onClick={() => setPick(null)} role="dialog" aria-modal="true" aria-label="Noter la série"
+          style={{ position:'fixed', inset:0, zIndex:300, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:'14px 16px', width:'100%', maxWidth:380, boxShadow:'0 20px 60px rgba(0,0,0,0.6)' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:12 }}>
+              {picked.poster && <img src={TMDB_IMG + picked.poster} alt="" referrerPolicy="no-referrer" style={{ width:36, height:54, borderRadius:5, objectFit:'cover', flexShrink:0 }} />}
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:14, fontWeight:800, color:C.text, lineHeight:1.25 }}>{picked.title}</div>
+                <div style={{ fontSize:10, color:C.muted, marginTop:2 }}>⭐ Ma note{tvRatingOf(picked) ? ` · ${tvRatingOf(picked)}/10` : ' · pas encore notée'}</div>
+              </div>
+              <button onClick={() => setPick(null)} title="Fermer" style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:'50%', width:30, height:30, color:C.text, fontSize:18, lineHeight:1, cursor:'pointer', flexShrink:0 }}>×</button>
+            </div>
+            <TvRatingPicker value={tvRatingOf(picked)} onRate={v => { rate(picked.id, v); setPick(null); }} />
+          </div>
+        </div>, document.body)}
     </GameWrap>
   );
 }
@@ -31996,6 +32175,8 @@ const MODULE_LINKS = [
   ['passion',  'remember',   '🎁 anniversaire d’un des deux dans 14 j ⇒ ses cadeaux préférés affichés dans Alertes'],
   ['mdp',      'contact',    'même chiffrement AES-GCM (mot de passe propre)'],
   ['actu',     'tvtime',     'vidéo YouTube vue ⇒ marquée vue'],
+  ['tvtime',   'games',      'notes ⭐ des séries ⇒ TierList 📺 Mes séries (S à D)'],
+  ['games',    'tvtime',     'série glissée dans un autre rang de la TierList ⇒ note ⭐ réécrite'],
   ['finance',  'actu',       'Bull Run (crypto) affiché dans Actu'],
   ['finance',  'collection', 'classeur Finance (Drive) importé'],
   ['remember', 'finance',    'taxe foncière, contrôle technique, assurances… proposés comme dépenses datées (Prévision)'],
@@ -32575,6 +32756,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.202', date:'2026-10-12', title:'📺 TierList : tes séries de S à D', items:[
+    'Dans 🎮 Jeux → TierList, le bouton « 📺 Mes séries » range tes séries de 🎬 TV Time selon ta note ⭐ : S = 9–10, A = 7–8, B = 5–6, C = 3–4, D = 1–2. Les séries commencées ou vues sans note attendent dans « À noter ».',
+    'Glisse une série dans un autre rang pour changer sa note (dans « À noter » pour la retirer), ou touche-la pour choisir la note exacte : c’est la même note que sur la fiche TV Time. « 🖼️ Mes images » ramène à ta tier list d’images, intacte.',
+  ] },
   { v:'13.21.201', date:'2026-10-12', title:'⭐ TV Time : note tes séries de 1 à 10', items:[
     'Dans 🎬 TV Time, la fiche d’une série (toucher son affiche) a une nouvelle ligne « ⭐ Ma note » : touche un chiffre de 1 à 10 pour la noter, touche-le de nouveau pour retirer la note.',
     'Séries seulement, pas les films. La note est gardée avec ta liste TV Time (sauvegarde comprise) et ↩ Retour en arrière l’annule.',
@@ -32590,10 +32775,6 @@ const RELEASE_NOTES = [
   { v:'13.21.198', date:'2026-10-11', title:'🔴 Puissance 4 : victoire bien visible', items:[
     'Quand une partie de Puissance 4 se termine, un grand bandeau aux couleurs du gagnant s’affiche au-dessus de la grille (« 🏆 ROUGE GAGNE ! », ou « 🤝 Match nul »), avec un bouton ↻ Rejouer.',
     'Les jetons de l’alignement gagnant sont cerclés de blanc et pulsent, tous les autres sont estompés : on voit tout de suite où la partie s’est jouée.',
-  ] },
-  { v:'13.21.197', date:'2026-10-11', title:'➕ Doodle Jump : mode Chaos +', items:[
-    'Nouveau mode « ➕ Chaos + » dans Doodle Jump, à choisir sur l’écran d’accueil (ou après une chute) : tout le Chaos, et en plus deux dalles à l’écran échangent leur place chaque seconde. Un trait rose relie les deux dalles échangées pour qu’on voie ce qui a bougé.',
-    'Les dalles d’une chaîne ou d’une échelle et celle qui te tient ne sont jamais échangées. Chaque mode a son propre record (aussi dans Stats → Jeux) ; le choix du mode est mémorisé sur l’appareil.',
   ] },
 ];
 
@@ -46665,6 +46846,15 @@ function tvRatingOf(it) {
   return r >= 1 && r <= TV_RATING_MAX ? r : null;
 }
 function tvWithRating(it, v) { const { rating, ...rest } = it; return v ? { ...rest, rating: v } : rest; }
+// Écrit la note depuis HORS du panneau TV Time (TierList des Jeux) : relit la liste à jour,
+// enregistre, puis prévient un panneau ouvert (`tvBgNotify`) pour qu'il ne réécrive pas son
+// ancienne liste par-dessus. `false` = base TV Time pas encore chargée (`_tvReady`).
+function tvRatingSet(id, v) {
+  if (!_tvReady) return false;
+  saveTvItems(loadTvItems().map(it => (it.type === 'tv' && it.id === id) ? tvWithRating(it, v) : it));
+  tvBgNotify();
+  return true;
+}
 
 // Jours avant une date ISO 'YYYY-MM-DD' (minuit local) — 0 = aujourd'hui, négatif = passée
 // ⚠ 8.7.1 — UN ÉPISODE PAS ENCORE DIFFUSÉ NE PEUT PAS ÊTRE « VU » : sa coche est verrouillée
@@ -47169,6 +47359,23 @@ function tvTimeStats() {
 // saison (barre + x/y + coche verte). Les épisodes spéciaux (saison 0) sont SUIVABLES
 // (ligne dépliable + coches INDIVIDUELLES, liste specialsSeen) mais JAMAIS comptés dans
 // les 100 % ni requis pour que la série passe en « Vu ».
+// Rangée de 10 boutons de la note ⭐ d'une série — fiche TV Time et TierList 📺 des Jeux.
+// Toucher la note active la retire (`onRate(null)`).
+function TvRatingPicker({ value, onRate }) {
+  return (
+    <div style={{ display:'grid', gridTemplateColumns:`repeat(${TV_RATING_MAX}, 1fr)`, gap:3 }}>
+      {Array.from({ length: TV_RATING_MAX }, (_, i) => i + 1).map(n => {
+        const cur = n === value, lit = !!value && n <= value;
+        return (
+          <button key={n} onClick={() => onRate(cur ? null : n)} title={cur ? 'Retirer ma note' : `Noter ${n}/10`}
+            style={{ minWidth:0, height:28, padding:0, borderRadius:6, cursor:'pointer', fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace',
+              background: cur ? '#f5b81f' : lit ? '#f5b81f22' : 'none', border:`1px solid ${lit ? '#f5b81f88' : C.border}`,
+              color: cur ? '#1a1a1a' : lit ? '#f5b81f' : C.dim }}>{n}</button>
+        );
+      })}
+    </div>
+  );
+}
 function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUnignoreEp, onSetSpecials, onStatus, onManga, onCartoon, onEpAlert, onRate }) {
   const isMovie = item.type === 'movie';
   const rating  = tvRatingOf(item);
@@ -47293,17 +47500,7 @@ function TvDetailModal({ item, onClose, onBump, onSeasonToggle, onToggleEp, onUn
               ⭐ MA NOTE{rating ? ` · ${rating}/10` : ''}
               {!rating && <span style={{ color:C.dim, fontWeight:400, letterSpacing:0 }}> · pas encore notée</span>}
             </div>
-            <div style={{ display:'grid', gridTemplateColumns:`repeat(${TV_RATING_MAX}, 1fr)`, gap:3 }}>
-              {Array.from({ length: TV_RATING_MAX }, (_, i) => i + 1).map(n => {
-                const cur = n === rating, lit = !!rating && n <= rating;
-                return (
-                  <button key={n} onClick={() => onRate(cur ? null : n)} title={cur ? 'Retirer ma note' : `Noter ${n}/10`}
-                    style={{ minWidth:0, height:28, padding:0, borderRadius:6, cursor:'pointer', fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace',
-                      background: cur ? '#f5b81f' : lit ? '#f5b81f22' : 'none', border:`1px solid ${lit ? '#f5b81f88' : C.border}`,
-                      color: cur ? '#1a1a1a' : lit ? '#f5b81f' : C.dim }}>{n}</button>
-                );
-              })}
-            </div>
+            <TvRatingPicker value={rating} onRate={onRate} />
           </div>
         )}
 
