@@ -26,7 +26,7 @@
 - **🎵 Musique Spotify** : tous les titres de tes playlists (un sous-collapse par playlist), mis à jour à chaque analyse 🔀 Delta. Note chaque titre de 0 à 10 : touche **NA** pour ouvrir les étoiles. Les notes sont sauvegardées.
 - **💿 Musique locale** : importe tes fichiers audio (un par un ou un dossier) ; ils sont copiés sur l'appareil et se lisent hors ligne, sans Spotify. Pas dans les sauvegardes (trop lourds).
 - **🔀 Delta** (dernier collapse) : likes absents de tes playlists, artistes suivis sans titre rangé (⊘ pour te désabonner), artistes présents chez toi mais non suivis (➕), et 🤖 10 artistes + 10 titres suggérés par l'IA. **🎤 Télécharger mes artistes suivis** : la liste complète en .txt, sans lancer l'analyse (base locale si Spotify ne répond pas). L'un comme l'autre reporte dans 🎤 Artistes suivis les (dés)abonnements faits dans Spotify.
-- Se désabonner d'un artiste ne l'efface jamais : il reste marqué **⊘ Désabonné** et, si tu te réabonnes, repart de sa dernière date.
+- Se désabonner d'un artiste (⊘ dans 🎤 Artistes suivis ou dans Delta) ne l'efface jamais : il reste marqué **⊘ Désabonné** et, si tu te réabonnes, repart de sa dernière date.
 
 ---
 
