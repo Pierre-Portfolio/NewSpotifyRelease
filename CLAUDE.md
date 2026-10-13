@@ -76,7 +76,7 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 - **429** : `_rlSet(max(Retry-After, 15 min))`, persisté dans `spotifyplus_blocked_until`, s'applique à **tous** les appels.
 - **Premier scan = toute la discographie** (pages déroulées, plafond `FIRST_SCRAPE_MAX_PAGES`) ; artiste connu = **une page** (+1 page `include_groups=single` si la 1re n'a aucun single). ⚠ **Une page d'albums = une unité de quota**, comptée APRÈS la requête ; l'artiste en cours est toujours terminé. ⚠ `FULL_SCRAPE_FROM` est un **état** (« premier scan pas fini ») posé par `writeLightRow()`.
 - Albums `limit=10` (piège 21) → `releaseInRange` (piège 19) → tracks. `single` de `EP_MIN_TRACKS`+ titres = EP (`release_type='ep'`).
-- **Désabonnement = `following=0`, JAMAIS un DELETE** (réabonnement ⇒ repart de sa date). Le balayage de fin de boucle n'est joué qu'après un passage **complet** parti de la page 1.
+- **Désabonnement = `following=0`, JAMAIS un DELETE** (réabonnement ⇒ repart de sa date). Balayage `artistsApplyFollowing` (absent ⇒ 0, revu ⇒ 1) sur une liste **complète** seulement : fin d'un passage parti de la page 1, ou lecture de `/me/following` par 🔀 Delta (`deltaFollowSync`, `meta.complete`).
 - Quota **100 / 24 h glissantes** (`spotifyplus_daily_scrapings`). Scraping auto `musicAutoTry()` (100 % local ; journée marquée par `endSync('completed')` seul ; `MUSIC_AUTO_LS` absent = activé).
 - **Découvertes de la semaine** : jamais automatique ; `dwManualAccess` ou capture par la lecture `dwCaptureFromContext` (le contenu des playlists éditoriales répond souvent 403).
 

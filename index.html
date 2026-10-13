@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.203';
+const APP_VERSION = '13.21.204';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2262,6 +2262,26 @@ async function artistUnfollowKeepData(a) {
     await saveDB();
   } catch { return { ok:false, refused, sent, why }; }
   return { ok:true, refused, sent, why };
+}
+
+// ── Abonnements relus EN ENTIER : report dans `following` (13.21.204) ──────────
+// Demande utilisateur : un désabonnement fait DANS Spotify doit se voir dès qu'un 🔀 Delta relit
+// les abonnements, pas seulement au bout d'une passe de scraping complète partie de la page 1
+// (des jours au quota de 100). Appelée par ce balayage de fin de passe ET par Delta
+// (`deltaFollowSync`) : ligne absente de la liste ⇒ `following = 0` (données gardées) ; ligne
+// à 0 revue dans la liste (réabonnement fait dans Spotify) ⇒ 1. Jamais d'INSERT ni de DELETE :
+// un artiste jamais visité n'a pas de ligne, le scan la créera.
+// ⚠ Liste COMPLÈTE seulement : un artiste absent parce qu'une page a échoué serait archivé à
+// tort. Ne sauvegarde pas (`saveDB` à l'appelant). Rend les noms basculés { off, on }.
+function artistsApplyFollowing(followedIds) {
+  const off = [], on = [];
+  dbAll("SELECT spotify_id, name, following FROM artists_scraped").forEach(r => {
+    const now = followedIds.has(r.spotify_id);
+    if ((r.following !== 0) === now) return;   // NULL = suivi (colonne d'avant la migration)
+    dbRun("UPDATE artists_scraped SET following = ? WHERE spotify_id = ?", [now ? 1 : 0, r.spotify_id]);
+    (now ? on : off).push(r.name || r.spotify_id);
+  });
+  return { off, on };
 }
 // ── Quota de scraping : 100 artistes max par fenêtre GLISSANTE de 24h ──
 // Avant : remise à zéro à minuit (jour LOCAL) — on pouvait scraper 100 à 23h30
@@ -4666,17 +4686,9 @@ function StoreProvider({ children }) {
       // ⚠ La ligne n'est jamais supprimée : ses données restent là pour un futur réabonnement.
       if (!resumeUrl && skipCount === 0) {
         try {
-          const known = dbAll("SELECT spotify_id FROM artists_scraped WHERE following IS NULL OR following <> 0");
-          let dropped = 0;
-          known.forEach(r => {
-            if (followedIds.has(r.spotify_id)) return;
-            dbRun("UPDATE artists_scraped SET following = 0 WHERE spotify_id = ?", [r.spotify_id]);
-            dropped++;
-          });
-          if (dropped) {
-            log(`⊘ ${dropped} artiste(s) ne sont plus dans tes abonnements — archivés (données conservées, plus scannés)`, 'info');
-            refreshArtists();
-          }
+          const { off, on } = artistsApplyFollowing(followedIds);
+          if (off.length) log(`⊘ ${off.length} artiste(s) ne sont plus dans tes abonnements — archivés (données conservées, plus scannés)`, 'info');
+          if (off.length || on.length) refreshArtists();
         } catch {}
       }
 
@@ -32756,6 +32768,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.204', date:'2026-10-13', title:'🔀 Delta voit tes désabonnements Spotify', items:[
+    'Si tu te désabonnes d’un artiste directement dans Spotify, lancer l’analyse 🔀 Delta (ou 🎤 Télécharger mes artistes suivis) le passe aussitôt en ⊘ Désabonné dans 🎤 Artistes suivis. Ses données sont gardées et le scraping ne le visite plus.',
+    'Un réabonnement fait dans Spotify est repris de la même façon. Une ligne sous les boutons de Delta dit qui a changé ; si Spotify n’a pas rendu toute la liste, rien n’est modifié.',
+  ] },
   { v:'13.21.203', date:'2026-10-13', title:'🆕 Artistes suivis : filtre « Pas encore scrapé »', items:[
     'Dans 🎵 Musique → 🎤 Artistes suivis, le nouveau filtre « 🆕 Pas encore scrapé » ne garde que les artistes dont le premier scan n’est jamais allé au bout (badge JAMAIS SCANNÉ, ou premier scan coupé par Spotify) : la prochaine synchro reprendra toute leur discographie.',
     'Ils ne sont plus comptés dans le filtre « ✓ OK ». Un artiste que tu suis mais que la synchro n’a encore jamais visité n’apparaît pas dans la liste : il y entrera à son premier passage.',
@@ -32771,10 +32787,6 @@ const RELEASE_NOTES = [
   { v:'13.21.200', date:'2026-10-11', title:'📅 Alertes : la date se choisit au calendrier', items:[
     'Dans 🔔 Alertes, toucher une date ouvre maintenant le même calendrier que la « Date de la pesée » de 🩺 Santé, au lieu du clavier numérique : Mes rappels, Mes garanties et toutes les rubriques.',
     'L’heure optionnelle se tape toujours au clavier (930 = 09:30), et les anniversaires restent en JJ/MM.',
-  ] },
-  { v:'13.21.199', date:'2026-10-11', title:'🏒 Air Hockey : plus de maillet téléporté', items:[
-    'Dans l’Air Hockey, toucher un point de ta moitié ne téléporte plus ton maillet : il y glisse à la vitesse normale d’un déplacement. Tapoter n’importe où ne permet donc plus de surprendre l’autre joueur ni d’envoyer un tir surpuissant.',
-    'Un vrai glissé du doigt garde toute sa force de frappe.',
   ] },
 ];
 
@@ -65172,6 +65184,8 @@ async function deltaFetchLiked(onProgress, artistSink) {
 // Sert au collapse « artistes sans titre en playlist » : on n'en garde que l'identité.
 // `meta` (facultatif) reçoit `total` (annoncé par Spotify) : une page en erreur arrête la
 // lecture SANS lever, seul ce total permet à l'export de dire que la liste est incomplète.
+// `meta.complete` = dernière page atteinte ET autant d'artistes que le total annoncé : seule
+// une liste complète a le droit de toucher à `following` (`deltaFollowSync`).
 async function deltaFetchFollowed(onProgress, meta) {
   const out = [], seen = new Set();
   let url = 'https://api.spotify.com/v1/me/following?type=artist&limit=50', pages = 0;
@@ -65196,7 +65210,25 @@ async function deltaFetchFollowed(onProgress, meta) {
     url = d?.artists?.next || null;
     if (url) await sleep(DELTA_GAP_MS);
   }
+  if (meta) meta.complete = !url && out.length > 0 && !(typeof meta.total === 'number' && out.length < meta.total);
   return out;
+}
+
+// 🎤 Report dans « Artistes suivis » des (dés)abonnements faits DANS Spotify, depuis une lecture
+// de /me/following par Delta (analyse ou export .txt). Rend la ligne de compte-rendu affichée.
+async function deltaFollowSync(list, meta, reloadArtists) {
+  if (!list || !meta || !meta.complete)
+    return `⚠ Abonnements lus en partie (${(list || []).length}${typeof meta?.total === 'number' ? ' sur ' + meta.total : ''}) : « Artistes suivis » n'a pas été modifié.`;
+  let r;
+  try { r = artistsApplyFollowing(new Set(list.map(a => a.id))); }
+  catch { return '⚠ Base locale indisponible : « Artistes suivis » n\'a pas été modifié.'; }
+  if (!r.off.length && !r.on.length) return '🎤 Artistes suivis : déjà à jour avec Spotify.';
+  try { await saveDB(); } catch {}
+  try { reloadArtists && reloadArtists(); } catch {}
+  const names = a => a.slice(0, 5).join(', ') + (a.length > 5 ? ` +${a.length - 5}` : '');
+  return '🎤 Artistes suivis mis à jour'
+    + (r.off.length ? ` · ⊘ ${r.off.length} désabonné(s) dans Spotify : ${names(r.off)}` : '')
+    + (r.on.length ? ` · ↺ ${r.on.length} réabonné(s) : ${names(r.on)}` : '');
 }
 
 // Playlists du compte (possédées ET suivies — « toutes les playlists de mon compte »).
@@ -65278,7 +65310,9 @@ async function deltaFetchPlaylistTracks(pid, artistSink) {
 // ⚠ Chaque section porte SES DEUX listes : `tracks` = le delta (vue normale) et `all` = tout
 // le contenu lu (mode debug « tout afficher »). Sans `all`, le mode debug afficherait le delta
 // déguisé et ne prouverait rien.
-async function deltaScan(onProgress) {
+// `fol` (facultatif) reçoit la liste des abonnements lue et son `meta` (→ `deltaFollowSync`) :
+// gardés HORS du résultat, qui part en cache localStorage.
+async function deltaScan(onProgress, fol) {
   // Sets d'IDS D'ARTISTES rencontrés (pas d'uris) : ils servent au dernier collapse,
   // « artistes suivis dont AUCUN titre n'est dans une playlist ».
   // ⚠ Deux Map (id → { id, name, count }) et non des Set : `.has()` sert toujours aux filtres,
@@ -65317,7 +65351,9 @@ async function deltaScan(onProgress) {
   // Abonnements lus EN DERNIER : les playlists illisibles (403 sur une playlist éditoriale)
   // ne peuvent que gonfler la liste — d'où l'avertissement affiché quand il y en a.
   onProgress('Lecture de tes abonnements…');
-  const followed = await deltaFetchFollowed(n => onProgress(`Abonnements : ${n} lus…`));
+  const fMeta = {};
+  const followed = await deltaFetchFollowed(n => onProgress(`Abonnements : ${n} lus…`), fMeta);
+  if (fol) { fol.list = followed; fol.meta = fMeta; }
   const followedGap = followed
     .filter(a => !plArtists.has(a.id))
     .map(a => ({ ...a, liked: likedArtists.has(a.id) }))
@@ -65393,17 +65429,21 @@ function deltaErrMsg(e) {
 
 // État PARTAGÉ module-level (pattern _finance) : StatsCollapse démonte ses enfants à la
 // fermeture — sans ça, replier le collapse pendant un scan perdrait le résultat en cours.
-const _delta = { state:'idle', progress:'', err:'', data:null, cached:true, loaded:false, subs:new Set(), folBusy:false, folMsg:'' };
+const _delta = { state:'idle', progress:'', err:'', data:null, cached:true, loaded:false, subs:new Set(), folBusy:false, folMsg:'', folSync:'' };
 function deltaSet(patch) {
   Object.assign(_delta, patch);
   _delta.subs.forEach(f => { try { f(); } catch {} });
 }
-async function deltaRun() {
+// `reloadArtists` (store) : rafraîchit « Artistes suivis » après `deltaFollowSync`, même si le
+// collapse Delta a été replié pendant l'analyse (le setter vit dans StoreProvider).
+async function deltaRun(reloadArtists) {
   if (_delta.state === 'loading') return;
-  deltaSet({ state:'loading', progress:'Démarrage…', err:'' });
+  deltaSet({ state:'loading', progress:'Démarrage…', err:'', folSync:'' });
   try {
-    const d = await deltaScan(p => deltaSet({ progress: p }));
-    deltaSet({ state:'ok', data:d, cached: deltaCacheSave(d), progress:'' });
+    const fol = {};
+    const d = await deltaScan(p => deltaSet({ progress: p }), fol);
+    const folSync = await deltaFollowSync(fol.list, fol.meta, reloadArtists);
+    deltaSet({ state:'ok', data:d, cached: deltaCacheSave(d), progress:'', folSync });
     smSnapSave(d);   // 🎵 Musique Spotify : son instantané ne change QU'ICI
   } catch (e) {
     deltaSet({ state:'err', err: deltaErrMsg(e), progress:'' });
@@ -65445,7 +65485,7 @@ function deltaExportTxt(data) {
 // injoignable, en pause 429 ou hors ligne ⇒ repli sur la base locale (abonnements vus par le
 // dernier scan, `following` ≠ 0), et l'en-tête du fichier le dit. État dans `_delta` : replier
 // le collapse pendant la lecture ne la perd pas (piège 5).
-async function deltaFollowedExport() {
+async function deltaFollowedExport(reloadArtists) {
   if (_delta.folBusy) return;
   deltaSet({ folBusy:true, folMsg:'Lecture de tes abonnements…' });
   let rows = null, head = '', warn = '';
@@ -65453,6 +65493,7 @@ async function deltaFollowedExport() {
     const meta = {};
     const got = await deltaFetchFollowed(n => deltaSet({ folMsg:`Abonnements : ${n} lus…` }), meta);
     if (!got.length && meta.total !== 0) throw new Error('EMPTY');
+    deltaSet({ folSync: await deltaFollowSync(got, meta, reloadArtists) });
     rows = got.map(a => ({ name: a.name, url: a.url || 'https://open.spotify.com/artist/' + a.id }));
     head = 'lus sur Spotify';
     if (meta.total != null && got.length < meta.total) warn = `⚠ ${got.length} sur ${meta.total} : Spotify a interrompu la lecture, la liste est incomplète.`;
@@ -66014,7 +66055,7 @@ function DeltaPanel() {
     return () => { _delta.subs.delete(force); };
   }, []);
 
-  const { state, progress, err, data, cached, showAll, folBusy, folMsg } = _delta;
+  const { state, progress, err, data, cached, showAll, folBusy, folMsg, folSync } = _delta;
   const loading = state === 'loading';
   const cnt = n => <span style={{ color:C.dim, fontWeight:400 }}>· {n}</span>;
   // ⚠ CAUSE N°1 d'une liste de playlists incomplète : sans le scope playlist-read-private,
@@ -66104,7 +66145,7 @@ function DeltaPanel() {
         </div>
       )}
       <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
-        <button onClick={deltaRun} disabled={loading}
+        <button onClick={() => deltaRun(reloadArtists)} disabled={loading}
           style={{ background:`${DELTA_COLOR}22`, border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px', fontSize:11, fontWeight:700, cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.5 : 1, fontFamily:'inherit' }}>
           {loading ? '⏳ Analyse…' : (data ? '↻ Relancer l\'analyse' : '▶ Analyser')}
         </button>
@@ -66122,13 +66163,15 @@ function DeltaPanel() {
       </div>
       {/* 🎤 Hors analyse : la liste de TOUS les abonnements, sans lancer Delta (`deltaFollowedExport`). */}
       <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
-        <button onClick={deltaFollowedExport} disabled={folBusy}
+        <button onClick={() => deltaFollowedExport(reloadArtists)} disabled={folBusy}
           title="Tous les artistes auxquels tu es abonné, « Nom ||| lien Spotify », triés de A à Z — sans lancer l'analyse"
           style={{ background:'none', border:`1px solid ${DELTA_COLOR}66`, color:DELTA_COLOR, borderRadius:8, padding:'7px 13px', fontSize:11, fontWeight:700, cursor: folBusy ? 'default' : 'pointer', opacity: folBusy ? 0.5 : 1, fontFamily:'inherit' }}>
           {folBusy ? '⏳ Lecture…' : '🎤 Télécharger mes artistes suivis (.txt)'}
         </button>
         {folMsg && <span style={{ fontSize:10, color: folMsg[0] === '⚠' ? '#f5a623' : C.dim, fontFamily:'DM Mono,monospace' }}>{folMsg}</span>}
       </div>
+      {/* Report des (dés)abonnements faits dans Spotify vers « Artistes suivis » (`deltaFollowSync`). */}
+      {folSync && <div style={{ fontSize:10, color: folSync[0] === '⚠' ? '#f5a623' : C.dim, fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>{folSync}</div>}
       {showAll && (
         <div style={{ fontSize:10, color:DELTA_COLOR, fontFamily:'DM Mono,monospace' }}>
           Mode debug : chaque section liste TOUT ce que l'analyse a lu (aucun filtre), avec le détail des réponses de Spotify.
