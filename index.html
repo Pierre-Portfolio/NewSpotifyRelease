@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.202';
+const APP_VERSION = '13.21.203';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32756,6 +32756,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.203', date:'2026-10-13', title:'🆕 Artistes suivis : filtre « Pas encore scrapé »', items:[
+    'Dans 🎵 Musique → 🎤 Artistes suivis, le nouveau filtre « 🆕 Pas encore scrapé » ne garde que les artistes dont le premier scan n’est jamais allé au bout (badge JAMAIS SCANNÉ, ou premier scan coupé par Spotify) : la prochaine synchro reprendra toute leur discographie.',
+    'Ils ne sont plus comptés dans le filtre « ✓ OK ». Un artiste que tu suis mais que la synchro n’a encore jamais visité n’apparaît pas dans la liste : il y entrera à son premier passage.',
+  ] },
   { v:'13.21.202', date:'2026-10-12', title:'📺 TierList : tes séries de S à D', items:[
     'Dans 🎮 Jeux → TierList, le bouton « 📺 Mes séries » range tes séries de 🎬 TV Time selon ta note ⭐ : S = 9–10, A = 7–8, B = 5–6, C = 3–4, D = 1–2. Les séries commencées ou vues sans note attendent dans « À noter ».',
     'Glisse une série dans un autre rang pour changer sa note (dans « À noter » pour la retirer), ou touche-la pour choisir la note exacte : c’est la même note que sur la fiche TV Time. « 🖼️ Mes images » ramène à ta tier list d’images, intacte.',
@@ -32771,10 +32775,6 @@ const RELEASE_NOTES = [
   { v:'13.21.199', date:'2026-10-11', title:'🏒 Air Hockey : plus de maillet téléporté', items:[
     'Dans l’Air Hockey, toucher un point de ta moitié ne téléporte plus ton maillet : il y glisse à la vitesse normale d’un déplacement. Tapoter n’importe où ne permet donc plus de surprendre l’autre joueur ni d’envoyer un tir surpuissant.',
     'Un vrai glissé du doigt garde toute sa force de frappe.',
-  ] },
-  { v:'13.21.198', date:'2026-10-11', title:'🔴 Puissance 4 : victoire bien visible', items:[
-    'Quand une partie de Puissance 4 se termine, un grand bandeau aux couleurs du gagnant s’affiche au-dessus de la grille (« 🏆 ROUGE GAGNE ! », ou « 🤝 Match nul »), avec un bouton ↻ Rejouer.',
-    'Les jetons de l’alignement gagnant sont cerclés de blanc et pulsent, tous les autres sont estompés : on voit tout de suite où la partie s’est jouée.',
   ] },
 ];
 
@@ -64688,6 +64688,13 @@ function fmtCompactNum(n) {
   return (n / 1e6).toFixed(1).replace('.', ',') + ' M';
 }
 
+// « Pas encore scrapé » = premier scan JAMAIS terminé : aucun scan réussi ET date encore à la
+// sentinelle FULL_SCRAPE_FROM (ligne « légère » d'un premier scan coupé par un 429, ou ligne
+// créée par un désabonnement avant la visite). Partagé par le filtre et le badge de la ligne.
+// ⚠ Un artiste suivi que la boucle n'a encore jamais visité n'a PAS de ligne : il n'est ni
+// dans la liste ni dans ce filtre (le total des abonnements vient de Spotify, pas de la base).
+const artistNeverScraped = a => !a.scanCount && (!a.lastScrapedAt || a.lastScrapedAt.slice(0, 10) <= FULL_SCRAPE_FROM);
+
 // ════════════════════════════════════════════════
 // ARTISTS PANEL — liste des artistes scrapés + filtres
 // (id, dernière date de scraping + métadonnées gratuites de l'API Spotify)
@@ -64696,7 +64703,7 @@ function ArtistsPanel() {
   const { artists, reloadArtists } = useStore();
   const [search,   setSearch]   = React.useState('');
   const [sortBy,   setSortBy]   = React.useState('recent');
-  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'partial' | 'error' | 'gone' | 'off'
+  const [status,   setStatus]   = React.useState('all'); // 'all' | 'ok' | 'never' | 'partial' | 'error' | 'gone' | 'off'
   const [busy,     setBusy]     = React.useState('');    // '' | 'resolve' | 'purge'
   const [msg,      setMsg]      = React.useState('');    // compte-rendu de la dernière action
   const filtersOn = search.trim() || sortBy !== 'recent' || status !== 'all';
@@ -64782,7 +64789,9 @@ function ArtistsPanel() {
 
   const view = React.useMemo(() => {
     let r = (artists || []).filter(a => {
-      if (status === 'ok'      && a.lastScanStatus !== 'ok' && a.lastScanStatus != null) return false;
+      // Un « jamais scanné » sans statut n'est pas OK : il porte le badge JAMAIS SCANNÉ.
+      if (status === 'ok'      && ((a.lastScanStatus !== 'ok' && a.lastScanStatus != null) || artistNeverScraped(a))) return false;
+      if (status === 'never'   && !artistNeverScraped(a)) return false;
       if (status === 'partial' && a.lastScanStatus !== 'partial') return false;
       if (status === 'error'   && a.lastScanStatus !== 'error') return false;
       if (status === 'gone'    && a.lastScanStatus !== 'gone') return false;
@@ -64859,7 +64868,7 @@ function ArtistsPanel() {
       )}
       {/* Toolbar : statut + tri + reset */}
       <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
-        {[['all','Tous'],['ok','✓ OK'],['partial','⏳ Partiel'],['error','⚠ Erreur'],['gone','👻 Introuvable'],['off','⊘ Désabonnés']].map(([k,n]) => (
+        {[['all','Tous'],['ok','✓ OK'],['never','🆕 Pas encore scrapé'],['partial','⏳ Partiel'],['error','⚠ Erreur'],['gone','👻 Introuvable'],['off','⊘ Désabonnés']].map(([k,n]) => (
           <button key={k} onClick={() => setStatus(k)} style={btnFilter(status===k)}>{n}</button>
         ))}
         <div style={{ marginLeft:'auto', display:'flex', gap:4, alignItems:'center' }}>
@@ -64921,7 +64930,7 @@ const ArtistRow = React.memo(function ArtistRow({ a }) {
   const unfollowed = a.following === false;
   // Jamais scrapé : ligne créée par un désabonnement avant que la boucle n'ait eu le temps
   // de visiter l'artiste (quota 100/jour) — sa date est la sentinelle, pas un vrai scan.
-  const never = !a.scanCount && (!a.lastScrapedAt || a.lastScrapedAt.slice(0, 10) <= FULL_SCRAPE_FROM);
+  const never = artistNeverScraped(a);
   // Couleur + libellé du badge selon le statut (erreur rouge, partiel orange, ok vert,
   // introuvable gris : l'id a été refusé par /v1/artists, la page n'existe plus)
   const badge = gone
