@@ -11,6 +11,8 @@ regardées sur youtube.com — y compris quand le Hub est ouvert sur le téléph
 - **✨ Résumé IA** : bouton en bas à droite des pages `/watch`. Gemini regarde la vidéo et
   la résume en 5 points (même prompt que le Hub). La vidéo compte alors aussi comme vue,
   et le résumé est repris par le Hub.
+- **« Résumer avec Gemini »** d'une autre extension (widget « Transcription et résumé ») : un
+  clic dessus compte aussi la vidéo comme vue (même réglage que le ✨ Résumé IA).
 - Les deux conditions sont réglables séparément (options) : la première remplie l'ajoute.
 
 ## Comment ça arrive dans le Hub

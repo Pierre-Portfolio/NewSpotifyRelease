@@ -69,6 +69,24 @@
   };
   document.addEventListener('timeupdate', e => { if (e.target && e.target.tagName === 'VIDEO') onTime(e); }, true);
 
+  // ── « Résumer avec Gemini » d'une AUTRE extension (widget « Transcription et résumé »,
+  // `.qt-widget`) : demander ce résumé compte comme le ✨ Résumé IA d'ici (même réglage
+  // `sumMarks`), mais sans texte de résumé à transmettre. Repéré par son `title` seul (pas sa
+  // classe) ; capture sur `window` car l'autre extension peut arrêter la propagation, et
+  // `composedPath` au cas où son widget passe en shadow DOM. Libellé changé ⇒ plus rien.
+  const GEMINI_BTN = /^(résumer avec gemini|summari[sz]e with gemini)\b/i;
+  window.addEventListener('click', e => {
+    const b = e.composedPath().find(n => n && n.nodeType === 1 && (n.tagName === 'BUTTON' || n.getAttribute('role') === 'button'));
+    if (!b || !GEMINI_BTN.test((b.getAttribute('title') || b.getAttribute('aria-label') || '').trim())) return;
+    const id = urlId();
+    if (!id || !settings.sumMarks) return;
+    if (id !== cur.id) cur = { id, played: 0, last: null, done: false };
+    cur.done = true;
+    send({ type: 'seen', video: videoFor(id, 'ia', document.querySelector('video')) }).then(r => {
+      if (r && r.added) toast('✓ Ajoutée à TV Time (résumé Gemini)');
+    });
+  }, true);
+
   // ── ✨ Résumé IA (pages /watch seulement : un Short est trop court à résumer) ─────
   let panel = null;
   const closePanel = () => { if (panel) { panel.remove(); panel = null; } };
