@@ -86,7 +86,7 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 - **3 auto-avances** (`advancedForRef`, `prevNowRef`), **placées AVANT le `return` sur `listenedUrisRef`** : URI quittée proche de la fin · `remaining ≤ 3 s` · transition `playing true→false` et `remaining ≤ 8 s` — **cas principal** (fin de titre = `is_playing:false` sur la **même URI**).
 - **Poll player** : chaîne de `setTimeout`, une requête en vol, 5 s en lecture / 15 s au repos, rien en onglet caché ; curseur optimiste `_effUri`.
 - **`playTrack`** : sans appareil actif ⇒ 404/403 ⇒ `GET /me/player/devices` puis rejeu avec `device_id` (`spotifyPickDevice` écarte les `is_restricted`). Throttle `_playAlert` 30 s (appel sans geste utilisateur).
-- **`purgeListened`** : URIs → `purged_uris` puis DELETE ; `removeFromFeed` = marqué écouté (Undo 5 s).
+- **`purgeListened`** : URIs → `purged_uris` puis DELETE ; `removeFromFeed` = marqué écouté (Undo 5 s), stats comptées seulement si c'est le titre du lecteur.
 
 ## Store (`StoreProvider`)
 

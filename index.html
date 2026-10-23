@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.207';
+const APP_VERSION = '13.21.208';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3993,13 +3993,18 @@ function StoreProvider({ children }) {
   // useCallback : identités stables pour que React.memo(FeedItem) soit efficace
   const removeFromFeed = React.useCallback(async (uri) => {
     if (!dbReady) return;
-    // Clic croix rouge × (et swipe gauche mobile) : le titre est traité COMME écouté →
-    // marqué listened = 1 + listened_at + incrément des compteurs de la table stats, pour
-    // qu'il apparaisse dans l'Historique ET compte dans les stats d'écoute.
+    // Clic croix rouge × (et swipe gauche mobile) : le titre est marqué listened = 1 +
+    // listened_at (il quitte le feed et entre dans l'Historique). Les compteurs de la table
+    // stats (+1 écoute, +durée) et le journal du graphique ne bougent QUE si c'est le titre du
+    // lecteur (prevNowRef garde la dernière URI connue) : un titre jamais lancé n'a pas été
+    // écouté. Retiré sans être compté, il reste HORS de listenedUrisRef (Annuler puis lecture
+    // ⇒ compté normalement par le poll).
     // Idempotent via listenedUrisRef : si le poll player l'a déjà compté, on ne recompte pas.
+    // Renvoie { counted, durMs } : l'action IA `music.remove` en tire son undo.
     const itemIdx = feedRef.current.findIndex(f => f.spotifyUri === uri); // position pour l'undo
     const item = itemIdx !== -1 ? feedRef.current[itemIdx] : null;        // snapshot pour l'undo
-    const counted = !listenedUrisRef.current.has(uri); // a-t-on incrémenté les stats dans cet appel ?
+    const already = listenedUrisRef.current.has(uri);
+    const counted = !already && prevNowRef.current.uri === uri; // a-t-on incrémenté les stats dans cet appel ?
     let durMs = 0, listenTs = null;
     if (counted) {
       listenedUrisRef.current.add(uri);
@@ -4012,7 +4017,7 @@ function StoreProvider({ children }) {
       );
       listenTs = recordListen(); // journal persistant (graphique) — survit à la purge ; ts mémorisé pour un undo précis
     } else {
-      // Déjà compté écouté par le poll : on s'assure juste qu'il est bien marqué (idempotent)
+      // Déjà compté par le poll, ou jamais écouté : marqué sans toucher aux stats (idempotent)
       dbRun("UPDATE tracks SET listened = 1, listened_at = COALESCE(listened_at, datetime('now')) WHERE spotify_uri = ?", [uri]);
     }
     await saveDB();
@@ -4020,6 +4025,7 @@ function StoreProvider({ children }) {
     setListenStats(loadListenStatsFromDB());
     setHistory(loadHistoryFromDB());
     setUndo({ uri, item, idx: itemIdx, durMs, counted, listenTs }); // affiche le toast "↩ Annuler" (5 s, cf. UndoToast)
+    return { counted, durMs };
   }, [dbReady]);
 
   // Annule le dernier retrait : remet le titre non écouté, ré-décrémente les stats (si
@@ -32768,6 +32774,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.208', date:'2026-10-23', title:'✖ Un titre retiré sans l’écouter ne compte plus', items:[
+    'Dans 🎵 Musique, la croix rouge × (ou le glissement vers la gauche sur mobile) sur un titre que tu n’as pas lancé le retire du feed sans l’ajouter à tes stats : ni +1 écoute, ni ses minutes, ni le graphique des écoutes.',
+    'Le titre en cours de lecture, lui, compte toujours comme écouté quand tu le retires. Le titre retiré reste dans l’Historique, et ↩ Annuler le remet dans le feed comme avant.',
+  ] },
   { v:'13.21.207', date:'2026-10-18', title:'🧩 « Résumer avec Gemini » compte comme vu', items:[
     'Avec l’extension YouTube → TV Time (version 1.1.3, à recharger dans chrome://extensions), cliquer sur le bouton « Résumer avec Gemini » d’une autre extension (widget « Transcription et résumé » de YouTube) coche la vidéo comme vue dans 🎬 TV Time, comme le ✨ Résumé IA de l’extension.',
     'Même réglage que le ✨ Résumé IA dans les options de l’extension (« Quand je demande son résumé IA ») : décoché, ce clic ne compte plus.',
@@ -32783,10 +32793,6 @@ const RELEASE_NOTES = [
   { v:'13.21.204', date:'2026-10-13', title:'🔀 Delta voit tes désabonnements Spotify', items:[
     'Si tu te désabonnes d’un artiste directement dans Spotify, lancer l’analyse 🔀 Delta (ou 🎤 Télécharger mes artistes suivis) le passe aussitôt en ⊘ Désabonné dans 🎤 Artistes suivis. Ses données sont gardées et le scraping ne le visite plus.',
     'Un réabonnement fait dans Spotify est repris de la même façon. Une ligne sous les boutons de Delta dit qui a changé ; si Spotify n’a pas rendu toute la liste, rien n’est modifié.',
-  ] },
-  { v:'13.21.203', date:'2026-10-13', title:'🆕 Artistes suivis : filtre « Pas encore scrapé »', items:[
-    'Dans 🎵 Musique → 🎤 Artistes suivis, le nouveau filtre « 🆕 Pas encore scrapé » ne garde que les artistes dont le premier scan n’est jamais allé au bout (badge JAMAIS SCANNÉ, ou premier scan coupé par Spotify) : la prochaine synchro reprendra toute leur discographie.',
-    'Ils ne sont plus comptés dans le filtre « ✓ OK ». Un artiste que tu suis mais que la synchro n’a encore jamais visité n’apparaît pas dans la liste : il y entrera à son premier passage.',
   ] },
 ];
 
@@ -67673,16 +67679,14 @@ const IA_ACTIONS = [
       await c.store.setTrackLiked(uri, false);
       return { msg:'Like retiré.', undo:[{ t:'like', uri, before:true }] };
     } },
-  { id:'music.remove', mod:'musique', d:'Retirer un titre du feed (compté comme écouté) — sans cible : le titre en cours',
+  { id:'music.remove', mod:'musique', d:'Retirer un titre du feed (compté écouté seulement si c\'est le titre en cours) — sans cible : le titre en cours',
     p:{ cible:{ t:'str', d:'artiste et/ou titre (absent = titre en cours)' } },
     target:{ optional:1, find: (p, c) => (p.cible ? iaFeedCands(p.cible, c.store.feed)
       : (c.now && c.store.feedIndex.get(c.now.uri) ? iaFeedCands(c.now.artist + ' ' + c.now.title, c.store.feed).filter(x => x.uri === c.now.uri) : [])) },
     label: (p, t) => `✖ Retirer du feed ${t ? t.label : (p.cible || 'le titre en cours')}`,
     run: async (p, t, c) => {
-      const row = dbGet("SELECT listened, duration_ms FROM tracks WHERE spotify_uri = ?", [t.uri]);
-      const counted = !!row && !row.listened;
-      await c.store.removeFromFeed(t.uri);
-      return { msg:'Titre retiré du feed.', undo:[{ t:'feed', uri: t.uri, counted, durMs: (row && row.duration_ms) || 0 }] };
+      const r = await c.store.removeFromFeed(t.uri);
+      return { msg:'Titre retiré du feed.', undo:[{ t:'feed', uri: t.uri, counted: !!(r && r.counted), durMs: (r && r.durMs) || 0 }] };
     } },
   { id:'music.filter', mod:'musique', d:'Filtrer le feed par type et/ou artiste',
     p:{ type:{ t:'enum', vals:() => [['all', 'tout'], ['single', 'singles'], ['album', 'albums'], ['dw', 'découvertes']], d:'type de sortie' }, artist:{ t:'str', d:'artiste (vide = tous)' } },

@@ -21,7 +21,7 @@
 
 - Connexion **OAuth PKCE** 100 % client. Chaque artiste suivi est scanné depuis **sa propre date de dernier scan** ; la première fois, il rapporte **toute sa discographie** (et compte pour autant d'artistes qu'il a lu de pages).
 - **Quota de 100 artistes / 24 h glissantes**, pause / reprise, arrêt de 15 min minimum dès la première limite Spotify (429). **Scraping automatique** au lancement (À propos → ⏰ Lancement automatique).
-- **Feed** jusqu'à 1000 titres, filtres et tri sur toute la base. Clic = lecture, **×** = écouté et retiré (↩ Annuler 5 s), **❤** = like. Fin de titre ⇒ marqué écouté + **auto-avance**, sans voler une lecture lancée ailleurs.
+- **Feed** jusqu'à 1000 titres, filtres et tri sur toute la base. Clic = lecture, **×** = retiré, compté écouté seulement s'il était en lecture (↩ Annuler 5 s), **❤** = like. Fin de titre ⇒ marqué écouté + **auto-avance**, sans voler une lecture lancée ailleurs.
 - **Découvertes de la semaine** : bouton violet dans ⚙ Scraping, ou simplement **lancer la playlist** — le Hub range ses titres dans « En attente ».
 - **🎵 Musique Spotify** : tous les titres de tes playlists (un sous-collapse par playlist), mis à jour à chaque analyse 🔀 Delta. Note chaque titre de 0 à 10 : touche **NA** pour ouvrir les étoiles. Les notes sont sauvegardées.
 - **💿 Musique locale** : importe tes fichiers audio (un par un ou un dossier) ; ils sont copiés sur l'appareil et se lisent hors ligne, sans Spotify. Pas dans les sauvegardes (trop lourds).
