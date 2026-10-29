@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.212';
+const APP_VERSION = '13.21.213';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -33096,6 +33096,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.213', date:'2026-10-29', title:'🚇 Chercher une ligne de transport', items:[
+    'Dans 📰 Actu → Cartographie → Réseaux de transport Paris, une barre de recherche trouve une ligne (1, 13, RER A, T3a, H…).',
+    'En la choisissant, la ligne ressort sur la carte et la liste de ses gares s’affiche dans l’ordre, d’un terminus à l’autre ; les embranchements (RER A, B, C, métro 7, 13…) sont listés à part depuis leur gare de bifurcation.',
+  ] },
   { v:'13.21.212', date:'2026-10-29', title:'📰 Actu sur toute la largeur (ordinateur)', items:[
     'Sur ordinateur, les 5 rubriques d’📰 Actu (Actualité, Bug & Pannes, Cartographie, Fuites de données, Vidéos YouTube) s’affichent les unes sous les autres sur toute la largeur, au lieu de deux colonnes.',
   ] },
@@ -33110,10 +33114,6 @@ const RELEASE_NOTES = [
   { v:'13.21.209', date:'2026-10-23', title:'💇 Coiffeur dans les alertes Médecin', items:[
     'Dans 🔔 Alertes → 🩺 Médecin, une nouvelle ligne « Coiffeur » (juste avant Mutuelle) : pose la date de ton prochain rendez-vous, avec une heure si tu veux.',
     'Comme les autres échéances, elle a son badge, apparaît dans les dates à venir et le calendrier, te prévient à l’approche et devient une tâche To do 3 jours avant.',
-  ] },
-  { v:'13.21.208', date:'2026-10-23', title:'✖ Un titre retiré sans l’écouter ne compte plus', items:[
-    'Dans 🎵 Musique, la croix rouge × (ou le glissement vers la gauche sur mobile) sur un titre que tu n’as pas lancé le retire du feed sans l’ajouter à tes stats : ni +1 écoute, ni ses minutes, ni le graphique des écoutes.',
-    'Le titre en cours de lecture, lui, compte toujours comme écouté quand tu le retires. Le titre retiré reste dans l’Historique, et ↩ Annuler le remet dans le feed comme avant.',
   ] },
 ];
 
@@ -37819,14 +37819,141 @@ async function cartoFetchTransport() {
   const by = {}; for (const l of lines) by[l.mode] = (by[l.mode] || new Set()).add(l.label);
   return { lines, gares, count: Object.fromEntries(Object.entries(by).map(([k, v]) => [k, v.size])), at: Date.now() };
 }
+// 🔎 Recherche d'une ligne → ses gares DANS L'ORDRE (demande utilisateur).
+// ⚠ Clé de ligne = mode + indice (« METRO:1 », « RER:A », « TRAM:T3A ») : les deux jeux IDFM
+// n'écrivent pas forcément le libellé pareil, l'indice seul est comparé. Une gare sans ligne
+// reconnue est rattachée à la ligne si elle tombe à moins de `IDFM_NEAR_M` de son tracé.
+// ⚠ ORDRE : aucun champ « rang » dans l'open data. Chaque gare est projetée sur le TRACÉ : deux
+// gares qui se suivent le long d'un même morceau de tracé sont voisines. Les morceaux sans lien
+// sont recousus à vol d'oiseau (pénalisé ×4, `idfmOrder`), puis un arbre couvrant minimal
+// garde une seule liaison par paire ; son plus long chemin = le TRONC, lu d'un terminus à
+// l'autre, chaque embranchement listé ensuite depuis sa gare de bifurcation (RER A/B/C, 7, 13…).
+// ⚠ Recherche par `idfmNorm` (garde les chiffres), pas `flagNorm` (lettres seules).
+const IDFM_NEAR_M = 150;
+const idfmNorm = v => String(v || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+function idfmKey(mode, p) {
+  const raw = String((p && p.indice_lig) || idfmLabel(p || {}) || '').toUpperCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\b(METRO|RER|TRAMWAY|TRAM|TRAIN|TRANSILIEN|LIGNE|SNCF|RATP)\b/g, '').replace(/[^A-Z0-9]/g, '');
+  return raw ? mode + ':' + raw : '';
+}
+const idfmDist = (a, b) => { const dx = (a[1] - b[1]) * 73000, dy = (a[0] - b[0]) * 111000; return Math.hypot(dx, dy); };
+function idfmSegDist(p, a, b) {
+  const kx = 73000, ky = 111000;
+  const px = p[1] * kx, py = p[0] * ky, ax = a[1] * kx, ay = a[0] * ky, bx = b[1] * kx, by = b[0] * ky;
+  const vx = bx - ax, vy = by - ay, l2 = vx * vx + vy * vy;
+  const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / l2)) : 0;
+  return Math.hypot(px - ax - t * vx, py - ay - t * vy);
+}
+// Gares d'une ligne → [{ title, names[] }] : le tronc, puis un bloc par embranchement.
+function idfmOrder(st, paths) {
+  const n = st.length;
+  if (n < 3) return [{ title:null, names: st.map(g => g.name) }];
+  // Voisins le long du tracé : position (mètres cumulés) de chaque gare proche d'un morceau.
+  const link = new Set();
+  for (const pa of (paths || [])) {
+    const cum = [0]; for (let i = 1; i < pa.length; i++) cum.push(cum[i - 1] + idfmDist(pa[i - 1], pa[i]));
+    const on = [];
+    st.forEach((g, gi) => {
+      let bd = Infinity, bp = 0;
+      for (let i = 1; i < pa.length; i++) {
+        const dd = idfmSegDist(g.ll, pa[i - 1], pa[i]);
+        if (dd < bd) { bd = dd; bp = cum[i - 1] + idfmDist(pa[i - 1], g.ll); }
+      }
+      if (bd < IDFM_NEAR_M) on.push([bp, gi]);
+    });
+    on.sort((a, b) => a[0] - b[0]);
+    for (let i = 1; i < on.length; i++) if (on[i][1] !== on[i - 1][1]) link.add(Math.min(on[i][1], on[i - 1][1]) + '-' + Math.max(on[i][1], on[i - 1][1]));
+  }
+  const w = (u, v) => idfmDist(st[u].ll, st[v].ll) * (link.has(Math.min(u, v) + '-' + Math.max(u, v)) ? 1 : 4);
+  const adj = st.map(() => []), inT = new Array(n).fill(false), best = new Array(n).fill(Infinity), par = new Array(n).fill(-1);
+  best[0] = 0;
+  for (let k = 0; k < n; k++) {
+    let u = -1; for (let i = 0; i < n; i++) if (!inT[i] && (u < 0 || best[i] < best[u])) u = i;
+    inT[u] = true;
+    if (par[u] >= 0) { adj[u].push(par[u]); adj[par[u]].push(u); }
+    for (let v = 0; v < n; v++) if (!inT[v]) { const d = w(u, v); if (d < best[v]) { best[v] = d; par[v] = u; } }
+  }
+  const far = from => {   // gare la plus éloignée (en distance cumulée dans l'arbre) + parents
+    const dist = new Array(n).fill(-1), pr = new Array(n).fill(-1); dist[from] = 0;
+    const q = [from];
+    while (q.length) { const u = q.shift(); for (const v of adj[u]) if (dist[v] < 0) { dist[v] = dist[u] + idfmDist(st[u].ll, st[v].ll); pr[v] = u; q.push(v); } }
+    let m = from; for (let i = 0; i < n; i++) if (dist[i] > dist[m]) m = i;
+    return { m, pr };
+  };
+  const a = far(0).m, { m: b, pr } = far(a);
+  const trunk = []; for (let x = b; x >= 0; x = pr[x]) trunk.push(x);
+  // Terminus du tronc le plus au NORD/OUEST en tête : la liste ne s'inverse pas d'un chargement à l'autre.
+  const t0 = st[trunk[0]].ll, t1 = st[trunk[trunk.length - 1]].ll;
+  if (t1[0] - t1[1] > t0[0] - t0[1]) trunk.reverse();
+  const used = new Set(trunk), out = [{ title:null, names: trunk.map(i => st[i].name) }];
+  // Embranchements : depuis chaque gare déjà listée, le plus long chemin dans ce qui reste.
+  for (let guard = 0; guard < 20 && used.size < n; guard++) {
+    let pick = null;
+    for (const r of used) for (const v of adj[r]) {
+      if (used.has(v)) continue;
+      // plus long chemin depuis v sans repasser par les gares listées
+      const stack = [[v, [v]]]; let longest = [v];
+      while (stack.length) {
+        const [u, path] = stack.pop();
+        if (path.length > longest.length) longest = path;
+        for (const w of adj[u]) if (!used.has(w) && !path.includes(w)) stack.push([w, path.concat(w)]);
+      }
+      if (!pick || longest.length > pick.path.length) pick = { root: r, path: longest };
+    }
+    if (!pick) break;
+    pick.path.forEach(i => used.add(i));
+    out.push({ title: `Branche depuis ${st[pick.root].name}`, names: pick.path.map(i => st[i].name) });
+  }
+  return out;
+}
 function CartoTransport() {
   const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
   const [modes, setModes] = React.useState(() => new Set(IDFM_MODES.filter(m => m.def).map(m => m.id)));
   const [showGares, setShowGares] = React.useState(true);
+  const [q, setQ] = React.useState('');
+  const [sel, setSel] = React.useState('');            // clé de la ligne choisie (idfmKey)
   const d = st.data;
   const toggle = id => setModes(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  const sig = [...modes].sort().join(',') + '|' + showGares + '|' + (d ? d.at : 0);
-  const overlay = React.useCallback((grp) => {
+  // Index des lignes : clé → { label, mode, color, paths, gares }.
+  const lineIdx = React.useMemo(() => {
+    const m = new Map();
+    if (!d) return m;
+    for (const l of d.lines) {
+      const k = idfmKey(l.mode, { indice_lig: null, res_com: l.label });
+      if (!k) continue;
+      const e = m.get(k) || { key: k, label: l.label, mode: l.mode, color: l.color, paths: [], gares: [] };
+      e.paths.push(...l.paths); m.set(k, e);
+    }
+    for (const g of d.gares) {
+      const k = g.mode ? idfmKey(g.mode, { res_com: g.line }) : '';
+      if (k && m.has(k)) m.get(k).gares.push(g);
+    }
+    return m;
+  }, [d]);
+  const cur = sel ? lineIdx.get(sel) : null;
+  // Gares de la ligne choisie, dédoublonnées par nom ; rattachement au tracé si l'open data
+  // ne relie aucune gare à la ligne.
+  const curOrder = React.useMemo(() => {
+    if (!cur || !d) return null;
+    let gs = cur.gares;
+    if (!gs.length) gs = d.gares.filter(g => g.name && (!g.mode || g.mode === cur.mode) && cur.paths.some(pa => {
+      for (let i = 1; i < pa.length; i++) if (idfmSegDist(g.ll, pa[i - 1], pa[i]) < IDFM_NEAR_M) return true;
+      return false;
+    }));
+    const by = new Map();
+    for (const g of gs) { const k = idfmNorm(g.name); if (k && !by.has(k)) by.set(k, g); }
+    return by.size ? idfmOrder([...by.values()], cur.paths) : [];
+  }, [cur, d]);
+  const hits = React.useMemo(() => {
+    const k = idfmNorm(q);
+    if (!k) return [];
+    // « 1 » trouve le métro 1 (indice exact), « rer » toutes les lignes de RER.
+    return [...lineIdx.values()].filter(l => idfmNorm(l.key.split(':')[1]) === k || (k.length > 1 || /[a-z]/.test(k)) && idfmNorm(l.label).includes(k))
+      .sort((a, b) => a.label.localeCompare(b.label, 'fr', { numeric:true })).slice(0, 14);
+  }, [q, lineIdx]);
+  const sig = [...modes].sort().join(',') + '|' + showGares + '|' + (d ? d.at : 0) + '|' + sel;
+  const overlay = React.useCallback((grp, map) => {
     if (!d) return;
     const rend = L.canvas({ padding: 0.5 });
     const wOf = {}; for (const m of IDFM_MODES) wOf[m.id] = m.w;
@@ -37835,12 +37962,20 @@ function CartoTransport() {
       if (!modes.has(id)) continue;
       for (const l of d.lines) {
         if (l.mode !== id) continue;
-        L.polyline(l.paths, { renderer: rend, color: l.color, weight: wOf[id], opacity: 0.9 })
+        // Ligne choisie : les autres s'estompent, elle passe devant (tracée à la fin).
+        const mine = cur && idfmKey(l.mode, { res_com: l.label }) === cur.key;
+        if (mine) continue;
+        L.polyline(l.paths, { renderer: rend, color: l.color, weight: wOf[id], opacity: cur ? 0.2 : 0.9 })
           .bindPopup(mapsEsc(l.label || id)).addTo(grp);
       }
     }
+    if (cur) {
+      const pl = L.polyline(cur.paths, { renderer: rend, color: cur.color, weight: (wOf[cur.mode] || 3) + 2, opacity: 1 })
+        .bindPopup(mapsEsc(cur.label)).addTo(grp);
+      try { map.fitBounds(pl.getBounds().pad(0.08)); } catch {}
+    }
     if (showGares) for (const g of d.gares) {
-      if (g.mode && !modes.has(g.mode)) continue;
+      if (g.mode && !modes.has(g.mode) && !(cur && g.mode === cur.mode)) continue;
       L.circleMarker(g.ll, { renderer: rend, radius: 2.5, weight: 1, color: g.color || '#ffffff', fillColor: '#ffffff', fillOpacity: 1 })
         .bindPopup(mapsEsc([g.name, g.line].filter(Boolean).join(' — ') || 'Gare')).addTo(grp);
     }
@@ -37859,7 +37994,42 @@ function CartoTransport() {
           ))}
           <button onClick={() => setShowGares(v => !v)} style={chip(showGares)}>Gares</button>
         </div>
+        <div style={{ position:'relative', margin:'0 0 6px' }}>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="🔎 Chercher une ligne (1, 13, RER A, T3a, H…)" aria-label="Chercher une ligne"
+            style={{ width:'100%', boxSizing:'border-box', background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:'7px 10px', fontSize:12, outline:'none' }} />
+          {hits.length > 0 && (
+            <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginTop:5 }}>
+              {hits.map(l => (
+                <button key={l.key} onClick={() => { setSel(l.key); setQ(''); }}
+                  style={{ display:'flex', alignItems:'center', gap:5, fontSize:11, fontWeight:700, borderRadius:12, padding:'3px 9px', cursor:'pointer', fontFamily:'inherit', background:'none', border:`1px solid ${l.color}`, color:C.text }}>
+                  <span style={{ width:8, height:8, borderRadius:4, background:l.color, flexShrink:0 }} />{l.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {q.trim() && !hits.length && <div style={{ fontSize:10.5, color:C.dim, marginTop:4 }}>Aucune ligne ne correspond.</div>}
+        </div>
         <CartoMiniMap height={340} center={[48.8566, 2.3522]} zoom={11} markers={[]} overlaySig={sig} overlay={overlay} />
+        {cur && (
+          <div style={{ marginTop:8, border:`1px solid ${cur.color}66`, borderRadius:10, padding:'8px 10px' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:7, marginBottom:6 }}>
+              <span style={{ width:10, height:10, borderRadius:5, background:cur.color, flexShrink:0 }} />
+              <span style={{ fontSize:12.5, fontWeight:800, color:C.text, flex:1, minWidth:0 }}>{cur.label}</span>
+              <button onClick={() => setSel('')} style={chip(false)}>✕</button>
+            </div>
+            {!curOrder || !curOrder.length
+              ? <div style={{ fontSize:11, color:C.dim }}>Aucune gare de cette ligne dans les données IDFM.</div>
+              : curOrder.map((b, bi) => (
+                <div key={bi} style={{ marginTop: bi ? 8 : 0 }}>
+                  {b.title && <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.06em', color:cur.color, marginBottom:3 }}>↳ {b.title.toUpperCase()}</div>}
+                  <ol style={{ margin:0, paddingLeft:22, fontSize:11.5, color:C.text, lineHeight:1.6 }}>
+                    {b.names.map((nm, i) => <li key={nm + i}>{nm}</li>)}
+                  </ol>
+                </div>
+              ))}
+            <div style={{ fontSize:9.5, color:C.dim, marginTop:6 }}>Ordre déduit de la position des gares (l'open data ne donne pas le rang) : un embranchement est listé à part.</div>
+          </div>
+        )}
       </>}
     </CartoCard>
   );
