@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.214';
+const APP_VERSION = '13.21.215';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1648,10 +1648,18 @@ async function actifsFetch(force) {
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const parsed = actifsParseCsv(await res.text());
   if (!parsed || !parsed.months.length) throw new Error('EMPTY');
+  // ⚠ `modifiedTime` RELU à chaque fois : celui d'`ACTIFS_FILE_LS` date de la recherche du
+  // fichier, et c'est lui qui dit si le classeur a changé (synchro Collection ci-dessous).
+  let mt = file.modifiedTime || null;
+  try {
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?fields=modifiedTime`, { headers: { Authorization: `Bearer ${token}` } });
+    if (r.ok) mt = (await r.json()).modifiedTime || mt;
+  } catch {}
   const data = { v: ACTIFS_CACHE_V, fetched_at: Date.now(),
-    file: { id: file.id, name: file.name, modifiedTime: file.modifiedTime || null },
+    file: { id: file.id, name: file.name, modifiedTime: mt },
     months: parsed.months, totals: parsed.totals };
   saveActifs(data);
+  collFinanceAutoSync(mt, force);        // ⚠ jamais attendu : Mes Actifs s'affiche d'abord
   return data;
 }
 
@@ -21275,13 +21283,6 @@ function CollectionSub({ sub, data, onData }) {
     if (r.added) onData(r.data);
     return r;
   };
-  // Fusion d'un relevé du classeur Finance : contrairement à `addMany`, un id DÉJÀ présent
-  // n'est pas ignoré — sa valeur est réalignée sur le classeur (cf. `collMergeFinance`).
-  const mergeRows = rows => {
-    const r = collMergeFinance(dataRef.current, sub.id, rows);
-    if (r.added || r.updated) onData(r.data);
-    return r;
-  };
   // Import d'une collection ENTIÈRE (CSV ManaBox / Delver Lens) : le fichier fait autorité
   // sur les quantités, cf. `collImportCards`. ⚠ `saveErr` remonte un refus d'écriture —
   // sans lui l'import s'annoncerait réussi alors que rien n'aurait été enregistré (piège 14).
@@ -21655,8 +21656,8 @@ function CollectionSub({ sub, data, onData }) {
           </div>
         )}
 
-        {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (Steam, classeur Finance) */}
-        {sub.importer && <sub.importer sub={sub} list={list} onImport={addMany} onMerge={mergeRows} onCards={importCards} onList={setList} />}
+        {/* IMPORT EN LOT D'UNE BIBLIOTHÈQUE EXTERNE (Steam) — Displate / Pop / Montre arrivent de Finance (`collFinanceAutoSync`) */}
+        {sub.importer && <sub.importer sub={sub} list={list} onImport={addMany} onCards={importCards} onList={setList} />}
 
         {/* ESTIMATION PAR PHOTO (Pierre précieuse / Montre / Vin) */}
         {sub.photo && <CollPhotoEstimate kind={sub.photo} onAdd={add} />}
@@ -22548,74 +22549,75 @@ const COLL_FIN_ERR = {
   NOSHEET:  "Le classeur a été trouvé mais il n'a pas d'onglet portant ce nom.",
   EMPTY:    "L'onglet a été lu mais aucune colonne d'objet n'y porte de valeur sur le dernier mois.",
   NET:      'Lecture impossible (réseau ou API Sheets).',
+  FULL:     'stockage local plein : rien enregistré.',
 };
 
-// Bloc « importer depuis le classeur », rendu par `CollectionSub` via `sub.importer`.
-function CollFinanceImport({ sub, onMerge }) {
-  const [busy, setBusy] = React.useState(false);
-  const [res, setRes]   = React.useState(null);    // { month, sheet, columns, vides, added, updated, full }
-  const [err, setErr]   = React.useState('');
-  const canRead = gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_READ);
-
-  const run = async force => {
-    if (busy) return;
-    setBusy(true); setErr(''); setRes(null);
-    try {
-      const d = await collFinanceFetch(sub.id, force);
-      const r = onMerge(d.items);
-      setRes({ ...d, ...r });
-    } catch (e) {
-      const m = String((e && e.message) || e);
-      setErr(actifsNotNativeMsg(m) || COLL_FIN_ERR[m]
-        || (/^HTTP /.test(m) ? `${COLL_FIN_ERR.NET} (${m})` : COLL_FIN_ERR.NET));
+// 🔄 SYNCHRO DEPUIS FINANCE (demande utilisateur : la LISTE ne s'importe plus depuis
+// Collection). Chaque lecture du classeur par Mes Actifs (`actifsFetch` : ouverture au-delà de
+// `ACTIFS_TTL`, ↻) compare son `modifiedTime` à celui de la dernière synchro réussie
+// (`COLL_FIN_SYNC_LS`, sur l'appareil, hors sauvegarde : rejouer une fusion ne change rien) ;
+// classeur modifié (ou ↻) ⇒ les onglets Displate / Pop / Montre sont relus et fusionnés par
+// `collMergeFinance` dans la collection. Collection ne garde que l'ajout de PHOTOS (✏️ → 📷).
+// ⚠ AUTH / SCOPE / réseau ⇒ marqueur NON posé : la prochaine lecture retente. Un onglet absent
+// (NOSHEET) ou vide n'empêche pas de poser le marqueur.
+const COLL_FIN_SYNC_LS = 'spotifyplus_collection_finsync';   // { mt, at, res:{ sub: bilan | {err} } }
+const _collFin = { busy: false, subs: new Set() };
+function collFinSyncLoad() { try { const v = JSON.parse(lsGet(COLL_FIN_SYNC_LS) || 'null'); return v && typeof v === 'object' ? v : null; } catch { return null; } }
+function collFinPublish() { for (const f of _collFin.subs) { try { f(); } catch {} } }
+async function collFinanceAutoSync(mt, force) {
+  if (_collFin.busy) return;
+  const prev = collFinSyncLoad();
+  if (!force && mt && prev && prev.mt === mt) return;
+  _collFin.busy = true; collFinPublish();
+  const res = {};
+  let retry = false;
+  try {
+    // ⚠ Les cartes doivent être chargées avant `collLoad` / `collPublish` (sinon `collSave` ne sait pas les écarter).
+    try { await cardsPreload(); } catch {}
+    for (const subId of Object.keys(COLL_FIN_SHEETS)) {
+      try {
+        const d = await collFinanceFetch(subId, false);
+        const cur = collLoad();
+        const r = collMergeFinance(cur, subId, d.items);
+        if (r.data !== cur && !collPublish(r.data)) throw new Error('FULL');
+        res[subId] = { added: r.added, updated: r.updated, merged: r.merged, full: r.full, n: d.items.length, month: d.month };
+      } catch (e) {
+        const m = String((e && e.message) || e);
+        if (m !== 'NOSHEET' && m !== 'EMPTY') retry = true;
+        res[subId] = { err: m };
+      }
     }
-    setBusy(false);
+  } finally {
+    if (!retry) lsSet(COLL_FIN_SYNC_LS, JSON.stringify({ mt: mt || null, at: Date.now(), res }));
+    else lsSet(COLL_FIN_SYNC_LS, JSON.stringify({ ...(prev || {}), tried: Date.now(), res }));
+    _collFin.busy = false; collFinPublish();
+  }
+}
+function useCollFinSync() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { _collFin.subs.add(bump); return () => { _collFin.subs.delete(bump); }; }, []);
+  return { busy: _collFin.busy, last: collFinSyncLoad() };
+}
+const COLL_FIN_LABEL = { displate: 'Displate', pop: 'Pop', montre: 'Montre' };
+// Ligne d'état sous Mes Actifs : ce que la dernière synchro a versé dans Collection.
+function CollFinSyncLine({ onForce }) {
+  const { busy, last } = useCollFinSync();
+  const res = (last && last.res) || {};
+  const part = id => {
+    const r = res[id];
+    if (!r) return null;
+    if (r.err) return `${COLL_FIN_LABEL[id]} ${r.err === 'NOSHEET' ? 'sans onglet' : r.err === 'EMPTY' ? 'vide' : '⚠ ' + (COLL_FIN_ERR[r.err] || r.err)}`;
+    const bits = [r.added ? `+${r.added}` : '', r.updated ? `${r.updated} maj` : '', r.merged ? `${r.merged} doublon${r.merged > 1 ? 's' : ''} retiré${r.merged > 1 ? 's' : ''}` : '', r.full ? 'collection pleine' : ''].filter(Boolean);
+    return `${COLL_FIN_LABEL[id]} ${bits.length ? bits.join(', ') : 'à jour'}`;
   };
-  const btn = on => ({ background: on ? `${COLLECTION_COLOR}22` : 'none',
-    border:`1px solid ${on ? COLLECTION_COLOR + '88' : C.border}`, borderRadius:6,
-    color: on ? COLLECTION_COLOR : C.dim, fontSize:11, fontWeight:700, padding:'5px 10px',
-    cursor: on ? 'pointer' : 'default', fontFamily:'DM Mono,monospace' });
-  const bilan = res && [
-    res.added   ? `${res.added} ajouté${res.added > 1 ? 's' : ''}` : null,
-    res.updated ? `${res.updated} mis à jour` : null,
-    res.merged ? `${res.merged} doublon${res.merged > 1 ? 's' : ''} d'anciens imports retiré${res.merged > 1 ? 's' : ''}` : null,
-    !res.added && !res.updated && !res.merged ? 'déjà à jour' : null,
-    `relevé de ${fmtActifMonth(res.month)}`,
-    res.vides.length ? `${res.vides.length} colonne${res.vides.length > 1 ? 's' : ''} à 0 € ignorée${res.vides.length > 1 ? 's' : ''}` : null,
-    res.full ? `collection pleine (${COLLECTION_MAX})` : null,
-  ].filter(Boolean).join(' · ');
-
+  const txt = Object.keys(COLL_FIN_SHEETS).map(part).filter(Boolean).join(' · ');
   return (
-    <div style={{ display:'flex', flexDirection:'column', gap:6, padding:'8px 10px',
-      background:`${COLLECTION_COLOR}10`, border:`1px solid ${COLLECTION_COLOR}44`, borderRadius:8 }}>
-      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
-        <span style={{ fontSize:11, fontWeight:800, color:COLLECTION_COLOR }}>📥 Importer depuis le classeur Finance</span>
-        <button onClick={() => run(false)} disabled={busy || !canRead} style={btn(!busy && canRead)}>
-          {busy ? '⏳ Lecture du classeur…' : 'Importer'}
-        </button>
-        {canRead && <button onClick={() => run(true)} disabled={busy} title="Re-chercher le classeur dans le Drive"
-          style={{ ...btn(!busy), fontWeight:400, padding:'5px 8px' }}>↻</button>}
-        {!canRead && <button onClick={() => gdriveLogin({ scopes: GDRIVE_SCOPES })} style={{ ...btn(true), fontWeight:400 }}>△ Autoriser la lecture du Drive</button>}
-      </div>
-      {bilan && <div style={{ fontSize:10, color:COLLECTION_COLOR, fontWeight:600 }}>✓ {bilan}</div>}
-      {err && <div style={{ fontSize:10, color:'#e05050', lineHeight:1.5 }}>⚠ {err}</div>}
-      {res && (
-        <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
-          Onglet « {res.sheet} » · colonnes prises pour des objets : {res.columns.join(' · ')}
-          {Math.abs(res.factor - 1) > 0.005 && <> · valeurs brutes converties par ×{res.factor.toFixed(4)} pour retomber sur le Total du classeur ({fmtEur(res.total, 0)})</>}
-          {res.vides.length > 0 && <> · à 0 € ce mois-ci (donc ignorées) : {res.vides.join(' · ')}</>}
-        </div>
-      )}
-      <div style={{ fontSize:9, color:C.dim, fontStyle:'italic', lineHeight:1.5 }}>
-        Une colonne = un objet, son en-tête donne le nom et sa valeur du dernier mois donne le prix —
-        <b>ramené en euros par le Total de la ligne</b> (les colonnes Displate sont en dollars avant
-        le ratio de revente), si bien que la somme des fiches retombe sur le Total du classeur.
-        Une référence déjà là — même ajoutée par la recherche, l'IA ou une photo, sous un nom un peu
-        différent (« Kaneki » #61 pour « Kaneki 61 ») — est retrouvée et garde sa quantité, sa photo et
-        ses notes : <b>seuls le prix et le lien sont réalignés sur le classeur</b>, qui fait foi pour la
-        valeur. Les doublons créés par d'anciens imports sont retirés ; rien d'autre n'est supprimé —
-        une colonne retirée du classeur laisse sa fiche en place, à toi de l'enlever.
-      </div>
+    <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+      <span style={{ flex:1, minWidth:0 }}>
+        🗃️ Collection {busy ? '⏳ synchro des onglets Displate / Pop / Montre…' : last && (last.at || last.tried) ? `· ${txt || 'rien à verser'} · ${new Date(last.at || last.tried).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })}` : '· synchronisée à la prochaine modification du classeur'}
+      </span>
+      {onForce && <button onClick={onForce} disabled={busy} title="Reverser Displate / Pop / Montre dans Collection"
+        style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:6, padding:'3px 8px', cursor: busy ? 'default' : 'pointer', fontSize:9, flexShrink:0 }}>↻ Collection</button>}
     </div>
   );
 }
@@ -23405,13 +23407,13 @@ const COLLECTION_SUBS = {
   displate: [
     { id:'displate', label:'Displate', icon:'🖼️', unit:'Displate', article:'un premier Displate',
       search: displateSearch, placeholder:'Chercher un Displate (titre ou artiste)…',
-      hydrate: displateHydrate, importer: CollFinanceImport, note: displateNote },
+      hydrate: displateHydrate, note: displateNote },
   ],
   pop: [
     { id:'pop', label:'Pop', icon:'🧸', unit:'figurine', article:'une première figurine',
       search: popSearch, placeholder:'Chercher une figurine Funko Pop…',
       manual: true, manualPlaceholder:'Ajouter à la main : nom de la figurine…',
-      importer: CollFinanceImport, note: popNote },
+      note: popNote },
   ],
   jeuxvideo: [
     { id:'jeuxvideo', label:'Jeux vidéo', icon:'🎮', unit:'jeu', article:'un premier jeu',
@@ -23430,7 +23432,7 @@ const COLLECTION_SUBS = {
   montre: [
     { id:'montre', label:'Montre', icon:'⌚', unit:'montre', article:'une première montre',
       photo:'montre', manual:true, manualPlaceholder:'Ajouter à la main : marque et modèle…',
-      importer: CollFinanceImport, note: COLL_PHOTO_NOTE },
+      note: COLL_PHOTO_NOTE },
   ],
   vin: [
     { id:'vin', label:'Vin', icon:'🍷', unit:'bouteille', article:'une première bouteille',
@@ -32731,7 +32733,7 @@ const MODULE_LINKS = [
   ['tvtime',   'games',      'notes ⭐ des séries ⇒ TierList 📺 Mes séries (S à D)'],
   ['games',    'tvtime',     'série glissée dans un autre rang de la TierList ⇒ note ⭐ réécrite'],
   ['finance',  'actu',       'Bull Run (crypto) affiché dans Actu'],
-  ['finance',  'collection', 'classeur Finance (Drive) importé'],
+  ['finance',  'collection', 'Displate / Pop / Montre versés depuis le classeur Finance'],
   ['remember', 'finance',    'taxe foncière, contrôle technique, assurances… proposés comme dépenses datées (Prévision)'],
   ['api',      'tvtime',     'clés TMDB / YouTube'],
   ['api',      'ia',         'clés des IA (Gemini, Groq…)'],
@@ -33309,6 +33311,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.215', date:'2026-10-29', title:'🗃️ Displate, Pop et Montre arrivent de Finance', items:[
+    'Dans 🗃️ Collection, le bloc « Importer depuis le classeur Finance » disparaît : tu n’y ajoutes plus que des photos (✏️ → 📷), les cartes gardent leur import CSV.',
+    'C’est 📈 Finance qui remplit la liste : à chaque lecture de ton classeur, s’il a été modifié depuis la dernière fois, les onglets Displate, Pop et Montre sont versés dans Collection (prix et liens réalignés, rien de supprimé). L’état s’affiche sous Mes Actifs, avec ↻ Collection pour forcer.',
+  ] },
   { v:'13.21.214', date:'2026-10-29', title:'🎲 Cube Magic avec ta collection', items:[
     'Dans 🗃️ Collection → Cartes, un nouveau collapse « 🎲 Cube » juste au-dessus de Deck Magic : tape un thème (zombies, cimetière, artefacts…, ou rien pour les meilleures cartes), choisis une taille (180, 360 ou 540) et touche ✨ Générer.',
     'Le cube est construit sur l’appareil avec tes cartes Magic en français uniquement, chacune en un exemplaire, équilibré : autant de cartes par couleur, une courbe de mana tenue, des multicolores, des incolores et des terrains. 📜 Liste, 🖼️ Cartes, 📋 Copier ou ⬇ .txt pour l’emporter.',
@@ -33323,10 +33329,6 @@ const RELEASE_NOTES = [
   { v:'13.21.211', date:'2026-10-29', title:'🧑‍🎤 Nouveau jeu : Personantix', items:[
     'Dans 🎮 Jeux → 1 joueur, Personantix : devine la personnalité mystère parmi 141 célébrités (sport, musique, cinéma, sciences, politique…).',
     'Chaque essai compare sexe, pays, continent, année de naissance, domaine et si la personne est en vie : vert = pareil, orange = proche (même continent ou ±10 ans), ▲/▼ = née plus tard ou plus tôt. Les initiales s’affichent au 6e essai.',
-  ] },
-  { v:'13.21.210', date:'2026-10-29', title:'▶ Lancer un titre ne coupe plus Spotify', items:[
-    'Dans 🎵 Musique, lancer un titre de la liste « En attente » pendant que Spotify joue autre chose pouvait couper la musique sans démarrer le titre choisi.',
-    'Le Hub vérifie maintenant, une seconde après, que le titre joue vraiment : sinon il le relance une fois sur ton appareil Spotify (ou reprend la lecture s’il est resté en pause), et te prévient seulement si Spotify refuse toujours.',
   ] },
 ];
 
@@ -43803,6 +43805,7 @@ function MesActifsPanel() {
         </span>
         {connected && <button onClick={() => refresh(true)} disabled={loading} style={{ ...chip(false), flexShrink:0 }}>↻ Actualiser</button>}
       </div>
+      {canRead && <CollFinSyncLine onForce={() => collFinanceAutoSync(data.file.modifiedTime, true)} />}
     </div>
   );
 }
