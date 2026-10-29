@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.209';
+const APP_VERSION = '13.21.210';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -27853,10 +27853,46 @@ function _playAlert(msg) {
   alert(msg);
 }
 
+// ── Lecture acceptée mais jamais démarrée ─────────────────────────────────────
+// Spotify peut répondre 204 au PUT /me/player/play puis s'ARRÊTER sans lancer le titre
+// demandé (constaté quand une lecture tourne déjà avec une file d'attente côté Spotify) :
+// aucun code d'erreur, la musique en cours se coupe et plus rien ne joue. On relit donc
+// l'état du lecteur juste après et on corrige UNE fois, en ciblant l'appareil par
+// `device_id` : titre chargé mais en pause ⇒ simple reprise ; autre titre ou rien ⇒ on
+// renvoie le titre. `_playSeq` abandonne la vérif dès qu'un autre playTrack est parti
+// (navigation rapide, auto-avance). L'état de Spotify traîne ~1 s : un AUTRE titre qui
+// joue encore n'est corrigé qu'au dernier contrôle.
+let _playSeq = 0;
+const PLAY_CHECK_WAITS = [1200, 1500, 2500];
+async function _playConfirm(spotifyUri, seq) {
+  const url = 'https://api.spotify.com/v1/me/player/play';
+  let fixed = false;
+  for (let i = 0; i < PLAY_CHECK_WAITS.length; i++) {
+    await sleep(PLAY_CHECK_WAITS[i]);
+    if (seq !== _playSeq || document.visibilityState === 'hidden') return;
+    let st;
+    try { st = await apiGet('https://api.spotify.com/v1/me/player?market=from_token'); } catch { return; }
+    if (seq !== _playSeq || st?.rate_limited || st?.error) return;
+    const it   = st?.item;
+    const same = !!it && (it.uri === spotifyUri || it.linked_from?.uri === spotifyUri);
+    if (same && st.is_playing) return;
+    const last = i === PLAY_CHECK_WAITS.length - 1;
+    if (fixed) { if (last) _playAlert('Spotify a reçu le titre mais ne l\'a pas lancé (titre indisponible ou appareil qui refuse la commande).\n\nRelance-le depuis Spotify, puis réessaie ici.'); continue; }
+    if (!same && st?.is_playing && !last) continue;
+    const devId = st?.device && !st.device.is_restricted ? st.device.id : (await spotifyPickDevice())?.id;
+    if (seq !== _playSeq) return;
+    const q = devId ? `?device_id=${encodeURIComponent(devId)}` : '';
+    fixed = true;
+    await apiPut(url + q, same ? undefined : { uris: [spotifyUri], position_ms: 0 });
+    if (_playerPollKick) _playerPollKick();
+  }
+}
+
 async function playTrack(spotifyUri) {
   if (!spotifyUri) return;
   _navUri = spotifyUri;
   _navAt  = Date.now();
+  const seq    = ++_playSeq;
   const url    = 'https://api.spotify.com/v1/me/player/play';
   const body   = { uris: [spotifyUri] };
   let   result = await apiPut(url, body);
@@ -27867,7 +27903,10 @@ async function playTrack(spotifyUri) {
   }
   if (result?.error === 'no_active_device') _playAlert(NO_DEVICE_MSG);
   else if (result?.error === 'forbidden')   _playAlert(playForbiddenMsg(result));
-  else if (_playerPollKick) _playerPollKick();   // lecture lancée : re-sonder sans attendre le tick lent
+  else if (!result?.error) {
+    if (_playerPollKick) _playerPollKick();   // lecture lancée : re-sonder sans attendre le tick lent
+    _playConfirm(spotifyUri, seq).catch(() => {});
+  }
 }
 
 // React.memo + props explicites (pas de useStore) : seuls les items dont les props changent
@@ -32774,6 +32813,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.210', date:'2026-10-29', title:'▶ Lancer un titre ne coupe plus Spotify', items:[
+    'Dans 🎵 Musique, lancer un titre de la liste « En attente » pendant que Spotify joue autre chose pouvait couper la musique sans démarrer le titre choisi.',
+    'Le Hub vérifie maintenant, une seconde après, que le titre joue vraiment : sinon il le relance une fois sur ton appareil Spotify (ou reprend la lecture s’il est resté en pause), et te prévient seulement si Spotify refuse toujours.',
+  ] },
   { v:'13.21.209', date:'2026-10-23', title:'💇 Coiffeur dans les alertes Médecin', items:[
     'Dans 🔔 Alertes → 🩺 Médecin, une nouvelle ligne « Coiffeur » (juste avant Mutuelle) : pose la date de ton prochain rendez-vous, avec une heure si tu veux.',
     'Comme les autres échéances, elle a son badge, apparaît dans les dates à venir et le calendrier, te prévient à l’approche et devient une tâche To do 3 jours avant.',
@@ -32789,10 +32832,6 @@ const RELEASE_NOTES = [
   { v:'13.21.206', date:'2026-10-15', title:'❤ Télécharger mes titres likés', items:[
     'Dans 🎵 Musique → 🔀 Delta, sous « 🎤 Télécharger mes artistes suivis », le nouveau bouton « ❤ Télécharger mes titres likés » donne la liste complète de tes likes en .txt : artiste, titre, durée et lien Spotify, dans l’ordre de ta bibliothèque.',
     'La liste est gardée sur l’appareil à chaque analyse Delta : tu la télécharges quand tu veux, sans relancer l’analyse et même hors ligne. Elle date de ta dernière analyse (la date est écrite en tête du fichier).',
-  ] },
-  { v:'13.21.205', date:'2026-10-13', title:'⊘ Désabonnement depuis Artistes suivis', items:[
-    'Dans 🎵 Musique → 🎤 Artistes suivis, chaque artiste suivi a maintenant un bouton ⊘ : après confirmation, il sort de tes abonnements Spotify et passe en ⊘ Désabonné, sans rien perdre (date de dernier scraping et compteurs gardés, le scan repart de là si tu te réabonnes).',
-    'Le bouton est grisé hors ligne, ou si ta connexion Spotify n’a pas la permission de modifier tes abonnements : une ligne au-dessus de la liste dit alors de te reconnecter une fois.',
   ] },
 ];
 
