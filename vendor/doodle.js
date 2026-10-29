@@ -9486,9 +9486,8 @@ function doodleRules() {
   // Bandes au départ (score 0, renfort de début inclus) et à saturation (700 points).
   const lo = doodleBands(0, 1), hi = doodleBands(700, 1);
   return [
-    { t:'Modes de jeu', c:'#ff8fc8', rows:[
-      { i:'🌀', n:'Chaos',   d:'le jeu complet : biomes, tuiles débloquées, coffres, boss et tout le reste.' },
-      { i:'➕', n:'Chaos +', d:`tout le Chaos, et en plus DEUX dalles visibles échangent leur place toutes les ${D_CHAOSP_EVERY / 60} s (jamais celles d'une chaîne ou d'une échelle, ni celle qui te tient). Record séparé.` },
+    { t:'Mode de jeu', c:'#ff8fc8', rows:[
+      { i:'➕', n:'Chaos +', d:`le jeu complet (biomes, tuiles débloquées, coffres, boss…), et DEUX dalles visibles échangent leur place toutes les ${D_CHAOSP_EVERY / 60} s (jamais celles d'une chaîne ou d'une échelle, ni celle qui te tient).` },
     ] },
     { t:'Taux d\'apparition', c:'#9bd93f', rows:[
       { i:'🟩', n:'Plateformes',  d:`sur une rangée ordinaire : cassante ${doodlePct(lo.b)} à ${doodlePct(hi.b)}, bleue ${doodlePct(lo.m)} à ${doodlePct(hi.m)}, blanche ${doodlePct(lo.v)} à ${doodlePct(hi.v)} — le reste est vert. Les parts montent avec l'altitude et saturent vers 700 points ; blanche, bleue et multicolore sont en plus renforcées avant ${D_EARLY_SCORE} points.` },
@@ -9550,7 +9549,6 @@ const D_SLOT_STOPS = [560, 900, 1240];
 // `!doodleClassic(s)` a donc disparu, jamais son contenu : le Chaos est le comportement gardé.
 // ⚠ L'ancienne clé `spotifyplus_doodle_mode` n'est plus ni lue ni écrite ; elle traîne peut-être
 // encore chez l'utilisateur, mais plus rien ne s'en sert — ne pas la ressusciter.
-// ➕ Le mode « Chaos + » N'EST PAS un retour du Classique : c'est le Chaos plus un drapeau
-// (`s.plus`, voir doodleChaosSwap), choisi à l'accueil du jeu et mémorisé dans sa PROPRE clé
-// (`spotifyplus_doodle_plus`), avec son propre record (`doodle_plus`).
+// ➕ « Chaos + » (le Chaos + l'échange de dalles, voir doodleChaosSwap) est le SEUL mode depuis
+// 13.21.217 : plus de drapeau `s.plus`, le record garde la clé `doodle_plus`.
 window.DOODLE_READY = true;
