@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.221';
+const APP_VERSION = '13.21.222';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2012,7 +2012,14 @@ const RL_LS_KEY = 'spotifyplus_blocked_until';
 // cause que rien n'annonçait). Une fenêtre 429 oubliée est infiniment moins grave.
 let _rlUntil  = (() => { try { return parseInt(localStorage.getItem(RL_LS_KEY) || '0') || 0; } catch { return 0; } })();
 let _rlNotify = null;
-function _rlSet(retryMs) {
+// `_rlSpotUntil` = la fenêtre que SPOTIFY a réellement demandée (Retry-After), sans le
+// minimum de 15 min que la synchro s'impose ensuite par prudence (`selfImposed`). Une
+// commande de lecture lancée d'un clic (`apiPut(..., {player:true})`) ne respecte que
+// celle-ci : sans ça, un 429 de quelques secondes pendant un scraping bloquait TOUT clic
+// sur un titre pendant 15 min, sans que Spotify ne refuse quoi que ce soit.
+let _rlSpotUntil = 0;
+function _rlSet(retryMs, selfImposed) {
+  if (!selfImposed) _rlSpotUntil = Math.max(_rlSpotUntil, Date.now() + retryMs + 2000);
   _rlUntil = Date.now() + retryMs + 2000;
   try { localStorage.setItem(RL_LS_KEY, String(_rlUntil)); } catch {}
   if (_rlNotify) _rlNotify(_rlUntil);
@@ -2069,8 +2076,10 @@ async function apiGet(url, _retried = false, opts) {
   // → le poll player rejetterait au lieu de simplement ne rien afficher. On renvoie null.
   return res.json().catch(() => null);
 }
-async function apiPut(url, body, _retried = false) {
-  const blocked = _rlCheck();
+async function apiPut(url, body, _retried = false, opts) {
+  const blocked = opts && opts.player
+    ? (Date.now() < _rlSpotUntil ? { error: 'rate_limited', rate_limited: true, blockedUntil: _rlSpotUntil } : null)
+    : _rlCheck();
   if (blocked) return blocked;
   const token = await getToken();
   const res   = await fetch(url, {
@@ -2081,7 +2090,7 @@ async function apiPut(url, body, _retried = false) {
   if (res.status === 401 && !_retried) {
     // Même politique que apiGet : un refresh puis un seul retry (un like/play ne doit pas échouer en silence)
     const ok = await refreshToken();
-    if (ok) return apiPut(url, body, true);
+    if (ok) return apiPut(url, body, true, opts);
   }
   if (res.status === 429) {
     _rlSet(_parseRetryAfterMs(res.headers.get('Retry-After'), 30000));
@@ -4305,7 +4314,7 @@ function StoreProvider({ children }) {
               // fenêtre persistée — survit au F5. La progression est sauvegardée, le
               // bouton ↩ Reprendre réapparaît via endSync('error').
               const blockMs = Math.max(err.waitMs || 0, 15 * 60 * 1000);
-              _rlSet(blockMs);
+              _rlSet(blockMs, true);   // minimum de 15 min = prudence de la synchro, pas Spotify
               setBlockedUntil(_rlUntil);
               const e = new Error('SYNC_RATE_ABORT');
               e.blockMin = Math.ceil(blockMs / 60000);
@@ -5393,7 +5402,6 @@ const GAMES = [
   { id:'motus',      label:'Motus',           min:1, max:1 },
   { id:'ordre',      label:'Ordre croissant', min:2, max:8 },
   { id:'osu',        label:'Osu',             min:1, max:1 },
-  { id:'personantix', label:'Personantix',    min:1, max:1 },
   { id:'piano',      label:'Piano Tiles',     min:1, max:1 },
   { id:'puissance4', label:'Puissance 4',     min:2, max:2 },
   { id:'simon',      label:'Simon',           min:1, max:1 },
@@ -5589,7 +5597,6 @@ function GameHost({ game, label, dobMode }) {
     case 'motus':      return <GameMotus />;
     case 'ordre':      return <GameOrdre />;
     case 'osu':        return <GameOsu />;
-    case 'personantix': return <GamePersonantix />;
     case 'piano':      return <GamePiano />;
     case 'plox':       return <GamePlox />;
     case 'puissance4': return <GamePuissance4 />;
@@ -5617,8 +5624,9 @@ function GameComingSoon({ label }) {
 // ── Helpers partagés des jeux ──
 function gameHi(id) { try { return +(localStorage.getItem('spotifyplus_game_hi_' + id) || 0) || 0; } catch { return 0; } }
 function setGameHi(id, v) { try { localStorage.setItem('spotifyplus_game_hi_' + id, String(v)); } catch {} }
-// Record de Doodle Jump : clé héritée du mode ➕ Chaos +, devenu le seul mode.
-const D_HI_ID = 'doodle_plus';
+// Record de Doodle Jump (🌀 Chaos, seul mode). ⚠ Le record `doodle_plus` du ➕ Chaos + retiré
+// est purgé (REMOVED_GAMES) : un échange de dalles par seconde ne se compare pas au Chaos.
+const D_HI_ID = 'doodle';
 // 🟢 11.8.3 — PURGE DES RECORDS ORPHELINS (demande utilisateur). Un jeu retiré du Hub laisse
 // derrière lui son record dans le navigateur (`spotifyplus_game_hi_<id>`) : plus rien ne l'affiche,
 // plus rien ne le met à jour, il ne fait qu'occuper le quota localStorage partagé par TOUT le Hub.
@@ -5640,13 +5648,14 @@ const D_HI_ID = 'doodle_plus';
 // le barème simple (cf. PLOX_PT_*), et un record d'avant — des dizaines de milliers de points —
 // ne serait plus jamais battu. Renommer le drapeau est le SEUL moyen de remettre un record à
 // zéro sur tous les appareils, le record lui-même n'étant jamais réécrit à la baisse.
-const REMOVED_GAMES = ['flipper', 'snake', 'bounce', 'sudoku', 'flip7', 'solitaire', 'blackjack', 'poker', 'plox', 'bataille', 'tetris', 'oua_crous', 'oua_food', 'oua_vues'];   // jeux retirés du Hub
+const REMOVED_GAMES = ['flipper', 'snake', 'bounce', 'sudoku', 'flip7', 'solitaire', 'blackjack', 'poker', 'plox', 'bataille', 'tetris', 'oua_crous', 'oua_food', 'oua_vues', 'doodle_plus', 'personantix'];   // jeux retirés du Hub
 // Réglages laissés par un jeu retiré, hors préfixe `spotifyplus_game_hi_` (niveau choisi…).
-// ⚠ v10 : le mode 🌀 Chaos de Doodle Jump est retiré (Chaos + seul) ⇒ son record `doodle`,
-// la préférence de mode et le drapeau de la remise à zéro 10.9.0 partent avec lui.
+// ⚠ v12 : le ➕ Chaos + de Doodle Jump est retiré et le 🌀 Chaos revient seul ⇒ `doodle_plus`
+// part (REMOVED_GAMES) et `spotifyplus_game_hi_doodle` NE DOIT PLUS figurer ici (la v10 le
+// purgeait) : c'est de nouveau le record vivant, une prochaine vague l'effacerait.
 const REMOVED_GAME_KEYS = ['spotifyplus_game_sudoku_level', 'spotifyplus_game_sol_draw',
-  'spotifyplus_game_hi_doodle', 'spotifyplus_doodle_plus', 'spotifyplus_doodle_hi_reset'];
-const HI_PURGE_LS = 'spotifyplus_hi_purged_v11';
+  'spotifyplus_doodle_plus', 'spotifyplus_doodle_hi_reset'];
+const HI_PURGE_LS = 'spotifyplus_hi_purged_v12';
 (function purgeRemovedGameHiOnce() {
   try {
     if (localStorage.getItem(HI_PURGE_LS)) return;
@@ -5660,6 +5669,7 @@ const HI_PURGE_LS = 'spotifyplus_hi_purged_v11';
     localStorage.removeItem('spotifyplus_hi_purged_v8');
     localStorage.removeItem('spotifyplus_hi_purged_v9');
     localStorage.removeItem('spotifyplus_hi_purged_v10');
+    localStorage.removeItem('spotifyplus_hi_purged_v11');
     // ⚠ La liste est CUMULATIVE : un appareil qui n'a jamais vu une vague précédente doit
     // encore nettoyer ses clés, un seul drapeau suffit donc — mais il faut un NOUVEAU nom
     // à chaque vague, sinon la nouvelle purge ne partirait pas là où l'ancienne a tourné.
@@ -8006,7 +8016,6 @@ function GameDoodleInner() {
   const dragRef = React.useRef(false);  // ⚠ idem : `togglePause` le remet à zéro, or il est défini bien plus haut
   const [score, setScore] = React.useState(0);
   const [ammo, setAmmo] = React.useState(D_AMMO_START);
-  // ➕ Chaos + est le SEUL mode (le Chaos simple a été retiré) : son record garde la clé `doodle_plus`.
   const [best, setBest] = React.useState(() => gameHi(D_HI_ID));
   // Biome remonté dans React uniquement pour habiller le repose-pouce : la boucle, elle,
   // continue de lire `s.biome`. Un state de plus par frame serait un re-render par frame.
@@ -8028,8 +8037,7 @@ function GameDoodleInner() {
       ammo: D_AMMO_START, wpn: { rate: 0, pierce: 0, boom: 0, spread: 0, laser: 0, missile: 0, shuriken: 0, big: 0, shTime: 0, shHit: 0, shFall: 0, shVoid: 0, shRam: 0 }, shTimeLeft: 0, lastMissile: -99, lastAuto: -99, shur: [],
       luckyLeft: D_LUCKY_MAX, luckyAt: D_LUCKY_GAP, unluckyLeft: D_LUCKY_MAX, unluckyAt: D_LUCKY_GAP, mrev: 0, mheavy: 0, mfog: 0,
       biome: 0, biomes: [0], relics: [], banner: null, padQ: -1, unlocked: null, shTmp: 0, shBefore: null,
-      vine: null, tride: null, grab: null, tardis: null, chainUp: null, flame: 0, barb: null, raid: null, beltVx: 0, beltLeft: 0, beltSoap: false, tmag: 0, tmagX: 0, tmagY: 0, magLeft: 0, magSeen: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, shroom: 0, hall: [], neg: 0, blind: false, notif: null, wat: 0, watX: 0, tw: 0, acc: null, rebLeft: 0, bambLeft: 0, zoom: 1, slotRoll: null, slotPending: false, banRoll: null, banned: [], nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, scoreRaw: 0, climbSeen: 0, skin: null, bolts: [], trail: [], gale: null, galeV: 0, galeD: null, galeWind: null,
-      swapLeft: D_CHAOSP_EVERY, swapFx: null };
+      vine: null, tride: null, grab: null, tardis: null, chainUp: null, flame: 0, barb: null, raid: null, beltVx: 0, beltLeft: 0, beltSoap: false, tmag: 0, tmagX: 0, tmagY: 0, magLeft: 0, magSeen: 0, slowLeft: 0, sandLeft: 0, frost: 0, gravLeft: 0, shroom: 0, hall: [], neg: 0, blind: false, notif: null, wat: 0, watX: 0, tw: 0, acc: null, rebLeft: 0, bambLeft: 0, zoom: 1, slotRoll: null, slotPending: false, banRoll: null, banned: [], nextSlot: null, mobTime: 1, rrN: D_RR_START, rrP: 1, scoreMul: 1, scoreRaw: 0, climbSeen: 0, skin: null, bolts: [], trail: [], gale: null, galeV: 0, galeD: null, galeWind: null };
     setScore(0); setAmmo(D_AMMO_START); setBiomeIdx(0); setPadBiome(D_BIOMES[0]);
   };
   const start = () => { reset(); setPhase('playing'); };
@@ -10644,10 +10652,7 @@ function GameDoodleInner() {
         s.chests.push({ x: 10 + Math.random() * Math.max(1, W - D_CHEST_W - 20), y: -D_CHEST_H - 10,
                         w: D_CHEST_W, h: D_CHEST_H, vy: 0, landed: false, taken: false, plat: null });
       }
-      // ➕ Chaos + : deux dalles échangent leur place toutes les D_CHAOSP_EVERY frames de JEU.
-      // ⚠ Suspendu dans l'arène du boss (`bossHide`) : il n'y a aucune dalle à y échanger.
-      if (!s.bossHide && (s.swapLeft -= sf) <= 0) { s.swapLeft += D_CHAOSP_EVERY; doodleChaosSwap(s, H); }
-      if (s.swapFx && (s.swapFx.life -= sf) <= 0) s.swapFx = null;
+
       if (s.notif && (s.notif.life -= sf) <= 0) s.notif = null;   // 🔔 la notification s'efface toute seule
       if (s.faceTimer > 0) s.faceTimer--;
       for (const k of ['mrev', 'mheavy', 'mfog', 'sandLeft', 'frost', 'gravLeft', 'shroom', 'neg']) if (s[k] > 0) s[k]--;   // 🍀 malus, tempête, gel et gravité : ils s'épuisent tout seuls
@@ -12559,287 +12564,6 @@ function GameFindFlag() {
             ))}
           </div>
         )}
-      </div>
-    </GameWrap>
-  );
-}
-
-// ════════ Personantix (deviner une personnalité, solo — d'après gamentix.fr/#personantix) ════════
-// On propose une personnalité de la liste : chaque critère est comparé à celle à trouver.
-// Vert = identique ; orange = proche (même continent, naissance à ±10 ans) ; ▲/▼ = la
-// personne mystère est née plus tard / plus tôt. Rien en ligne : tout tient dans `PX_PEOPLE`.
-// ⚠ Données FIGÉES (pays de nationalité usuelle, décès connus fin 2026) : une personnalité
-// qui meurt reste « vivante » ici jusqu'à ce qu'on corrige sa ligne (dernier champ = année
-// de décès, 0 = vivante). Années négatives = avant J.-C.
-const PX_COLOR = '#c58af5';
-const PX_SUGG_MAX = 7;
-const PX_RAW = `Albert Einstein|H|Allemagne|Europe|1879|Science|1955
-Marie Curie|F|Pologne|Europe|1867|Science|1934
-Isaac Newton|H|Royaume-Uni|Europe|1642|Science|1727
-Charles Darwin|H|Royaume-Uni|Europe|1809|Science|1882
-Stephen Hawking|H|Royaume-Uni|Europe|1942|Science|2018
-Galilée|H|Italie|Europe|1564|Science|1642
-Louis Pasteur|H|France|Europe|1822|Science|1895
-Sigmund Freud|H|Autriche|Europe|1856|Science|1939
-Ada Lovelace|F|Royaume-Uni|Europe|1815|Science|1852
-Alan Turing|H|Royaume-Uni|Europe|1912|Science|1954
-Thomas Pesquet|H|France|Europe|1978|Science|0
-Neil Armstrong|H|États-Unis|Amérique|1930|Science|2012
-Youri Gagarine|H|Russie|Europe|1934|Science|1968
-Léonard de Vinci|H|Italie|Europe|1452|Art|1519
-Michel-Ange|H|Italie|Europe|1475|Art|1564
-Pablo Picasso|H|Espagne|Europe|1881|Art|1973
-Vincent van Gogh|H|Pays-Bas|Europe|1853|Art|1890
-Claude Monet|H|France|Europe|1840|Art|1926
-Frida Kahlo|F|Mexique|Amérique|1907|Art|1954
-Salvador Dalí|H|Espagne|Europe|1904|Art|1989
-Akira Toriyama|H|Japon|Asie|1955|Art|2024
-Victor Hugo|H|France|Europe|1802|Lettres|1885
-Molière|H|France|Europe|1622|Lettres|1673
-William Shakespeare|H|Royaume-Uni|Europe|1564|Lettres|1616
-J. K. Rowling|F|Royaume-Uni|Europe|1965|Lettres|0
-Agatha Christie|F|Royaume-Uni|Europe|1890|Lettres|1976
-Jules Verne|H|France|Europe|1828|Lettres|1905
-Albert Camus|H|France|Europe|1913|Lettres|1960
-Simone de Beauvoir|F|France|Europe|1908|Lettres|1986
-Antoine de Saint-Exupéry|H|France|Europe|1900|Lettres|1944
-Stephen King|H|États-Unis|Amérique|1947|Lettres|0
-Gabriel García Márquez|H|Colombie|Amérique|1927|Lettres|2014
-Michael Jackson|H|États-Unis|Amérique|1958|Musique|2009
-Madonna|F|États-Unis|Amérique|1958|Musique|0
-Beyoncé|F|États-Unis|Amérique|1981|Musique|0
-Taylor Swift|F|États-Unis|Amérique|1989|Musique|0
-Elvis Presley|H|États-Unis|Amérique|1935|Musique|1977
-Lady Gaga|F|États-Unis|Amérique|1986|Musique|0
-Eminem|H|États-Unis|Amérique|1972|Musique|0
-Freddie Mercury|H|Royaume-Uni|Europe|1946|Musique|1991
-John Lennon|H|Royaume-Uni|Europe|1940|Musique|1980
-Paul McCartney|H|Royaume-Uni|Europe|1942|Musique|0
-Adele|F|Royaume-Uni|Europe|1988|Musique|0
-Ed Sheeran|H|Royaume-Uni|Europe|1991|Musique|0
-Mozart|H|Autriche|Europe|1756|Musique|1791
-Beethoven|H|Allemagne|Europe|1770|Musique|1827
-Édith Piaf|F|France|Europe|1915|Musique|1963
-Johnny Hallyday|H|France|Europe|1943|Musique|2017
-Charles Aznavour|H|France|Europe|1924|Musique|2018
-Aya Nakamura|F|France|Europe|1995|Musique|0
-Stromae|H|Belgique|Europe|1985|Musique|0
-Céline Dion|F|Canada|Amérique|1968|Musique|0
-Drake|H|Canada|Amérique|1986|Musique|0
-Rihanna|F|Barbade|Amérique|1988|Musique|0
-Bob Marley|H|Jamaïque|Amérique|1945|Musique|1981
-Shakira|F|Colombie|Amérique|1977|Musique|0
-Youssou N'Dour|H|Sénégal|Afrique|1959|Musique|0
-Kylie Minogue|F|Australie|Océanie|1968|Musique|0
-Charlie Chaplin|H|Royaume-Uni|Europe|1889|Cinéma|1977
-Alfred Hitchcock|H|Royaume-Uni|Europe|1899|Cinéma|1980
-Audrey Hepburn|F|Royaume-Uni|Europe|1929|Cinéma|1993
-Marilyn Monroe|F|États-Unis|Amérique|1926|Cinéma|1962
-Leonardo DiCaprio|H|États-Unis|Amérique|1974|Cinéma|0
-Brad Pitt|H|États-Unis|Amérique|1963|Cinéma|0
-Tom Cruise|H|États-Unis|Amérique|1962|Cinéma|0
-Meryl Streep|F|États-Unis|Amérique|1949|Cinéma|0
-Scarlett Johansson|F|États-Unis|Amérique|1984|Cinéma|0
-Angelina Jolie|F|États-Unis|Amérique|1975|Cinéma|0
-Morgan Freeman|H|États-Unis|Amérique|1937|Cinéma|0
-Steven Spielberg|H|États-Unis|Amérique|1946|Cinéma|0
-Quentin Tarantino|H|États-Unis|Amérique|1963|Cinéma|0
-Walt Disney|H|États-Unis|Amérique|1901|Cinéma|1966
-Jim Carrey|H|Canada|Amérique|1962|Cinéma|0
-Omar Sy|H|France|Europe|1978|Cinéma|0
-Jean Dujardin|H|France|Europe|1972|Cinéma|0
-Marion Cotillard|F|France|Europe|1975|Cinéma|0
-Louis de Funès|H|France|Europe|1914|Cinéma|1983
-Gérard Depardieu|H|France|Europe|1948|Cinéma|0
-Alain Delon|H|France|Europe|1935|Cinéma|2024
-Jackie Chan|H|Chine|Asie|1954|Cinéma|0
-Hayao Miyazaki|H|Japon|Asie|1941|Cinéma|0
-Shah Rukh Khan|H|Inde|Asie|1965|Cinéma|0
-Hugh Jackman|H|Australie|Océanie|1968|Cinéma|0
-Nicole Kidman|F|Australie|Océanie|1967|Cinéma|0
-Margot Robbie|F|Australie|Océanie|1990|Cinéma|0
-Zinédine Zidane|H|France|Europe|1972|Sport|0
-Kylian Mbappé|H|France|Europe|1998|Sport|0
-Tony Parker|H|France|Europe|1982|Sport|0
-Teddy Riner|H|France|Europe|1989|Sport|0
-Léon Marchand|H|France|Europe|2002|Sport|0
-Antoine Dupont|H|France|Europe|1996|Sport|0
-Victor Wembanyama|H|France|Europe|2004|Sport|0
-Cristiano Ronaldo|H|Portugal|Europe|1985|Sport|0
-Roger Federer|H|Suisse|Europe|1981|Sport|0
-Rafael Nadal|H|Espagne|Europe|1986|Sport|0
-Lewis Hamilton|H|Royaume-Uni|Europe|1985|Sport|0
-Lionel Messi|H|Argentine|Amérique|1987|Sport|0
-Diego Maradona|H|Argentine|Amérique|1960|Sport|2020
-Pelé|H|Brésil|Amérique|1940|Sport|2022
-Ayrton Senna|H|Brésil|Amérique|1960|Sport|1994
-Usain Bolt|H|Jamaïque|Amérique|1986|Sport|0
-Serena Williams|F|États-Unis|Amérique|1981|Sport|0
-Michael Jordan|H|États-Unis|Amérique|1963|Sport|0
-Muhammad Ali|H|États-Unis|Amérique|1942|Sport|2016
-Michael Phelps|H|États-Unis|Amérique|1985|Sport|0
-Simone Biles|F|États-Unis|Amérique|1997|Sport|0
-Shohei Ohtani|H|Japon|Asie|1994|Sport|0
-Didier Drogba|H|Côte d'Ivoire|Afrique|1978|Sport|0
-Mohamed Salah|H|Égypte|Afrique|1992|Sport|0
-Sadio Mané|H|Sénégal|Afrique|1992|Sport|0
-Napoléon Bonaparte|H|France|Europe|1769|Politique|1821
-Charles de Gaulle|H|France|Europe|1890|Politique|1970
-Jeanne d'Arc|F|France|Europe|1412|Politique|1431
-Louis XIV|H|France|Europe|1638|Politique|1715
-Simone Veil|F|France|Europe|1927|Politique|2017
-Emmanuel Macron|H|France|Europe|1977|Politique|0
-Marie-Antoinette|F|Autriche|Europe|1755|Politique|1793
-Winston Churchill|H|Royaume-Uni|Europe|1874|Politique|1965
-Élisabeth II|F|Royaume-Uni|Europe|1926|Politique|2022
-Angela Merkel|F|Allemagne|Europe|1954|Politique|0
-Vladimir Poutine|H|Russie|Europe|1952|Politique|0
-Jules César|H|Italie|Europe|-100|Politique|-44
-Christophe Colomb|H|Italie|Europe|1451|Politique|1506
-Cléopâtre|F|Égypte|Afrique|-69|Politique|-30
-Nelson Mandela|H|Afrique du Sud|Afrique|1918|Politique|2013
-Abraham Lincoln|H|États-Unis|Amérique|1809|Politique|1865
-Martin Luther King|H|États-Unis|Amérique|1929|Politique|1968
-Barack Obama|H|États-Unis|Amérique|1961|Politique|0
-Donald Trump|H|États-Unis|Amérique|1946|Politique|0
-Che Guevara|H|Argentine|Amérique|1928|Politique|1967
-Gandhi|H|Inde|Asie|1869|Politique|1948
-Mao Zedong|H|Chine|Asie|1893|Politique|1976
-Steve Jobs|H|États-Unis|Amérique|1955|Entreprise|2011
-Bill Gates|H|États-Unis|Amérique|1955|Entreprise|0
-Mark Zuckerberg|H|États-Unis|Amérique|1984|Entreprise|0
-Jeff Bezos|H|États-Unis|Amérique|1964|Entreprise|0
-Coco Chanel|F|France|Europe|1883|Entreprise|1971
-Oprah Winfrey|F|États-Unis|Amérique|1954|Médias|0
-MrBeast|H|États-Unis|Amérique|1998|Médias|0
-Squeezie|H|France|Europe|1996|Médias|0
-Cyprien|H|France|Europe|1989|Médias|0`;
-const PX_PEOPLE = PX_RAW.split('\n').map(l => {
-  const [n, s, pays, cont, y, dom, d] = l.split('|');
-  return { n, s, pays, cont, y:+y, dom, dead:+d !== 0, k:flagNorm(n) };
-});
-const pxYear = y => y < 0 ? `${-y} av. J.-C.` : String(y);
-// Une case de comparaison : 'ok' (vert), 'near' (orange), 'no' (rouge) ; `arrow` pour l'année.
-function pxCompare(g, t) {
-  const dy = t.y - g.y;
-  return [
-    { label:'Sexe',       v: g.s === 'F' ? '♀ Femme' : '♂ Homme', st: g.s === t.s ? 'ok' : 'no' },
-    { label:'Pays',       v: g.pays, st: g.pays === t.pays ? 'ok' : (g.cont === t.cont ? 'near' : 'no') },
-    { label:'Continent',  v: g.cont, st: g.cont === t.cont ? 'ok' : 'no' },
-    { label:'Naissance',  v: pxYear(g.y), st: !dy ? 'ok' : (Math.abs(dy) <= 10 ? 'near' : 'no'), arrow: dy > 0 ? '▲' : (dy < 0 ? '▼' : '') },
-    { label:'Domaine',    v: g.dom, st: g.dom === t.dom ? 'ok' : 'no' },
-    { label:'En vie',     v: g.dead ? '✝ Décédé' + (g.s === 'F' ? 'e' : '') : '✓ Oui', st: g.dead === t.dead ? 'ok' : 'no' },
-  ];
-}
-const PX_ST = { ok:'#2fae5f', near:'#e0952b', no:'#a8383f' };
-function GamePersonantix() {
-  const [target, setTarget] = React.useState(() => PX_PEOPLE[Math.floor(Math.random() * PX_PEOPLE.length)]);
-  const [tries, setTries] = React.useState([]);          // personnes proposées, la plus récente en tête
-  const [input, setInput] = React.useState('');
-  const [msg, setMsg] = React.useState('');
-  const [over, setOver] = React.useState(null);           // null | 'won' | 'lost'
-  const [streak, setStreak] = React.useState(0);
-  const [best, setBest] = React.useState(() => gameHi('personantix'));
-  const [sugOpen, setSugOpen] = React.useState(false);
-  const sugg = React.useMemo(() => {
-    const k = flagNorm(input);
-    if (!k) return [];
-    const used = new Set(tries.map(p => p.n));
-    const starts = [], has = [];
-    for (const p of PX_PEOPLE) {
-      if (used.has(p.n)) continue;
-      // Début du nom OU d'un de ses mots (« mbap » trouve Kylian Mbappé).
-      if (p.k.startsWith(k) || p.n.split(/[\s-]/).some(w => flagNorm(w).startsWith(k))) starts.push(p);
-      else if (p.k.indexOf(k) >= 0) has.push(p);
-    }
-    return starts.concat(has).slice(0, PX_SUGG_MAX);
-  }, [input, tries]);
-  const play = p => {
-    if (over || !p) return;
-    setInput(''); setSugOpen(false); setMsg('');
-    if (tries.some(x => x.n === p.n)) { setMsg(`${p.n} est déjà dans tes essais.`); return; }
-    setTries(t => [p].concat(t));
-    if (p.n === target.n) {
-      setOver('won');
-      const ns = streak + 1;
-      setStreak(ns);
-      setBest(b => { const v = Math.max(b, ns); setGameHi('personantix', v); return v; });
-    }
-  };
-  const submit = () => {
-    const k = flagNorm(input);
-    const p = PX_PEOPLE.find(x => x.k === k) || (sugg.length === 1 ? sugg[0] : null);
-    // Un nom inconnu ne coûte pas d'essai (faute de frappe).
-    if (!p) { setMsg(`« ${input.trim() || '…'} » n'est pas dans la liste — choisis une suggestion.`); return; }
-    play(p);
-  };
-  const next = keep => {
-    setTarget(PX_PEOPLE[Math.floor(Math.random() * PX_PEOPLE.length)]);
-    setTries([]); setInput(''); setMsg(''); setOver(null); setSugOpen(false);
-    if (!keep) setStreak(0);
-  };
-  const giveUp = () => { setOver('lost'); setStreak(0); };
-  // Indice : initiales à partir du 6e essai raté.
-  const initials = target.n.split(/\s+/).map(w => w[0] + '.').join(' ');
-  return (
-    <GameWrap hint="Devine la personnalité mystère. Chaque proposition compare sexe, pays, continent, année de naissance, domaine et si elle est en vie : vert = pareil, orange = proche (même continent, ±10 ans), ▲/▼ = née plus tard / plus tôt."
-      bar={<><span style={{ fontSize:12, color:C.muted }}>Essais <b style={{ color:C.text }}>{tries.length}</b> · Série <b style={{ color:PX_COLOR }}>{streak}</b> · Record <b style={{ color:PX_COLOR }}>{best}</b></span>
-        <button onClick={() => next(false)} style={gameBtn()}>↻ Autre personne</button></>}>
-      <div style={{ width:'100%', maxWidth:560, display:'flex', flexDirection:'column', alignItems:'center', gap:12 }}>
-        <div style={{ fontSize:38 }}>{over ? '🧑‍🎤' : '❓'}</div>
-        {over ? (
-          <>
-            <div style={{ fontSize:15, fontWeight:900, color: over === 'won' ? PX_COLOR : '#e05050', textAlign:'center' }}>
-              {over === 'won' ? `🎉 ${target.n} — trouvé${target.s === 'F' ? 'e' : ''} en ${tries.length} essai${tries.length > 1 ? 's' : ''} !` : `C'était : ${target.n}.`}
-            </div>
-            <button onClick={() => next(over === 'won')} style={gameBtn({ padding:'11px 20px', fontSize:13 })}>➡️ Personne suivante</button>
-          </>
-        ) : (
-          <>
-            <div style={{ position:'relative', width:'100%', maxWidth:380 }}>
-              <div style={{ display:'flex', gap:6, width:'100%' }}>
-                <input value={input} onFocus={() => setSugOpen(true)}
-                  onChange={e => { setInput(e.target.value); setSugOpen(true); }}
-                  onKeyDown={e => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') setSugOpen(false); }}
-                  placeholder="Nom d'une personnalité…" aria-label="Nom d'une personnalité" autoComplete="off"
-                  style={{ flex:1, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, padding:'9px 11px', fontSize:13, outline:'none' }} />
-                <button onClick={submit} style={gameBtn({ padding:'9px 15px' })}>🔎</button>
-              </div>
-              {/* ⚠ `onPointerDown` : le clic arriverait après le blur qui referme la liste. */}
-              {sugOpen && sugg.length > 0 && (
-                <div style={{ position:'absolute', top:'100%', left:0, right:0, marginTop:4, zIndex:20,
-                  background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, overflow:'hidden', boxShadow:'0 8px 20px rgba(0,0,0,0.5)' }}>
-                  {sugg.map(p => (
-                    <div key={p.n} role="button" onPointerDown={e => { e.preventDefault(); play(p); }}
-                      style={{ padding:'8px 10px', cursor:'pointer', borderBottom:`1px solid ${C.border}`, fontSize:12.5, color:C.text }}>{p.n}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-            {msg && <div style={{ fontSize:11.5, color:C.muted, textAlign:'center' }}>{msg}</div>}
-            {tries.length >= 6 && <div style={{ fontSize:11.5, color:PX_COLOR }}>💡 Initiales : <b>{initials}</b></div>}
-            {tries.length >= 3 && <button onClick={giveUp} style={gameBtn({ background:'none', border:`1px solid ${C.border}`, color:C.muted, fontSize:11 })}>🏳️ Donner ma langue au chat</button>}
-          </>
-        )}
-        {tries.length > 0 && (
-          <div style={{ width:'100%', display:'flex', flexDirection:'column', gap:8 }}>
-            <div style={{ fontSize:10, letterSpacing:'0.16em', color:C.dim }}>TES ESSAIS</div>
-            {tries.map(p => (
-              <div key={p.n} style={{ display:'flex', flexDirection:'column', gap:5, padding:'7px 9px', borderRadius:9, background:C.surface, border:`1px solid ${p.n === target.n ? PX_COLOR : C.border}` }}>
-                <div style={{ fontSize:12.5, fontWeight:800, color:C.text }}>{p.n}</div>
-                <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(78px, 1fr))', gap:4 }}>
-                  {pxCompare(p, target).map(c => (
-                    <div key={c.label} style={{ background:PX_ST[c.st], borderRadius:6, padding:'4px 5px', textAlign:'center', minWidth:0 }}>
-                      <div style={{ fontSize:8.5, letterSpacing:'0.08em', textTransform:'uppercase', color:'#ffffffb0' }}>{c.label}</div>
-                      <div style={{ fontSize:11, fontWeight:700, color:'#fff', overflowWrap:'anywhere' }}>{c.v}{c.arrow ? ' ' + c.arrow : ''}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-        <div style={{ fontSize:10, color:C.dim, textAlign:'center' }}>{PX_PEOPLE.length} personnalités · d'après Personantix (gamentix.fr)</div>
       </div>
     </GameWrap>
   );
@@ -27395,24 +27119,82 @@ async function _playConfirm(spotifyUri, seq) {
   }
 }
 
-async function playTrack(spotifyUri) {
+// ── Ratés PASSAGERS de l'API Player ───────────────────────────────────────────
+// L'API Player de Spotify rate souvent une commande qui passe à l'essai suivant : 502/500
+// « Bad gateway / Server error », 401 « Access token missing » juste après un refresh, et
+// même un 403 « Premium required » sporadique sur un compte Premium. Avant, tout ce qui
+// n'était ni 404 ni 403 finissait EN SILENCE (aucun message, rien ne jouait), et une erreur
+// réseau faisait rejeter `playTrack`. `playErrKind` classe la réponse ; `playTrack` réessaie
+// les ratés passagers (`PLAY_RETRY_WAITS`) et, si c'est un clic (`opts.user`), dit
+// TOUJOURS pourquoi rien ne joue.
+const PLAY_RETRY_WAITS = [500, 1200, 2500];
+function playErrKind(r) {
+  if (!r || !r.error) return null;
+  if (r.rate_limited) return 'rl';
+  if (r.error === 'no_active_device') return 'device';
+  if (r.error === 'forbidden') {
+    if (/scope/i.test(r.message || '')) return 'scope';
+    return r.reason === 'PREMIUM_REQUIRED' ? 'transient' : 'forbidden';
+  }
+  const st = typeof r.error === 'object' ? +r.error.status : +(String(r.error).match(/^http_(\d+)$/) || [])[1];
+  if (r.error === 'network' || st === 401 || st === 408 || st >= 500) return 'transient';
+  return 'other';
+}
+function playErrText(r) {
+  if (!r) return '';
+  if (typeof r.error === 'object') return [r.error.status, r.error.message].filter(Boolean).join(' · ');
+  return String(r.error || '');
+}
+
+async function playTrack(spotifyUri, opts) {
   if (!spotifyUri) return;
+  const user = !!(opts && opts.user);
+  const warn = msg => { if (user) { _playAlertAt = Date.now(); alert(msg); } else _playAlert(msg); };
   _navUri = spotifyUri;
   _navAt  = Date.now();
   const seq    = ++_playSeq;
   const url    = 'https://api.spotify.com/v1/me/player/play';
   const body   = { uris: [spotifyUri] };
-  let   result = await apiPut(url, body);
-  if (result?.error === 'no_active_device' || result?.error === 'forbidden') {
-    const dev = await spotifyPickDevice();
-    if (dev) result = await apiPut(`${url}?device_id=${encodeURIComponent(dev.id)}`, body);
-    else { _playAlert(NO_DEVICE_MSG); return; }
+  // ⚠ try : une coupure réseau fait REJETER fetch — sans lui, playTrack rejetait et le
+  // bouton ▶ restait allumé sans que rien ne joue.
+  const put = async devId => {
+    try { return await apiPut(devId ? `${url}?device_id=${encodeURIComponent(devId)}` : url, body, false, { player: true }); }
+    catch { return { error: 'network' }; }
+  };
+  let devId  = null;
+  let result = await put(null);
+  for (let i = 0; i < PLAY_RETRY_WAITS.length; i++) {
+    const kind = playErrKind(result);
+    if (!kind || kind === 'rl' || kind === 'scope' || kind === 'other') break;
+    if (kind === 'device' || kind === 'forbidden') {
+      // Pas d'appareil actif / appareil qui refuse : en cibler un explicitement (une fois).
+      if (devId) break;
+      const dev = await spotifyPickDevice();
+      if (!dev) { warn(NO_DEVICE_MSG); return; }
+      devId = dev.id;
+    } else {
+      await sleep(PLAY_RETRY_WAITS[i]);
+    }
+    if (seq !== _playSeq) return;   // un autre titre a été demandé entre-temps
+    result = await put(devId);
   }
-  if (result?.error === 'no_active_device') _playAlert(NO_DEVICE_MSG);
-  else if (result?.error === 'forbidden')   _playAlert(playForbiddenMsg(result));
-  else if (!result?.error) {
+  const kind = playErrKind(result);
+  if (!kind) {
     if (_playerPollKick) _playerPollKick();   // lecture lancée : re-sonder sans attendre le tick lent
     _playConfirm(spotifyUri, seq).catch(() => {});
+    return;
+  }
+  if (seq !== _playSeq) return;
+  if (kind === 'device') warn(NO_DEVICE_MSG);
+  else if (kind === 'forbidden' || kind === 'scope') warn(playForbiddenMsg(result));
+  else if (kind === 'rl') {
+    const min = Math.max(1, Math.ceil(((result.blockedUntil || 0) - Date.now()) / 60000));
+    warn(`Spotify limite les requêtes en ce moment (429) : la lecture est refusée encore ~${min} min.`);
+  } else if (user) {
+    const t = playErrText(result);
+    warn('Spotify n\'a pas lancé le titre' + (kind === 'transient' ? ` après ${PLAY_RETRY_WAITS.length + 1} essais` : '') + '.'
+      + (t ? '\n\nRéponse de Spotify : ' + t : '')
+      + '\n\nRéessaie dans quelques secondes ; si ça persiste, lance un titre à la main dans Spotify puis réessaie ici.');
   }
 }
 
@@ -27445,8 +27227,8 @@ const FeedItem = React.memo(function FeedItem({ item, isMobile=false, isNowPlayi
 
   const play = async () => {
     setPlaying(true);
-    await playTrack(item.spotifyUri);
-    setTimeout(() => setPlaying(false), 2000);
+    try { await playTrack(item.spotifyUri, { user: true }); }
+    finally { setTimeout(() => setPlaying(false), 2000); }
   };
   const onPlay = e => { e.stopPropagation(); play(); };
   // ⚠ TOUTE LA LIGNE lance le titre : le ▶ de 28 px était le SEUL déclencheur, alors que
@@ -28181,7 +27963,7 @@ function buildBackup() {
     finance: lsJson('spotifyplus_finance_history') || { version: 1, series: {} },
     // 📈 Finance → Prévision : scénarios budgétaires (saisis à la main). Le classeur de Mes Actifs
     // reste sur Drive : son cache local est re-téléchargeable, donc exclu.
-    budget: (() => { const d = budgetLoad(); return d.scenarios.length ? d : null; })(),
+    budget: (() => { const d = budgetLoad(); return d.scenarios.length || d.fx ? d : null; })(),
     // Mot de passe : blob CHIFFRÉ du coffre { v, salt, iv, ct } — jamais en clair,
     // déchiffrable uniquement avec le mot de passe maître
     mdp_vault: loadVaultBlob(),
@@ -32319,6 +32101,12 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.222', date:'2026-10-29', title:'🎵 Lecture fiable, 🔮 prévision par formules', items:[
+    'Musique : lancer un titre en attente réessaie tout seul quand Spotify rate la commande (erreurs passagères 5xx, 401, « Premium required »), et un clic dit toujours pourquoi rien ne joue. La pause de 15 min que s’impose le scraping après un 429 ne bloque plus la lecture.',
+    'Jeux : Doodle Jump revient en mode 🌀 Chaos seul (le ➕ Chaos + est retiré, son record aussi) ; Personantix est retiré.',
+    'Actu → Réseaux de transport : les gares d’une ligne s’affichent en flèche vers le bas, chaque embranchement quittant la flèche du milieu à sa gare de bifurcation.',
+    'Finance → Prévision : nouveau collapse ⚙️ Config · Formules — une règle en français par champ (salaire, dépenses habituelles, chaque ligne de placement). L’IA les lit, le Hub calcule les nouveaux mois qui suivent ton classeur : graphique du total, salaire & dépenses, une courbe par compte et le tableau des mois prévus.',
+  ] },
   { v:'13.21.221', date:'2026-10-29', title:'🏋️ Sport : exercices revus pour Basic-Fit', items:[
     'Dans 🏃 Sport, chaque exercice a été confronté au matériel des clubs Basic-Fit : ceux dont la machine n’existe que dans certaines salles (Hack squat, Rowing T-bar, Curl au pupitre, Leg curl debout, Mollets debout, Stepper) portent le badge « ≈ certains clubs », avec l’alternative à prendre sinon.',
     'La roue abdominale (absente des salles) devient le Roll-out à la barre. Nouveaux exercices sur du matériel standard : Chest press machine, Rowing assis machine, Tractions assistées, Face pull, Hip thrust et Kettlebell swing (sans planche animée pour l’instant).',
@@ -32332,10 +32120,6 @@ const RELEASE_NOTES = [
   { v:'13.21.218', date:'2026-10-29', title:'🗑️ L’un ou l’autre retiré', items:[
     'Le jeu « L’un ou l’autre » (Crous ou Prison, Chinois ou Coréen, Le plus vu) disparaît de 🎮 Jeux, avec ses records.',
     'Tous les jeux du Hub fonctionnent désormais hors ligne.',
-  ] },
-  { v:'13.21.217', date:'2026-10-29', title:'🟢 Doodle Jump : Chaos + seulement', items:[
-    'Dans 🎮 Jeux → Doodle Jump, le mode 🌀 Chaos est retiré : le jeu se lance directement en ➕ Chaos + (deux dalles échangent leur place chaque seconde), plus de choix à faire.',
-    'Ton record Chaos + est gardé ; l’ancien record du mode Chaos est effacé, et Stats n’affiche plus qu’une ligne Doodle Jump.',
   ] },
 ];
 
@@ -37067,10 +36851,12 @@ function idfmSegDist(p, a, b) {
   const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / l2)) : 0;
   return Math.hypot(px - ax - t * vx, py - ay - t * vy);
 }
-// Gares d'une ligne → [{ title, names[] }] : le tronc, puis un bloc par embranchement.
+// Gares d'une ligne → [{ title, names[], ids[], root? }] : le tronc, puis un bloc par
+// embranchement. `ids` = index dans `st` (alignés sur `names`), `root` = index de la gare de
+// bifurcation (déjà listée, sur le tronc ou sur une autre branche) — lus par `IdfmRail`.
 function idfmOrder(st, paths) {
   const n = st.length;
-  if (n < 3) return [{ title:null, names: st.map(g => g.name) }];
+  if (n < 3) return [{ title:null, names: st.map(g => g.name), ids: st.map((g, i) => i) }];
   // Voisins le long du tracé : position (mètres cumulés) de chaque gare proche d'un morceau.
   const link = new Set();
   for (const pa of (paths || [])) {
@@ -37108,7 +36894,7 @@ function idfmOrder(st, paths) {
   // Terminus du tronc le plus au NORD/OUEST en tête : la liste ne s'inverse pas d'un chargement à l'autre.
   const t0 = st[trunk[0]].ll, t1 = st[trunk[trunk.length - 1]].ll;
   if (t1[0] - t1[1] > t0[0] - t0[1]) trunk.reverse();
-  const used = new Set(trunk), out = [{ title:null, names: trunk.map(i => st[i].name) }];
+  const used = new Set(trunk), out = [{ title:null, names: trunk.map(i => st[i].name), ids: trunk }];
   // Embranchements : depuis chaque gare déjà listée, le plus long chemin dans ce qui reste.
   for (let guard = 0; guard < 20 && used.size < n; guard++) {
     let pick = null;
@@ -37125,9 +36911,92 @@ function idfmOrder(st, paths) {
     }
     if (!pick) break;
     pick.path.forEach(i => used.add(i));
-    out.push({ title: `Branche depuis ${st[pick.root].name}`, names: pick.path.map(i => st[i].name) });
+    out.push({ title: `Branche depuis ${st[pick.root].name}`, names: pick.path.map(i => st[i].name), ids: pick.path, root: pick.root });
   }
   return out;
+}
+// 🔎 Schéma de la ligne en FLÈCHE VERS LE BAS (demande utilisateur) : le tronc est la flèche
+// du milieu, chaque embranchement la QUITTE à sa gare de bifurcation par une courbe, descend
+// dans sa propre voie (flèche à son terminus), puis la flèche du milieu reprend.
+// ⚠ Une ligne de liste par gare (façon graphe git) : les gares d'une branche sont insérées
+// juste après leur gare de bifurcation (parcours en profondeur), le tronc passe à côté sans
+// arrêt. Voie d'une branche = du côté de sa voie parente (le tronc alterne droite / gauche), la
+// plus proche qui n'est pas occupée par un ancêtre encore en cours — jamais deux traits sur la
+// même voie au même moment. Un seul SVG pour tout le schéma, les noms en HTML à côté.
+const IDFM_RAIL_ROW = 22, IDFM_RAIL_GAP = 14;
+function idfmRailLayout(order) {
+  const kids = new Map();   // gare de bifurcation → blocs qui en partent
+  order.forEach((b, bi) => { if (bi && b.root != null) { const a = kids.get(b.root) || []; a.push(bi); kids.set(b.root, a); } });
+  const rows = [], rowOf = new Map(), laneOf = [0], startOf = [], stack = [];
+  let flip = 0;
+  const emit = bi => {
+    const b = order[bi], lane = laneOf[bi];
+    stack.push(lane);
+    startOf[bi] = rows.length;
+    b.ids.forEach((sid, k) => {
+      rowOf.set(sid, rows.length);
+      rows.push({ sid, name: b.names[k], lane, block: bi, k, last: k === b.ids.length - 1 });
+      for (const cb of (kids.get(sid) || [])) {
+        // Côté : celui de la voie parente ; depuis le tronc, alternativement droite puis gauche.
+        const dir = lane > 0 ? 1 : lane < 0 ? -1 : (flip++ % 2 ? -1 : 1);
+        let l = lane + dir; while (stack.includes(l)) l += dir;
+        laneOf[cb] = l;
+        emit(cb);
+      }
+    });
+    stack.pop();
+  };
+  if (order[0]) emit(0);
+  // Blocs jamais émis (racine introuvable) : à la suite, sur une voie à droite.
+  order.forEach((b, bi) => { if (startOf[bi] == null) { laneOf[bi] = Math.max(0, ...laneOf.filter(v => v != null)) + 1; emit(bi); } });
+  const lanes = rows.map(r => r.lane);
+  return { rows, rowOf, laneOf, startOf, min: Math.min(0, ...lanes), max: Math.max(0, ...lanes) };
+}
+function IdfmRail({ order, color }) {
+  const lay = React.useMemo(() => idfmRailLayout(order), [order]);
+  const R = IDFM_RAIL_ROW, G = IDFM_RAIL_GAP;
+  const X = l => (l - lay.min) * G + 9;
+  const W = (lay.max - lay.min) * G + 18;
+  const H = lay.rows.length * R + 10;
+  const cy = r => r * R + R / 2;
+  const segs = [];
+  order.forEach((b, bi) => {
+    const s0 = lay.startOf[bi]; if (s0 == null) return;
+    const x = X(lay.laneOf[bi]);
+    // Départ d'une branche : la voie parente descend jusqu'à la ligne de la branche, puis courbe.
+    if (bi && b.root != null && lay.rowOf.has(b.root)) {
+      const rr = lay.rowOf.get(b.root), px = X(lay.rows[rr].lane), y0 = s0 * R;
+      segs.push(`M${px},${cy(rr)} L${px},${y0} C${px},${y0 + R * 0.45} ${x},${y0 + R * 0.05} ${x},${cy(s0)}`);
+    }
+    // Rails entre deux gares du bloc (les branches insérées entre elles passent à côté).
+    const rs = b.ids.map(sid => lay.rowOf.get(sid));
+    for (let k = 1; k < rs.length; k++) segs.push(`M${x},${cy(rs[k - 1])} L${x},${cy(rs[k])}`);
+  });
+  const arrows = lay.rows.filter(r => r.last).map(r => {
+    const x = X(r.lane), y = cy(lay.rowOf.get(r.sid));
+    return `M${x},${y} L${x},${y + R * 0.62} M${x - 4},${y + R * 0.42} L${x},${y + R * 0.66} L${x + 4},${y + R * 0.42}`;
+  });
+  return (
+    <div style={{ position:'relative', minHeight:H }}>
+      <svg width={W} height={H} style={{ position:'absolute', left:0, top:0, overflow:'visible' }} aria-hidden="true">
+        <path d={segs.join(' ')} fill="none" stroke={color} strokeWidth={3} strokeLinecap="round" />
+        <path d={arrows.join(' ')} fill="none" stroke={color} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />
+        {lay.rows.map((r, i) => {
+          const end = (r.block === 0 && r.k === 0) || r.last;
+          return <circle key={r.sid} cx={X(r.lane)} cy={cy(i)} r={end ? 5 : 3.6} fill={end ? '#fff' : C.surface} stroke={color} strokeWidth={end ? 2.5 : 2} />;
+        })}
+      </svg>
+      {lay.rows.map((r, i) => {
+        const end = (r.block === 0 && r.k === 0) || r.last;
+        return (
+          <div key={r.sid} style={{ height:R, marginLeft:W + 6, display:'flex', alignItems:'center', gap:6, minWidth:0 }}>
+            <span style={{ fontSize:11.5, color:C.text, fontWeight: end ? 800 : 500, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{r.name}</span>
+            {r.block > 0 && r.k === 0 && <span style={{ fontSize:9, color, fontWeight:700, flexShrink:0 }}>↳ branche</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 function CartoTransport() {
   const [st, load, card] = useCartoSummary('transport', cartoFetchTransport);
@@ -37241,15 +37110,8 @@ function CartoTransport() {
             </div>
             {!curOrder || !curOrder.length
               ? <div style={{ fontSize:11, color:C.dim }}>Aucune gare de cette ligne dans les données IDFM.</div>
-              : curOrder.map((b, bi) => (
-                <div key={bi} style={{ marginTop: bi ? 8 : 0 }}>
-                  {b.title && <div style={{ fontSize:10, fontWeight:700, letterSpacing:'0.06em', color:cur.color, marginBottom:3 }}>↳ {b.title.toUpperCase()}</div>}
-                  <ol style={{ margin:0, paddingLeft:22, fontSize:11.5, color:C.text, lineHeight:1.6 }}>
-                    {b.names.map((nm, i) => <li key={nm + i}>{nm}</li>)}
-                  </ol>
-                </div>
-              ))}
-            <div style={{ fontSize:9.5, color:C.dim, marginTop:6 }}>Ordre déduit de la position des gares (l'open data ne donne pas le rang) : un embranchement est listé à part.</div>
+              : <IdfmRail order={curOrder} color={cur.color} />}
+            <div style={{ fontSize:9.5, color:C.dim, marginTop:6 }}>Ordre déduit de la position des gares (l'open data ne donne pas le rang) : chaque embranchement quitte la flèche du milieu à sa gare de bifurcation.</div>
           </div>
         )}
       </>}
@@ -44520,13 +44382,16 @@ function budgetLoad() {
   let raw = null;
   try { raw = JSON.parse(lsGet(BUDGET_LS) || 'null'); } catch {}
   const list = (raw && Array.isArray(raw.scenarios) ? raw.scenarios : []).map(budgetScenNorm).filter(Boolean);
-  _budget.data = { v: 1, scenarios: list };
+  _budget.data = { v: 1, scenarios: list, fx: budgetFxNorm(raw && raw.fx) };
   return _budget.data;
 }
 // ⚠ Piège 14 : stockage plein ⇒ `false`, et le cache garde l'état d'AVANT (l'écran ne montre
 // jamais une modification que le disque ignore).
+// ⚠ `fx` (⚙️ formules de prévision) vit dans le MÊME objet : un appel qui ne le passe pas
+// (tous ceux des scénarios) le CONSERVE — ne jamais l'écrire `{ scenarios }` « tout court ».
 function budgetSave(next) {
-  const d = { v: 1, scenarios: (next.scenarios || []).slice(0, BUDGET_MAX_SCEN) };
+  const fx = next.fx !== undefined ? budgetFxNorm(next.fx) : budgetLoad().fx;
+  const d = { v: 1, scenarios: (next.scenarios || []).slice(0, BUDGET_MAX_SCEN), fx };
   if (!lsSet(BUDGET_LS, JSON.stringify(d))) return false;
   _budget.data = d;
   for (const f of _budget.subs) { try { f(d); } catch {} }
@@ -44553,16 +44418,18 @@ function budgetScenNew(name, i, base) {
     startDate: base ? base.startDate : localDayStr(), at: Date.now(), ai: null }, i);
 }
 // Restauration (`applyBackup`) : union par id, le plus récemment modifié gagne.
+// ⚙️ Formules : le bloc le plus récent (`at`) gagne en entier (formules + règles lues par l'IA).
 function budgetMerge(inc) {
-  if (!inc || !Array.isArray(inc.scenarios)) return true;
+  if (!inc || typeof inc !== 'object') return true;
   const cur = budgetLoad().scenarios.slice();
   const pos = new Map(cur.map((s, i) => [s.id, i]));
-  inc.scenarios.map(budgetScenNorm).filter(Boolean).forEach(s => {
+  (Array.isArray(inc.scenarios) ? inc.scenarios : []).map(budgetScenNorm).filter(Boolean).forEach(s => {
     if (!pos.has(s.id)) { pos.set(s.id, cur.length); cur.push(s); return; }
     const i = pos.get(s.id);
     if ((s.at || 0) > (cur[i].at || 0)) cur[i] = s;
   });
-  return budgetSave({ scenarios: cur });
+  const fxIn = budgetFxNorm(inc.fx), fxCur = budgetLoad().fx;
+  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur });
 }
 // Empreinte du contenu (pas de `at`) : l'analyse IA sait si le scénario a bougé depuis elle.
 function budgetSig(s) {
@@ -44570,6 +44437,155 @@ function budgetSig(s) {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
   return (h >>> 0).toString(36);
+}
+
+// ── ⚙️ FORMULES DE PRÉVISION (demande utilisateur) ───────────────────────────
+// Une formule en TEXTE LIBRE par champ : 💼 salaire, 🛒 dépenses habituelles, puis chaque ligne
+// de placement du classeur Mes Actifs (`ACTIFS_COMPTES`). « 🤖 Générer » envoie les formules à
+// l'IA, qui les TRADUIT en règles (`budgetFxRuleNorm`) ; les mois sont ensuite CALCULÉS ici
+// (`budgetFxProject`) — l'IA ne fait aucune arithmétique, une erreur de calcul serait invisible.
+// Chaque règle garde sa phrase « compris : … » pour que l'utilisateur vérifie la lecture.
+// ⚠ Les mois prévus partent du mois QUI SUIT le dernier mois du classeur (cache `loadActifs`,
+// aucune requête) : ce sont les « nouvelles lignes » du tableau. Sans classeur : mois prochain.
+// ⚠ Stocké dans `_budget.data.fx` (même clé, même sauvegarde que les scénarios) :
+// { at, h, f:{ clé: texte }, rules:{ clé: règle } | null, sig, ai, fb, rat, note }.
+// `sig` = empreinte des formules au moment de la lecture IA ⇒ « formules modifiées depuis ».
+// Clés : 'salaire', 'depense', 'acc:<clé ACTIFS_COMPTES>'. Un compte SANS formule reste à sa
+// dernière valeur dans le total (dit sous le graphique).
+const BUDGET_FX_HORIZONS = [[6, '6 mois'], [12, '1 an'], [24, '2 ans'], [36, '3 ans']];
+const BUDGET_FX_EVENTS = 40;
+function budgetFxRuleNorm(r) {
+  if (!r || typeof r !== 'object') return null;
+  const n = v => (v == null || v === '' || !isFinite(+v) ? null : Math.round(+v * 100) / 100);
+  const ev = (Array.isArray(r.ev) ? r.ev : []).slice(0, BUDGET_FX_EVENTS).map(e => (e && /^\d{4}-\d{2}$/.test(e.m || '') && ['add', 'set', 'pct'].includes(e.t) && n(e.v) != null
+    ? { m: e.m, t: e.t, v: n(e.v), once: !!e.once } : null)).filter(Boolean);
+  return { base: n(r.base), add: n(r.add) || 0, addPct: Math.max(0, Math.min(100, n(r.addPct) || 0)),
+    addFrom: ['salaire', 'reste'].includes(r.addFrom) ? r.addFrom : '', rate: Math.max(-50, Math.min(50, n(r.rate) || 0)),
+    cap: n(r.cap) > 0 ? n(r.cap) : null, ev, why: String(r.why || '').trim().slice(0, 240) };
+}
+const budgetFxKeyOk = k => k === 'salaire' || k === 'depense' || (k.startsWith('acc:') && ACTIFS_COMPTES.some(c => 'acc:' + c[0] === k));
+function budgetFxNorm(x) {
+  if (!x || typeof x !== 'object') return null;
+  const f = {}, rules = {};
+  for (const k of Object.keys(x.f || {})) if (budgetFxKeyOk(k) && typeof x.f[k] === 'string' && x.f[k].trim()) f[k] = x.f[k].slice(0, 400);
+  for (const k of Object.keys(x.rules || {})) if (budgetFxKeyOk(k)) { const r = budgetFxRuleNorm(x.rules[k]); if (r) rules[k] = r; }
+  const has = Object.keys(rules).length > 0;
+  if (!Object.keys(f).length && !has) return null;
+  const fb = x.fb && typeof x.fb === 'object' && typeof x.fb.to === 'string' ? { from: String(x.fb.from || ''), to: x.fb.to, vision: !!x.fb.vision } : null;
+  return { at: +x.at || 0, h: BUDGET_FX_HORIZONS.some(([v]) => v === +x.h) ? +x.h : 12, f, rules: has ? rules : null,
+    sig: String(x.sig || ''), ai: String(x.ai || ''), fb, rat: +x.rat || 0, note: typeof x.note === 'string' ? x.note.trim().slice(0, 600) : '' };
+}
+function budgetFxSig(f) {
+  const str = JSON.stringify(Object.keys(f || {}).sort().map(k => [k, f[k].trim()]));
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+const budgetFxMonth = m => `${Math.floor(m / 12)}-${String(m % 12 + 1).padStart(2, '0')}`;
+const budgetFxIdxOfT = t => { const d = new Date(t); return d.getFullYear() * 12 + d.getMonth(); };
+// Champs proposés : salaire, dépenses, puis les comptes présents au dernier mois du classeur
+// (ou déjà dotés d'une formule) — sans classeur, tous les comptes.
+function budgetFxFields(a, fx) {
+  const last = a && Array.isArray(a.months) && a.months[0];
+  const f = (fx && fx.f) || {};
+  const out = [{ key:'salaire', label:'💼 Salaire', flow:true }, { key:'depense', label:'🛒 Dépenses habituelles', flow:true }];
+  for (const [k, lbl] of ACTIFS_COMPTES) if (!last || last[k] != null || f['acc:' + k]) out.push({ key:'acc:' + k, acc:k, label:lbl });
+  return out;
+}
+// Mois prévus. Flux (salaire, dépenses) : niveau mensuel ; `rate` = % appliqué chaque JANVIER ;
+// événement permanent (`once:false`) = nouveau niveau, ponctuel = ce mois-là seulement (prime).
+// Comptes : solde × (1 + rate/12 %) + versement (fixe et/ou % du salaire ou du reste) ± événements,
+// borné par `cap`. « Reste » = salaire − dépenses du mois (jamais négatif pour un versement).
+function budgetFxProject(fx, a) {
+  const fields = budgetFxFields(a, fx);
+  const rules = (fx && fx.rules) || {};
+  const months = (fx && fx.h) || 12;
+  const ms = a && Array.isArray(a.months) ? a.months.filter(m => m && isFinite(m.t)) : [];
+  const last = ms[0] || null;
+  const startIdx = (last ? budgetFxIdxOfT(last.t) : budgetMonthIdx(localDayStr())) + 1;
+  const act = budgetFromActifs();
+  const r2 = v => Math.round(v * 100) / 100;
+  const lvl = {}, bal = {};
+  for (const fd of fields) {
+    const r = rules[fd.key];
+    if (fd.flow) lvl[fd.key] = r && r.base != null ? r.base : (act && act[fd.key] != null ? act[fd.key] : 0);
+    else bal[fd.key] = r && r.base != null ? r.base : (last && last[fd.acc] != null ? last[fd.acc] : 0);
+  }
+  const rows = [];
+  for (let i = 0; i < months; i++) {
+    const idx = startIdx + i, ym = budgetFxMonth(idx), v = {};
+    for (const fd of fields.filter(x => x.flow)) {
+      const r = rules[fd.key]; if (!r) continue;
+      if (r.rate && idx % 12 === 0) lvl[fd.key] *= 1 + r.rate / 100;
+      for (const e of r.ev) if (e.m === ym && !e.once) lvl[fd.key] = e.t === 'set' ? e.v : e.t === 'pct' ? lvl[fd.key] * (1 + e.v / 100) : lvl[fd.key] + e.v;
+      let x = lvl[fd.key];
+      for (const e of r.ev) if (e.m === ym && e.once) x = e.t === 'set' ? e.v : e.t === 'pct' ? x * (1 + e.v / 100) : x + e.v;
+      v[fd.key] = r2(x);
+    }
+    const sal = v.salaire != null ? v.salaire : (act && act.salaire) || 0;
+    const dep = v.depense != null ? v.depense : (act && act.depense) || 0;
+    const reste = Math.max(0, sal - dep);
+    let tot = 0;
+    for (const fd of fields.filter(x => !x.flow)) {
+      const r = rules[fd.key];
+      if (r) {
+        let b = bal[fd.key] * (1 + r.rate / 100 / 12) + r.add + (r.addPct ? r.addPct / 100 * (r.addFrom === 'reste' ? reste : sal) : 0);
+        for (const e of r.ev) if (e.m === ym) b = e.t === 'set' ? e.v : e.t === 'pct' ? b * (1 + e.v / 100) : b + e.v;
+        if (r.cap != null) b = Math.min(b, Math.max(r.cap, bal[fd.key]));   // plafond : bloque les AJOUTS, ne retire rien
+        bal[fd.key] = b; v[fd.key] = r2(b);
+      }
+      tot += bal[fd.key] || 0;
+    }
+    v.total = r2(tot); v.reste = r2(sal - dep);
+    rows.push({ idx, ym, v });
+  }
+  // Historique (ordre chronologique, 24 derniers mois) : même clés que les mois prévus.
+  const hist = ms.slice(0, 24).reverse().map(m => {
+    const v = { salaire: m.salaire, depense: m.depense };
+    let tot = 0, any = false;
+    for (const fd of fields.filter(x => !x.flow)) { if (m[fd.acc] != null) { v[fd.key] = m[fd.acc]; tot += m[fd.acc]; any = true; } }
+    if (any) v.total = r2(tot);
+    return { idx: budgetFxIdxOfT(m.t), ym: budgetFxMonth(budgetFxIdxOfT(m.t)), v };
+  });
+  return { fields, rules, rows, hist, startIdx, last, act,
+    frozen: fields.filter(fd => !fd.flow && !rules[fd.key] && last && last[fd.acc] != null) };
+}
+async function budgetFxAi(fx, a) {
+  const fields = budgetFxFields(a, fx).filter(fd => (fx.f[fd.key] || '').trim());
+  if (!fields.length) throw new Error('Écris au moins une formule.');
+  const p = budgetFxProject({ ...fx, rules: null }, a);
+  const act = p.act, last = p.last;
+  const cur = fd => fd.flow ? (act && act[fd.key] != null ? `${Math.round(act[fd.key])} €/mois (moyenne des derniers mois)` : 'inconnu')
+    : (last && last[fd.acc] != null ? `${Math.round(last[fd.acc])} € (solde actuel)` : 'inconnu');
+  const prompt = [
+    'Tu traduis des formules de prévision financière personnelle (France, euros), écrites en langage libre, en règles JSON. Tu ne calcules AUCUN mois : le programme le fera.',
+    `Mois prévus : de ${budgetFxMonth(p.startIdx)} à ${budgetFxMonth(p.startIdx + fx.h - 1)} (${fx.h} mois).`,
+    'Champs et formules :',
+    ...fields.map(fd => `- ${fd.key} · ${fd.label.replace(/^\S+\s/, '')} · ${fd.flow ? 'FLUX mensuel' : 'SOLDE de compte'} · valeur actuelle ${cur(fd)} · formule : """${fx.f[fd.key].trim().slice(0, 400)}"""`),
+    '',
+    'Réponds UNIQUEMENT en JSON, sans texte autour : {"regles":{"<clé du champ>":{"base":null,"versement":0,"versementPct":0,"versementDe":"","taux":0,"plafond":null,"evenements":[{"mois":"YYYY-MM","type":"ajout","valeur":0,"ponctuel":true}],"compris":"…"}},"commentaire":"…"}',
+    'FLUX (salaire, depense) : base = montant mensuel de départ (null = garder la valeur actuelle) ; taux = % d\'augmentation appliqué chaque janvier ; evenements : type "ajout" (+/− euros), "fixe" (nouveau montant) ou "pct" (+/− %) ; ponctuel=true ⇒ ce mois-là seulement (prime, 13e mois…), false ⇒ le nouveau niveau dure. Un événement annuel se RÉPÈTE : un événement par année de la période. versement / plafond : laisser 0 / null.',
+    'SOLDE de compte : base = solde de départ (null = solde actuel) ; versement = euros ajoutés chaque mois (négatif = retrait) ; versementPct + versementDe ("salaire" ou "reste" = salaire − dépenses) = versement en % de l\'un d\'eux ; taux = rendement ANNUEL en % ; plafond = solde maximum (ex. 22950 pour un Livret A) sinon null ; evenements : type "ajout" (versement ou retrait exceptionnel), "fixe" (solde forcé) ou "pct" (+/− % du solde) ce mois-là.',
+    '"compris" : une phrase courte qui reformule ce que tu as compris de la formule (l\'utilisateur la relit pour vérifier). Formule ambiguë ⇒ l\'hypothèse la plus prudente, dite dans "compris". "commentaire" : 1 à 2 phrases sur la trajectoire attendue, sans promettre de rendement.',
+    'Mets UNE entrée par champ listé, avec exactement sa clé.',
+  ].join('\n');
+  const txt = await aiGenerate('finance', [{ text: prompt }]);
+  const meta = aiMeta();
+  const o = geminiExtract(txt, '{', '}');
+  const reg = o && typeof o === 'object' && o.regles && typeof o.regles === 'object' ? o.regles : null;
+  if (!reg) throw new Error("Réponse illisible de l'IA.");
+  const tmap = { ajout:'add', fixe:'set', pct:'pct' };
+  const rules = {};
+  for (const fd of fields) {
+    const r = reg[fd.key];
+    if (!r || typeof r !== 'object') continue;
+    const n = budgetFxRuleNorm({ base: r.base, add: fd.flow ? 0 : r.versement, addPct: fd.flow ? 0 : r.versementPct, addFrom: r.versementDe,
+      rate: r.taux, cap: fd.flow ? null : r.plafond, why: r.compris,
+      ev: (Array.isArray(r.evenements) ? r.evenements : []).map(e => (e && typeof e === 'object' ? { m: String(e.mois || '').slice(0, 7), t: tmap[e.type], v: e.valeur, once: fd.flow ? e.ponctuel !== false : true } : null)) });
+    if (n) rules[fd.key] = n;
+  }
+  if (!Object.keys(rules).length) throw new Error("L'IA n'a lu aucune formule — reformule-les plus simplement.");
+  return { rules, sig: budgetFxSig(fx.f), ai: meta.ai, fb: meta.fb, rat: Date.now(), note: typeof o.commentaire === 'string' ? o.commentaire : '' };
 }
 
 // ── Moteur de projection ──────────────────────────────────────────────────────
@@ -45193,6 +45209,266 @@ function BudgetAiBox({ sc, proj, onPrefill }) {
   );
 }
 
+// ── ⚙️ Formules de prévision : graphiques, tableau, saisie ─────────────────────
+// Courbe mensuelle : historique du classeur en TRAIT PLEIN, mois prévus en POINTILLÉS (même
+// couleur, même série), séparés par un repère « prévision ». Une seule échelle : salaire /
+// dépenses et soldes de comptes ne partagent JAMAIS un graphique (ordres de grandeur différents).
+function BudgetFxChart({ series, split, W = 400, height = 140, compact }) {
+  const [hov, setHov] = React.useState(null);   // index de mois survolé | null
+  const H = height, AX = compact ? 0 : 14, PT = 8, PB = 4, PL = 4, PR = 4;
+  const pts = series.flatMap(s => s.pts.filter(p => p.v != null && isFinite(p.v)));
+  if (!pts.length) return <div style={{ fontSize:10.5, color:C.dim }}>Pas de données.</div>;
+  let i0 = Infinity, i1 = -Infinity, vmin = Infinity, vmax = -Infinity;
+  for (const p of pts) { i0 = Math.min(i0, p.idx); i1 = Math.max(i1, p.idx); vmin = Math.min(vmin, p.v); vmax = Math.max(vmax, p.v); }
+  if (i1 === i0) i1 = i0 + 1;
+  const pad = (vmax - vmin) * 0.12 || Math.abs(vmax) * 0.05 || 1;
+  vmin -= pad; vmax += pad;
+  const X = i => PL + (i - i0) / (i1 - i0) * (W - PL - PR);
+  const Y = v => PT + (1 - (v - vmin) / (vmax - vmin)) * (H - PT - PB);
+  const line = list => list.map((p, k) => `${k ? 'L' : 'M'}${X(p.idx).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
+  const ticks = [];
+  if (!compact) {
+    const step = i1 - i0 > 30 ? 6 : i1 - i0 > 14 ? 3 : i1 - i0 > 7 ? 2 : 1;
+    for (let m = i0; m <= i1; m++) if ((m - i0) % step === 0) ticks.push(m);
+  }
+  const onMove = e => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * W;
+    setHov(Math.max(i0, Math.min(i1, Math.round(i0 + (x - PL) / (W - PL - PR) * (i1 - i0)))));
+  };
+  const valAt = (s, i) => { const p = s.pts.find(q => q.idx === i); return p && p.v != null && isFinite(p.v) ? p.v : null; };
+  const sx = split > i0 && split <= i1 ? X(split - 0.5) : null;
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H + AX}`} style={{ width:'100%', display:'block', cursor:'crosshair' }}
+        onMouseMove={onMove} onClick={onMove} onMouseLeave={() => setHov(null)}>
+        {ticks.map(m => (
+          <g key={m}>
+            <line x1={X(m)} x2={X(m)} y1={PT} y2={H} stroke={C.border} strokeWidth="1" />
+            <text x={X(m) + 2} y={H + 11} fontSize="8.5" fill={C.muted} fontFamily="DM Mono,monospace">{m % 12 === 0 ? String(Math.floor(m / 12)) : budgetMonthLbl(m).replace('.', '')}</text>
+          </g>
+        ))}
+        {vmin < 0 && vmax > 0 && <line x1={PL} x2={W - PR} y1={Y(0)} y2={Y(0)} stroke={C.muted} strokeWidth="0.8" strokeOpacity="0.5" />}
+        {sx != null && <rect x={sx} y={PT} width={W - PR - sx} height={H - PT - PB} fill={C.text} fillOpacity="0.035" />}
+        {sx != null && <line x1={sx} x2={sx} y1={PT} y2={H - PB} stroke={C.muted} strokeWidth="1" strokeDasharray="3 3" />}
+        {sx != null && !compact && <text x={sx + 4} y={PT + 8} fontSize="8.5" fill={C.muted} fontFamily="DM Mono,monospace">prévision →</text>}
+        {series.map((s, si) => {
+          const ok = s.pts.filter(p => p.v != null && isFinite(p.v));
+          const h = ok.filter(p => p.idx < split), f = ok.filter(p => p.idx >= split);
+          const fl = h.length && f.length ? [h[h.length - 1]].concat(f) : f;
+          return (
+            <g key={si}>
+              {h.length > 1 && <path d={line(h)} fill="none" stroke={s.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />}
+              {fl.length > 1 && <path d={line(fl)} fill="none" stroke={s.color} strokeWidth="2" strokeDasharray="5 4" strokeLinejoin="round" strokeLinecap="round" />}
+              {ok.length === 1 && <circle cx={X(ok[0].idx)} cy={Y(ok[0].v)} r="3" fill={s.color} />}
+            </g>
+          );
+        })}
+        {hov != null && <line x1={X(hov)} x2={X(hov)} y1={PT} y2={H} stroke={C.text} strokeOpacity="0.5" strokeWidth="1" strokeDasharray="2 3" />}
+        {hov != null && series.map((s, si) => { const v = valAt(s, hov); return v == null ? null : <circle key={si} cx={X(hov)} cy={Y(v)} r="3.4" fill={s.color} stroke={C.surfaceHigh} strokeWidth="2" />; })}
+      </svg>
+      <div style={{ minHeight: compact ? 15 : 28, fontSize: compact ? 9.5 : 10.5, color:C.muted, lineHeight:1.4, marginTop:2 }}>
+        {hov != null ? (
+          <span><b style={{ color:C.text }}>{budgetMonthLbl(hov, true)}</b>{hov >= split ? ' · prévu' : ''}
+            {series.map((s, si) => { const v = valAt(s, hov); return v == null ? null : (
+              <span key={si} style={{ marginLeft:8, whiteSpace:'nowrap' }}>{series.length > 1 && <span style={{ color:s.color }}>● </span>}{series.length > 1 ? s.name + ' ' : ''}<b style={{ color:C.text, fontFamily:'DM Mono,monospace' }}>{budgetEur(v)}</b></span>); })}</span>
+        ) : series.length > 1 ? (
+          <span>{series.map((s, si) => <span key={si} style={{ marginRight:10, whiteSpace:'nowrap' }}><span style={{ color:s.color }}>●</span> {s.name}</span>)}<span style={{ whiteSpace:'nowrap' }}>· trait plein = classeur, pointillés = prévu</span></span>
+        ) : compact ? null : <span>Trait plein = classeur Mes Actifs, pointillés = mois prévus · survole pour le détail</span>}
+      </div>
+    </div>
+  );
+}
+// Les « nouvelles lignes » du classeur : un mois par ligne, une colonne par champ prévu.
+function BudgetFxTable({ p }) {
+  const cols = [];
+  if (p.rules.salaire) cols.push(['salaire', '💼 Salaire']);
+  if (p.rules.depense) cols.push(['depense', '🛒 Dépenses']);
+  if (p.rules.salaire || p.rules.depense) cols.push(['reste', '= Reste']);
+  for (const fd of p.fields) if (!fd.flow && p.rules[fd.key]) cols.push([fd.key, fd.label]);
+  cols.push(['total', 'Σ Comptes']);
+  const cell = { padding:'4px 7px', textAlign:'right', fontFamily:'DM Mono,monospace', whiteSpace:'nowrap', fontSize:11 };
+  return (
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ borderCollapse:'collapse', width:'100%', minWidth: 90 + cols.length * 84 }}>
+        <thead><tr>
+          <th style={{ ...cell, textAlign:'left', fontFamily:'inherit', fontSize:9.5, color:C.muted }}>MOIS</th>
+          {cols.map(([k, l]) => <th key={k} style={{ ...cell, fontFamily:'inherit', fontSize:9.5, color:C.muted, fontWeight:700 }}>{l}</th>)}
+        </tr></thead>
+        <tbody>{p.rows.map(r => (
+          <tr key={r.idx} style={{ borderTop:`1px solid ${C.border}` }}>
+            <td style={{ ...cell, textAlign:'left', fontFamily:'inherit', color:C.text, fontWeight:700 }}>{budgetMonthLbl(r.idx, true)}</td>
+            {cols.map(([k]) => <td key={k} style={{ ...cell, color: k === 'reste' && r.v[k] < 0 ? FIN_DOWN : k === 'total' ? C.text : C.muted, fontWeight: k === 'total' ? 800 : 500 }}>{r.v[k] != null ? budgetK(r.v[k]) : '—'}</td>)}
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+const BUDGET_FX_PH = {
+  salaire: 'ex. 2 500 net / mois, +2 % chaque janvier, prime de 1 500 en juin',
+  depense: 'ex. 1 400 / mois, +150 de chauffage de novembre à février',
+  'acc:livretA': 'ex. +150 €/mois, 2,4 %/an, plafond 22 950',
+  'acc:pea': 'ex. 30 % du reste chaque mois, 7 %/an',
+  'acc:courant': 'ex. reste à peu près stable, garde 1 500',
+};
+function BudgetFxConfig() {
+  const data = useBudget();
+  const desk = useDesk();
+  const fx = data.fx || { h: 12, f: {}, rules: null };
+  const a = loadActifs();
+  const fields = budgetFxFields(a, fx);
+  const act = budgetFromActifs();
+  const last = a && Array.isArray(a.months) && a.months[0];
+  const drafts = React.useRef({});   // texte en cours de frappe, vidé à l'enregistrement (blur / Générer)
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const save = patch => {
+    const d = budgetLoad();
+    const ok = budgetSave({ scenarios: d.scenarios, fx: { ...(d.fx || { h: 12, f: {} }), ...patch, at: Date.now() } });
+    setErr(ok ? '' : '⚠ Stockage local plein : non enregistré.');
+    return ok;
+  };
+  const flush = () => {
+    const ks = Object.keys(drafts.current);
+    if (!ks.length) return true;
+    const f = { ...((budgetLoad().fx || {}).f || {}) };
+    for (const k of ks) { const t = drafts.current[k]; if (t.trim()) f[k] = t; else delete f[k]; }
+    drafts.current = {};
+    return save({ f });
+  };
+  const run = async () => {
+    if (!flush()) return;
+    setBusy(true); setErr('');
+    try {
+      const res = await budgetFxAi(budgetLoad().fx || { h: 12, f: {} }, a);
+      save(res);
+    } catch (e) { setErr(budgetAiErr(e)); }
+    setBusy(false);
+  };
+  const nF = Object.keys(fx.f).length;
+  const stale = fx.rules && fx.sig !== budgetFxSig(fx.f);
+  const cur = fd => fd.flow ? (act && act[fd.key] != null ? `≈ ${budgetK(act[fd.key])} €/mois` : '') : (last && last[fd.acc] != null ? `${budgetK(last[fd.acc])} €` : '');
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:9 }}>
+      <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.5 }}>
+        Écris ta règle champ par champ, en français. L’IA la lit et la traduit ; le Hub calcule ensuite les <b style={{ color:C.text }}>nouveaux mois</b> qui suivent ton classeur, avec leurs graphiques. Champ vide = ligne non prévue.
+        {last ? <> Point de départ : <b style={{ color:C.text }}>{fmtActifMonth(last.t)}</b> (mode Finance · Mes Actifs).</> : <> ⚠ Classeur Mes Actifs jamais synchronisé : ouvre le mode Finance une fois pour partir de tes vrais soldes (sinon, donne un montant de départ dans la formule).</>}
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns: desk ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap:'7px 12px' }}>
+        {fields.map(fd => {
+          const r = fx.rules && fx.rules[fd.key];
+          return (
+            <div key={fd.key} style={{ display:'flex', flexDirection:'column', gap:3 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', gap:8, fontSize:11 }}>
+                <span style={{ fontWeight:800, color:C.text }}>{fd.label}</span>
+                <span style={{ color:C.dim, fontFamily:'DM Mono,monospace', fontSize:10 }}>{cur(fd)}</span>
+              </div>
+              <input key={fd.key + ':' + (fx.f[fd.key] || '')} defaultValue={fx.f[fd.key] || ''} maxLength={400}
+                placeholder={BUDGET_FX_PH[fd.key] || (fd.flow ? 'ex. montant / mois, évolution…' : 'ex. +100 €/mois, 3 %/an')}
+                onChange={e => { drafts.current[fd.key] = e.target.value; }}
+                onBlur={() => flush()}
+                style={{ ...BUDGET_IN, width:'100%' }} />
+              {r && r.why && fx.f[fd.key] && <div style={{ fontSize:9.5, color: stale ? C.dim : IA_COLOR, lineHeight:1.4 }}>🤖 compris : {r.why}</div>}
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ fontSize:10.5, color:C.muted }}>Prévoir sur</span>
+        {BUDGET_FX_HORIZONS.map(([n, l]) => <button key={n} onClick={() => { flush(); save({ h: n }); }} style={budgetChip((fx.h || 12) === n)}>{l}</button>)}
+        <span style={{ flex:1 }} />
+        <button onClick={run} disabled={busy || !aiAnyKey()} title={aiAnyKey() ? 'L’IA lit les formules, le Hub calcule les mois' : 'Ajoute une clé d’IA dans 🔌 API'}
+          style={{ ...budgetBtn(IA_COLOR, true), opacity: busy || !aiAnyKey() ? 0.5 : 1 }}>{busy ? '⏳ Lecture des formules…' : fx.rules ? '🤖 Relire les formules' : '🤖 Générer la prévision'}</button>
+      </div>
+      {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Formules modifiées depuis la dernière lecture : relance l’IA pour mettre la prévision à jour.</div>}
+      {!aiAnyKey() && <div style={{ fontSize:10.5, color:C.muted }}>Ajoute une clé d’IA dans 🔌 API (Gemini est gratuite).</div>}
+      {nF === 0 && <div style={{ fontSize:10.5, color:C.dim }}>Aucune formule pour l’instant.</div>}
+      {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
+    </div>
+  );
+}
+function BudgetFxResults() {
+  const data = useBudget();
+  const desk = useDesk();
+  const fx = data.fx;
+  const a = loadActifs();
+  const p = React.useMemo(() => (fx && fx.rules ? budgetFxProject(fx, a) : null), [fx, a]);
+  if (!p || !p.rows.length) return null;
+  const W = desk ? 1100 : 400;
+  const ser = (key, name, color) => ({ name, color, pts: p.hist.map(h => ({ idx: h.idx, v: h.v[key] })).concat(p.rows.map(r => ({ idx: r.idx, v: r.v[key] }))) });
+  const flows = [];
+  if (p.rules.salaire) flows.push(ser('salaire', 'Salaire', FIN_UP));
+  if (p.rules.depense) flows.push(ser('depense', 'Dépenses', FIN_DOWN));
+  const accs = p.fields.filter(fd => !fd.flow && p.rules[fd.key]);
+  const histTot = [...p.hist].reverse().find(h => h.v.total != null);
+  const endTot = p.rows[p.rows.length - 1].v.total;
+  const stale = fx.sig !== budgetFxSig(fx.f);
+  const box = { background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 10px 4px' };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      <div style={{ fontSize:9.5, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+        {aiLabel(fx.ai)} · lu le {new Date(fx.rat || fx.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })} · {budgetMonthLbl(p.rows[0].idx, true)} → {budgetMonthLbl(p.rows[p.rows.length - 1].idx, true)}<AiFallbackBadge fb={fx.fb} />
+        {stale && <span style={{ color:'#e0a040', marginLeft:6 }}>⚠ formules modifiées depuis</span>}
+      </div>
+      {fx.note && <div style={{ fontSize:12, lineHeight:1.45, color:C.text }}>🤖 {fx.note}</div>}
+      <div style={{ display:'grid', gridTemplateColumns: desk ? 'repeat(3, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', gap:8 }}>
+        <BudgetKpi icon="🏦" label="COMPTES AUJOURD’HUI" value={histTot ? budgetEur(histTot.v.total) : '—'} sub={histTot ? `classeur, ${budgetMonthLbl(histTot.idx, true)}` : 'classeur non synchronisé'} />
+        <BudgetKpi icon="🔮" label={`FIN ${budgetMonthLbl(p.rows[p.rows.length - 1].idx, true).toUpperCase()}`} value={budgetEur(endTot)} color={BUDGET_COLOR}
+          sub={histTot ? `${endTot >= histTot.v.total ? '+' : '−'}${budgetEur(Math.abs(endTot - histTot.v.total))} sur ${p.rows.length} mois` : `sur ${p.rows.length} mois`} />
+        {(p.rules.salaire || p.rules.depense) && (() => { const avg = p.rows.reduce((s, r) => s + r.v.reste, 0) / p.rows.length;
+          return <BudgetKpi icon="🐖" label="RESTE MOYEN" value={`${budgetEur(avg)}/m`} color={avg >= 0 ? FIN_UP : FIN_DOWN} wide={!desk} sub="salaire − dépenses, mois prévus" />; })()}
+      </div>
+      <div style={box}>
+        <div style={{ fontSize:10, fontWeight:800, color:C.muted, letterSpacing:'0.05em', marginBottom:4 }}>📈 TOTAL DES COMPTES · CLASSEUR PUIS MOIS PRÉVUS</div>
+        <BudgetFxChart series={[ser('total', 'Total', BUDGET_COLOR)]} split={p.startIdx} W={W} height={desk ? 200 : 150} />
+        {p.frozen.length > 0 && <div style={{ fontSize:9.5, color:C.dim, marginBottom:6 }}>Sans formule, gardés à leur dernière valeur : {p.frozen.map(fd => fd.label).join(', ')}.</div>}
+      </div>
+      {flows.length > 0 && (
+        <div style={box}>
+          <div style={{ fontSize:10, fontWeight:800, color:C.muted, letterSpacing:'0.05em', marginBottom:4 }}>💼 SALAIRE & DÉPENSES PAR MOIS</div>
+          <BudgetFxChart series={flows} split={p.startIdx} W={W} height={desk ? 160 : 120} />
+        </div>
+      )}
+      {accs.length > 0 && (
+        <div style={{ display:'grid', gridTemplateColumns: desk ? 'repeat(4, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', gap:8 }}>
+          {accs.map(fd => {
+            const endV = p.rows[p.rows.length - 1].v[fd.key];
+            return (
+              <div key={fd.key} style={{ ...box, padding:'8px 8px 2px' }}>
+                <div style={{ display:'flex', justifyContent:'space-between', gap:6, fontSize:10.5, marginBottom:2 }}>
+                  <span style={{ fontWeight:800, color:C.text, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{fd.label}</span>
+                  <span style={{ fontFamily:'DM Mono,monospace', color:C.text, flexShrink:0 }}>{budgetK(endV)} €</span>
+                </div>
+                <BudgetFxChart series={[ser(fd.key, fd.label, BUDGET_COLOR)]} split={p.startIdx} W={200} height={64} compact />
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div>
+        <div style={{ fontSize:10, fontWeight:800, color:C.muted, letterSpacing:'0.05em', margin:'2px 0 4px' }}>🗓️ MOIS PRÉVUS (NOUVELLES LIGNES)</div>
+        <BudgetFxTable p={p} />
+      </div>
+      <div style={{ fontSize:9, color:C.dim }}>Prévision calculée à partir de TES formules telles que l’IA les a comprises (relis les « compris » dans la config) — pas un conseil financier.</div>
+    </div>
+  );
+}
+function BudgetFxBlocks() {
+  const data = useBudget();
+  const has = !!(data.fx && data.fx.rules);
+  return (<>
+    <StatsCollapse key="fxcfg" defaultOpen={!has} color={BUDGET_COLOR} title="⚙️ CONFIG · FORMULES DE PRÉVISION">
+      <BudgetFxConfig />
+    </StatsCollapse>
+    {has && (
+      <StatsCollapse key="fxres" defaultOpen={true} color={IA_COLOR} title="🔮 PRÉVISION IA · NOUVEAUX MOIS">
+        <BudgetFxResults />
+      </StatsCollapse>
+    )}
+  </>);
+}
+
 function BudgetPanel() {
   const desk = useDesk();
   const data = useBudget();
@@ -45277,6 +45553,8 @@ function BudgetPanel() {
   // ── Aucun scénario : accueil ──
   if (!sc) {
     return (
+      <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      <BudgetFxBlocks />
       <div style={{ display:'flex', flexDirection:'column', gap:10, alignItems:'flex-start' }}>
         <div style={{ fontSize:12, color:C.text, lineHeight:1.55 }}>
           Prépare tes <b>3, 6 ou 12 prochains mois</b> : salaire, prêt immo, charges, taxe foncière, contrôle technique, assurances, vacances…
@@ -45286,6 +45564,7 @@ function BudgetPanel() {
         <button onClick={() => createScen(null)} style={budgetBtn(BUDGET_COLOR, true)}>✨ Créer mon premier scénario</button>
         {actifs && <div style={{ fontSize:10.5, color:C.muted }}>Astuce : une fois créé, 📥 reprend ta trésorerie et tes moyennes depuis le mode Finance (Mes Actifs).</div>}
         {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
+      </div>
       </div>
     );
   }
@@ -45432,6 +45711,8 @@ function BudgetPanel() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      {/* ⚙️ Formules de prévision (indépendantes des scénarios) */}
+      <BudgetFxBlocks />
       {/* Scénarios + horizon */}
       <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
         {scens.map(s => (
@@ -61984,7 +62265,7 @@ function statCardEl({ label, value, sub, icon, color }) {
 const GAMES_HUB_STATS = [
   { id:'2048',   label:'2048',        icon:'🔢', metric:'meilleur score' },
   { id:'crossy', label:'Crossy Road', icon:'🐔', metric:'rangées franchies' },
-  { id:'doodle_plus', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
+  { id:'doodle', label:'Doodle Jump', icon:'🟢', metric:'altitude max' },
   { id:'flappy', label:'Flappy Bird', icon:'🐤', metric:'meilleur score' },
   { id:'findflag', label:'Find the Flag', icon:'🏳️', metric:'série de drapeaux' },
   { id:'osu',    label:'Osu',         icon:'🎯', metric:'meilleur score' },
@@ -64326,7 +64607,7 @@ function LikerPanel() {
               <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
             </svg>
           </button>
-          <button onClick={() => playTrack(item.spotifyUri)}
+          <button onClick={() => playTrack(item.spotifyUri, { user: true })}
             style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
             <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
           </button>
@@ -64390,7 +64671,7 @@ function HistoryPanel() {
           {item.listenedAt && (
             <span style={{ fontSize:9, color:C.dim, fontFamily:'DM Mono,monospace', flexShrink:0, whiteSpace:'nowrap' }}>{formatListenedAt(item.listenedAt)}</span>
           )}
-          <button onClick={() => playTrack(item.spotifyUri)}
+          <button onClick={() => playTrack(item.spotifyUri, { user: true })}
             title="Réécouter"
             style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
             <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
@@ -65277,7 +65558,7 @@ const DeltaTrackRow = React.memo(function DeltaTrackRow({ t }) {
         <div style={{ fontSize:12, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color:C.text }}>{t.title}</div>
         <div style={{ fontSize:10, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{t.artist}</div>
       </div>
-      <button onClick={() => playTrack(t.uri)} title="Écouter"
+      <button onClick={() => playTrack(t.uri, { user: true })} title="Écouter"
         style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
         <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
       </button>
@@ -65705,7 +65986,7 @@ function DeltaAiRow({ icon, title, sub, why, found, query, color }) {
         )}
       </div>
       {found?.uri && found.uri.startsWith('spotify:track:') ? (
-        <button onClick={() => playTrack(found.uri)} title="Écouter"
+        <button onClick={() => playTrack(found.uri, { user: true })} title="Écouter"
           style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
           <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
         </button>
@@ -66636,7 +66917,7 @@ const SmTrackRow = React.memo(function SmTrackRow({ t, rate, onRate }) {
                  fontSize:11, fontWeight:800, fontFamily:'DM Mono,monospace', cursor:'pointer', flexShrink:0, padding:'0 8px' }}>
         {rate == null ? 'NA' : `${rate}/10`}
       </button>
-      <button onClick={() => playTrack(t.uri)} title="Écouter"
+      <button onClick={() => playTrack(t.uri, { user: true })} title="Écouter"
         style={{ width:28, height:28, borderRadius:'50%', border:'none', background:`${C.accent}22`, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>
         <svg width="9" height="10" viewBox="0 0 9 10" fill={C.accent}><path d="M0 0l9 5-9 5V0z"/></svg>
       </button>
