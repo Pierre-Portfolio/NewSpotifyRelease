@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.213';
+const APP_VERSION = '13.21.214';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -23876,9 +23876,8 @@ function mtgDensity(pool, id, cm) {
   return d;
 }
 const MTG_COLOR_OPTS = ['W', 'U', 'B', 'R', 'G', 'WU', 'UB', 'BR', 'RG', 'GW', 'WB', 'UR', 'BG', 'RW', 'GU'];
-async function mtgDeckBuild(q, list, stop, picked, frOnly) {
-  await mtgDeckFetchInfo(list, stop);
-  if (stop.v) throw new Error('Arrêté.');
+// Cartes utilisables du Deck Magic et du Cube : UNE fiche Scryfall par nom (×1), cartes réelles.
+function mtgPoolOf(list, frOnly) {
   // Exemplaire FRANÇAIS possédé de chaque nom (celui qui a un id Scryfall de préférence :
   // son image est déjà la version française). `frOnly` ⇒ seuls ces noms entrent au pool.
   const frBy = new Map();
@@ -23905,6 +23904,12 @@ async function mtgDeckBuild(q, list, stop, picked, frOnly) {
     pool.push(f);
     for (const s of mtgFeat(f).sub) { tribes.set(s.toLowerCase(), s); tribeN.set(s, (tribeN.get(s) || 0) + 1); }
   }
+  return { pool, tribes, tribeN };
+}
+async function mtgDeckBuild(q, list, stop, picked, frOnly) {
+  await mtgDeckFetchInfo(list, stop);
+  if (stop.v) throw new Error('Arrêté.');
+  const { pool, tribes, tribeN } = mtgPoolOf(list, frOnly);
   if (pool.length < 20) throw new Error(frOnly ? `Seulement ${pool.length} carte${pool.length > 1 ? 's' : ''} française${pool.length > 1 ? 's' : ''} identifiée${pool.length > 1 ? 's' : ''} : pas de quoi bâtir un deck.` : 'Pas assez de cartes identifiées sur Scryfall pour bâtir un deck.');
   const intent = mtgDeckIntent(q, picked, tribes);
   const fmtKey = intent.commander ? 'cmd' : 'std';
@@ -24419,6 +24424,213 @@ function MtgSavedDecks({ saved }) {
     mtgDeckPublish();
   }} />);
 }
+// 🎲 CUBE — une liste de cartes pour jouer en draft « cube » avec SA collection (demande
+// utilisateur) : un thème (même vocabulaire que Deck Magic : `mtgDeckIntent`), une taille, et
+// le cube est assemblé sur l'appareil, SANS IA, avec les cartes possédées EN FRANÇAIS seulement.
+// ⚠ Équilibre d'un cube : autant de cartes par couleur (`MTG_CUBE_SPLIT`), une courbe de mana
+// tenue dans chaque couleur (`MTG_CUBE_CURVE`), assez de retraits et de créatures pour que
+// chaque couleur se drafte seule. Le thème passe d'abord, jusqu'à `MTG_CUBE_THEME` de chaque
+// case sous la courbe, puis retraits et créatures manquants, puis le reste (le thème compte
+// encore dans la note) : le cube reste draftable même si le thème est partout. Une case trop maigre
+// est complétée par les meilleures cartes restantes, toutes couleurs confondues.
+// ⚠ Couleurs nommées dans le thème (« cube noir-vert ») ⇒ seules ces couleurs et leurs paires.
+// ⚠ Rien n'est sauvegardé (état module-level `_mtgCube`, perdu au rechargement) ; les noms et
+// images français arrivent ensuite par `mtgDeckFrResolve`.
+const MTG_CUBE_SIZES = [180, 360, 540];
+const MTG_CUBE_SPLIT = { mono:0.75, multi:0.11, less:0.08, land:0.06 };
+const MTG_CUBE_CURVE = { 1:0.14, 2:0.26, 3:0.22, 4:0.18, 5:0.12, 6:0.08 };
+const MTG_CUBE_THEME = 0.45;
+const _mtgCube = { q: '', size: 360, busy: false, err: '', res: null };
+const mtgBits = m => { let n = 0; for (; m; m >>= 1) n += m & 1; return n; };
+function mtgBuildCube(pool, themes, cols, size) {
+  const cm = mtgMask(cols);
+  const tsc = f => themes.reduce((a, id, i) => a + mtgThemeScore(f, id) * (i ? 0.6 : 1), 0);
+  const score = f => tsc(f) * 4 + mtgFeat(f).q;
+  const used = new Set();
+  const by = key => (a, b) => key(b) - key(a);
+  // Remplit une case de `n` cartes prises dans `cands`.
+  const fill = (cands, n, spells) => {
+    const out = [], cnt = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0 };
+    const cap = b => Math.max(1, Math.round(n * MTG_CUBE_CURVE[b]));
+    const take = (list, k, strict) => {
+      for (const f of list) {
+        if (k <= 0 || out.length >= n) break;
+        if (used.has(f)) continue;
+        const b = mtgFeat(f).b;
+        if (spells && strict && cnt[b] >= cap(b)) continue;
+        used.add(f); out.push(f); cnt[b]++; k--;
+      }
+    };
+    const sorted = cands.slice().sort(by(score));
+    if (themes.length) take(sorted.filter(f => tsc(f) > 0), Math.round(n * MTG_CUBE_THEME), spells);
+    if (spells) {
+      const rm = out.filter(f => mtgFeat(f).removal).length, need = Math.round(n * 0.15);
+      if (rm < need) take(sorted.filter(f => mtgFeat(f).removal), need - rm, true);
+      const cr = out.filter(f => mtgFeat(f).creature).length, needC = Math.round(n * 0.45);
+      if (cr < needC) take(sorted.filter(f => mtgFeat(f).creature), needC - cr, true);
+    }
+    take(sorted, n, spells);
+    take(sorted, n, false);
+    return out;
+  };
+  const colsArr = MTG_PICK_COLORS.map(x => x.c).filter(c => cols.includes(c));
+  const spellOk = f => { const x = mtgFeat(f); return !x.land && (x.mask & ~cm) === 0; };
+  const nMono = Math.round(size * MTG_CUBE_SPLIT.mono / colsArr.length);
+  const sections = [];
+  for (const c of colsArr) {
+    const pc = MTG_PICK_COLORS.find(x => x.c === c);
+    sections.push({ id: c, label: pc.label, color: pc.bar, want: nMono, cards: fill(pool.filter(f => spellOk(f) && mtgFeat(f).mask === MTG_CMASK[c]), nMono, true) });
+  }
+  const nMulti = colsArr.length > 1 ? Math.round(size * MTG_CUBE_SPLIT.multi) : 0;
+  if (nMulti) sections.push({ id: 'M', label: 'Multicolore', color: '#d4af37', want: nMulti, cards: fill(pool.filter(f => spellOk(f) && mtgBits(mtgFeat(f).mask) >= 2), nMulti, true) });
+  const nLess = Math.round(size * MTG_CUBE_SPLIT.less);
+  sections.push({ id: 'C', label: 'Incolore', color: '#a0a0a8', want: nLess, cards: fill(pool.filter(f => spellOk(f) && mtgFeat(f).mask === 0), nLess, true) });
+  // Terrains non-base : ceux qui produisent au moins deux couleurs du cube d'abord (fixing).
+  const nLand = size - sections.reduce((a, x) => a + x.want, 0);
+  const lands = pool.filter(f => { const x = mtgFeat(f); return x.land && !x.basic && (x.mask & ~cm) === 0; });
+  const fix = f => [...cols].filter(c => (f.pm || '').includes(c)).length;
+  const landSorted = lands.slice().sort(by(f => fix(f) * 3 + tsc(f) * 2 + mtgFeat(f).q / 2));
+  const landOut = [];
+  for (const f of landSorted) { if (landOut.length >= nLand) break; if (!used.has(f)) { used.add(f); landOut.push(f); } }
+  sections.push({ id: 'L', label: 'Terrains', color: '#8a7f6a', want: nLand, cards: landOut });
+  // Cases trop maigres : complétées par les meilleures cartes restantes (toutes couleurs du cube).
+  const total = () => sections.reduce((a, x) => a + x.cards.length, 0);
+  const missing = size - total();
+  let extra = [];
+  if (missing > 0) {
+    extra = pool.filter(f => !used.has(f) && spellOk(f)).sort(by(score)).slice(0, missing);
+    for (const f of extra) {
+      used.add(f);
+      const m = mtgFeat(f).mask;
+      const sec = sections.find(x => x.id === (m === 0 ? 'C' : mtgBits(m) >= 2 ? 'M' : colsArr.find(c => MTG_CMASK[c] === m)));
+      (sec || sections[0]).cards.push(f);
+    }
+  }
+  for (const sec of sections) sec.cards.sort((a, b) => (mtgCmcOf(a) - mtgCmcOf(b)) || mtgCardName(a).localeCompare(mtgCardName(b), 'fr'));
+  const all = sections.flatMap(x => x.cards);
+  return { sections, total: all.length, size, themes, cols, inTheme: themes.length ? all.filter(f => tsc(f) > 0).length : 0, extra: extra.length };
+}
+async function mtgCubeRun(list) {
+  const text = _mtgCube.q.trim().slice(0, MTG_DECK_Q_MAX);
+  if (_mtgCube.busy || _mtgDeck.busy || !list.length) return;
+  _mtgCube.busy = true; _mtgCube.err = ''; mtgDeckPublish();
+  try {
+    await mtgDeckFetchInfo(list, { v: false });
+    let pool, tribes;
+    try { ({ pool, tribes } = mtgPoolOf(list, true)); }
+    catch (e) { throw new Error(String(e.message || e).replace(/, ou décoche.*$/, '.')); }
+    if (pool.length < 45) throw new Error(`Seulement ${pool.length} carte${pool.length > 1 ? 's' : ''} française${pool.length > 1 ? 's' : ''} identifiée${pool.length > 1 ? 's' : ''} : pas de quoi bâtir un cube.`);
+    const intent = mtgDeckIntent(text, null, tribes);
+    const cols = intent.cols || 'WUBRG';
+    const res = mtgBuildCube(pool, intent.themes, cols, _mtgCube.size);
+    res.q = text; res.poolN = pool.length;
+    _mtgCube.res = res;
+    mtgDeckFrResolve({ decks: [{ cards: res.sections.flatMap(x => x.cards) }] });
+  } catch (e) {
+    const m = String((e && e.message) || e);
+    _mtgCube.err = /abort/i.test(m) ? 'Scryfall injoignable (délai dépassé).' : m;
+  }
+  _mtgCube.busy = false; _mtgDeck.fetch = null; mtgDeckPublish();
+}
+function mtgCubeText(r) {
+  const head = [`Cube ${r.total} cartes${r.q ? ' — « ' + r.q + ' »' : ''}`, ''];
+  return head.concat(...r.sections.filter(x => x.cards.length).map(x => [`// ${x.label} (${x.cards.length})`, ...x.cards.map(f => '1 ' + mtgCardName(f)), ''])).join('\n');
+}
+function MtgCubeSection({ list }) {
+  const st = useMtgDeck();                       // même publieur que Deck Magic (fetch Scryfall, noms FR)
+  const cb = _mtgCube;
+  const [q, setQ0] = React.useState(cb.q);
+  const setQ = v => { _mtgCube.q = v; setQ0(v); };   // survit au repli (piège 5)
+  const [mode, setMode] = React.useState('list');
+  const [zoom, setZoom] = React.useState(-1);
+  const [copied, setCopied] = React.useState(false);
+  const n = list.length, frN = React.useMemo(() => list.filter(x => cardLangOf('magic', x) === 'fr').length, [list]);
+  const r = cb.res, busy = cb.busy || st.busy, fx = st.fetch;
+  const all = r ? r.sections.flatMap(x => x.cards) : [];
+  const copy = () => {
+    try { navigator.clipboard.writeText(mtgCubeText(r)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }, () => {}); } catch {}
+  };
+  const btn = on => ({ background: on ? `${COLLECTION_COLOR}22` : 'none', border:`1px solid ${on ? COLLECTION_COLOR : COLLECTION_COLOR + '66'}`, borderRadius:8, color:COLLECTION_COLOR, fontSize:11, fontWeight:700, padding:'5px 9px', cursor:'pointer' });
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+      <div style={{ fontSize:10, color:C.muted, lineHeight:1.5 }}>
+        Donne un thème ({MTG_THEMES.slice(0, 6).map(t => t.label.toLowerCase()).join(', ')}…, une tribu, des couleurs) : un cube équilibré (autant de cartes par couleur, courbe de mana, retraits) est construit sur l'appareil avec tes cartes Magic <b style={{ color:C.text }}>en français</b> ({frN} sur {n}), chacune en un exemplaire. Sans thème : les meilleures cartes de ta collection.
+      </div>
+      <form onSubmit={e => { e.preventDefault(); mtgCubeRun(list); }} style={{ display:'flex', gap:6 }}>
+        <input value={q} onChange={e => setQ(e.target.value)} maxLength={MTG_DECK_Q_MAX}
+          placeholder="Ex. : cimetière, zombies, artefacts…" enterKeyHint="go" aria-label="Thème du cube"
+          style={{ flex:1, minWidth:0, background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:8, color:C.text, fontSize:12, padding:'8px 10px', outline:'none' }} />
+        <button type="submit" disabled={busy || !n}
+          style={{ ...btn(false), color: busy || !n ? C.dim : COLLECTION_COLOR, borderColor: busy || !n ? C.border : COLLECTION_COLOR + '66', cursor: busy || !n ? 'default' : 'pointer', fontFamily:'DM Mono,monospace' }}>
+          {cb.busy ? '⏳' : '✨ Générer'}
+        </button>
+      </form>
+      <div style={{ display:'flex', gap:5, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ fontSize:10, color:C.muted }}>Taille :</span>
+        {MTG_CUBE_SIZES.map(z => (
+          <button key={z} type="button" aria-pressed={cb.size === z} onClick={() => { _mtgCube.size = z; mtgDeckPublish(); }} style={btn(cb.size === z)}>{z}</button>
+        ))}
+      </div>
+      {!n && <div style={{ fontSize:9.5, color:C.dim }}>Ta collection Magic est vide : importe d'abord ton CSV (📥 dans 🟣 Magic).</div>}
+      {cb.busy && <div style={{ fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>{fx ? `⏳ Lecture des cartes sur Scryfall… ${fx.done} / ${fx.total} (une seule fois : gardées ensuite sur l'appareil)` : '⏳ Assemblage du cube…'}</div>}
+      {!cb.busy && st.busy && <div style={{ fontSize:9.5, color:C.dim }}>Deck Magic est en train de travailler : attends qu'il ait fini.</div>}
+      {cb.err && <div style={{ fontSize:10.5, color:'#e05050', lineHeight:1.5 }}>⚠ {cb.err}</div>}
+      {r && !cb.busy && (
+        <div style={{ border:`1px solid ${COLLECTION_COLOR}44`, background:C.surfaceHigh, borderRadius:10, padding:'10px 12px', display:'flex', flexDirection:'column', gap:8 }}>
+          <div style={{ fontSize:13, fontWeight:800, color:COLLECTION_COLOR }}>🎲 Cube {r.total} cartes{r.q ? ` · « ${r.q} »` : ''}</div>
+          <div style={{ fontSize:10, color:C.muted, lineHeight:1.5 }}>
+            {r.themes.length ? `${r.themes.map(mtgThemeLabel).join(' + ')} : ${r.inTheme} carte${r.inTheme > 1 ? 's' : ''} du thème · ` : (r.q ? 'Aucun thème reconnu : cube généraliste · ' : '')}
+            {mtgColorName(r.cols)} · {r.poolN} cartes françaises différentes analysées
+            {r.total < r.size && <span style={{ color:'#e0952b' }}> · ⚠ seulement {r.total} cartes jouables sur {r.size}</span>}
+            {r.extra > 0 && <span> · {r.extra} carte{r.extra > 1 ? 's' : ''} ajoutée{r.extra > 1 ? 's' : ''} hors répartition (couleur trop maigre)</span>}
+          </div>
+          <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
+            {r.sections.map(x => (
+              <span key={x.id} title={`${x.label} : ${x.cards.length} / ${x.want} visées`} style={{ display:'inline-flex', alignItems:'center', gap:4, fontSize:10.5, color:C.text, border:`1px solid ${C.border}`, borderRadius:10, padding:'2px 7px' }}>
+                <span style={{ width:8, height:8, borderRadius:4, background:x.color }} />{x.label} {x.cards.length}
+              </span>
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+            <button type="button" onClick={() => setMode('list')} style={btn(mode === 'list')}>📜 Liste</button>
+            <button type="button" onClick={() => setMode('photo')} style={btn(mode === 'photo')}>🖼️ Cartes</button>
+            <button type="button" onClick={copy} style={btn(false)}>{copied ? '✓ Copiée' : '📋 Copier'}</button>
+            <button type="button" onClick={() => ctDownload('cube-' + localDayStr() + '.txt', mtgCubeText(r), 'text/plain;charset=utf-8')} style={btn(false)}>⬇ .txt</button>
+          </div>
+          {mode === 'list' && r.sections.filter(x => x.cards.length).map(x => (
+            <div key={x.id}>
+              <div style={{ fontSize:9.5, fontWeight:700, color:x.color, letterSpacing:'0.05em', textTransform:'uppercase' }}>{x.label} ({x.cards.length})</div>
+              {x.cards.map(f => (
+                <div key={f.n} style={{ display:'flex', gap:6, fontSize:11, color:C.text, lineHeight:1.5, userSelect:'text' }}>
+                  <span style={{ flex:1, minWidth:0 }}>{mtgCardName(f)}</span>
+                  <span style={{ color:C.muted, fontFamily:'DM Mono,monospace', fontSize:10 }}>{f.m}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          {mode === 'photo' && (
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(78px, 1fr))', gap:5 }}>
+              {all.map((f, k) => (
+                <button key={f.n} type="button" onClick={() => setZoom(k)} title={mtgCardName(f)}
+                  style={{ display:'block', width:'100%', aspectRatio:'488 / 680', padding:0, borderRadius:5, overflow:'hidden', cursor:'zoom-in', background:C.surface, border:`1px solid ${C.border}` }}>
+                  <img src={mtgCardImg(f)} alt={mtgCardName(f)} loading="lazy" referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+                </button>
+              ))}
+            </div>
+          )}
+          {zoom >= 0 && all[zoom] && <MtgCardZoom cards={all} at={zoom} onAt={setZoom} onClose={() => setZoom(-1)} />}
+        </div>
+      )}
+    </div>
+  );
+}
+function CollectionMagicCube({ list }) {
+  return (
+    <StatsCollapse title="🎲 CUBE" color={COLLECTION_COLOR} defaultOpen={false}>
+      <MtgCubeSection list={list} />
+    </StatsCollapse>
+  );
+}
 function CollectionMagicDeck({ list }) {
   const saved = useMtgSaved();
   return (
@@ -24520,6 +24732,7 @@ function CollectionCat({ cat, data, save, saveErr }) {
         );
       })}
       {/* 🧙 Deck Magic puis 🃏 Analyse Cardmarket : dans CARTES seulement, en DERNIER — donc juste sous 🟣 Magic. */}
+      {cat.id === 'cartes' && <CollectionMagicCube list={collList(data, 'magic')} />}
       {cat.id === 'cartes' && <CollectionMagicDeck list={collList(data, 'magic')} />}
       {cat.id === 'cartes' && <CollectionCardmarket />}
     </div>
@@ -33096,6 +33309,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.214', date:'2026-10-29', title:'🎲 Cube Magic avec ta collection', items:[
+    'Dans 🗃️ Collection → Cartes, un nouveau collapse « 🎲 Cube » juste au-dessus de Deck Magic : tape un thème (zombies, cimetière, artefacts…, ou rien pour les meilleures cartes), choisis une taille (180, 360 ou 540) et touche ✨ Générer.',
+    'Le cube est construit sur l’appareil avec tes cartes Magic en français uniquement, chacune en un exemplaire, équilibré : autant de cartes par couleur, une courbe de mana tenue, des multicolores, des incolores et des terrains. 📜 Liste, 🖼️ Cartes, 📋 Copier ou ⬇ .txt pour l’emporter.',
+  ] },
   { v:'13.21.213', date:'2026-10-29', title:'🚇 Chercher une ligne de transport', items:[
     'Dans 📰 Actu → Cartographie → Réseaux de transport Paris, une barre de recherche trouve une ligne (1, 13, RER A, T3a, H…).',
     'En la choisissant, la ligne ressort sur la carte et la liste de ses gares s’affiche dans l’ordre, d’un terminus à l’autre ; les embranchements (RER A, B, C, métro 7, 13…) sont listés à part depuis leur gare de bifurcation.',
@@ -33110,10 +33327,6 @@ const RELEASE_NOTES = [
   { v:'13.21.210', date:'2026-10-29', title:'▶ Lancer un titre ne coupe plus Spotify', items:[
     'Dans 🎵 Musique, lancer un titre de la liste « En attente » pendant que Spotify joue autre chose pouvait couper la musique sans démarrer le titre choisi.',
     'Le Hub vérifie maintenant, une seconde après, que le titre joue vraiment : sinon il le relance une fois sur ton appareil Spotify (ou reprend la lecture s’il est resté en pause), et te prévient seulement si Spotify refuse toujours.',
-  ] },
-  { v:'13.21.209', date:'2026-10-23', title:'💇 Coiffeur dans les alertes Médecin', items:[
-    'Dans 🔔 Alertes → 🩺 Médecin, une nouvelle ligne « Coiffeur » (juste avant Mutuelle) : pose la date de ton prochain rendez-vous, avec une heure si tu veux.',
-    'Comme les autres échéances, elle a son badge, apparaît dans les dates à venir et le calendrier, te prévient à l’approche et devient une tâche To do 3 jours avant.',
   ] },
 ];
 
