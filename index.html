@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.223';
+const APP_VERSION = '13.21.224';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2049,9 +2049,11 @@ function _parseRetryAfterMs(raw, fallbackMs) {
 }
 
 // `opts.signal` (facultatif) : AbortSignal transmis au fetch — le poll player s'en sert pour
-// borner chaque tick dans le temps.
+// borner chaque tick dans le temps. `opts.player` : même fenêtre 429 que `apiPut` (lecture).
 async function apiGet(url, _retried = false, opts) {
-  const blocked = _rlCheck();
+  const blocked = opts && opts.player
+    ? (Date.now() < _rlSpotUntil ? { error: 'rate_limited', rate_limited: true, blockedUntil: _rlSpotUntil } : null)
+    : _rlCheck();
   if (blocked) return blocked;
   const token = await getToken();
   const res   = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: opts && opts.signal });
@@ -27095,7 +27097,7 @@ function _playAlert(msg) {
 // joue encore n'est corrigé qu'au dernier contrôle.
 let _playSeq = 0;
 const PLAY_CHECK_WAITS = [1200, 1500, 2500];
-async function _playConfirm(spotifyUri, seq) {
+async function _playConfirm(spotifyUri, seq, body) {
   const url = 'https://api.spotify.com/v1/me/player/play';
   let fixed = false;
   for (let i = 0; i < PLAY_CHECK_WAITS.length; i++) {
@@ -27114,9 +27116,37 @@ async function _playConfirm(spotifyUri, seq) {
     if (seq !== _playSeq) return;
     const q = devId ? `?device_id=${encodeURIComponent(devId)}` : '';
     fixed = true;
-    await apiPut(url + q, same ? undefined : { uris: [spotifyUri], position_ms: 0 });
+    await apiPut(url + q, same ? undefined : body, false, { player: true });
     if (_playerPollKick) _playerPollKick();
   }
+}
+
+// ── Lancer un titre DANS SON ALBUM ────────────────────────────────────────────
+// ⚠ Depuis fin octobre 2026, PUT /me/player/play avec `uris` répond 204 mais l'appareil ne
+// charge rien : la musique en cours se coupe, `item` revient null, toutes les actions sont
+// « disallowed » (même constat chez d'autres apps, rien d'annoncé par Spotify). Un CONTEXTE
+// démarre, lui : `context_uri` de l'album + `offset.uri` du titre. L'album n'est pas en
+// base ⇒ GET /tracks/{id} (l'unitaire existe toujours, les lots ont disparu en fév. 2026),
+// gardé en mémoire pour la session. Album introuvable ⇒ repli sur `uris`.
+// Effet de bord : en fin de titre Spotify enchaîne sur la piste suivante de l'album. Si elle
+// n'est pas dans le feed filtré, l'auto-avance « URI quittée proche de la fin » reprend la
+// main ; si elle y est, c'est presque toujours aussi la suivante du feed (tri par insertion).
+const _trackCtx = new Map();
+async function spotifyPlayBody(trackUri) {
+  const bare = { uris: [trackUri], position_ms: 0 };
+  const id = (/^spotify:track:([A-Za-z0-9]{22})$/.exec(trackUri) || [])[1];
+  if (!id) return bare;
+  let ctx = _trackCtx.get(trackUri);
+  if (!ctx) {
+    let t = null;
+    try { t = await apiGet(`https://api.spotify.com/v1/tracks/${id}?market=from_token`, false, { player: true, signal: fetchSig(6000) }); } catch {}
+    const album = t && !t.error ? t.album?.uri : null;
+    if (!album || !/^spotify:album:/.test(album)) return bare;
+    // `market=from_token` : un titre relinké rend la version jouable ici (`t.uri`), dans SON album
+    ctx = { context_uri: album, offset: { uri: /^spotify:track:/.test(t.uri || '') ? t.uri : trackUri } };
+    _trackCtx.set(trackUri, ctx);
+  }
+  return { ...ctx, position_ms: 0 };
 }
 
 // ── Ratés PASSAGERS de l'API Player ───────────────────────────────────────────
@@ -27154,7 +27184,8 @@ async function playTrack(spotifyUri, opts) {
   _navAt  = Date.now();
   const seq    = ++_playSeq;
   const url    = 'https://api.spotify.com/v1/me/player/play';
-  const body   = { uris: [spotifyUri] };
+  let body     = await spotifyPlayBody(spotifyUri);
+  if (seq !== _playSeq) return;   // un autre titre a été demandé pendant la recherche de l'album
   // ⚠ try : une coupure réseau fait REJETER fetch — sans lui, playTrack rejetait et le
   // bouton ▶ restait allumé sans que rien ne joue.
   const put = async devId => {
@@ -27178,10 +27209,16 @@ async function playTrack(spotifyUri, opts) {
     if (seq !== _playSeq) return;   // un autre titre a été demandé entre-temps
     result = await put(devId);
   }
+  // Contexte d'album refusé (offset introuvable, album retiré…) : dernier essai en `uris`.
+  const k0 = playErrKind(result);
+  if (body.context_uri && (k0 === 'device' || k0 === 'other') && seq === _playSeq) {
+    body = { uris: [spotifyUri], position_ms: 0 };
+    result = await put(devId);
+  }
   const kind = playErrKind(result);
   if (!kind) {
     if (_playerPollKick) _playerPollKick();   // lecture lancée : re-sonder sans attendre le tick lent
-    _playConfirm(spotifyUri, seq).catch(() => {});
+    _playConfirm(spotifyUri, seq, body).catch(() => {});
     return;
   }
   if (seq !== _playSeq) return;
@@ -32101,6 +32138,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.224', date:'2026-10-30', title:'🎵 Musique : les titres se relancent', items:[
+    'Depuis fin octobre, Spotify accepte la commande « joue ce titre » mais ne lance plus rien : la musique en cours s’arrêtait et la suivante ne démarrait jamais, quel que soit le titre. Le Hub lance désormais le titre dans son album, ce que Spotify joue bien.',
+    'En fin de titre, Spotify enchaîne sur la piste suivante de l’album : si elle n’est pas dans tes titres en attente, le Hub passe au titre suivant de ta liste comme avant.',
+  ] },
   { v:'13.21.223', date:'2026-10-30', title:'🩳 TV Time : plus de vidéos longues dans les Shorts', items:[
     'Une vidéo dont YouTube ne donnait pas la durée (lot de durées raté, live en cours, première à venir, vidéo privée) comptait 0 minute, donc passait pour un Short : elle n’entre plus dans la liste avant que sa durée soit connue. Si les durées ne répondent pas du tout (quota, réseau), la chaîne garde sa liste actuelle au lieu d’être reconstruite de travers.',
     'Les vidéos longues déjà rangées en Shorts retrouvent leur place au prochain rafraîchissement de leur chaîne (synchro du jour, ou ↻ sur la chaîne).',
@@ -32117,9 +32158,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.220', date:'2026-10-29', title:'🗑️ Des chiffres et des lettres retiré', items:[
     'Le jeu « Des chiffres et des lettres » disparaît de 🎮 Jeux. Motus et son dictionnaire restent là.',
-  ] },
-  { v:'13.21.219', date:'2026-10-29', title:'🗑️ Code Rouge retiré', items:[
-    'Le jeu « Code Rouge » (lettres bleues obligatoires, lettre rouge interdite) disparaît de 🎮 Jeux.',
   ] },
 ];
 

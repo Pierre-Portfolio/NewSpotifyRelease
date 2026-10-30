@@ -83,9 +83,9 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 ## Écoute / auto-avance
 
 - **Marquage** : changement de `now?.uri` → `listened=1` + stats + `saveDB` ; `listenedUrisRef` anti-doublon ; écritures DB **hors** de l'updater `setFeed`. Les players capturent l'URI quittée AVANT de jouer la suivante puis `markListened` (idempotent, position réelle seulement).
-- **3 auto-avances** (`advancedForRef`, `prevNowRef`), **placées AVANT le `return` sur `listenedUrisRef`** : URI quittée proche de la fin · `remaining ≤ 3 s` · transition `playing true→false` et `remaining ≤ 8 s` — **cas principal** (fin de titre = `is_playing:false` sur la **même URI**).
+- **3 auto-avances** (`advancedForRef`, `prevNowRef`), **placées AVANT le `return` sur `listenedUrisRef`** : URI quittée proche de la fin · `remaining ≤ 3 s` · transition `playing true→false` et `remaining ≤ 8 s` (fin de titre = `is_playing:false` sur la **même URI** ; lancé en contexte album, la fin arrive surtout par le 1er cas).
 - **Poll player** : chaîne de `setTimeout`, une requête en vol, 5 s en lecture / 15 s au repos, rien en onglet caché ; curseur optimiste `_effUri`.
-- **`playTrack`** : sans appareil actif ⇒ 404/403 ⇒ `GET /me/player/devices` puis rejeu avec `device_id` (`spotifyPickDevice` écarte les `is_restricted`). Ratés passagers (5xx, 401, 403 `PREMIUM_REQUIRED`, réseau) réessayés (`playErrKind`, `PLAY_RETRY_WAITS`). Throttle `_playAlert` 30 s (appel sans geste utilisateur) ; un clic passe `{user:true}` et dit toujours pourquoi rien ne joue.
+- **`playTrack`** : ⚠ titre lancé **dans son album** (`spotifyPlayBody` : `context_uri` + `offset.uri`, album lu par `GET /tracks/{id}`) : depuis fin oct. 2026, `uris` répond 204 sans rien lancer ; en fin de titre Spotify enchaîne donc sur la piste suivante de l'album. Sans appareil actif ⇒ 404/403 ⇒ `GET /me/player/devices` puis rejeu avec `device_id` (`spotifyPickDevice` écarte les `is_restricted`). Ratés passagers (5xx, 401, 403 `PREMIUM_REQUIRED`, réseau) réessayés (`playErrKind`, `PLAY_RETRY_WAITS`). Throttle `_playAlert` 30 s (appel sans geste utilisateur) ; un clic passe `{user:true}` et dit toujours pourquoi rien ne joue.
 - **`purgeListened`** : URIs → `purged_uris` puis DELETE ; `removeFromFeed` = marqué écouté (Undo 5 s), stats comptées seulement si c'est le titre du lecteur.
 
 ## Store (`StoreProvider`)
