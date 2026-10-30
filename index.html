@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.222';
+const APP_VERSION = '13.21.223';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32101,6 +32101,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.223', date:'2026-10-30', title:'🩳 TV Time : plus de vidéos longues dans les Shorts', items:[
+    'Une vidéo dont YouTube ne donnait pas la durée (lot de durées raté, live en cours, première à venir, vidéo privée) comptait 0 minute, donc passait pour un Short : elle n’entre plus dans la liste avant que sa durée soit connue. Si les durées ne répondent pas du tout (quota, réseau), la chaîne garde sa liste actuelle au lieu d’être reconstruite de travers.',
+    'Les vidéos longues déjà rangées en Shorts retrouvent leur place au prochain rafraîchissement de leur chaîne (synchro du jour, ou ↻ sur la chaîne).',
+  ] },
   { v:'13.21.222', date:'2026-10-29', title:'🎵 Lecture fiable, 🔮 prévision par formules', items:[
     'Musique : lancer un titre en attente réessaie tout seul quand Spotify rate la commande (erreurs passagères 5xx, 401, « Premium required »), et un clic dit toujours pourquoi rien ne joue. La pause de 15 min que s’impose le scraping après un 429 ne bloque plus la lecture.',
     'Jeux : Doodle Jump revient en mode 🌀 Chaos seul (le ➕ Chaos + est retiré, son record aussi) ; Personantix est retiré.',
@@ -32116,10 +32120,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.219', date:'2026-10-29', title:'🗑️ Code Rouge retiré', items:[
     'Le jeu « Code Rouge » (lettres bleues obligatoires, lettre rouge interdite) disparaît de 🎮 Jeux.',
-  ] },
-  { v:'13.21.218', date:'2026-10-29', title:'🗑️ L’un ou l’autre retiré', items:[
-    'Le jeu « L’un ou l’autre » (Crous ou Prison, Chinois ou Coréen, Le plus vu) disparaît de 🎮 Jeux, avec ses records.',
-    'Tous les jeux du Hub fonctionnent désormais hors ligne.',
   ] },
 ];
 
@@ -34162,11 +34162,13 @@ async function ytSubsFetchVideos(force) {
   return data;
 }
 
-// Durée ISO 8601 → SECONDES (ytParseDuration arrondit aux minutes : un Short de 25 s → 0).
+// Durée ISO 8601 → SECONDES (en minutes arrondies, un Short de 25 s tomberait à 0).
+// ⚠ Les jours existent (`P1DT2H3M`, live de plus de 24 h) ; `P0D` = live en cours ou
+// première à venir, donc 0 = durée INCONNUE, pas une vidéo courte.
 function ytParseDurationSec(iso) {
-  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(iso || '');
   if (!m) return 0;
-  return (+(m[1] || 0)) * 3600 + (+(m[2] || 0)) * 60 + (+(m[3] || 0));
+  return (+(m[1] || 0)) * 86400 + (+(m[2] || 0)) * 3600 + (+(m[3] || 0)) * 60 + (+(m[4] || 0));
 }
 // Short = durée CONNUE et < YT_MIN_MINUTES. Une durée inconnue (0) reste une vidéo longue.
 function ytSubIsShort(v) { return !!v.durSec && v.durSec < YT_MIN_MINUTES * 60; }
@@ -46167,13 +46169,6 @@ async function ytApi(path, params = {}) {
   } catch { return null; }
 }
 
-// Durée ISO 8601 (PT1H2M3S) → minutes arrondies
-function ytParseDuration(iso) {
-  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
-  if (!m) return 0;
-  return Math.round((+(m[1] || 0)) * 60 + (+(m[2] || 0)) + (+(m[3] || 0)) / 60);
-}
-
 // Analyse un lien / id YouTube → { kind, id|handle|name|q }
 // ⚠ Un handle accentué arrive ENCODÉ depuis la barre d'adresse (`/@LesInachev%C3%A9s`) : décoder
 // avant d'extraire, et accepter les lettres Unicode (un handle YouTube en admet, + `_ . - ·`) —
@@ -46251,12 +46246,21 @@ async function ytFetchPlaylistVideos(playlistId, max = YT_MAX_VIDEOS) {
   return out.slice(0, max);
 }
 
-// Durées de vidéos (batch de 50) → Map id → minutes
+// Durées de vidéos (batch de 50) → Map id → minutes arrondies, ou null si un lot a échoué.
+// ⚠ Seules les durées CONNUES y entrent. Avant, un lot raté (quota, réseau), un live, une
+// première à venir (`P0D`) ou une vidéo privée valaient 0 minute, donc un Short : des
+// vidéos longues remplissaient la file 🩳 des chaînes qui gardent les Shorts.
 async function ytFetchDurations(ids) {
   const map = new Map();
   for (let i = 0; i < ids.length; i += 50) {
-    const d = await ytApi('videos', { part: 'contentDetails', id: ids.slice(i, i + 50).join(',') });
-    if (d && d.items) for (const v of d.items) map.set(v.id, ytParseDuration(v.contentDetails && v.contentDetails.duration));
+    const id = ids.slice(i, i + 50).join(',');
+    let d = await ytApi('videos', { part: 'contentDetails', id });
+    if (!d || !d.items) { await sleep(1500); d = await ytApi('videos', { part: 'contentDetails', id }); }
+    if (!d || !d.items) return null;
+    for (const v of d.items) {
+      const sec = ytParseDurationSec(v.contentDetails && v.contentDetails.duration);
+      if (sec > 0) map.set(v.id, Math.round(sec / 60));
+    }
   }
   return map;
 }
@@ -46286,14 +46290,20 @@ async function ytBuildItem(raw, opts = {}) {
   const videosRaw = await ytFetchPlaylistVideos(playlistId, cap);
   if (!videosRaw.length) return { error: 'Aucune vidéo trouvée pour ce lien.' };
   const durs = await ytFetchDurations(videosRaw.map(v => v.id));
-  for (const v of videosRaw) v.dur = durs.get(v.id) || 0;
+  // Lot de durées raté : on ne reconstruit pas avec des durées manquantes. `transient` :
+  // l'ajout d'une chaîne ne conclut pas pour autant qu'elle ne fait que des Shorts.
+  if (!durs) return { error: 'Durées YouTube indisponibles (quota ou réseau) : réessaie plus tard.', transient: true };
+  // Durée inconnue (live, première à venir, vidéo privée) : vidéo écartée jusqu'au prochain
+  // rafraîchissement, jamais rangée en Short. Ses vues restent comptées (`ytOrphanSeen`).
+  const known = videosRaw.filter(v => durs.has(v.id));
+  for (const v of known) v.dur = durs.get(v.id);
   // Filtrage Shorts (< 3 min) selon les tags de la chaîne/playlist :
-  //  • shortsOnly → UNIQUEMENT les Shorts (complément exact du filtre normal, dur inconnue=0 inclus)
+  //  • shortsOnly → UNIQUEMENT les Shorts (complément exact du filtre normal)
   //  • keepShorts → tout (Shorts + vidéos longues)
   //  • défaut     → uniquement les vidéos ≥ 3 min (Shorts exclus)
   const videos = opts.shortsOnly
-    ? videosRaw.filter(v => (v.dur || 0) < YT_MIN_MINUTES)
-    : opts.keepShorts ? videosRaw : videosRaw.filter(v => (v.dur || 0) >= YT_MIN_MINUTES);
+    ? known.filter(v => v.dur < YT_MIN_MINUTES)
+    : opts.keepShorts ? known : known.filter(v => v.dur >= YT_MIN_MINUTES);
   if (!videos.length) return { error: opts.shortsOnly ? 'Aucun Short trouvé pour ce lien.' : opts.keepShorts ? 'Aucune vidéo trouvée pour ce lien.' : 'Aucune vidéo de plus de 3 min trouvée pour ce lien.' };
   videos.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));   // chrono croissant
   const byYear = {};
@@ -49386,7 +49396,7 @@ function TvTimePanel() {
     // Chaîne qui ne fait QUE des Shorts : le build normal ne renvoie aucune vidéo ≥ 3 min.
     // On retente en « uniquement les Shorts » et, si ça donne des Shorts, on demande à
     // l'utilisateur si c'est volontaire → ajout avec le tag « garder uniquement les Shorts ».
-    if (built && built.error) {
+    if (built && built.error && !built.transient) {
       const shortsBuilt = await ytBuildItem(raw, { shortsOnly: true });
       if (shortsBuilt && !shortsBuilt.error) {
         setYtBusy(false);
