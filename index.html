@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.228';
+const APP_VERSION = '13.21.229';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3856,8 +3856,9 @@ function StoreProvider({ children }) {
         try { syncRemembersToTodos(); } catch {}
         // Frigo → To do : aliments qui périment dans 2 jours ou moins (100 % local).
         try { syncFrigoToTodos(); } catch {}
-        // Bon Plan → To do + alerte : jeu suivi passé sous son prix cible (fire-and-forget).
-        try { if (moduleEnabled(loadModuleToggles(), 'compare')) cmpTargetSync().catch(() => {}); } catch {}
+        // Bon Plan : recherche des favoris 1×/jour (pop-up si baisse ou cible atteinte ; tâche
+        // To do si cible). Différée : le flux et l'IA ne doivent pas ralentir le démarrage.
+        try { if (moduleEnabled(loadModuleToggles(), 'compare')) setTimeout(() => { cmpFavDaily().catch(() => {}); }, 6000); } catch {}
         // Speedrun → To do : même chose pour les runs à valider, mais sur le SEUL cache
         // (aucune requête au boot ; la synchro complète a lieu à l'ouverture d'Alertes).
         try { syncSpeedrunToTodoFromCache(); } catch {}
@@ -28481,7 +28482,7 @@ const EXPORT_SECTIONS = [
   { key:'todo',     label:'To do',        icon:'✅', hint:'tâches + journal terminées + liste de course', fields:['todos', 'todos_done', 'courses'] },
   { key:'maps',     label:'Maps',         icon:'🗺️', hint:'trajets Google Timeline',    fields:['maps'] },
   { key:'finance',  label:'Finance',      icon:'📈', hint:'historique local des prix (crypto…) + scénarios de Prévision (le classeur Mes Actifs reste sur Drive)', fields:['finance', 'budget'] },
-  { key:'bonplan',  label:'Bon Plan',     icon:'🛒', hint:'jeux suivis + prix cibles', fields:['bonplan'] },
+  { key:'bonplan',  label:'Bon Plan',     icon:'🛒', hint:'favoris + prix cibles', fields:['bonplan'] },
   { key:'food',     label:'Santé',        icon:'🍎', hint:'profil + calories quotidiennes + pesées + séances de sport (pas la composition des repas)', fields:['food'] },
   { key:'frigo',    label:'Frigo',        icon:'🧊', hint:'contenu + dates de péremption', fields:['frigo'] },
   { key:'recette',  label:'Recette',      icon:'📖', hint:'carnet de recettes : listes, ingrédients, étapes, notes', fields:['recettes'] },
@@ -29003,13 +29004,13 @@ function applyBackup(data) {
     try { localStorage.setItem(YT_KEY_LS, data.yt_key.trim()); } catch {}
   }
   if (data.maps && typeof data.maps === 'object') { put('spotifyplus_maps', data.maps); _mapsCache = null; }
-  // Bon Plan — jeux suivis FUSIONNÉS : union par gameID, l'entrée locale gagne
-  // (elle a le lastPrice/lastCheck le plus frais), les jeux absents sont ajoutés.
+  // Bon Plan — favoris FUSIONNÉS : union par `id` (anciens fichiers convertis par
+  // `cmpFavNorm`), l'entrée locale gagne (relevés les plus frais), les absents sont ajoutés.
   if (Array.isArray(data.bonplan)) {
     try {
       const local = loadCmpWatch();
-      const have = new Set(local.map(w => String(w.gameID)));
-      const merged = local.concat(data.bonplan.filter(w => w && w.gameID && !have.has(String(w.gameID))));
+      const have = new Set(local.map(w => w.id));
+      const merged = local.concat(data.bonplan.map(cmpFavNorm).filter(w => w && !have.has(w.id)));
       saveCmpWatch(merged);
     } catch {}
   }
@@ -31908,7 +31909,7 @@ const MODULE_LINKS = [
   ['frigo',    'food',       '🧊 sur un repas de Santé : l’aliment choisi quitte le frigo (consommé)'],
   ['maps',     'food',       'trajets à pied, en courant ou à vélo du jour proposés comme séances de sport'],
   ['compare',  'remember',   'promos Steam de la liste de souhaits affichées dans Alertes'],
-  ['compare',  'todo',       'jeu suivi passé sous son prix cible ⇒ tâche + alerte à la connexion'],
+  ['compare',  'todo',       'favori passé sous son prix cible ⇒ tâche + pop-up (vérification 1×/jour)'],
   ['meteo',    'todo',       'pluie prévue entre 8 h 30 et 10 h ou 17 h et 18 h ⇒ tâche « parapluie »'],
   ['vetement', 'revente',    '🏷️ Revendre sur une fiche ⇒ brouillon d’annonce (alerte avant création)'],
   ['collection','revente',   '🏷️ dans la fiche ⇒ brouillon d’annonce (alerte avant création)'],
@@ -32506,6 +32507,12 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.229', date:'2026-11-06', title:'🛒 Bon Plan refait', items:[
+    'Nouveaux bons plans : Dealabs (hot et nouveaux), Le Dénicheur, jeux offerts. Ils sont relevés toutes les 2 h côté serveur, donc le module ne dépend plus des relais qui le rendaient muet.',
+    'Une seule barre de recherche, pour un produit ou un jeu PC : bons plans en cours, prix chez les marchands (IA, si une clé est enregistrée) et liens directs vers Le Dénicheur, Dealabs, Idealo, Amazon…',
+    '⭐ Favoris : chaque recherche suivie est relancée une fois par jour à l’ouverture. Une pop-up te prévient si le prix passe sous ta cible 🎯 ou sous son plus bas connu, avec la courbe des relevés.',
+    'Les jeux vidéo restent là (promos Steam, Epic, CheapShark, liste de souhaits Steam), et un onglet 💡 Astuces regroupe historique de prix, codes promo et cashback.',
+  ] },
   { v:'13.21.228', date:'2026-11-06', title:'📅 TV Time : date du dernier épisode', items:[
     'Dans Prochaines sorties, le bouton « Last » (à droite du 1️⃣) affiche pour chaque série la date de sortie de son dernier épisode diffusé, au lieu du prochain. Un second appui revient au prochain épisode.',
   ] },
@@ -32523,10 +32530,6 @@ const RELEASE_NOTES = [
     'Mes Actifs lit maintenant ton classeur Excel « Finance.xlsx » directement depuis le Drive (le Google Sheets reste accepté) : un seul téléchargement sert à tout — patrimoine, portefeuille crypto et synchro Displate / Pop / Montre vers Collection.',
     'Nouvelles colonnes reprises : compte Bourso (compté pour moitié, comme dans le classeur), capital immo remboursé et loyer évité dans le budget du mois, rendement réel 12 mois et rendement fixe, liberté financière sans rendement / à taux fixe / à taux réel.',
     'Le bloc « gains par actif » du classeur ne pollue plus les vieux mois de 2022.',
-  ] },
-  { v:'13.21.224', date:'2026-10-30', title:'🎵 Musique : les titres se relancent', items:[
-    'Depuis fin octobre, Spotify accepte la commande « joue ce titre » mais ne lance plus rien : la musique en cours s’arrêtait et la suivante ne démarrait jamais, quel que soit le titre. Le Hub lance désormais le titre dans son album, ce que Spotify joue bien.',
-    'En fin de titre, Spotify enchaîne sur la piste suivante de l’album : si elle n’est pas dans tes titres en attente, le Hub passe au titre suivant de ta liste comme avant.',
   ] },
 ];
 
@@ -39474,8 +39477,10 @@ async function cmpStores() {
 
 // Taux USD→EUR (Frankfurter/BCE, CORS natif) — 1 fetch par session
 let _cmpEurPromise = null;
+// ⚠ 13.21.229 — taux BCE du flux serveur `data/deals.json` d'abord ; Frankfurter en repli.
 function cmpUsdToEur() {
   if (!_cmpEurPromise) _cmpEurPromise = (async () => {
+    try { const d = await cmpDealsData(); if (d && typeof d.usd_eur === 'number' && d.usd_eur > 0.3 && d.usd_eur < 3) return d.usd_eur; } catch {}
     try {
       const r = await fetch('https://api.frankfurter.app/latest?from=USD&to=EUR', { signal: fetchSig() });
       if (!r.ok) return null;
@@ -39924,7 +39929,7 @@ function SteamAlertSection() {
   }, []);
   return (
     <StatsCollapse title={`🕹️ STEAM${promos.length ? ' · ' + promos.length : ''}`} color={STEAM_COLOR} defaultOpen={promos.length > 0}>
-      {!steamId() && <div style={{ fontSize:11.5, color:C.dim }}>Renseigne ton SteamID64 dans <b style={{ color:C.text }}>Bon Plan → 🕹️ Bibliothèque Steam</b> pour être alerté des promos ≥ {STEAM_PROMO_PCT} % sur ta liste de souhaits.</div>}
+      {!steamId() && <div style={{ fontSize:11.5, color:C.dim }}>Renseigne ton SteamID64 dans <b style={{ color:C.text }}>Bon Plan → 🕹️ Steam</b> pour être alerté des promos ≥ {STEAM_PROMO_PCT} % sur ta liste de souhaits.</div>}
       {steamId() && !promos.length && <div style={{ fontSize:11.5, color:C.dim }}>Rien à signaler — aucun jeu de ta liste de souhaits à −{STEAM_PROMO_PCT} % ou plus. 🎮</div>}
       {promos.map(g => (
         <a key={g.appid} href={safeHref(g.url) || undefined} target="_blank" rel="noopener noreferrer"
@@ -40060,33 +40065,66 @@ function cmpUntil(iso) {
   return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
-// ⭐ Ma liste — jeux suivis { gameID, title, thumb, target (EUR, null = pas d'alerte),
-// lastPrice (USD, meilleure offre), dealID, lastCheck, addedAt }. PERSISTANT (lsSet)
-// + inclus dans buildBackup (clé `bonplan`, fusion par gameID à la restauration).
+// ⭐ FAVORIS (13.21.229, refonte Bon Plan) — un favori = une RECHERCHE mémorisée (jeu ou
+// produit), relancée 1×/jour à l'ouverture de l'app (`cmpFavDaily`) : meilleur prix trouvé,
+// plus bas historique, prix cible optionnel.
+// Forme : { id, kind:'game'|'product', q, title, thumb, gameID, target (€|null), price (€|null),
+//   store, url, src, low (€|null), hit (sous la cible, épisode en cours), lastCheck, addedAt,
+//   hist:[{d:'YYYY-MM-DD', p}] }. PERSISTANT + backup `bonplan` (fusion par `id`).
+// ⚠ Les anciens « jeux suivis » `{gameID, lastPrice (USD), …}` sont convertis À LA LECTURE
+// (`cmpFavNorm`) ; leur `lastPrice` en dollars est jeté, le prochain relevé le refait en euros.
+// ⚠ Toute écriture passe par `saveCmpWatch`, qui prévient les panneaux montés (`useCmpFavs`) :
+// la vérification du jour tourne hors de tout composant.
 const CMP_WATCH_LS = 'spotifyplus_cmp_watch';
-function loadCmpWatch() { try { return JSON.parse(localStorage.getItem(CMP_WATCH_LS)) || []; } catch { return []; } }
-function saveCmpWatch(l) { lsSet(CMP_WATCH_LS, JSON.stringify(l)); }
-// Rafraîchit les meilleurs prix des jeux suivis (1 requête pour tous : /games?ids=…)
-async function cmpRefreshWatch(list) {
-  const ids = list.map(w => w.gameID).filter(Boolean);
-  if (!ids.length) return list;
-  try {
-    const r = await fetch('https://www.cheapshark.com/api/1.0/games?ids=' + ids.join(','), { signal: fetchSig() });
-    if (!r.ok) return list;
-    const j = await r.json();
-    return list.map(w => {
-      const g = j && j[w.gameID];
-      if (!g || !Array.isArray(g.deals) || !g.deals.length) return { ...w, lastCheck: Date.now() };
-      let best = null, bestDeal = null;
-      for (const d of g.deals) {
-        const p = parseFloat(d.price);
-        if (!isNaN(p) && (best === null || p < best)) { best = p; bestDeal = d; }
-      }
-      return { ...w, lastPrice: best, dealID: (bestDeal && bestDeal.dealID) || w.dealID,
-        title: (g.info && g.info.title) || w.title, thumb: (g.info && g.info.thumb) || w.thumb,
-        lastCheck: Date.now() };
-    });
-  } catch { return list; }
+const CMP_FAV_HIST = 60;
+function cmpFavNorm(w) {
+  if (!w || typeof w !== 'object') return null;
+  if (w.id && w.kind) return w;
+  if (!w.gameID) return null;
+  const t = w.title || '?';
+  return { id: 'g' + w.gameID, kind: 'game', q: t, title: t, thumb: w.thumb || '', gameID: String(w.gameID),
+    target: typeof w.target === 'number' ? w.target : null, price: null, store: '', url: '', src: '',
+    low: null, hit: false, lastCheck: 0, addedAt: w.addedAt || Date.now(), hist: [] };
+}
+function loadCmpWatch() {
+  try { const a = JSON.parse(localStorage.getItem(CMP_WATCH_LS)); return Array.isArray(a) ? a.map(cmpFavNorm).filter(Boolean) : []; } catch { return []; }
+}
+const _cmpFav = { subs: new Set() };
+function saveCmpWatch(l) {
+  const ok = lsSet(CMP_WATCH_LS, JSON.stringify(l));
+  _cmpFav.subs.forEach(fn => { try { fn(); } catch {} });
+  return ok;
+}
+function useCmpFavs() {
+  const [list, setList] = React.useState(loadCmpWatch);
+  React.useEffect(() => {
+    const fn = () => setList(loadCmpWatch());
+    _cmpFav.subs.add(fn);
+    return () => { _cmpFav.subs.delete(fn); };
+  }, []);
+  return list;
+}
+// Un jeu se reconnaît à son gameID CheapShark s'il en a un, sinon (comme un produit) au
+// titre normalisé de sa recherche : « Elden Ring » suivi deux fois = un seul favori.
+function cmpFavFind(list, it) {
+  if (it.gameID) { const g = list.find(f => f.gameID && String(f.gameID) === String(it.gameID)); if (g) return g; }
+  const k = cmpTitleKey(it.q || it.title);
+  return list.find(f => f.kind === (it.kind === 'game' ? 'game' : 'product') && cmpTitleKey(f.q) === k) || null;
+}
+function cmpFavNew({ kind, q, title, thumb, gameID, target, price, store, url }) {
+  const isGame = kind === 'game';
+  const p = typeof price === 'number' && isFinite(price) ? Math.round(price * 100) / 100 : null;
+  return { id: isGame && gameID ? 'g' + gameID : 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    kind: isGame ? 'game' : 'product', q: String(q || title || '').trim(), title: String(title || q || '?').trim(),
+    thumb: thumb || '', gameID: gameID ? String(gameID) : null, target: typeof target === 'number' && target > 0 ? target : null,
+    price: p, store: store || '', url: safeHref(url) || '', src: '', low: p, hit: false, lastCheck: 0, addedAt: Date.now(), hist: [] };
+}
+// Ajoute le favori s'il n'existe pas, le retire s'il existe. Renvoie true si ajouté.
+function cmpFavToggle(it) {
+  const list = loadCmpWatch(), have = cmpFavFind(list, it);
+  if (have) { saveCmpWatch(list.filter(f => f.id !== have.id)); return false; }
+  saveCmpWatch([...list, cmpFavNew(it)]);
+  return true;
 }
 const cmpDealUrl = dealID => 'https://www.cheapshark.com/redirect?dealID=' + encodeURIComponent(dealID || '');
 // ── Helpers communs aux TROIS sources d'offres (11.5.2) ───────────────────────────────
@@ -40197,7 +40235,7 @@ function CmpShopLinks({ q, label }) {
 function CmpStar({ watched, onClick }) {
   return (
     <button onClick={e => { e.preventDefault(); e.stopPropagation(); onClick(); }}
-      title={watched ? 'Ne plus suivre' : 'Suivre ce jeu (Ma liste)'}
+      title={watched ? 'Retirer des favoris' : 'Suivre ce jeu (⭐ Favoris)'}
       style={{ background:'none', border:'none', color: watched ? '#f5c518' : C.dim, fontSize:14, lineHeight:1, padding:'0 3px', cursor:'pointer', flexShrink:0 }}>
       {watched ? '★' : '☆'}
     </button>
@@ -40283,8 +40321,13 @@ function CompareDeals({ isWatched, toggleWatch }) {
   React.useEffect(() => {
     let alive = true;
     (async () => {
+      // ⚠ 13.21.229 — le flux serveur `data/deals.json` d'abord (prix déjà en euros) ; les
+      // fetchers client (relais CORS pour Steam) ne servent plus qu'à la source qui y manque.
+      const srv = await cmpDealsData();
+      const fromSrv = k => (srv && Array.isArray(srv[k]) ? srv[k].map(cmpSrvDeal) : []);
+      const sC = fromSrv('cheapshark'), sS = fromSrv('steam'), sE = fromSrv('epic');
       const [d, steamD, epicD, st, rate] = await Promise.all([
-        cmpFetchDeals(), cmpSteamDeals(), cmpEpicDeals(), cmpStores(), cmpUsdToEur()]);
+        sC.length ? sC : cmpFetchDeals(), sS.length ? sS : cmpSteamDeals(), sE.length ? sE : cmpEpicDeals(), cmpStores(), cmpUsdToEur()]);
       if (!alive) return;
       const extra = [...(steamD || []), ...(epicD || [])];
       setDeals(d === null && !extra.length ? null : [...(d || []), ...extra]);
@@ -40389,19 +40432,18 @@ function CompareDeals({ isWatched, toggleWatch }) {
               {d.__normal > d.__sale && <div style={{ fontSize:9, color:C.dim, textDecoration:'line-through', fontFamily:'DM Mono,monospace' }}>{px(d.__normal, d.__eur)}</div>}
               <div style={{ fontSize:11.5, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace' }}>{px(d.__sale, d.__eur)}</div>
             </div>
-            {/* ⚠ ☆ seulement sur un jeu connu de CheapShark : le suivi rafraîchit les prix
-                par `/games?ids=`, une offre purement Steam ou Epic n'a pas de gameID à y
-                envoyer et resterait figée sur son prix du jour. */}
+            {/* ☆ sur toute offre : un jeu sans gameID CheapShark (Steam, Epic) est suivi par
+                son titre, rapproché chaque jour des promos du flux serveur (`cmpFavCheck`). */}
             {g.gameID
-              ? <CmpStar watched={isWatched(g.gameID)} onClick={() => toggleWatch({ gameID: g.gameID, title: d.title, thumb: g.thumb || d.thumb, price: d.__sale })} />
-              : <span style={{ width:18, flexShrink:0 }} />}
+              ? <CmpStar watched={isWatched({ gameID: g.gameID, title: d.title })} onClick={() => toggleWatch({ gameID: g.gameID, title: d.title, thumb: g.thumb || d.thumb })} />
+              : <CmpStar watched={isWatched({ title: d.title })} onClick={() => toggleWatch({ title: d.title, thumb: g.thumb || d.thumb })} />}
           </div>
         );
       })}
       {pop && <CmpDealsModal group={pop} stores={stores} px={px} onClose={() => setPop(null)} />}
       {!loading && deals !== null && (
         <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
-          Meilleures offres PC du moment (CheapShark + Steam + Epic{eur ? ` — les prix CheapShark sont en USD, convertis ≈ EUR au taux BCE ${eur.toFixed(4)} ; Steam et Epic sont déjà en euros` : ''}) · un jeu vendu par plusieurs boutiques n'apparaît qu'une fois, au <b style={{ color:C.muted }}>meilleur prix</b> · clic sur la <b style={{ color:C.muted }}>vignette</b> = toutes ses offres (site et prix) · clic sur le titre = ouvrir l'offre · ☆ = suivre (jeux CheapShark)
+          Meilleures offres PC du moment (CheapShark + Steam + Epic{eur ? ` — prix CheapShark en USD convertis ≈ EUR au taux BCE ${eur.toFixed(4)}` : ''}) · un jeu vendu par plusieurs boutiques n'apparaît qu'une fois, au <b style={{ color:C.muted }}>meilleur prix</b> · clic sur la <b style={{ color:C.muted }}>vignette</b> = toutes ses offres (site et prix) · clic sur le titre = ouvrir l'offre · ☆ = ajouter aux favoris
           {mute ? <span style={{ color:'#e0a050' }}> · source muette : {mute}</span> : null}
         </div>
       )}
@@ -40409,111 +40451,643 @@ function CompareDeals({ isWatched, toggleWatch }) {
   );
 }
 
-// ── 🛒 BON PLAN → TO DO + ALERTE (à la connexion) ─────────────────────────────────
-// Un jeu suivi dont le meilleur prix passe SOUS son prix cible (€) crée une tâche
-// « Aujourd'hui » et déclenche UNE alerte, la première fois qu'on le voit à la connexion.
-// ⚠ « Première fois » = par ÉPISODE : `CMP_TARGET_LS` garde les jeux actuellement sous la
-// cible ; un jeu qui repasse au-dessus en sort, et une nouvelle baisse ré-alerte.
-// ⚠ Prix relus chez CheapShark seulement si le plus vieux relevé a plus de
-// `CMP_TARGET_REFRESH_MS` (une requête groupée) ; la liste est RELUE avant d'écrire.
-// Alerte = notification système si elle est autorisée, sinon `alert()` (l'utilisateur a
-// demandé une alerte, pas une ligne qu'il pourrait ne pas voir).
-const CMP_TARGET_LS = 'spotifyplus_cmp_target_hit';   // { gameID: prix € au moment de l'alerte }
-const CMP_TARGET_REFRESH_MS = 6 * 3600 * 1000;
-async function cmpTargetSync() {
-  const withTarget = loadCmpWatch().filter(w => w && w.gameID && w.target != null);
-  if (!withTarget.length) return 0;
-  const oldest = Math.min(...withTarget.map(w => w.lastCheck || 0));
-  if (Date.now() - oldest > CMP_TARGET_REFRESH_MS) {
-    const fresh = await cmpRefreshWatch(withTarget);
-    const byId = new Map(fresh.map(w => [w.gameID, w]));
-    saveCmpWatch(loadCmpWatch().map(w => {
-      const f = byId.get(w.gameID);
-      return f ? { ...w, lastPrice: f.lastPrice, dealID: f.dealID, lastCheck: f.lastCheck } : w;
-    }));
+// ── 📦 FLUX SERVEUR `data/deals.json` (13.21.229) ────────────────────────────────────
+// Écrit toutes les 2 h par `scripts/fetch_deals.py` (GitHub Action) : Dealabs (hot / nouveaux),
+// Le Dénicheur (best effort, aucune API publique), Steam, Epic, CheapShark, GamerPower et le taux
+// BCE. Lus CÔTÉ SERVEUR, ils ne dépendent plus des relais CORS publics, ce qui rendait le module
+// muet. Toutes les offres y ont la même forme {id, title, link, price (€), old, pct, merchant,
+// image, …} ; `price` 0 = gratuit, absent = inconnu.
+// ⚠ Une source absente du fichier (jamais lue, ou en échec depuis le premier run) ⇒ le client
+// retombe sur ses anciens fetchers (relais CORS) pour cette source seulement.
+const CMP_DATA_URL = './data/deals.json';
+let _cmpData = null;   // { t, v } — mémoire 10 min (le fichier ne bouge que toutes les 2 h)
+async function cmpDealsData(force) {
+  if (!force && _cmpData && Date.now() - _cmpData.t < 10 * 60000) return _cmpData.v;
+  try {
+    const v = await fetchTimeout(CMP_DATA_URL + '?_=' + Date.now(), 10000, { cache: 'no-store' }, r => (r.ok ? r.json() : null));
+    if (v && typeof v === 'object') { _cmpData = { t: Date.now(), v }; return v; }
+  } catch {}
+  return _cmpData ? _cmpData.v : null;
+}
+// Offre serveur → forme des offres CheapShark/Steam/Epic du client (prix déjà en EUROS).
+function cmpSrvDeal(x) {
+  return { dealID: null, gameID: x.gameID || null, title: x.title, thumb: x.image || null,
+    storeID: x.merchant, __store: x.merchant || 'Boutique', __eur: true, __url: x.link,
+    __until: x.end ? cmpUntil(new Date(x.end).toISOString()) : '',
+    salePrice: x.price, normalPrice: x.old != null ? x.old : x.price, savings: x.pct || 0, steamRatingPercent: x.rating || 0 };
+}
+// « 1 299,99 € » / « 19.99 » → nombre ; « gratuit » → 0 ; sinon null (miroir de `_num` du script).
+function cmpNum(s) {
+  if (s == null) return null;
+  if (typeof s === 'number') return isFinite(s) ? s : null;
+  const t = String(s).toLowerCase();
+  if (/gratuit|\bfree\b/.test(t)) return 0;
+  const m = t.match(/\d[\d\s  .]*(?:,\d{1,2})?/);
+  if (!m) return null;
+  let v = m[0].replace(/[\s  ]/g, '');
+  if (v.includes(',')) v = v.replace(/\./g, '').replace(',', '.');
+  else if ((v.match(/\./g) || []).length > 1 || /\.\d{3}$/.test(v)) v = v.replace(/\./g, '');
+  const n = parseFloat(v);
+  return isNaN(n) ? null : n;
+}
+// Repli client Dealabs (fichier serveur sans Dealabs) : flux RSS via relais CORS, lu au DOMParser.
+function cmpParseDealabs(xml) {
+  let doc;
+  try { doc = new DOMParser().parseFromString(xml, 'text/xml'); } catch { return []; }
+  const tx = (el, tag) => { const n = el.getElementsByTagName(tag)[0]; return n ? (n.textContent || '').trim() : ''; };
+  return [...doc.getElementsByTagName('item')].slice(0, 50).map(el => {
+    const title = tx(el, 'title'), link = tx(el, 'link');
+    const mer = el.getElementsByTagName('pepper:merchant')[0];
+    let price = mer ? cmpNum(mer.getAttribute('price')) : null;
+    if (price == null) {
+      const ps = title.replace(/au lieu de\s+\d[\d\s.,]*\s?€/ig, ' ').match(/\d[\d\s  .]*(?:,\d{1,2})?\s?€/g);
+      price = ps ? cmpNum(ps[ps.length - 1]) : (/\bgratuit/i.test(title) ? 0 : null);
+    }
+    const media = el.getElementsByTagName('media:content')[0];
+    const idm = link.match(/-(\d{4,})(?:[/?#]|$)/);
+    return { id: 'dl' + (idm ? idm[1] : link), title, link, price, old: null,
+      merchant: mer ? (mer.getAttribute('name') || '') : '', image: media ? (media.getAttribute('url') || '') : '',
+      date: Date.parse(tx(el, 'pubDate')) || null };
+  }).filter(x => x.title && /^https:\/\//.test(x.link));
+}
+async function cmpDealabsClient() {
+  const out = {};
+  for (const [k, u] of [['hot', 'https://www.dealabs.com/rss/hot'], ['new', 'https://www.dealabs.com/rss/new']]) {
+    const txt = await corsFetchText(u, t => /<item[\s>]/i.test(t));
+    const items = txt ? cmpParseDealabs(txt) : [];
+    if (items.length) out[k] = items;
   }
-  const eur = await cmpUsdToEur();
-  if (!eur) return 0;
-  let hit = {};
-  try { hit = JSON.parse(lsGet(CMP_TARGET_LS) || '{}') || {}; } catch {}
-  const next = {}, fresh = [];
-  for (const w of loadCmpWatch()) {
-    if (!w || w.target == null || w.lastPrice == null) continue;
-    const p = Math.round(w.lastPrice * eur * 100) / 100;
-    if (p > w.target) continue;
-    const k = String(w.gameID);
-    next[k] = hit[k] != null ? hit[k] : p;
-    if (hit[k] == null) fresh.push({ w, p });
-  }
-  lsSet(CMP_TARGET_LS, JSON.stringify(next));
-  if (!fresh.length) return 0;
-  const todos = loadTodos();
-  for (const { w, p } of fresh) {
-    todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), bucket:'today', fav:false, cmpKey: String(w.gameID),
-      text: `🛒 Bon Plan : ${w.title || 'jeu suivi'} à ${cmpFmtEur(p)} (ta cible : ${cmpFmtEur(w.target)}) — à acheter` });
-  }
-  saveTodos(todos);
-  const msg = fresh.map(({ w, p }) => `${w.title || 'Jeu'} : ${cmpFmtEur(p)} (cible ${cmpFmtEur(w.target)})`).join('\n');
-  const title = fresh.length === 1 ? '🛒 Bon Plan : prix cible atteint' : `🛒 Bon Plan : ${fresh.length} prix cibles atteints`;
-  if ('Notification' in window && Notification.permission === 'granted') notify(title, msg);
-  else setTimeout(() => { try { window.alert(title + '\n\n' + msg + '\n\nUne tâche a été ajoutée dans To do → Aujourd\'hui.'); } catch {} }, 1500);
-  return fresh.length;
+  return Object.keys(out).length ? out : null;
 }
 
-// ⭐ Ma liste — jeux suivis : meilleur prix actuel (refresh 30 min), prix cible optionnel
-function CompareWatch({ watch, update }) {
-  const [eur, setEur] = React.useState(null);
-  React.useEffect(() => { let a = true; cmpUsdToEur().then(r => { if (a) setEur(r); }); return () => { a = false; }; }, []);
-  // Refresh des prix au montage si le plus vieux check a > 30 min (1 requête groupée)
+// ── Rapprochement favori ↔ offre : TOUS les mots utiles de la recherche doivent figurer
+// dans le titre de l'offre (casse, accents et ponctuation ignorés).
+const CMP_STOP = new Set(['de', 'du', 'des', 'la', 'le', 'les', 'et', 'en', 'pour', 'avec', 'au', 'aux', 'un', 'une', 'sur', 'the', 'of', 'and', 'for', 'edition']);
+function cmpTokens(s) { return cmpTitleKey(s).split(' ').filter(w => w.length >= 2 && !CMP_STOP.has(w)); }
+function cmpMatch(q, title) {
+  const qt = cmpTokens(q);
+  if (!qt.length) return false;
+  const tt = new Set(cmpTokens(title));
+  return qt.every(w => tt.has(w));
+}
+// Toutes les offres CHIFFRÉES du flux serveur (euros), avec leur source.
+function cmpPool(data) {
+  if (!data) return [];
+  const dl = data.dealabs || {};
+  const tag = (arr, src) => (Array.isArray(arr) ? arr : []).map(x => ({ ...x, src }));
+  return [...tag(dl.hot, 'Dealabs'), ...tag(dl.new, 'Dealabs'), ...tag(data.denicheur, 'Le Dénicheur'),
+    ...tag(data.steam, 'Steam'), ...tag(data.epic, 'Epic'), ...tag(data.cheapshark, 'CheapShark'), ...tag(data.free, 'GamerPower')]
+    .filter(x => x && x.title && typeof x.price === 'number' && x.price >= 0);
+}
+const cmpAgo = ms => {
+  if (!ms) return '';
+  const m = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  if (m < 60) return `il y a ${m} min`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `il y a ${h} h`;
+  const d = Math.round(h / 24);
+  return d === 1 ? 'hier' : `il y a ${d} j`;
+};
+
+// ── 🔎 VÉRIFICATION DES FAVORIS (1×/jour à l'ouverture, ou 🔄 à la main) ─────────────
+// Candidats d'un favori : offres du flux serveur dont le titre contient tous ses mots, meilleur
+// prix CheapShark par gameID (jeux), et — pour un PRODUIT, si une clé IA est enregistrée — la
+// recherche web par IA (`cmpAiSearch`, au plus `CMP_FAV_AI_MAX` par passage, les moins récemment
+// vérifiés d'abord). Le moins cher l'emporte.
+// ⚠ Seules les offres NEUVES de l'IA comptent : une occasion moins chère n'est pas une baisse.
+// ⚠ Un mot-clé attrape aussi les accessoires (« iPhone 15 » ⇒ « Coque iPhone 15 ») : une offre
+// du flux à moins de 35 % du prix de référence du favori est écartée (`CMP_FAV_FLOOR`).
+// Alertes (pop-up dans l'app, `CmpAlertHost`) : prix ≤ cible (une fois par épisode : `hit`
+// retombe quand le prix repasse au-dessus) ou nouveau plus bas historique (`low`). Cible
+// atteinte ⇒ tâche To do « Aujourd'hui » (`cmpKey` = id du favori).
+// ⚠ `CMP_FAV_DAY_LS` n'est posé que si au moins une source a répondu : hors ligne, la
+// vérification est retentée au prochain lancement au lieu de sauter la journée.
+const CMP_FAV_DAY_LS = 'spotifyplus_cmp_fav_day';
+const CMP_FAV_AI_MAX = 6;
+const CMP_FAV_FLOOR  = 0.35;
+async function cmpCsBest(ids, rate) {
+  const out = {};
+  if (!ids.length) return out;
+  try {
+    const j = await fetchTimeout('https://www.cheapshark.com/api/1.0/games?ids=' + ids.slice(0, 25).map(encodeURIComponent).join(','),
+      12000, undefined, r => (r.ok ? r.json() : null));
+    if (!j) return out;
+    const stores = await cmpStores();
+    for (const id of ids) {
+      const g = j[id];
+      let best = null;
+      for (const d of (g && g.deals) || []) { const p = parseFloat(d.price); if (!isNaN(p) && (!best || p < best.p)) best = { p, d }; }
+      if (best) out[id] = { price: Math.round(best.p * rate * 100) / 100, store: stores[best.d.storeID] || 'Boutique PC',
+        url: cmpDealUrl(best.d.dealID), src: 'CheapShark', thumb: (g.info && g.info.thumb) || '' };
+    }
+  } catch {}
+  return out;
+}
+async function cmpFavProbe(f, pool, cs, useAi) {
+  const ref = f.low != null ? f.low : f.price != null ? f.price : f.target;
+  let cands = [];
+  for (const d of pool) if (cmpMatch(f.q, d.title)) cands.push({ price: d.price, store: d.merchant || d.src, url: d.link, src: d.src, thumb: d.image });
+  if (cands.length) {
+    const floor = (ref != null ? ref : Math.max(...cands.map(c => c.price))) * CMP_FAV_FLOOR;
+    cands = cands.filter(c => c.price >= floor || c.price === 0 && f.kind === 'game');
+  }
+  if (f.gameID && cs[f.gameID]) cands.push(cs[f.gameID]);
+  let ai = false;
+  if (useAi) {
+    try {
+      const r = await cmpAiSearch(f.q);
+      ai = true;
+      for (const o of r.offres) if (o.prix != null && o.prix > 0 && !/occas|recond/i.test(o.etat || '')) cands.push({ price: o.prix, store: o.marchand, url: o.url, src: 'IA' });
+    } catch {}
+  }
+  cands.sort((a, b) => a.price - b.price);
+  return { best: cands[0] || null, ai };
+}
+let _cmpFavRun = null;
+function cmpFavCheck(ids) {
+  if (_cmpFavRun) return _cmpFavRun;
+  _cmpFavRun = (async () => {
+    const all = loadCmpWatch();
+    const todo = ids ? all.filter(f => ids.includes(f.id)) : all;
+    if (!todo.length) return { n: 0, ok: false };
+    const [data, rate] = await Promise.all([cmpDealsData(true), cmpUsdToEur()]);
+    const pool = cmpPool(data);
+    const cs = await cmpCsBest([...new Set(todo.map(f => f.gameID).filter(Boolean))], rate || 0.92);
+    let ok = pool.length > 0 || Object.keys(cs).length > 0;
+    let aiLeft = aiAnyKey(false) ? (ids ? ids.length : CMP_FAV_AI_MAX) : 0;
+    const res = new Map();
+    for (const f of [...todo].sort((a, b) => (a.lastCheck || 0) - (b.lastCheck || 0))) {
+      const useAi = f.kind === 'product' && aiLeft > 0;
+      if (useAi) aiLeft--;
+      const p = await cmpFavProbe(f, pool, cs, useAi);
+      if (p.ai) ok = true;
+      res.set(f.id, p.best);
+    }
+    if (!ok) return { n: 0, ok: false };
+    const day = localDayStr(), alerts = [];
+    // ⚠ Liste RELUE avant d'écrire : un favori ajouté ou retiré pendant la recherche est respecté.
+    saveCmpWatch(loadCmpWatch().map(f => {
+      if (!res.has(f.id)) return f;
+      const b = res.get(f.id), g = { ...f, lastCheck: Date.now() };
+      if (!b) return g;
+      const p = Math.round(b.price * 100) / 100;
+      Object.assign(g, { price: p, store: b.store || '', url: safeHref(b.url) || '', src: b.src || '', low: f.low == null ? p : Math.min(f.low, p) });
+      if (!g.thumb && b.thumb) g.thumb = b.thumb;
+      g.hist = [...(f.hist || []).filter(h => h.d !== day), { d: day, p }].slice(-CMP_FAV_HIST);
+      const under = f.target != null && p <= f.target;
+      if (under && !f.hit) alerts.push({ kind: 'target', f: g, p, before: f.price });
+      else if (f.low != null && p < f.low - 0.009) alerts.push({ kind: 'low', f: g, p, before: f.low });
+      g.hit = under;
+      return g;
+    }));
+    if (!ids) lsSet(CMP_FAV_DAY_LS, day);
+    if (alerts.length) cmpAlertPush(alerts);
+    return { n: alerts.length, ok: true };
+  })().finally(() => { _cmpFavRun = null; });
+  return _cmpFavRun;
+}
+async function cmpFavDaily() {
+  if (lsGet(CMP_FAV_DAY_LS) === localDayStr() || !loadCmpWatch().length) return 0;
+  return (await cmpFavCheck(null)).n;
+}
+
+// ── 🔔 POP-UP DANS L'APP ──────────────────────────────────────────────────────────
+// File module-level : la vérification du jour tourne au démarrage, avant que l'utilisateur ait
+// ouvert Bon Plan. `CmpAlertHost` est monté par `Shell` (hors de MobileApp / WebApp) : aucun
+// changement d'onglet ou de mise en page ne le démonte.
+const _cmpPop = { list: [], subs: new Set() };
+function cmpAlertPush(alerts) {
+  _cmpPop.list = [..._cmpPop.list, ...alerts];
+  _cmpPop.subs.forEach(fn => { try { fn(); } catch {} });
+  const tg = alerts.filter(a => a.kind === 'target');
+  if (tg.length) {
+    const todos = loadTodos();
+    for (const a of tg) {
+      if (todos.some(t => t.cmpKey === a.f.id && !t.done)) continue;
+      todos.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2), bucket: 'today', fav: false, cmpKey: a.f.id,
+        text: `🛒 Bon Plan : ${a.f.title} à ${cmpFmtEur(a.p)} (ta cible : ${cmpFmtEur(a.f.target)}) — à acheter` });
+    }
+    saveTodos(todos);
+  }
+  if (document.hidden) notify('🛒 Bon Plan', alerts.map(a => `${a.f.title} : ${cmpFmtEur(a.p)}`).join('\n'));
+}
+function CmpAlertHost() {
+  const [, bump] = React.useState(0);
   React.useEffect(() => {
-    if (!watch.length) return;
-    const oldest = Math.min(...watch.map(w => w.lastCheck || 0));
-    if (Date.now() - oldest < 30 * 60000) return;
-    let alive = true;
-    cmpRefreshWatch(watch).then(next => { if (alive) update(next); });
-    return () => { alive = false; };
-  }, []);   // au montage uniquement (une modif de la liste ne re-fetch pas)
-  const setTarget = (gameID, v) => {
-    const t = parseFloat(String(v).replace(',', '.'));
-    update(watch.map(w => w.gameID === gameID ? { ...w, target: isNaN(t) || t <= 0 ? null : t } : w));
-  };
-  const px = usd => usd == null ? '—' : (eur ? cmpFmtEur(usd * eur) : '$' + usd.toFixed(2));
-  const eurPrice = w => (w.lastPrice != null && eur) ? w.lastPrice * eur : null;
-  if (!watch.length) return <div style={{ fontSize:11, color:C.dim }}>Aucun jeu suivi — clique sur ☆ dans les promos ou la recherche.</div>;
-  return (
-    <div>
-      {watch.map(w => {
-        const below = w.target != null && eurPrice(w) != null && eurPrice(w) <= w.target;
-        return (
-          <div key={w.gameID} style={{ display:'flex', gap:8, alignItems:'center', padding:'6px 0', borderBottom:`1px solid ${C.border}55` }}>
-            {w.thumb && <img src={w.thumb} alt="" loading="lazy" style={{ width:44, height:20, objectFit:'cover', borderRadius:4, flexShrink:0, background:'#111' }} />}
-            <div style={{ flex:1, minWidth:0 }}>
-              {w.dealID
-                ? <a href={cmpDealUrl(w.dealID)} target="_blank" rel="noopener noreferrer" style={{ fontSize:12, color:C.text, textDecoration:'none', display:'block', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{w.title}</a>
-                : <div style={{ fontSize:12, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{w.title}</div>}
-              <div style={{ fontSize:9, color: below ? '#45c552' : C.dim, display:'flex', alignItems:'center', gap:4 }}>
-                {below ? '✓ sous le prix cible !' : 'cible :'}
-                <input type="number" step="0.01" placeholder="— €" defaultValue={w.target != null ? w.target : ''}
-                  onBlur={e => setTarget(w.gameID, e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
-                  style={{ width:52, background:'#111', border:`1px solid ${C.border}`, borderRadius:4, padding:'1px 4px', fontSize:9, color:C.muted, outline:'none' }} />€
-              </div>
-            </div>
-            <span style={{ fontSize:11.5, color: below ? '#45c552' : COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace', flexShrink:0 }}>{px(w.lastPrice)}</span>
-            <button onClick={() => update(watch.filter(x => x.gameID !== w.gameID))} title="Ne plus suivre"
-              style={{ background:'none', border:'none', color:'#e05050', fontSize:14, lineHeight:1, padding:'0 2px', cursor:'pointer', flexShrink:0 }}>×</button>
+    const fn = () => bump(n => n + 1);
+    _cmpPop.subs.add(fn);
+    return () => { _cmpPop.subs.delete(fn); };
+  }, []);
+  const list = _cmpPop.list;
+  if (!list.length) return null;
+  const close = () => { _cmpPop.list = []; bump(n => n + 1); };
+  const open = () => { close(); try { lsSet(CMP_TAB_LS, 'favs'); iaNavigate('compare'); } catch {} };
+  return ReactDOM.createPortal(
+    <div onClick={close} style={{ position:'fixed', inset:0, zIndex:9000, background:'rgba(0,0,0,0.72)', display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-label="Alertes Bon Plan"
+        style={{ background:C.surface, border:`1px solid ${COMPARE_COLOR}66`, borderRadius:16, width:'min(420px, 100%)', maxHeight:'80vh', display:'flex', flexDirection:'column', boxShadow:'0 20px 60px rgba(0,0,0,0.6)' }}>
+        <div style={{ padding:'14px 16px 8px', display:'flex', alignItems:'center', gap:10 }}>
+          <div style={{ fontSize:26 }}>🛒</div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:14, fontWeight:800, color:C.text }}>{list.length === 1 ? 'Bon plan sur un favori' : `${list.length} bons plans sur tes favoris`}</div>
+            <div style={{ fontSize:10.5, color:C.dim }}>Vérification du jour</div>
           </div>
-        );
-      })}
-      <div style={{ fontSize:9, color:C.dim, marginTop:6 }}>
-        Meilleur prix PC actuel par jeu (rafraîchi à l'ouverture, max 1×/30 min) · fixe un prix cible pour voir ✓ quand c'est le moment d'acheter
+        </div>
+        <div style={{ overflowY:'auto', padding:'0 12px' }}>
+          {list.map((a, i) => (
+            <a key={a.f.id + i} href={safeHref(a.f.url) || undefined} target="_blank" rel="noopener noreferrer"
+              style={{ display:'flex', gap:10, alignItems:'center', padding:'9px 6px', borderTop: i ? `1px solid ${C.border}55` : 'none', textDecoration:'none' }}>
+              <div style={{ width:42, height:42, borderRadius:8, background:'#ffffff0d', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', overflow:'hidden' }}>
+                {a.f.thumb ? <img src={a.f.thumb} alt="" referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : <span style={{ fontSize:18 }}>{a.f.kind === 'game' ? '🎮' : '🛍️'}</span>}
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12.5, fontWeight:700, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{a.f.title}</div>
+                <div style={{ fontSize:10.5, color: a.kind === 'target' ? '#45c552' : '#f0a030' }}>
+                  {a.kind === 'target' ? `🎯 sous ta cible de ${cmpFmtEur(a.f.target)}` : `🔻 plus bas jamais vu (avant ${cmpFmtEur(a.before)})`}
+                </div>
+                {a.f.store ? <div style={{ fontSize:9.5, color:C.dim }}>{a.f.store}{a.f.src && a.f.src !== a.f.store ? ` · via ${a.f.src}` : ''}</div> : null}
+              </div>
+              <div style={{ fontSize:15, fontWeight:800, color:'#45c552', fontFamily:'DM Mono,monospace', flexShrink:0 }}>{cmpFmtEur(a.p)}</div>
+            </a>
+          ))}
+        </div>
+        <div style={{ display:'flex', gap:8, padding:'12px 16px 14px' }}>
+          <button onClick={open} style={{ flex:1, background:`${COMPARE_COLOR}22`, border:`1px solid ${COMPARE_COLOR}77`, color:COMPARE_COLOR, borderRadius:10, padding:'9px 12px', fontSize:12, fontWeight:800, cursor:'pointer', fontFamily:'inherit' }}>⭐ Voir mes favoris</button>
+          <button onClick={close} style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:10, padding:'9px 16px', fontSize:12, fontWeight:700, cursor:'pointer', fontFamily:'inherit' }}>OK</button>
+        </div>
+      </div>
+    </div>, document.body);
+}
+
+// ── Pièces d'interface communes ─────────────────────────────────────────────────────
+const CMP_GREEN = '#45c552';
+function CmpChip({ on, onClick, children, color }) {
+  const c = color || COMPARE_COLOR;
+  return (
+    <button onClick={onClick} style={{ background: on ? `${c}22` : 'none', border:`1px solid ${on ? c + '77' : C.border}`, color: on ? c : C.muted,
+      borderRadius:99, padding:'4px 11px', fontSize:10.5, fontWeight: on ? 800 : 600, cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap', flexShrink:0 }}>{children}</button>
+  );
+}
+function CmpFavBtn({ on, onClick, title }) {
+  return (
+    <button onClick={e => { e.preventDefault(); e.stopPropagation(); onClick(); }} title={title || (on ? 'Retirer des favoris' : 'Ajouter aux favoris')} aria-label={on ? 'Retirer des favoris' : 'Ajouter aux favoris'}
+      style={{ background: on ? '#f5c51818' : 'none', border:`1px solid ${on ? '#f5c51866' : C.border}`, color: on ? '#f5c518' : C.dim, borderRadius:8,
+        width:30, height:30, fontSize:14, lineHeight:1, cursor:'pointer', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>{on ? '★' : '☆'}</button>
+  );
+}
+// Carte d'une offre (Dealabs, Le Dénicheur, gratuits…) : visuel, titre, marchand, prix.
+function CmpDealCard({ d, fav, onFav }) {
+  const free = d.price === 0;
+  const pct = d.pct || (d.old && d.price != null && d.old > d.price ? Math.round((1 - d.price / d.old) * 100) : 0);
+  const meta = [d.merchant, d.src && d.src !== d.merchant ? d.src : '', d.temp ? `🔥 ${Math.round(d.temp)}°` : '', d.end ? `jusqu'au ${cmpUntil(new Date(d.end).toISOString())}` : cmpAgo(d.date)].filter(Boolean).join(' · ');
+  return (
+    <a href={safeHref(d.link) || undefined} target="_blank" rel="noopener noreferrer"
+      style={{ display:'flex', gap:10, alignItems:'center', padding:9, borderRadius:12, background:C.surfaceHigh, border:`1px solid ${C.border}`, textDecoration:'none', minWidth:0 }}>
+      <div style={{ width:58, height:58, borderRadius:9, background:'#ffffff0d', flexShrink:0, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
+        {d.image ? <img src={d.image} alt="" loading="lazy" referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : <span style={{ fontSize:22 }}>🛍️</span>}
+      </div>
+      <div style={{ flex:1, minWidth:0 }}>
+        <div style={{ fontSize:12, fontWeight:600, color:C.text, lineHeight:1.3, display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' }}>{d.title}</div>
+        {meta && <div style={{ fontSize:9.5, color:C.dim, marginTop:3, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{meta}</div>}
+      </div>
+      <div style={{ textAlign:'right', flexShrink:0, display:'flex', flexDirection:'column', alignItems:'flex-end', gap:2 }}>
+        {d.price == null ? <span style={{ fontSize:11, color:C.dim }}>voir ↗</span>
+          : <span style={{ fontSize:14, fontWeight:800, color: free ? '#f0a030' : CMP_GREEN, fontFamily:'DM Mono,monospace' }}>{free ? 'Gratuit' : cmpFmtEur(d.price)}</span>}
+        {d.old != null && d.price != null && d.old > d.price && <span style={{ fontSize:9.5, color:C.dim, textDecoration:'line-through', fontFamily:'DM Mono,monospace' }}>{cmpFmtEur(d.old)}</span>}
+        {pct > 0 && !free && <span style={{ fontSize:9, fontWeight:800, color:'#0a0a0a', background:CMP_GREEN, borderRadius:4, padding:'0 4px', fontFamily:'DM Mono,monospace' }}>−{pct}%</span>}
+      </div>
+      {onFav && <CmpFavBtn on={fav} onClick={onFav} />}
+    </a>
+  );
+}
+function CmpEmpty({ children }) {
+  return <div style={{ fontSize:11, color:C.dim, lineHeight:1.55, padding:'10px 12px', borderRadius:10, border:`1px dashed ${C.border}`, textAlign:'center' }}>{children}</div>;
+}
+
+// ── 🔥 BONS PLANS : Dealabs (hot / nouveaux), Le Dénicheur, gratuits ─────────────────
+const CMP_FEEDS = [['hot', '🔥 Dealabs hot'], ['new', '🆕 Nouveaux'], ['den', '📉 Le Dénicheur'], ['free', '🎁 Gratuits']];
+function CmpDealsFeed({ favs }) {
+  const [data, setData] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [feed, setFeed] = React.useState('hot');
+  const [filter, setFilter] = React.useState('');
+  const [max, setMax] = React.useState('');
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      let d = await cmpDealsData();
+      const dl = d && d.dealabs;
+      if (!dl || !((dl.hot || []).length || (dl.new || []).length)) {
+        const cl = await cmpDealabsClient();
+        if (cl) d = { ...(d || {}), dealabs: cl, __client: true };
+      }
+      if (alive) { setData(d || {}); setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, []);
+  const dl = (data && data.dealabs) || {};
+  const lists = React.useMemo(() => {
+    const tag = (arr, src) => (Array.isArray(arr) ? arr : []).map(x => ({ ...x, src }));
+    const hot = tag(dl.hot, 'Dealabs'), nw = tag(dl.new, 'Dealabs');
+    const seen = new Set(), free = [];
+    for (const x of [...hot, ...nw, ...tag(data && data.epic, 'Epic').filter(x => x.price === 0), ...tag(data && data.free, 'GamerPower')]) {
+      if (x.price !== 0) continue;
+      const k = cmpTitleKey(x.title);
+      if (seen.has(k)) continue;
+      seen.add(k); free.push(x);
+    }
+    return { hot, new: nw, den: tag(data && data.denicheur, 'Le Dénicheur'), free };
+  }, [data]);
+  const maxN = cmpNum(max);
+  const items = (lists[feed] || []).filter(d => (!filter.trim() || cmpMatch(filter, d.title)) && (maxN == null || d.price == null || d.price <= maxN));
+  const isFav = d => !!cmpFavFind(favs, { kind:'product', q:d.title });
+  const inp = { background:C.surface, border:`1px solid ${C.border}`, borderRadius:9, padding:'7px 10px', color:C.text, fontSize:11.5, outline:'none', fontFamily:'inherit', minWidth:0 };
+  const upd = data && Date.parse(data.updated_at || '');
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      <div style={{ display:'flex', gap:6, overflowX:'auto', scrollbarWidth:'none', paddingBottom:2 }}>
+        {CMP_FEEDS.map(([k, l]) => <CmpChip key={k} on={feed === k} onClick={() => setFeed(k)}>{l}{lists[k] && lists[k].length ? ` · ${lists[k].length}` : ''}</CmpChip>)}
+      </div>
+      <div style={{ display:'flex', gap:6 }}>
+        <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filtrer (ex. ssd, lego, airpods)…" style={{ ...inp, flex:1 }} />
+        <input value={max} onChange={e => setMax(e.target.value)} placeholder="Max €" inputMode="decimal" style={{ ...inp, width:72 }} />
+      </div>
+      {loading && <CmpEmpty>⏳ Chargement des bons plans…</CmpEmpty>}
+      {!loading && !items.length && (
+        <CmpEmpty>
+          {feed === 'den'
+            ? <>Le Dénicheur n'a rien renvoyé : il n'a pas d'API publique, sa page de bons plans est lue côté serveur toutes les 2 h et peut changer de forme. <a href="https://ledenicheur.fr/deals" target="_blank" rel="noopener noreferrer" style={{ color:COMPARE_COLOR }}>Ouvrir ses bons plans ↗</a></>
+            : (lists[feed] || []).length ? 'Aucun bon plan ne passe ce filtre.' : 'Aucun bon plan reçu pour l\'instant — le flux se met à jour toutes les 2 h.'}
+        </CmpEmpty>
+      )}
+      <DeskGrid min={340}>
+        {items.map(d => <CmpDealCard key={d.id || d.link} d={d} fav={isFav(d)} onFav={() => cmpFavToggle({ kind:'product', q:d.title, title:d.title, thumb:d.image, price:d.price, store:d.merchant, url:d.link })} />)}
+      </DeskGrid>
+      <div style={{ fontSize:9, color:C.dim, lineHeight:1.5 }}>
+        {upd ? `Flux du ${new Date(upd).toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}` : ''}
+        {data && data.__client ? ' · Dealabs lu en direct (relais public)' : ''} · clic = ouvrir l'offre · ☆ = suivre le prix dans tes favoris ·{' '}
+        <a href="https://www.dealabs.com/" target="_blank" rel="noopener noreferrer" style={{ color:COMPARE_COLOR, textDecoration:'none' }}>Dealabs ↗</a>{' · '}
+        <a href="https://ledenicheur.fr/deals" target="_blank" rel="noopener noreferrer" style={{ color:COMPARE_COLOR, textDecoration:'none' }}>Le Dénicheur ↗</a>
       </div>
     </div>
   );
 }
 
+// ── 🔎 RECHERCHE D'UN PRODUIT ─────────────────────────────────────────────────────
+// Offres du flux qui contiennent tous les mots + recherche web par IA (si clé) + liens directs
+// vers les comparateurs. ⚠ Une réponse d'IA arrivée après une nouvelle recherche est jetée (`seq`).
+const CMP_PRODUCT_SITES = [
+  ['Le Dénicheur',    q => 'https://ledenicheur.fr/search?search=' + encodeURIComponent(q)],
+  ['Dealabs',         q => 'https://www.dealabs.com/search?q=' + encodeURIComponent(q)],
+  ['Idealo',          q => 'https://www.idealo.fr/prechcat.html?q=' + encodeURIComponent(q)],
+  ['Amazon',          q => 'https://www.amazon.fr/s?k=' + encodeURIComponent(q)],
+  ['Google Shopping', q => 'https://www.google.com/search?tbm=shop&q=' + encodeURIComponent(q)],
+  ['Rakuten',         q => 'https://fr.shopping.rakuten.com/search/' + encodeURIComponent(q)],
+  ['Back Market',     q => 'https://www.backmarket.fr/fr-fr/search?q=' + encodeURIComponent(q)],
+  ['Leboncoin',       q => 'https://www.leboncoin.fr/recherche?text=' + encodeURIComponent(q)],
+];
+function CmpSiteLinks({ q, sites }) {
+  return (
+    <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+      {sites.map(([name, fn]) => (
+        <a key={name} href={fn(q)} target="_blank" rel="noopener noreferrer"
+          style={{ fontSize:10, fontWeight:600, color:C.muted, textDecoration:'none', border:`1px solid ${C.border}`, borderRadius:7, padding:'3px 8px', whiteSpace:'nowrap' }}>{name} ↗</a>
+      ))}
+    </div>
+  );
+}
+// Barre « ⭐ Suivre » d'une recherche : prix cible optionnel, posé à l'ajout.
+function CmpFollowBar({ q, kind, favs, best }) {
+  const have = cmpFavFind(favs, { kind, q });
+  const [target, setTarget] = React.useState('');
+  const add = () => {
+    if (have) { saveCmpWatch(loadCmpWatch().filter(f => f.id !== have.id)); return; }
+    const t = cmpNum(target);
+    saveCmpWatch([...loadCmpWatch(), cmpFavNew({ kind, q, title:q, target: t && t > 0 ? t : null, price: best && best.price, store: best && best.store, url: best && best.url })]);
+  };
+  return (
+    <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap', padding:'8px 10px', borderRadius:10, background:'#f5c5180c', border:'1px solid #f5c51833' }}>
+      <span style={{ fontSize:11, color:C.text, flex:'1 1 160px', minWidth:0 }}>
+        {have ? <>★ <b>Suivi</b> — vérifié chaque jour à l'ouverture</> : <>Suivre <b>« {q} »</b> : alerte si le prix baisse</>}
+      </span>
+      {!have && <input value={target} onChange={e => setTarget(e.target.value)} placeholder="Cible €" inputMode="decimal"
+        style={{ width:78, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:'6px 8px', color:C.text, fontSize:11, outline:'none', fontFamily:'inherit' }} />}
+      <button onClick={add} style={{ background: have ? 'none' : '#f5c51822', border:`1px solid ${have ? C.border : '#f5c51877'}`, color: have ? C.muted : '#f5c518', borderRadius:8, padding:'6px 12px', fontSize:11, fontWeight:800, cursor:'pointer', fontFamily:'inherit' }}>
+        {have ? 'Ne plus suivre' : '⭐ Suivre'}
+      </button>
+    </div>
+  );
+}
+function CmpProductSearch({ q, nonce, favs }) {
+  const [data, setData] = React.useState(null);
+  const [ai, setAi] = React.useState(null);
+  const [aiErr, setAiErr] = React.useState('');
+  const [aiLoading, setAiLoading] = React.useState(false);
+  const seq = React.useRef(0);
+  const hasKey = aiAnyKey(false);
+  React.useEffect(() => { let a = true; cmpDealsData().then(d => { if (a) setData(d || {}); }); return () => { a = false; }; }, []);
+  const runAi = async () => {
+    const my = ++seq.current;
+    setAi(null); setAiErr(''); setAiLoading(true);
+    try { const r = await cmpAiSearch(q); if (my === seq.current) setAi(r); }
+    catch (e) { if (my === seq.current) setAiErr(String(e.message) === 'NO_KEY' ? 'Aucune clé IA enregistrée (module API).' : (e.message || 'Erreur IA.')); }
+    if (my === seq.current) setAiLoading(false);
+  };
+  React.useEffect(() => { seq.current++; setAi(null); setAiErr(''); setAiLoading(false); if (hasKey) runAi(); }, [q, nonce]);
+  const matches = React.useMemo(() => cmpPool(data).filter(d => cmpMatch(q, d.title)).sort((a, b) => a.price - b.price).slice(0, 12), [data, q]);
+  const offers = ai ? ai.offres.filter(o => o.prix != null) : [];
+  const best = [...matches.map(d => ({ price:d.price, store:d.merchant || d.src, url:d.link })),
+    ...offers.filter(o => !/occas|recond/i.test(o.etat || '')).map(o => ({ price:o.prix, store:o.marchand, url:o.url }))].sort((a, b) => a.price - b.price)[0] || null;
+  const head = { fontSize:9.5, fontWeight:800, letterSpacing:'0.07em', color:C.dim, margin:'2px 0 0' };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      {best && (
+        <div style={{ display:'flex', alignItems:'baseline', gap:8, flexWrap:'wrap' }}>
+          <span style={{ fontSize:11, color:C.muted }}>Meilleur prix trouvé</span>
+          <span style={{ fontSize:20, fontWeight:900, color:CMP_GREEN, fontFamily:'DM Mono,monospace' }}>{cmpFmtEur(best.price)}</span>
+          <span style={{ fontSize:11, color:C.dim }}>{best.store}</span>
+        </div>
+      )}
+      <CmpFollowBar q={q} kind="product" favs={favs} best={best} />
+      <div style={head}>DANS LES BONS PLANS DU MOMENT</div>
+      {matches.length
+        ? <DeskGrid min={340}>{matches.map(d => <CmpDealCard key={d.id || d.link} d={d} />)}</DeskGrid>
+        : <CmpEmpty>Aucun bon plan Dealabs / Le Dénicheur en cours ne contient « {q} ».</CmpEmpty>}
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <div style={{ ...head, flex:1 }}>PRIX SUR LE WEB {ai && !ai.grounded ? '· sans recherche web' : '· IA'}</div>
+        {hasKey && !aiLoading && <button onClick={runAi} style={{ background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:7, padding:'3px 9px', fontSize:10, cursor:'pointer', fontFamily:'inherit' }}>↻ Relancer</button>}
+      </div>
+      {!hasKey && <CmpEmpty>Ajoute une clé IA (module API) pour comparer les prix de tous les marchands. En attendant, les liens ci-dessous ouvrent chaque comparateur.</CmpEmpty>}
+      {aiLoading && <CmpEmpty>⏳ L'IA parcourt Amazon, Fnac, Darty, Cdiscount, Le Dénicheur, Dealabs…</CmpEmpty>}
+      {aiErr && !aiLoading && <div style={{ fontSize:11, color:'#e05050' }}>{aiErr}</div>}
+      {ai && !aiLoading && (offers.length ? (
+        <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+          {offers.map((o, i) => {
+            const url = safeHref(o.url);
+            const inner = (<>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, color:C.text, fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{o.marchand}{o.etat ? <span style={{ color:C.dim, fontWeight:400, fontSize:10 }}> · {o.etat}</span> : null}</div>
+                {o.commentaire ? <div style={{ fontSize:9.5, color:C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{o.commentaire}</div> : null}
+              </div>
+              {o.remise > 0 && <span style={{ fontSize:9, fontWeight:800, color:'#0a0a0a', background:CMP_GREEN, borderRadius:4, padding:'0 4px', fontFamily:'DM Mono,monospace' }}>−{o.remise}%</span>}
+              <div style={{ textAlign:'right', flexShrink:0 }}>
+                {o.barre != null && <div style={{ fontSize:9.5, color:C.dim, textDecoration:'line-through', fontFamily:'DM Mono,monospace' }}>{cmpFmtEur(o.barre)}</div>}
+                <div style={{ fontSize:13, fontWeight:800, color: i === 0 ? CMP_GREEN : COMPARE_COLOR, fontFamily:'DM Mono,monospace' }}>{cmpFmtEur(o.prix)}</div>
+              </div>
+            </>);
+            const st = { display:'flex', gap:10, alignItems:'center', padding:'8px 10px', borderRadius:10, background:C.surfaceHigh, border:`1px solid ${C.border}`, textDecoration:'none' };
+            return url ? <a key={i} href={url} target="_blank" rel="noopener noreferrer" style={st}>{inner}</a> : <div key={i} style={st}>{inner}</div>;
+          })}
+          {ai.verdict ? <div style={{ fontSize:11, color:C.muted, lineHeight:1.5 }}>💡 {ai.verdict}{ai.ref != null ? ` (prix habituel ≈ ${cmpFmtEur(ai.ref)})` : ''}</div> : null}
+          <div style={{ fontSize:9, color:C.dim }}>⚠ Une IA peut citer un prix périmé : le lien de chaque offre fait foi.</div>
+        </div>
+      ) : <CmpEmpty>L'IA n'a trouvé aucune offre fiable pour « {q} ».</CmpEmpty>)}
+      <div style={head}>CHERCHER DIRECTEMENT SUR</div>
+      <CmpSiteLinks q={q} sites={CMP_PRODUCT_SITES} />
+    </div>
+  );
+}
+
+// ── ⭐ LISTE DES FAVORIS ───────────────────────────────────────────────────────────
+// Courbe des relevés quotidiens (`hist`) : simple polyligne, sans axe.
+function CmpSpark({ hist }) {
+  if (!hist || hist.length < 2) return null;
+  const ps = hist.map(h => h.p), lo = Math.min(...ps), hi = Math.max(...ps), W = 70, H = 20;
+  const pts = ps.map((p, i) => `${(i / (ps.length - 1)) * W},${hi === lo ? H / 2 : H - 2 - ((p - lo) / (hi - lo)) * (H - 4)}`).join(' ');
+  return <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ flexShrink:0 }} aria-hidden="true"><polyline points={pts} fill="none" stroke={COMPARE_COLOR} strokeWidth="1.5" strokeLinejoin="round" /></svg>;
+}
+function CmpFavList({ favs, onSearch }) {
+  const [busy, setBusy] = React.useState(null);
+  const [msg, setMsg] = React.useState('');
+  const check = async id => {
+    if (busy) return;
+    setBusy(id || 'all'); setMsg('');
+    const r = await cmpFavCheck(id ? [id] : null);
+    setBusy(null);
+    setMsg(!r.ok ? 'Aucune source n\'a répondu — réessaie plus tard.' : r.n ? `${r.n} alerte(s) — voir la pop-up.` : 'Prix relevés — rien de nouveau.');
+  };
+  const patch = (id, ch) => saveCmpWatch(loadCmpWatch().map(f => f.id === id ? { ...f, ...ch } : f));
+  const del = f => { if (window.confirm(`Retirer « ${f.title} » des favoris ? Son historique de prix sera perdu.`)) saveCmpWatch(loadCmpWatch().filter(x => x.id !== f.id)); };
+  const setTarget = (f, v) => { const t = cmpNum(v); const target = t && t > 0 ? t : null; if (target !== f.target) patch(f.id, { target, hit: false }); };
+  const day = lsGet(CMP_FAV_DAY_LS);
+  const btn = { background:'none', border:`1px solid ${C.border}`, color:C.muted, borderRadius:8, padding:'5px 9px', fontSize:11, cursor:'pointer', fontFamily:'inherit', flexShrink:0 };
+  const sorted = [...favs].sort((a, b) => (b.hit - a.hit) || ((b.addedAt || 0) - (a.addedAt || 0)));
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+        <div style={{ flex:'1 1 200px', fontSize:10.5, color:C.dim, lineHeight:1.45 }}>
+          Recherche relancée <b style={{ color:C.muted }}>1×/jour à l'ouverture</b> · dernière : {day === localDayStr() ? "aujourd'hui" : day ? new Date(day + 'T12:00:00').toLocaleDateString('fr-FR') : 'jamais'}
+        </div>
+        <button onClick={() => check(null)} disabled={!!busy || !favs.length} style={{ ...btn, color:COMPARE_COLOR, borderColor:`${COMPARE_COLOR}66`, opacity: busy || !favs.length ? 0.5 : 1 }}>{busy === 'all' ? '⏳ Vérification…' : '🔄 Tout vérifier'}</button>
+      </div>
+      {msg && <div style={{ fontSize:10.5, color:C.muted }}>{msg}</div>}
+      {!favs.length && <CmpEmpty>Aucun favori. Cherche un produit ou un jeu en haut, ou touche ☆ sur un bon plan : il sera vérifié chaque jour, avec une alerte si son prix baisse ou passe sous ta cible.</CmpEmpty>}
+      <DeskGrid min={360}>
+        {sorted.map(f => {
+          const under = f.target != null && f.price != null && f.price <= f.target;
+          const url = safeHref(f.url);
+          return (
+            <div key={f.id} style={{ padding:10, borderRadius:12, background:C.surfaceHigh, border:`1px solid ${under ? CMP_GREEN + '77' : C.border}`, display:'flex', flexDirection:'column', gap:8 }}>
+              <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+                <div style={{ width:46, height:46, borderRadius:9, background:'#ffffff0d', flexShrink:0, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center' }}>
+                  {f.thumb ? <img src={f.thumb} alt="" loading="lazy" referrerPolicy="no-referrer" style={{ width:'100%', height:'100%', objectFit:'cover' }} /> : <span style={{ fontSize:20 }}>{f.kind === 'game' ? '🎮' : '🛍️'}</span>}
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontSize:12.5, fontWeight:700, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{f.title}</div>
+                  <div style={{ fontSize:9.5, color:C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                    {f.kind === 'game' ? '🎮 Jeu' : '🛍️ Produit'}{f.lastCheck ? ` · vérifié ${cmpAgo(f.lastCheck)}` : ' · pas encore vérifié'}
+                  </div>
+                </div>
+                <div style={{ textAlign:'right', flexShrink:0 }}>
+                  <div style={{ fontSize:16, fontWeight:900, color: under ? CMP_GREEN : f.price != null ? C.text : C.dim, fontFamily:'DM Mono,monospace' }}>{f.price != null ? (f.price === 0 ? 'Gratuit' : cmpFmtEur(f.price)) : '—'}</div>
+                  {f.store ? (url
+                    ? <a href={url} target="_blank" rel="noopener noreferrer" style={{ fontSize:9.5, color:COMPARE_COLOR, textDecoration:'none' }}>{f.store} ↗</a>
+                    : <div style={{ fontSize:9.5, color:C.dim }}>{f.store}</div>) : null}
+                </div>
+              </div>
+              <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+                <label style={{ display:'flex', alignItems:'center', gap:4, fontSize:10.5, color: under ? CMP_GREEN : C.muted }}>
+                  🎯
+                  <input key={f.id + ':' + f.target} defaultValue={f.target != null ? String(f.target).replace('.', ',') : ''} placeholder="cible" inputMode="decimal"
+                    onBlur={e => setTarget(f, e.target.value)} onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
+                    style={{ width:64, background:C.surface, border:`1px solid ${under ? CMP_GREEN + '77' : C.border}`, borderRadius:7, padding:'4px 6px', color:C.text, fontSize:11, outline:'none', fontFamily:'DM Mono,monospace' }} />€
+                </label>
+                {f.low != null && <span style={{ fontSize:10, color:C.dim }}>plus bas <b style={{ color:C.muted, fontFamily:'DM Mono,monospace' }}>{cmpFmtEur(f.low)}</b></span>}
+                <CmpSpark hist={f.hist} />
+                <div style={{ flex:1 }} />
+                <button onClick={() => check(f.id)} disabled={!!busy} title="Vérifier ce favori maintenant" style={{ ...btn, opacity: busy ? 0.5 : 1 }}>{busy === f.id ? '⏳' : '🔄'}</button>
+                <button onClick={() => onSearch(f.q, f.kind)} title="Refaire la recherche" style={btn}>🔎</button>
+                <button onClick={() => del(f)} title="Retirer des favoris" style={{ ...btn, color:'#e05050' }}>✕</button>
+              </div>
+            </div>
+          );
+        })}
+      </DeskGrid>
+      {favs.length > 0 && (
+        <div style={{ fontSize:9, color:C.dim, lineHeight:1.5 }}>
+          Sources : bons plans Dealabs / Le Dénicheur / boutiques de jeux du moment (titre contenant tous les mots), CheapShark pour les jeux, et pour les produits une recherche web par IA
+          ({CMP_FAV_AI_MAX} au plus par jour, si une clé est enregistrée). Pop-up quand le prix passe sous ta cible 🎯 ou sous son plus bas connu.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── 🎁 JEUX OFFERTS : Epic (jeu de la semaine) + GamerPower (toutes boutiques) ───────
+function CmpFreeGames() {
+  const [list, setList] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      const d = await cmpDealsData();
+      let epic = (d && d.epic) || null;
+      if (!epic) epic = (await cmpEpicDeals()).map(x => ({ title:x.title, link:x.__url, price:x.salePrice, old:x.normalPrice, merchant:'Epic Games', image:x.thumb }));
+      const seen = new Set(), out = [];
+      for (const x of [...epic.filter(x => x.price === 0).map(x => ({ ...x, src:'Epic' })), ...((d && d.free) || []).map(x => ({ ...x, src:'GamerPower' }))]) {
+        const k = cmpTitleKey(x.title);
+        if (!k || seen.has(k)) continue;
+        seen.add(k); out.push(x);
+      }
+      if (alive) setList(out);
+    })();
+    return () => { alive = false; };
+  }, []);
+  if (list === null) return <CmpEmpty>⏳ Chargement des jeux offerts…</CmpEmpty>;
+  if (!list.length) return <CmpEmpty>Aucun jeu offert trouvé pour l'instant.</CmpEmpty>;
+  return <DeskGrid min={320}>{list.slice(0, 24).map(d => <CmpDealCard key={d.id || d.link || d.title} d={d} />)}</DeskGrid>;
+}
+
+// ── 💡 ASTUCES : outils gratuits qui complètent le module ─────────────────────────
+const CMP_TIPS = [
+  ['📈', 'Keepa', 'Historique des prix Amazon : vérifie qu\'une « promo » n\'est pas un prix gonflé avant.', 'https://keepa.com/#!'],
+  ['🏷️', 'Codes promo Dealabs', 'Codes vérifiés par la communauté, à tenter au panier.', 'https://www.dealabs.com/codes-promo'],
+  ['💸', 'iGraal', 'Cashback : un pourcentage de l\'achat remboursé en passant par leur lien.', 'https://fr.igraal.com/'],
+  ['♻️', 'Back Market', 'Reconditionné garanti : souvent −30 % sur la high-tech.', 'https://www.backmarket.fr/'],
+  ['🎮', 'IsThereAnyDeal', 'Historique des prix d\'un jeu PC, toutes boutiques : le plus bas jamais vu.', 'https://isthereanydeal.com/'],
+  ['🎁', 'Prime Gaming', 'Jeux PC offerts chaque mois avec Amazon Prime.', 'https://gaming.amazon.com/home'],
+  ['🔔', 'Alertes Dealabs', 'Alerte par mot-clé côté Dealabs (compte requis), en plus de tes favoris.', 'https://www.dealabs.com/alertes'],
+];
+function CmpTips() {
+  return (
+    <DeskGrid min={300}>
+      {CMP_TIPS.map(([ic, name, txt, url]) => (
+        <a key={name} href={url} target="_blank" rel="noopener noreferrer"
+          style={{ display:'flex', gap:10, alignItems:'flex-start', padding:'9px 10px', borderRadius:10, background:C.surfaceHigh, border:`1px solid ${C.border}`, textDecoration:'none' }}>
+          <span style={{ fontSize:18, lineHeight:1.1 }}>{ic}</span>
+          <span style={{ minWidth:0 }}>
+            <span style={{ display:'block', fontSize:12, fontWeight:700, color:C.text }}>{name} <span style={{ color:COMPARE_COLOR, fontSize:10 }}>↗</span></span>
+            <span style={{ display:'block', fontSize:10.5, color:C.dim, lineHeight:1.45 }}>{txt}</span>
+          </span>
+        </a>
+      ))}
+    </DeskGrid>
+  );
+}
+
 // 🎮 Comparateur jeux vidéo (CheapShark) — recherche → jeu → offres par boutique
-function CompareGames({ isWatched, toggleWatch }) {
+// ⚠ 13.21.229 — piloté par la barre de recherche de ComparePanel : `initQ` + `nonce` lancent
+// la recherche (même requête relancée = nouveau `nonce`), et le champ propre n'est plus rendu.
+function CompareGames({ isWatched, toggleWatch, initQ, nonce }) {
   const [q, setQ]             = React.useState('');
   const [games, setGames]     = React.useState(null);   // résultats de recherche
   const [sel, setSel]         = React.useState(null);   // gameID sélectionné
@@ -40525,8 +41099,8 @@ function CompareGames({ isWatched, toggleWatch }) {
   const [steam, setSteam]     = React.useState(null);   // repli Steam (prix réel) si CheapShark vide
   const [steamLoading, setSteamLoading] = React.useState(false);
 
-  const search = async () => {
-    const query = q.trim();
+  const search = async (qq) => {
+    const query = String(qq == null ? q : qq).trim();
     if (!query) return;
     setLoading(true); setErr(''); setSel(null); setDeals(null); setSteam(null);
     const res = await cmpGameSearch(query);
@@ -40541,6 +41115,7 @@ function CompareGames({ isWatched, toggleWatch }) {
       setSteamLoading(false);
     }
   };
+  React.useEffect(() => { if (initQ) { setQ(initQ); search(initQ); } }, [initQ, nonce]);
   const pick = async (g) => {
     setSel(g.gameID); setDeals(null); setLoading(true);
     const [d, st, rate] = await Promise.all([cmpGameDeals(g.gameID), cmpStores(), cmpUsdToEur()]);
@@ -40554,13 +41129,13 @@ function CompareGames({ isWatched, toggleWatch }) {
   const line = { display:'flex', gap:8, alignItems:'baseline', padding:'6px 0', borderBottom:`1px solid ${C.border}55` };
   return (
     <div>
-      <div style={{ display:'flex', gap:6, marginBottom:8 }}>
+      {!initQ && <div style={{ display:'flex', gap:6, marginBottom:8 }}>
         <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') search(); }}
           placeholder="Nom du jeu (ex. Elden Ring)…"
           style={{ flex:1, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:'7px 10px', color:C.text, fontSize:12, outline:'none' }} />
-        <button onClick={search} disabled={loading}
+        <button onClick={() => search()} disabled={loading}
           style={{ background:`${COMPARE_COLOR}22`, border:`1px solid ${COMPARE_COLOR}66`, color:COMPARE_COLOR, borderRadius:8, padding:'7px 12px', fontSize:12, cursor:'pointer', fontWeight:600 }}>🔍</button>
-      </div>
+      </div>}
       {err && <div style={{ fontSize:11, color:'#e05050', padding:'2px 0 6px' }}>{err}</div>}
       {loading && <div style={{ fontSize:11, color:C.dim, padding:'2px 0 6px' }}>Chargement…</div>}
       {games && !games.length && !loading && <div style={{ fontSize:11, color:C.dim }}>Aucun jeu trouvé sur CheapShark{steamLoading ? ' — recherche du prix sur Steam…' : (steam === null ? ' — Steam injoignable (réseau), essaie les boutiques ci-dessous.' : (steam && steam.length ? ' — prix trouvés sur Steam :' : ' — essaie les boutiques ci-dessous.'))}</div>}
@@ -40584,7 +41159,7 @@ function CompareGames({ isWatched, toggleWatch }) {
             {g.cheapest != null && <div style={{ fontSize:11, color:COMPARE_COLOR, fontFamily:'DM Mono,monospace', whiteSpace:'nowrap' }}>
               dès {eur ? cmpFmtEur(+g.cheapest * eur) : usd(g.cheapest)}
             </div>}
-            <CmpStar watched={isWatched(g.gameID)} onClick={() => toggleWatch({ gameID: g.gameID, title: g.external, thumb: g.thumb, price: g.cheapest })} />
+            <CmpStar watched={isWatched({ gameID: g.gameID, title: g.external })} onClick={() => toggleWatch({ gameID: g.gameID, title: g.external, thumb: g.thumb })} />
           </div>
           {sel === g.gameID && deals && (
             <div style={{ padding:'2px 0 6px 18px' }}>
@@ -40615,175 +41190,78 @@ function CompareGames({ isWatched, toggleWatch }) {
   );
 }
 
-// 🔎 Tous produits — 100 % IA (7.6.49) : plus de scraping, une requête à Gemini
-// avec RECHERCHE WEB pour ramener les meilleures promos réelles du moment.
-// Le bouton « ✎ requête » affiche mot pour mot ce qui est envoyé au modèle.
-function CompareDenicheur() {
-  const [q, setQ]             = React.useState('');
-  const [res, setRes]         = React.useState(null);
-  const [err, setErr]         = React.useState('');
-  const [loading, setLoading] = React.useState(false);
-  const [showPrompt, setSP]   = React.useState(false);
-  const searchUrl = query => 'https://ledenicheur.fr/search?search=' + encodeURIComponent(query);
-  const hasKey = aiAnyKey(false);
-
-  const search = async () => {
-    const query = q.trim();
-    if (!query || loading) return;
-    setLoading(true); setErr(''); setRes(null);
-    try { setRes(await cmpAiSearch(query)); }
-    catch (e) {
-      setErr(String(e.message) === 'NO_KEY'
-        ? 'Aucune clé Gemini enregistrée — ajoute-la dans le module API ou dans Revente → Assistant IA.'
-        : (e.message || 'Erreur IA.'));
-    }
-    setLoading(false);
-  };
-
-  const line   = { display:'flex', gap:10, alignItems:'center', padding:'7px 0', borderBottom:`1px solid ${C.border}55`, textDecoration:'none' };
-  const chipS  = { fontSize:9.5, color:C.dim, background:C.surface, border:`1px solid ${C.border}`, borderRadius:20, padding:'2px 7px' };
-  const provBtn = () => ({
-    background:'none', border:`1px solid ${C.border}`, color:C.muted,
-    borderRadius:8, padding:'5px 9px', fontSize:11, cursor:'pointer', fontWeight:600,
-  });
-
-  return (
-    <div>
-      <div style={{ display:'flex', gap:6, marginBottom:8, flexWrap:'wrap' }}>
-        <span style={{ fontSize:10, color: hasKey ? C.dim : '#e0a050', alignSelf:'center' }}>
-          {hasKey ? '✓ clé Gemini enregistrée' : '⚠ clé Gemini manquante'}
-        </span>
-        <button onClick={() => setSP(v => !v)} style={{ ...provBtn(), marginLeft:'auto' }}>✎ requête</button>
-      </div>
-      {showPrompt && (
-        <pre style={{ fontSize:9.5, color:C.muted, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8,
-                      padding:8, marginBottom:8, maxHeight:220, overflow:'auto', whiteSpace:'pre-wrap', fontFamily:'DM Mono,monospace' }}>
-          {cmpAiPrompt(q.trim() || '(ton produit)')}
-        </pre>
-      )}
-      <div style={{ display:'flex', gap:6, marginBottom:8 }}>
-        <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') search(); }}
-          placeholder="Produit (ex. iPhone 15 128 Go, Dyson V15, Lego Millennium Falcon…)"
-          style={{ flex:1, background:C.surface, border:`1px solid ${C.border}`, borderRadius:8, padding:'7px 10px', color:C.text, fontSize:12, outline:'none' }} />
-        <button onClick={search} disabled={loading}
-          style={{ background:`${COMPARE_COLOR}22`, border:`1px solid ${COMPARE_COLOR}66`, color:COMPARE_COLOR, borderRadius:8, padding:'7px 12px', fontSize:12, cursor:'pointer', fontWeight:600 }}>🔍</button>
-      </div>
-      {loading && <div style={{ fontSize:11, color:C.dim }}>⏳ L'IA parcourt le web à la recherche des meilleures offres…</div>}
-      {!!err && !loading && <div style={{ fontSize:11, color:'#e05050', lineHeight:1.5 }}>{err}</div>}
-
-      {res && !loading && (
-        <div>
-          <div style={{ display:'flex', gap:8, alignItems:'baseline', flexWrap:'wrap', marginBottom:4 }}>
-            <div style={{ fontSize:12.5, color:C.text, fontWeight:600 }}>{res.produit}</div>
-            {res.ref != null && <div style={{ fontSize:10.5, color:C.dim }}>prix habituel ≈ {cmpFmtEur(res.ref)}</div>}
-          </div>
-          {!res.grounded && (
-            <div style={{ fontSize:10, color:'#e0a050', marginBottom:6, lineHeight:1.4 }}>
-              ⚠ Recherche web indisponible sur ce fournisseur : réponse issue des seules connaissances du modèle, les prix peuvent être périmés.
-            </div>
-          )}
-          {res.offres.length ? res.offres.map((o, i) => {
-            const inner = (<>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:12, color:C.text, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
-                  {o.marchand}{o.etat ? <span style={{ color:C.dim, fontSize:10 }}> · {o.etat}</span> : null}
-                </div>
-                {!!o.commentaire && <div style={{ fontSize:9.5, color:C.dim, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{o.commentaire}</div>}
-              </div>
-              {o.remise != null && o.remise > 0 && (
-                <div style={{ fontSize:10, fontWeight:700, color:'#4ad07a', background:'#4ad07a22', border:'1px solid #4ad07a55', borderRadius:6, padding:'1px 5px', whiteSpace:'nowrap' }}>−{o.remise} %</div>
-              )}
-              <div style={{ textAlign:'right', whiteSpace:'nowrap' }}>
-                {o.barre != null && <div style={{ fontSize:9.5, color:C.dim, textDecoration:'line-through' }}>{cmpFmtEur(o.barre)}</div>}
-                <div style={{ fontSize:12, color:COMPARE_COLOR, fontWeight:700, fontFamily:'DM Mono,monospace' }}>{o.prix == null ? '—' : cmpFmtEur(o.prix)}</div>
-              </div>
-            </>);
-            // ⚠ URL proposée par l'IA → `safeHref` obligatoire (piège 30) : sans lui, un
-            // `javascript:` renvoyé par le modèle s'exécutait au clic (CSP `unsafe-inline`).
-            const ourl = safeHref(o.url);
-            return ourl
-              ? <a key={i} href={ourl} target="_blank" rel="noopener noreferrer" style={line}>{inner}</a>
-              : <div key={i} style={line}>{inner}</div>;
-          }) : (
-            <div style={{ fontSize:11, color:C.dim, lineHeight:1.5 }}>L'IA n'a trouvé aucune offre fiable pour ce produit.</div>
-          )}
-          {!!res.verdict && <div style={{ fontSize:11, color:C.muted, lineHeight:1.5, marginTop:8 }}>💡 {res.verdict}</div>}
-          {!!res.sources.length && (
-            <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginTop:8 }}>
-              {res.sources.map((s, i) => <span key={i} style={chipS}>{s}</span>)}
-            </div>
-          )}
-          <div style={{ marginTop:8 }}>
-            <a href={searchUrl(q)} target="_blank" rel="noopener noreferrer" style={{ color:COMPARE_COLOR, fontSize:10.5 }}>→ Vérifier aussi sur ledenicheur.fr ↗</a>
-          </div>
-        </div>
-      )}
-
-      <div style={{ fontSize:9, color:C.dim, marginTop:10, lineHeight:1.45 }}>
-        Plus aucun scraping ici : une requête à <b style={{ color:C.muted }}>{geminiModel()}</b> avec
-        recherche web (google_search), avec TA clé API.
-        Sources balayées : {CMP_AI_SOURCES.slice(0, 8).join(', ')}… ⚠ Une IA peut citer un prix périmé : le lien de chaque offre fait foi.
-      </div>
-    </div>
-  );
-}
-
-// Refonte Bon Plan : 4 sections — 🔥 Promos du moment (nouvelles meilleures offres PC,
-// REPLIÉ par défaut — demande utilisateur), ⭐ Ma liste (jeux suivis + prix cible, ouvert si non vide),
-// 🎮 Recherche jeux (CheapShark) et 🔎 Tous produits (iTunes via proxies + Open Products/Beauty/Food Facts). L'état « suivis »
-// est porté ICI (partagé entre les 3 sections jeux via isWatched/toggleWatch).
+// ── 🛒 BON PLAN (refonte 13.21.229) ───────────────────────────────────────────────
+// En haut : UNE barre de recherche (🛍️ produit ou 🎮 jeu) dont le résultat s'affiche juste
+// dessous, avec « ⭐ Suivre ». Puis des onglets : 🔥 Bons plans (Dealabs, Le Dénicheur,
+// gratuits) · ⭐ Favoris · 🎮 Jeux vidéo (offerts + promos PC) · 🕹️ Steam (liste de souhaits)
+// · 💡 Astuces. Onglet retenu par appareil (`CMP_TAB_LS`, préférence d'affichage hors backup) ;
+// la pop-up d'alerte y écrit « favs » avant de naviguer.
+const CMP_TAB_LS = 'spotifyplus_cmp_tab';
 function ComparePanel() {
-  const [watch, setWatch] = React.useState(loadCmpWatch);
-  const update = list => { setWatch(list); saveCmpWatch(list); };
-  const isWatched = gameID => watch.some(w => String(w.gameID) === String(gameID));
-  const toggleWatch = g => {
-    const id = String(g.gameID);
-    if (watch.some(w => String(w.gameID) === id)) update(watch.filter(w => String(w.gameID) !== id));
-    else update([...watch, {
-      gameID: id, title: g.title || '?', thumb: g.thumb || '',
-      target: null, lastPrice: g.price != null && !isNaN(+g.price) ? +g.price : null,
-      dealID: null, lastCheck: 0, addedAt: Date.now(),
-    }]);
+  const favs = useCmpFavs();
+  const tabs = [['deals', '🔥 Bons plans'], ['favs', `⭐ Favoris${favs.length ? ' · ' + favs.length : ''}`], ['games', '🎮 Jeux vidéo'], ['steam', '🕹️ Steam'], ['tips', '💡 Astuces']];
+  const [tab, setTabS] = React.useState(() => { const v = lsGet(CMP_TAB_LS); return tabs.some(t => t[0] === v) ? v : 'deals'; });
+  const setTab = v => { setTabS(v); lsSet(CMP_TAB_LS, v); };
+  const [q, setQ] = React.useState('');
+  const [kind, setKind] = React.useState('product');
+  const [run, setRun] = React.useState(null);   // { q, kind, n } : recherche lancée
+  const go = (qq, kk) => {
+    const s = String(qq == null ? q : qq).trim();
+    if (!s) return;
+    const k = kk || kind;
+    setQ(s); setKind(k); setRun({ q: s, kind: k, n: Date.now() });
   };
+  // Vérification du jour si le démarrage ne l'a pas faite (module activé après coup…).
+  React.useEffect(() => { cmpFavDaily().catch(() => {}); }, []);
+  const isWatched = g => !!cmpFavFind(favs, { kind:'game', gameID: g.gameID, q: g.title });
+  const toggleWatch = g => cmpFavToggle({ kind:'game', gameID: g.gameID || null, q: g.title, title: g.title, thumb: g.thumb });
+  const seg = (on, onClick, label) => (
+    <button onClick={onClick} style={{ background: on ? `${COMPARE_COLOR}24` : 'none', border:'none', boxShadow: on ? `inset 0 0 0 1px ${COMPARE_COLOR}77` : 'none',
+      color: on ? COMPARE_COLOR : C.muted, borderRadius:8, padding:'6px 10px', fontSize:11, fontWeight: on ? 800 : 600, cursor:'pointer', fontFamily:'inherit', whiteSpace:'nowrap' }}>{label}</button>
+  );
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-      {/* 🖥️ Ordinateur : à gauche ce qui est À MOI (ma liste, ma liste de souhaits Steam), à
-          droite ce qu'on DÉCOUVRE (promos, recherche, tous produits). Mobile : la même pile. */}
-      <DeskCols cols={2} gap={14}>
-      <DeskCol n={0}>
-      <StatsCollapse defaultOpen={watch.length > 0} color={COMPARE_COLOR}
-        title={<span>⭐ MA LISTE {watch.length > 0 && <span style={{ color:COMPARE_COLOR }}>· {watch.length}</span>} <span style={{ color:C.dim, fontWeight:400 }}>· suivi de prix</span></span>}>
-        <CompareWatch watch={watch} update={update} />
-      </StatsCollapse>
-      </DeskCol>
-      {/* ⚠ 7.7.7 — « Promos du moment » et « Bibliothèque Steam » ont été INTERVERTIS
-          (demande utilisateur) : ordre final ⭐ Ma liste · 🔥 Promos · 🕹️ Steam ·
-          🎮 Recherche jeux · 🔎 Tous produits. */}
-      <DeskCol n={1}>
-      <StatsCollapse defaultOpen={false} color={COMPARE_COLOR}
-        title={<span>🔥 PROMOS DU MOMENT <span style={{ color:C.dim, fontWeight:400 }}>· jeux PC · CheapShark</span></span>}>
-        <CompareDeals isWatched={isWatched} toggleWatch={toggleWatch} />
-      </StatsCollapse>
-      </DeskCol>
-      <DeskCol n={0}>
-      <StatsCollapse defaultOpen={false} color={STEAM_COLOR}
-        title={<span>🕹️ BIBLIOTHÈQUE STEAM <span style={{ color:C.dim, fontWeight:400 }}>· ma liste de souhaits</span></span>}>
-        <SteamWishlistSection />
-      </StatsCollapse>
-      </DeskCol>
-      <DeskCol n={1}>
-      <StatsCollapse defaultOpen={false} color={COMPARE_COLOR}
-        title={<span>🎮 RECHERCHE JEUX <span style={{ color:C.dim, fontWeight:400 }}>· CheapShark (sans clé)</span></span>}>
-        <CompareGames isWatched={isWatched} toggleWatch={toggleWatch} />
-      </StatsCollapse>
-      </DeskCol>
-      <DeskCol n={1}>
-      <StatsCollapse defaultOpen={false} color={COMPARE_COLOR}
-        title={<span>🔎 TOUS PRODUITS <span style={{ color:C.dim, fontWeight:400 }}>· meilleures promos par IA</span></span>}>
-        <CompareDenicheur />
-      </StatsCollapse>
-      </DeskCol>
-      </DeskCols>
+      <div style={{ padding:12, borderRadius:14, background:`linear-gradient(135deg, ${COMPARE_COLOR}1c, ${COMPARE_COLOR}06)`, border:`1px solid ${COMPARE_COLOR}44`, display:'flex', flexDirection:'column', gap:8 }}>
+        <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+          <div style={{ display:'inline-flex', gap:3, padding:3, borderRadius:10, background:'#00000033', border:`1px solid ${C.border}` }}>
+            {seg(kind === 'product', () => setKind('product'), '🛍️ Produit')}
+            {seg(kind === 'game', () => setKind('game'), '🎮 Jeu PC')}
+          </div>
+          {run && <button onClick={() => setRun(null)} style={{ marginLeft:'auto', background:'none', border:'none', color:C.dim, fontSize:11, cursor:'pointer', fontFamily:'inherit' }}>✕ Fermer la recherche</button>}
+        </div>
+        <div style={{ display:'flex', gap:6 }}>
+          <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') go(); }} enterKeyHint="search"
+            placeholder={kind === 'game' ? 'Nom du jeu (ex. Elden Ring)…' : 'Produit (ex. AirPods Pro 2, Lego 10497, Dyson V15)…'}
+            style={{ flex:1, minWidth:0, background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 12px', color:C.text, fontSize:13, outline:'none', fontFamily:'inherit' }} />
+          <button onClick={() => go()} style={{ background:COMPARE_COLOR, border:'none', color:'#0a0a0a', borderRadius:10, padding:'0 16px', fontSize:13, fontWeight:800, cursor:'pointer', fontFamily:'inherit' }}>Chercher</button>
+        </div>
+        {run && (
+          <div style={{ marginTop:4 }}>
+            {run.kind === 'game'
+              ? <>
+                  <CmpFollowBar q={run.q} kind="game" favs={favs} />
+                  <div style={{ height:8 }} />
+                  <CompareGames initQ={run.q} nonce={run.n} isWatched={isWatched} toggleWatch={toggleWatch} />
+                </>
+              : <CmpProductSearch q={run.q} nonce={run.n} favs={favs} />}
+          </div>
+        )}
+      </div>
+      <BudgetSeg items={tabs} value={tab} onChange={setTab} color={COMPARE_COLOR} />
+      {tab === 'deals' && <CmpDealsFeed favs={favs} />}
+      {tab === 'favs' && <CmpFavList favs={favs} onSearch={(qq, kk) => go(qq, kk)} />}
+      {tab === 'games' && (
+        <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+          <StatsCollapse defaultOpen={true} color={COMPARE_COLOR} title={<span>🎁 JEUX OFFERTS <span style={{ color:C.dim, fontWeight:400 }}>· Epic, GamerPower</span></span>}>
+            <CmpFreeGames />
+          </StatsCollapse>
+          <StatsCollapse defaultOpen={true} color={COMPARE_COLOR} title={<span>🔥 PROMOS PC DU MOMENT <span style={{ color:C.dim, fontWeight:400 }}>· Steam, Epic, CheapShark</span></span>}>
+            <CompareDeals isWatched={isWatched} toggleWatch={toggleWatch} />
+          </StatsCollapse>
+        </div>
+      )}
+      {tab === 'steam' && <SteamWishlistSection />}
+      {tab === 'tips' && <CmpTips />}
     </div>
   );
 }
@@ -68075,7 +68553,7 @@ function iaStore(s, arg) {
     case 'histoire':  return L(histLoad, v => { if (!histSave(v)) throw new Error('Stockage plein : fiche non enregistrée.'); });
     case 'revente':   return L(() => revLoad().annonces, v => revSave({ ...revLoad(), annonces: v }));
     case 'vet':       return L(() => vetLoad().items, v => { const d = vetLoad(); vetSave({ ...d, items: v, counts: vetCounts(v) }); });
-    case 'cmp':       return L(loadCmpWatch, v => saveCmpWatch(v), x => x && String(x.gameID));
+    case 'cmp':       return L(loadCmpWatch, v => saveCmpWatch(v), x => x && x.id);
     case 'frigo':     return L(() => frigoLoad().sections[arg] || [], v => { const d = frigoLoad(); frigoSave({ sections: { ...d.sections, [arg]: v } }); });
     case 'tv':        return L(loadTvItems, v => { if (!saveTvItems(v)) throw new Error("TV Time n'a pas encore fini de charger sa base — réessaie dans un instant."); }, x => x && (x.type + ':' + x.id));
     case 'coll':      return L(() => collList(collLoad(), arg), v => { if (!collPublish({ ...collLoad(), [arg]: v })) throw new Error('Collection : écriture refusée (stockage plein ou base des cartes pas prête).'); });
@@ -68240,7 +68718,7 @@ function iaRevCands(q) {
   return iaMatch(q, revLoad().annonces.map(a => ({ key:a.id, id:a.id, name:[a.nom, a.marque].filter(Boolean).join(' '), label:`🏷️ ${a.nom || 'Sans nom'}${a.marque ? ' · ' + a.marque : ''}`, raw:a })), x => x.name);
 }
 function iaCmpCands(q) {
-  return iaMatch(q, loadCmpWatch().map(w => ({ key:String(w.gameID), id:String(w.gameID), name:w.title || '', label:`⭐ ${w.title}`, raw:w })), x => x.name);
+  return iaMatch(q, loadCmpWatch().map(w => ({ key:w.id, id:w.id, name:w.title || '', label:`⭐ ${w.title}`, raw:w })), x => x.name);
 }
 function iaFeedCands(q, feed) {
   return iaMatch(q, (feed || []).map(f => ({ key:f.spotifyUri, uri:f.spotifyUri, name:`${f.artist} ${f.title}`, label:`🎵 ${f.artist} — ${f.title}${f.label ? ' · ' + f.label : ''}`, raw:f })), x => x.name);
@@ -68796,14 +69274,13 @@ const IA_ACTIONS = [
     label: (p, t) => `🗑 Supprimer ${t ? t.label : p.cible}`,
     run: (p, t) => ({ msg:'Article supprimé.', undo:[iaListDel('revente', null, t.id)] }) },
   // ─── 🛒 Bon Plan ───
-  { id:'cmp.watch', mod:'compare', d:'Suivre le prix d\'un jeu (⭐ Ma liste de Bon Plan)',
+  { id:'cmp.watch', mod:'compare', d:'Suivre le prix d\'un jeu (⭐ Favoris de Bon Plan)',
     p:{ jeu:{ t:'str', req:1, d:'nom du jeu' } }, target:{ find: p => iaCheapSharkSearch(p.jeu) },
     label: (p, t) => `⭐ Suivre ${t ? t.label : p.jeu}`,
     run: (p, t) => {
-      const g = t.game, id = String(g.gameID);
-      if (loadCmpWatch().some(w => String(w.gameID) === id)) return { msg:'Déjà suivi.', undo:[] };
-      return { msg:'Jeu suivi.', undo:[iaListPut('cmp', null, { gameID: id, title: g.external || '?', thumb: g.thumb || '', target: null,
-        lastPrice: g.cheapest != null && !isNaN(+g.cheapest) ? +g.cheapest : null, dealID: null, lastCheck: 0, addedAt: Date.now() })] };
+      const g = t.game, it = { kind:'game', gameID: String(g.gameID), q: g.external || '?', title: g.external || '?', thumb: g.thumb || '' };
+      if (cmpFavFind(loadCmpWatch(), it)) return { msg:'Déjà suivi.', undo:[] };
+      return { msg:'Jeu suivi.', undo:[iaListPut('cmp', null, cmpFavNew(it))] };
     } },
   { id:'cmp.unwatch', mod:'compare', danger:1, d:'Ne plus suivre un jeu de Bon Plan',
     p:{ cible:IA_CIBLE }, target:{ find: p => iaCmpCands(p.cible) },
@@ -68929,7 +69406,7 @@ const IA_READ = {
   collection: { d:'collections (nombre et valeur)', ctx: () => { const data = collLoad(); return iaCollSubs().map(s => { const l = collList(data, s.id); const v = l.reduce((a, x) => a + (typeof x.price === 'number' ? x.price * (x.qty || 1) : 0), 0); return `${s.label} : ${l.length} référence(s)${v ? ' · ≈ ' + Math.round(v) + ' €' : ''}`; }).join('\n'); } },
   vetement: { d:'vêtements', ctx: () => { const c = vetCounts(vetLoad().items); return Object.keys(c).map(k => `${iaVetTypeLbl(k)} : ${c[k]}`).join(' ; ') || 'aucun'; } },
   revente: { d:'articles à revendre', ctx: () => revLoad().annonces.map(a => `${a.nom || '?'}${a.prix ? ' ' + a.prix + ' €' : ''}`).join(' ; ') || 'aucun' },
-  compare: { d:'jeux suivis (Bon Plan)', ctx: () => loadCmpWatch().map(w => `${w.title}${w.lastPrice != null ? ' dernier prix ' + w.lastPrice + ' $' : ''}`).join(' ; ') || 'aucun' },
+  compare: { d:'favoris suivis (Bon Plan)', ctx: () => loadCmpWatch().map(w => `${w.title}${w.price != null ? ' prix ' + w.price + ' €' : ''}${w.target != null ? ' cible ' + w.target + ' €' : ''}`).join(' ; ') || 'aucun' },
   emploi: { d:'critères emploi', ctx: () => { const c = emploiCrit(); return EMPLOI_CRIT_KEYS.filter(k => k !== 'linkedin' && k !== 'profil').map(k => `${k} : ${Array.isArray(c[k]) ? c[k].join(', ') : c[k]}`).join('\n'); } },
   histoire: { d:"fiches d'œuvres", ctx: () => histLoad().slice(0, 20).map(f => `${f.oeuvre} (${f.ville})`).join(' ; ') || 'aucune' },
   stats: { d:'statistiques du Hub', ctx: (q, c) => {
@@ -69858,7 +70335,7 @@ const DESK_DESC = {
   actu:'Actualité, pannes, cartographie, fuites de données et vidéos',
   remember:'Rappels, garanties, anniversaires et échéances',
   api:'Services réseau et clés utilisés par le Hub',
-  compare:'Prix cibles, promos jeux et bons plans',
+  compare:'Dealabs, Le Dénicheur, jeux et favoris suivis',
   collection:'Cartes, Displate, figurines, montres, vins…',
   contact:'Carnet d’adresses chiffré',
   emploi:'Offres triées selon tes critères',
@@ -69997,6 +70474,7 @@ function Shell() {
       )}
       {content}
       {authState === 'connected' && <UndoToast />}
+      {authState !== 'login' && <CmpAlertHost />}
     </>
   );
 }
