@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.230';
+const APP_VERSION = '13.21.231';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32574,6 +32574,12 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.231', date:'2026-11-06', title:'🚀 Prévision : générer ses scénarios', items:[
+    'Finance › Prévision se remplit en étapes repliables : ① point de départ (trésorerie, matelas, horizon), ② rentrées et dépenses, ③ prêt immo, ④ formules. Puis un gros bouton 🚀 Générer le scénario.',
+    'Aucun graphique avant la génération. Ensuite, les résultats arrivent en sous-menus : chiffres clés et courbe, mois par mois, à prévoir, comparaison, analyse IA.',
+    'Chaque génération est gardée dans 🕘 Historique : 👁 revoir ses résultats, ↩ remettre ses paramètres, écart avec la précédente. Modifier un paramètre ne change rien tant que tu ne regénères pas.',
+    'Google Drive connecté : chaque génération y devient une feuille Google Sheets (HUB_Pierre/Prevision). Sinon, ⤴ l’envoie plus tard depuis l’historique.',
+  ] },
   { v:'13.21.230', date:'2026-11-06', title:'🚗 Mode Voiture', items:[
     'Dans le lecteur réduit (écran petit), un bouton 🚗 à droite du ❤ active le mode Voiture.',
     'Mode actif, page ouverte : changer de titre sur l’autoradio (suivant, précédent, retour au début, saut dans le titre) fait comme ta flèche droite. Le titre suivant du feed démarre à 25 %, celui quitté est marqué écouté.',
@@ -32592,11 +32598,6 @@ const RELEASE_NOTES = [
     'Tout tient maintenant en deux volets : ⚙️ Paramètres (flux, formules, simulateur de prêt) et 📊 Résultats (mois par mois, dépenses à prévoir, comparaison des scénarios, prévision et analyse IA), chacun rangé en onglets.',
     'En haut, toujours visibles : tes scénarios, la trésorerie et le matelas, l’horizon, le montant plaçable en grand, les chiffres clés et la courbe du solde.',
     'Les modèles rapides tiennent sur une rangée qui défile, et une suggestion de l’Analyse IA ouvre directement le formulaire dans Paramètres.',
-  ] },
-  { v:'13.21.226', date:'2026-11-02', title:'📊 Finance : les graphiques du classeur', items:[
-    'Mes Actifs reprend les graphiques de ton onglet « Graphique » : revenus vs dépenses mois par mois, bilan annuel, dépenses par groupe et par an, rendement réel vs fixe, pyramide du patrimoine réel vs cible, valeur de l’appartement vs capital restant dû.',
-    'En plus : dépenses du mois poste par poste, charges fixes vs variables, détail de l’étage exotique, gains par actif (12 mois, total, rendements), gain du mois, fiche de l’appartement (onglet Immo) et amortissement du prêt année par année.',
-    'Survole (ou touche) une barre pour lire ses valeurs ; la légende masque une série. Couleurs choisies pour rester distinctes en cas de daltonisme.',
   ] },
 ];
 
@@ -45560,8 +45561,12 @@ function FinancePanel() {
 // ⚠ Les montants sont toujours POSITIFS, le sens est porté par `kind` ('in' | 'out').
 // Mode « Prévision » du module 📈 Finance (BudgetPanel), à droite du mode Finance (Mes Actifs).
 const BUDGET_COLOR = '#32c4b0';
-const BUDGET_LS = 'spotifyplus_budget';   // { v:1, scenarios:[{ id, name, color, start, startDate, cushion, at, items, ai }] }
+const BUDGET_LS = 'spotifyplus_budget';   // { v:1, scenarios:[{ id, name, color, start, startDate, cushion, h, at, items, ai }], fx, hist:[…] }
 const BUDGET_MAX_SCEN = 12, BUDGET_MAX_ITEMS = 250;
+// 🕘 Historique des générations (« 🚀 Générer le scénario ») : instantanés FIGÉS, les plus récents
+// d'abord. ⚠ Les graphiques n'affichent QUE des générations : modifier un paramètre ne redessine
+// rien tant qu'on ne regénère pas (demande utilisateur). Fichier Drive : HUB_Pierre/<BUDGET_DRIVE_SUB>.
+const BUDGET_MAX_HIST = 30, BUDGET_DRIVE_SUB = 'Prevision';
 const BUDGET_BIG = 300;   // € — dépense non mensuelle à partir de laquelle on la « provisionne »
 const BUDGET_EVERY = [[0, 'Une fois'], [1, 'Chaque mois'], [3, 'Chaque trimestre'], [6, 'Tous les 6 mois'], [12, 'Chaque année'], [24, 'Tous les 2 ans']];
 const BUDGET_EVERY_SHORT = { 0:'une fois', 1:'/ mois', 3:'/ trimestre', 6:'/ 6 mois', 12:'/ an', 24:'/ 2 ans' };
@@ -45720,10 +45725,38 @@ function budgetScenNorm(s, i) {
     start: isFinite(+s.start) ? Math.round(+s.start * 100) / 100 : 0,
     startDate: budgetIso(s.startDate) || localDayStr(),
     cushion: Math.max(0, Math.round(+s.cushion || 0)),
+    h: BUDGET_HORIZONS.some(([n]) => n === +s.h) ? +s.h : 6,
     at: +s.at || 0,
     items, ai,
   };
 }
+// Une génération = le scénario TEL QU'IL ÉTAIT (`scen`, sans l'analyse IA) + le jour de calcul
+// (`today`) : `budgetHistProj` refait exactement la même projection, jamais « recalée » sur
+// aujourd'hui. `drive` = fichier envoyé ({ id, url }) ou null (Drive non connecté / échec).
+function budgetHistEntryNorm(x) {
+  if (!x || typeof x !== 'object' || !x.scen) return null;
+  const scen = budgetScenNorm(x.scen, 0), today = budgetIso(x.today);
+  if (!scen || !today) return null;
+  const did = x.drive && typeof x.drive === 'object' && /^[\w-]{10,200}$/.test(x.drive.id || '') ? x.drive.id : '';
+  const url = did && typeof x.drive.url === 'string' && /^https:\/\/(docs|drive)\.google\.com\//.test(x.drive.url) ? x.drive.url.slice(0, 300) : '';
+  return { id: String(x.id || budgetId()).slice(0, 40), at: +x.at || 0, today, sig: String(x.sig || budgetSig(scen)).slice(0, 20),
+    drive: did ? { id: did, url: url || `https://drive.google.com/file/d/${did}/view` } : null, scen: { ...scen, ai: null } };
+}
+function budgetHistNorm(list) {
+  return (Array.isArray(list) ? list : []).map(budgetHistEntryNorm).filter(Boolean)
+    .sort((a, b) => b.at - a.at).slice(0, BUDGET_MAX_HIST);
+}
+// Projection d'une génération : entrées immuables (seul `drive` change) ⇒ cache par id.
+const _budgetHistProj = new Map();
+function budgetHistProj(e) {
+  let p = _budgetHistProj.get(e.id);
+  if (!p) { p = budgetProject(e.scen, e.scen.h, e.today); _budgetHistProj.set(e.id, p); }
+  return p;
+}
+// Dernière génération d'un scénario (null = jamais généré ⇒ aucun graphique).
+const budgetLastGen = (d, sid) => d.hist.find(e => e.scen.id === sid) || null;
+// Génération à jour = mêmes paramètres (empreinte + horizon) ET calculée aujourd'hui.
+const budgetGenFresh = (e, sc, today) => !!e && !!sc && e.sig === budgetSig(sc) && e.scen.h === sc.h && e.today === today;
 
 // ── Stockage : cache module-level + abonnés (le panneau et l'IA Action lisent la même chose) ──
 const _budget = { data: null, subs: new Set() };
@@ -45732,16 +45765,18 @@ function budgetLoad() {
   let raw = null;
   try { raw = JSON.parse(lsGet(BUDGET_LS) || 'null'); } catch {}
   const list = (raw && Array.isArray(raw.scenarios) ? raw.scenarios : []).map(budgetScenNorm).filter(Boolean);
-  _budget.data = { v: 1, scenarios: list, fx: budgetFxNorm(raw && raw.fx) };
+  _budget.data = { v: 1, scenarios: list, fx: budgetFxNorm(raw && raw.fx), hist: budgetHistNorm(raw && raw.hist) };
   return _budget.data;
 }
 // ⚠ Piège 14 : stockage plein ⇒ `false`, et le cache garde l'état d'AVANT (l'écran ne montre
 // jamais une modification que le disque ignore).
 // ⚠ `fx` (⚙️ formules de prévision) vit dans le MÊME objet : un appel qui ne le passe pas
 // (tous ceux des scénarios) le CONSERVE — ne jamais l'écrire `{ scenarios }` « tout court ».
+// Même règle pour `hist` (🕘 générations) : absent ⇒ conservé.
 function budgetSave(next) {
   const fx = next.fx !== undefined ? budgetFxNorm(next.fx) : budgetLoad().fx;
-  const d = { v: 1, scenarios: (next.scenarios || []).slice(0, BUDGET_MAX_SCEN), fx };
+  const hist = next.hist !== undefined ? budgetHistNorm(next.hist) : budgetLoad().hist;
+  const d = { v: 1, scenarios: (next.scenarios || budgetLoad().scenarios).slice(0, BUDGET_MAX_SCEN), fx, hist };
   if (!lsSet(BUDGET_LS, JSON.stringify(d))) return false;
   _budget.data = d;
   for (const f of _budget.subs) { try { f(d); } catch {} }
@@ -45779,7 +45814,104 @@ function budgetMerge(inc) {
     if ((s.at || 0) > (cur[i].at || 0)) cur[i] = s;
   });
   const fxIn = budgetFxNorm(inc.fx), fxCur = budgetLoad().fx;
-  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur });
+  // 🕘 Générations : union par id ; à id égal, celle qui a un fichier Drive gagne.
+  const hist = budgetLoad().hist.slice(), hpos = new Map(hist.map((e, i) => [e.id, i]));
+  budgetHistNorm(inc.hist).forEach(e => {
+    if (!hpos.has(e.id)) { hpos.set(e.id, hist.length); hist.push(e); }
+    else if (e.drive && !hist[hpos.get(e.id)].drive) hist[hpos.get(e.id)] = e;
+  });
+  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur, hist });
+}
+// 🚀 Génère : fige le scénario dans l'historique. Rien n'a bougé depuis la dernière génération
+// du jour ⇒ on la REPREND (pas de doublon, son fichier Drive reste valable). Rend l'entrée ou null (stockage plein).
+function budgetGenerate(sc, today) {
+  const d = budgetLoad(), sig = budgetSig(sc), last = budgetLastGen(d, sc.id);
+  const same = last && last.sig === sig && last.scen.h === sc.h && last.today === today
+    && last.scen.name === sc.name && last.scen.color === sc.color;
+  if (same) return last;
+  const e = budgetHistEntryNorm({ id: budgetId(), at: Date.now(), today, sig, drive: null, scen: sc });
+  return budgetSave({ hist: [e].concat(d.hist) }) ? e : null;
+}
+function budgetHistPatch(id, patch) {
+  return budgetSave({ hist: budgetLoad().hist.map(e => (e.id === id ? { ...e, ...patch } : e)) });
+}
+
+// ── ☁️ Drive : une génération = une feuille Google Sheets (CSV importé) dans HUB_Pierre/Prevision ──
+// ⚠ Nombres entiers, décimales à la virgule entre guillemets : le compte est en français, un
+// « 12.5 » serait lu comme une date par Sheets.
+const budgetCsvQ = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+const budgetCsvN = v => (v == null || !isFinite(v) ? '' : Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100).replace('.', ','));
+const budgetFmtFull = iso => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : '');
+function budgetHistCsv(e) {
+  const sc = e.scen, p = budgetHistProj(e), R = [];
+  const row = (...c) => R.push(c.map(budgetCsvQ).join(','));
+  const at = new Date(e.at);
+  row('Prévision budgétaire', sc.name);
+  row('Générée le', at.toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' }));
+  row('Horizon', `${sc.h} mois (du ${budgetFmtFull(p.today)} au ${budgetFmtFull(p.end)})`);
+  row('Trésorerie de départ (€)', budgetCsvN(sc.start), 'au ' + budgetFmtFull(sc.startDate));
+  row('Matelas de sécurité (€)', budgetCsvN(sc.cushion));
+  row();
+  row('RÉSUMÉ');
+  row('Solde aujourd’hui (€)', budgetCsvN(Math.round(p.open)));
+  row(p.lump < 0 ? 'Manque pour tenir le matelas (€)' : 'Plaçable aujourd’hui (€)', budgetCsvN(Math.abs(p.lump)));
+  row('Ou chaque mois (€)', budgetCsvN(p.dca));
+  row('Point bas (€)', budgetCsvN(Math.round(p.low.b)), budgetFmtFull(p.low.d), budgetCause(p.low));
+  row('Solde fin d’horizon (€)', budgetCsvN(Math.round(p.endB)));
+  row('Rentrées totales (€)', budgetCsvN(Math.round(p.inc)));
+  row('Sorties totales (€)', budgetCsvN(Math.round(p.out)));
+  row('Épargne nette / mois (€)', budgetCsvN(Math.round(p.net / p.mons.length)));
+  row();
+  row('MOIS PAR MOIS');
+  row('Mois', 'Rentrées', 'Sorties', 'Solde début', 'Solde le plus bas', 'Solde fin', 'À placer');
+  p.mons.forEach(m => row(budgetMonthLbl(m.idx, true), budgetCsvN(Math.round(m.inc)), budgetCsvN(Math.round(m.out)), budgetCsvN(Math.round(m.startB)),
+    budgetCsvN(Math.round(m.minB)), budgetCsvN(Math.round(m.endB)), budgetCsvN(m.invest)));
+  const prov = budgetProvisions(p);
+  if (prov.length) {
+    row();
+    row('À PRÉVOIR (grosses dépenses non mensuelles)');
+    row('Libellé', 'Date', 'Montant', 'À mettre de côté / mois', 'Mois restants');
+    prov.forEach(x => row(x.it.label, budgetFmtFull(x.d), budgetCsvN(x.amount), budgetCsvN(Math.round(x.perMonth)), budgetCsvN(x.mLeft)));
+  }
+  row();
+  row('FLUX');
+  row('Libellé', 'Sens', 'Catégorie', 'Montant', 'Répétition', 'À partir du', 'Jusqu’au', 'Actif');
+  sc.items.forEach(it => row(it.label, it.kind === 'in' ? 'Rentrée' : 'Dépense', budgetCat(it.cat, it.kind).label, budgetCsvN(it.amount),
+    (BUDGET_EVERY.find(([v]) => v === it.every) || [0, ''])[1], budgetFmtFull(it.date), budgetFmtFull(it.until), it.off ? 'non' : 'oui'));
+  return R.join('\r\n') + '\r\n';
+}
+async function budgetDrivePost(token, meta, csv) {
+  const b = 'hubbudget' + Math.random().toString(36).slice(2);
+  const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: text/csv; charset=UTF-8\r\n\r\n${csv}\r\n--${b}--`;
+  return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${b}` }, body });
+}
+// Envoie la génération `hid` (feuille Google Sheets ; conversion refusée ⇒ simple .csv).
+// Dossier caché supprimé côté Drive (404) ⇒ cache oublié, dossier recréé, un seul nouvel essai.
+const budgetDriveReady = () => gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_BASE);
+async function budgetDriveSend(hid) {
+  const token = gdriveToken();
+  if (!token) throw new Error('Google Drive non connecté');
+  const e = budgetLoad().hist.find(x => x.id === hid);
+  if (!e) throw new Error('Génération introuvable.');
+  const csv = budgetHistCsv(e);
+  const stamp = new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' }).replace(/\//g, '-').replace(':', 'h');
+  const name = `Prévision · ${e.scen.name} · ${stamp}`;
+  const send = async () => {
+    const folder = await gdriveHubSubfolder(token, BUDGET_DRIVE_SUB);
+    let r = await budgetDrivePost(token, { name, mimeType: ACTIFS_MIME_SHEET, parents: [folder] }, csv);
+    if (!r.ok && r.status !== 401 && r.status !== 404) r = await budgetDrivePost(token, { name: name + '.csv', mimeType: 'text/csv', parents: [folder] }, csv);
+    return r;
+  };
+  let r = await send();
+  if (r.status === 404) { gdriveHubFolderReset(BUDGET_DRIVE_SUB); r = await send(); }
+  if (r.status === 401) { gdriveLogout(); throw new Error('Session Google expirée — reconnecte-toi'); }
+  if (!r.ok) throw new Error('Drive : HTTP ' + r.status);
+  const d = await r.json();
+  if (!d.id) throw new Error('Drive : réponse sans fichier.');
+  const drive = { id: d.id, url: d.webViewLink || `https://drive.google.com/file/d/${d.id}/view` };
+  if (!budgetHistPatch(hid, { drive })) throw new Error('Envoyé sur Drive, mais stockage local plein : lien non conservé.');
+  return drive;
 }
 // Empreinte du contenu (pas de `at`) : l'analyse IA sait si le scénario a bougé depuis elle.
 function budgetSig(s) {
@@ -46155,7 +46287,7 @@ const budgetAiErr = e => (e && e.message === 'NO_KEY' ? "Aucune clé d'IA : ajou
 
 // ── UI ────────────────────────────────────────────────────────────────────────
 // État d'écran module-level : `StatsCollapse` démonte ses enfants (piège 5).
-const _budgetUi = { sel: null, horizon: 6, loan: null };
+const _budgetUi = { sel: null, view: null, loan: null };   // `view` = id de génération affichée (👁) | null = la dernière
 const BUDGET_IN = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', minWidth:0, boxSizing:'border-box' };
 const budgetChip = (on, col) => {
   const c = col || BUDGET_COLOR;
@@ -46471,16 +46603,17 @@ function BudgetLoanSim({ sc, onAdd }) {
   );
 }
 
-// Tous les scénarios côte à côte, sur le même horizon.
-function BudgetCompare({ scens, horizon, today, onPick }) {
+// Dernière GÉNÉRATION de chaque scénario, côte à côte (`rows` = [{ s: instantané, p: projection, e }]).
+function BudgetCompare({ rows, onPick }) {
   const desk = useDesk();
-  const rows = scens.map(s => ({ s, p: budgetProject(s, horizon, today) }));
+  const from = rows.reduce((m, r) => (r.p.today < m ? r.p.today : m), rows[0].p.today);
+  const to = rows.reduce((m, r) => (r.p.end > m ? r.p.end : m), rows[0].p.end);
   const th = { fontSize:9, color:C.muted, fontWeight:700, textAlign:'right', padding:'3px 4px' };
   const td = (v, col) => ({ fontSize:11, fontFamily:'DM Mono,monospace', textAlign:'right', padding:'5px 4px', color: col || C.text, whiteSpace:'nowrap', borderTop:`1px solid ${C.border}` });
   const best = Math.max(...rows.map(r => r.p.lump));
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-      <BudgetChart series={rows.map(r => ({ name: r.s.name, color: r.s.color, pts: r.p.pts }))} from={today} to={rows[0].p.end} cushion={0} W={desk ? 620 : 400} height={desk ? 190 : 150} />
+      <BudgetChart series={rows.map(r => ({ name: r.s.name, color: r.s.color, pts: r.p.pts }))} from={from} to={to} cushion={0} W={desk ? 620 : 400} height={desk ? 190 : 150} />
       <div style={{ overflowX:'auto' }}>
         <table style={{ width:'100%', borderCollapse:'collapse' }}>
           <thead><tr>
@@ -46488,7 +46621,8 @@ function BudgetCompare({ scens, horizon, today, onPick }) {
           </tr></thead>
           <tbody>{rows.map(({ s, p }) => (
             <tr key={s.id} onClick={() => onPick(s.id)} style={{ cursor:'pointer' }}>
-              <td style={{ ...td(), textAlign:'left', fontFamily:'inherit', fontWeight:700 }}><span style={{ color:s.color }}>●</span> {s.name}{p.lump === best && rows.length > 1 && best > 0 ? ' 🏆' : ''}</td>
+              <td style={{ ...td(), textAlign:'left', fontFamily:'inherit', fontWeight:700 }}><span style={{ color:s.color }}>●</span> {s.name}{p.lump === best && rows.length > 1 && best > 0 ? ' 🏆' : ''}
+                <span style={{ display:'block', fontSize:9, fontWeight:400, color:C.dim }}>{s.h} mois · généré le {budgetFmtDY(p.today)}</span></td>
               <td style={td(null)}>{budgetK(p.endB)}</td>
               <td style={td(null, p.low.b < s.cushion ? FIN_DOWN : null)}>{budgetK(p.low.b)}</td>
               <td style={td(null, p.lump < 0 ? FIN_DOWN : FIN_UP)}>{p.lump < 0 ? '−' + budgetK(-p.lump) : budgetK(p.lump)}</td>
@@ -46497,7 +46631,7 @@ function BudgetCompare({ scens, horizon, today, onPick }) {
           ))}</tbody>
         </table>
       </div>
-      <div style={{ fontSize:9.5, color:C.dim }}>En euros. « Plaçable » = tout de suite, sans passer sous le matelas du scénario ; « / mois » = versement mensuel sûr. Toucher une ligne ouvre le scénario.</div>
+      <div style={{ fontSize:9.5, color:C.dim }}>En euros, dernière génération de chaque scénario. « Plaçable » = tout de suite, sans passer sous le matelas du scénario ; « / mois » = versement mensuel sûr. Toucher une ligne ouvre le scénario.</div>
     </div>
   );
 }
@@ -46665,7 +46799,8 @@ const BUDGET_FX_PH = {
   'acc:pea': 'ex. 30 % du reste chaque mois, 7 %/an',
   'acc:courant': 'ex. reste à peu près stable, garde 1 500',
 };
-function BudgetFxConfig() {
+// `noRun` : dans un scénario, c'est 🚀 Générer qui fait relire les formules par l'IA (pas de bouton ici).
+function BudgetFxConfig({ noRun }) {
   const data = useBudget();
   const desk = useDesk();
   const fx = data.fx || { h: 12, f: {}, rules: null };
@@ -46731,10 +46866,11 @@ function BudgetFxConfig() {
         <span style={{ fontSize:10.5, color:C.muted }}>Prévoir sur</span>
         {BUDGET_FX_HORIZONS.map(([n, l]) => <button key={n} onClick={() => { flush(); save({ h: n }); }} style={budgetChip((fx.h || 12) === n)}>{l}</button>)}
         <span style={{ flex:1 }} />
-        <button onClick={run} disabled={busy || !aiAnyKey()} title={aiAnyKey() ? 'L’IA lit les formules, le Hub calcule les mois' : 'Ajoute une clé d’IA dans 🔌 API'}
-          style={{ ...budgetBtn(IA_COLOR, true), opacity: busy || !aiAnyKey() ? 0.5 : 1 }}>{busy ? '⏳ Lecture des formules…' : fx.rules ? '🤖 Relire les formules' : '🤖 Générer la prévision'}</button>
+        {!noRun && <button onClick={run} disabled={busy || !aiAnyKey()} title={aiAnyKey() ? 'L’IA lit les formules, le Hub calcule les mois' : 'Ajoute une clé d’IA dans 🔌 API'}
+          style={{ ...budgetBtn(IA_COLOR, true), opacity: busy || !aiAnyKey() ? 0.5 : 1 }}>{busy ? '⏳ Lecture des formules…' : fx.rules ? '🤖 Relire les formules' : '🤖 Générer la prévision'}</button>}
       </div>
-      {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Formules modifiées depuis la dernière lecture : relance l’IA pour mettre la prévision à jour.</div>}
+      {noRun && nF > 0 && <div style={{ fontSize:10.5, color:C.muted }}>L’IA relit ces formules quand tu appuies sur 🚀 Générer le scénario ; le résultat s’affiche dans 🔮 Prévision par formules.</div>}
+      {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Formules modifiées depuis la dernière lecture : {noRun ? '🚀 regénère' : 'relance l’IA'} pour mettre la prévision à jour.</div>}
       {!aiAnyKey() && <div style={{ fontSize:10.5, color:C.muted }}>Ajoute une clé d’IA dans 🔌 API (Gemini est gratuite).</div>}
       {nF === 0 && <div style={{ fontSize:10.5, color:C.dim }}>Aucune formule pour l’instant.</div>}
       {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
@@ -46807,9 +46943,11 @@ function BudgetFxResults() {
     </div>
   );
 }
-// 📐 Prévision tient en DEUX collapses (⚙️ Paramètres, 📊 Résultats) : chacun range ses vues
-// dans des onglets (`BudgetSeg`). L'onglet choisi vit dans `_budgetUi` (piège 5 : `StatsCollapse`
-// démonte ses enfants) ; le contenu est remonté à chaque changement (clé = id ⇒ fondu `hub-fade`).
+// 📐 Prévision = étapes ①–④ en sous-menus (paramètres), un gros bouton 🚀 Générer, puis les
+// résultats de la GÉNÉRATION en sous-menus, et 🕘 l'historique. Aucun graphique sans génération.
+// L'état d'écran vit dans `_budgetUi` (piège 5 : `StatsCollapse` démonte ses enfants) : `rk`
+// change à chaque génération ⇒ les sous-menus de résultats se remontent (chiffres clés ouverts).
+// `BudgetSeg` = rangée d'onglets (horizon).
 function BudgetSeg({ items, value, onChange, color, inline }) {
   const c = color || BUDGET_COLOR;
   return (
@@ -46832,7 +46970,6 @@ function BudgetSeg({ items, value, onChange, color, inline }) {
     </div>
   );
 }
-const BUDGET_FADE = { animation:'hub-fade .2s ease', display:'flex', flexDirection:'column', gap:10, minWidth:0 };
 const BUDGET_CARD = desk => ({ background:C.surface, border:`1px solid ${C.border}`, borderRadius: desk ? 12 : 10, padding: desk ? '12px 14px' : '10px 12px',
   display:'flex', flexDirection:'column', gap:10, minWidth:0 });
 const BUDGET_ICON_BTN = { ...BUDGET_GHOST, padding:'5px 8px', lineHeight:1 };
@@ -46851,11 +46988,22 @@ function BudgetPanel() {
   const [parsed, setParsed] = React.useState(null);    // [{ it, on }] proposés par l'IA
   const [pBusy, setPBusy] = React.useState(false);
   const [pErr, setPErr] = React.useState('');
-  const scens = data.scenarios;
+  const [gen, setGen] = React.useState(null);          // étape de 🚀 en cours : 'calc' | 'fx' | 'drive' | null
+  const [genMsg, setGenMsg] = React.useState(null);    // { ok:[], warn:[] } | { err }
+  const [driveBusy, setDriveBusy] = React.useState(null); // id de la génération en cours d'envoi
+  const resRef = React.useRef(null);
+  const scens = data.scenarios, hist = data.hist;
   const sc = scens.find(s => s.id === _budgetUi.sel) || scens[0] || null;
-  const horizon = _budgetUi.horizon;
   const today = localDayStr();
-  const proj = React.useMemo(() => (sc ? budgetProject(sc, horizon, today) : null), [sc, horizon, today]);
+  // Résultats affichés = une GÉNÉRATION (👁 choisie dans l'historique, sinon la dernière du
+  // scénario) — jamais les paramètres en cours de saisie.
+  const viewE = (_budgetUi.view && hist.find(e => e.id === _budgetUi.view)) || null;
+  const lastE = sc ? budgetLastGen(data, sc.id) : null;
+  const shown = viewE || lastE;
+  const gp = shown ? budgetHistProj(shown) : null;
+  const fresh = budgetGenFresh(lastE, sc, today);
+  // Solde d'aujourd'hui des paramètres EN COURS : seulement pour l'avertissement « trésorerie ancienne ».
+  const liveOpen = React.useMemo(() => (sc ? budgetProject(sc, 1, today).open : 0), [sc, today]);
   React.useEffect(() => { if (!undo) return; const t = setTimeout(() => setUndo(null), 7000); return () => clearTimeout(t); }, [undo]);
   const write = ok => { setErr(ok ? '' : '⚠ Stockage local plein : modification NON enregistrée.'); return ok; };
   const upd = fn => sc && write(budgetUpdateScen(sc.id, fn));
@@ -46919,7 +47067,102 @@ function BudgetPanel() {
     if (add.length && upd(s => ({ ...s, items: s.items.concat(add).slice(0, BUDGET_MAX_ITEMS) }))) { setParsed(null); setPhrase(''); }
   };
 
-  // ── Aucun scénario : accueil (+ les formules, indépendantes des scénarios) ──
+  // ── 🚀 Générer : fige le scénario (historique), relit les formules si besoin, envoie sur Drive ──
+  // ⚠ Lit `budgetLoad()` et non `sc` : le clic fait d'abord perdre le focus au champ en cours,
+  // dont le blur vient d'enregistrer la valeur (`BudgetField`) — `sc` date du rendu d'avant.
+  const generate = async () => {
+    if (gen || !sc) return;
+    const cur = budgetLoad().scenarios.find(s => s.id === sc.id);
+    if (!cur) return;
+    if (!cur.items.some(it => !it.off)) { setGenMsg({ err: 'Ajoute au moins une rentrée ou une dépense active (étape ②) avant de générer.' }); return; }
+    setGenMsg(null); setGen('calc');
+    const e = budgetGenerate(cur, localDayStr());
+    if (!e) { setGen(null); setGenMsg({ err: '⚠ Stockage local plein : génération NON enregistrée.' }); return; }
+    setUi({ view: null, rk: (_budgetUi.rk || 0) + 1 });
+    setTimeout(() => { try { if (resRef.current) resRef.current.scrollIntoView({ block:'start', behavior:'smooth' }); } catch {} }, 80);
+    const ok = ['✅ Scénario généré et ajouté à 🕘 l’historique.'], warn = [];
+    const fx = budgetLoad().fx;
+    if (fx && Object.keys(fx.f || {}).length && (!fx.rules || fx.sig !== budgetFxSig(fx.f))) {
+      if (!aiAnyKey()) warn.push('Formules de prévision non relues : aucune clé d’IA (🔌 API).');
+      else {
+        setGen('fx');
+        try { const res = await budgetFxAi(fx, loadActifs()); budgetSave({ fx: { ...(budgetLoad().fx || fx), ...res, at: Date.now() } }); ok.push('🔮 Formules relues par l’IA.'); }
+        catch (x) { warn.push('Formules : ' + budgetAiErr(x)); }
+      }
+    }
+    if (e.drive) ok.push('☁️ Déjà sur ton Drive (rien n’a changé depuis).');
+    else if (budgetDriveReady()) {
+      setGen('drive');
+      try { await budgetDriveSend(e.id); ok.push(`☁️ Enregistré sur ton Drive (${GDRIVE_HUB_FOLDER}/${BUDGET_DRIVE_SUB}).`); }
+      catch (x) { warn.push('Drive : ' + ((x && x.message) || 'échec') + ' — renvoie-le depuis 🕘 Historique.'); }
+    } else warn.push('Google Drive non connecté : génération gardée sur l’appareil seulement.');
+    setGen(null); setGenMsg({ ok, warn });
+  };
+  const sendDrive = async id => {
+    if (driveBusy) return;
+    setDriveBusy(id); setErr('');
+    try { await budgetDriveSend(id); } catch (x) { setErr('☁️ ' + ((x && x.message) || 'Envoi Drive impossible.')); }
+    setDriveBusy(null);
+  };
+  // ↩ Reprendre une génération : remet ses paramètres dans le scénario (ou le recrée s'il a été supprimé).
+  const restoreFrom = e => {
+    const live = scens.find(s => s.id === e.scen.id);
+    const when = new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
+    if (live) {
+      if (!confirm(`Remettre « ${live.name} » dans l’état de la génération du ${when} ?\n\nSes paramètres actuels (trésorerie, matelas, horizon, ${live.items.length} flux) seront remplacés.`)) return;
+      if (write(budgetUpdateScen(live.id, s => ({ ...s, start: e.scen.start, startDate: e.scen.startDate, cushion: e.scen.cushion, h: e.scen.h, items: e.scen.items })))) { setUi({ sel: live.id, view: null }); setForm(null); }
+      return;
+    }
+    if (scens.length >= BUDGET_MAX_SCEN) return setErr(`⚠ ${BUDGET_MAX_SCEN} scénarios au plus.`);
+    const s = budgetScenNew(e.scen.name, scens.length, { ...e.scen, items: e.scen.items.map(it => ({ ...it, id: budgetId() })) });
+    if (write(budgetSave({ scenarios: scens.concat([s]) }))) setUi({ sel: s.id, view: null });
+  };
+  const delHist = e => {
+    if (!confirm(`Retirer cette génération de l’historique ?${e.drive ? '\n\nLe fichier reste sur ton Google Drive.' : ''}`)) return;
+    if (write(budgetSave({ hist: hist.filter(x => x.id !== e.id) })) && _budgetUi.view === e.id) setUi({ view: null });
+  };
+  const driveOk = budgetDriveReady();
+  const driveBtn = (e, small) => e.drive
+    ? <a href={safeHref(e.drive.url)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Google Drive"
+        style={{ ...BUDGET_GHOST, textDecoration:'none', color:'#4ea3f5', borderColor:'#4ea3f555', padding: small ? '4px 7px' : BUDGET_GHOST.padding }}>☁️{small ? '' : ' Ouvrir sur Drive'}</a>
+    : driveOk
+      ? <button onClick={() => sendDrive(e.id)} disabled={!!driveBusy} title="Envoyer cette génération sur Google Drive"
+          style={{ ...BUDGET_GHOST, padding: small ? '4px 7px' : BUDGET_GHOST.padding }}>{driveBusy === e.id ? '⏳' : small ? '⤴☁️' : '⤴ Envoyer sur Drive'}</button>
+      : null;
+  // 🕘 Liste des générations (tous scénarios). Δ = plaçable vs la génération précédente du même scénario.
+  const histBody = canView => {
+    if (!hist.length) return <div style={{ fontSize:11, color:C.muted }}>Aucune génération pour l’instant.</div>;
+    return (
+      <div style={{ display:'flex', flexDirection:'column' }}>
+        {hist.map((e, i) => {
+          const p = budgetHistProj(e);
+          const prev = hist.slice(i + 1).find(x => x.scen.id === e.scen.id);
+          const dl = prev ? p.lump - budgetHistProj(prev).lump : null;
+          const on = shown && shown.id === e.id;
+          return (
+            <div key={e.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 6px', borderTop: i ? `1px solid ${C.border}` : 'none', background: on ? `${e.scen.color}12` : 'none', borderRadius: on ? 8 : 0 }}>
+              <span style={{ width:8, height:8, borderRadius:999, background:e.scen.color, flexShrink:0 }} />
+              <span style={{ flex:1, minWidth:0 }}>
+                <span style={{ display:'block', fontSize:12, fontWeight:800, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{e.scen.name}
+                  <span style={{ fontWeight:400, color:C.dim, fontSize:10 }}> · {new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })} · {e.scen.h} mois</span></span>
+                <span style={{ display:'block', fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>
+                  <span style={{ color: p.lump < 0 ? FIN_DOWN : BUDGET_COLOR }}>{p.lump < 0 ? '−' + budgetK(-p.lump) : budgetK(p.lump)} € plaçables</span> · bas {budgetK(p.low.b)} €
+                  {dl != null && Math.round(dl) !== 0 && <span style={{ color: dl > 0 ? FIN_UP : FIN_DOWN }}> · {dl > 0 ? '+' : '−'}{budgetK(Math.abs(dl))} € vs avant</span>}
+                </span>
+              </span>
+              {canView && <button onClick={() => setUi({ view: e.id, sel: scens.some(s => s.id === e.scen.id) ? e.scen.id : _budgetUi.sel, rk: (_budgetUi.rk || 0) + 1 })} title="Afficher ses résultats"
+                style={{ ...BUDGET_GHOST, padding:'4px 7px', color: on ? e.scen.color : C.muted }}>👁</button>}
+              {driveBtn(e, true)}
+              <button onClick={() => restoreFrom(e)} title={scens.some(s => s.id === e.scen.id) ? 'Remettre ces paramètres dans le scénario' : 'Recréer ce scénario (supprimé depuis)'} style={{ ...BUDGET_GHOST, padding:'4px 7px' }}>↩</button>
+              <button onClick={() => delHist(e)} title="Retirer de l’historique" style={{ ...BUDGET_GHOST, padding:'4px 7px', color:FIN_DOWN }}>🗑</button>
+            </div>
+          );
+        })}
+        <div style={{ fontSize:9.5, color:C.dim, marginTop:6, lineHeight:1.45 }}>Chaque génération est figée (paramètres + résultats du jour où elle a été faite) : 👁 l’affiche, ↩ remet ses paramètres, ☁️ ouvre sa feuille Google Sheets dans {GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}. {BUDGET_MAX_HIST} générations gardées au plus.</div>
+      </div>
+    );
+  };
+  // ── Aucun scénario : accueil (+ les formules, indépendantes des scénarios, + l'historique) ──
   const fxHas = !!(data.fx && data.fx.rules);
   const fxN = Object.keys((data.fx && data.fx.f) || {}).length;
   if (!sc) {
@@ -46929,8 +47172,8 @@ function BudgetPanel() {
           <div style={{ fontSize:16, fontWeight:900, color:C.text }}>📐 Ta trésorerie, mois par mois</div>
           <div style={{ fontSize:12, color:C.text, lineHeight:1.55 }}>
             Prépare tes <b>3, 6, 12 ou 24 prochains mois</b> : salaire, prêt immo, charges, taxe foncière, contrôle technique, assurances, vacances…
-            Le Hub calcule ton solde jour par jour, ton <b>point bas</b>, et <b style={{ color:BUDGET_COLOR }}>combien tu peux investir</b> sans passer sous ton matelas de sécurité.
-            Fais-en plusieurs (prudent, avec achat immo, avec nouvelle voiture…) et compare-les.
+            Appuie sur <b>🚀 Générer</b> : le Hub calcule ton solde jour par jour, ton <b>point bas</b>, et <b style={{ color:BUDGET_COLOR }}>combien tu peux investir</b> sans passer sous ton matelas de sécurité.
+            Chaque génération est gardée dans un historique et enregistrée sur ton Google Drive. Fais plusieurs scénarios (prudent, avec achat immo…) et compare-les.
           </div>
           <button onClick={() => createScen(null)} style={{ ...budgetBtn(BUDGET_COLOR, true), padding:'9px 16px', fontSize:12.5 }}>✨ Créer mon premier scénario</button>
           {actifs && <div style={{ fontSize:10.5, color:C.muted }}>Astuce : une fois créé, 📥 reprend ta trésorerie et tes moyennes depuis le mode Finance (Mes Actifs).</div>}
@@ -46944,23 +47187,26 @@ function BudgetPanel() {
             <BudgetFxResults />
           </StatsCollapse>
         )}
+        {hist.length > 0 && (
+          <StatsCollapse key="hist" defaultOpen={false} color={BUDGET_COLOR} title="🕘 HISTORIQUE DES GÉNÉRATIONS" right={hist.length}>
+            {histBody(false)}
+          </StatsCollapse>
+        )}
       </div>
     );
   }
 
-  const monthsLeft = proj.mons.length;
-  const avgNet = proj.net / monthsLeft;
-  const tauxEp = proj.inc > 0 ? proj.net / proj.inc * 100 : null;
-  const lastMonth = budgetMonthLbl(proj.mons[proj.mons.length - 1].idx, true);
   const ins = sc.items.filter(it => it.kind === 'in');
   const rec = sc.items.filter(it => it.kind === 'out' && it.every);
   const one = sc.items.filter(it => it.kind === 'out' && !it.every);
   const byNext = (a, b) => (budgetNext(a, today) || '9999') < (budgetNext(b, today) || '9999') ? -1 : 1;
-  const prov = budgetProvisions(proj);
-  const provTot = prov.reduce((s, x) => s + x.perMonth, 0);
   const alerts = budgetAlertCands(sc, today);
   const stale = budgetDaysTo(sc.startDate, today) > 31;
   const outMonthly = budgetMonthly(sc, it => it.kind === 'out', today);
+  // Résultats (génération affichée) — `ss` = scénario TEL QU'IL ÉTAIT généré.
+  const ss = shown ? shown.scen : null;
+  const prov = gp ? budgetProvisions(gp) : [];
+  const provTot = prov.reduce((s, x) => s + x.perMonth, 0);
 
   const group = (title, list, total) => list.length > 0 && (
     <div>
@@ -47039,7 +47285,7 @@ function BudgetPanel() {
         )}
       </div>
   </>);
-  const provBody = (<>
+  const provBody = gp && (<>
       {!prov.length ? (
         <div style={{ fontSize:11, color:C.muted }}>Aucune dépense non mensuelle de {budgetEur(BUDGET_BIG)} ou plus sur l’horizon.</div>
       ) : (<>
@@ -47063,57 +47309,182 @@ function BudgetPanel() {
       </>)}
   </>);
 
-  // ── ⚙️ Paramètres · 📊 Résultats : les deux seuls collapses ──
-  const t1 = ['flux', 'fx', 'loan'].includes(_budgetUi.t1) ? _budgetUi.t1 : 'flux';
-  const t2s = [['mois', '📅 Mois par mois'], ['prov', '🐖 À prévoir', prov.length]];
-  if (scens.length > 1) t2s.push(['cmp', '🆚 Comparer', scens.length]);
-  if (fxHas) t2s.push(['fxres', '🔮 Prévision IA']);
-  t2s.push(['ai', '🤖 Analyse IA']);
-  const t2 = t2s.some(t => t[0] === _budgetUi.t2) ? _budgetUi.t2 : 'mois';
-  // L'Analyse IA propose un flux oublié : il s'ouvre dans ⚙️ Paramètres › Flux. La clé du collapse
+  // L'Analyse IA propose un flux oublié : il s'ouvre dans ② Rentrées & dépenses. La clé du collapse
   // change (`pk`) ⇒ il se remonte OUVERT, même replié avant.
-  const prefill = init => { setForm({ init: { ...init, every: init.every || 0 }, edit:false }); setUi({ t1:'flux', pk:(_budgetUi.pk || 0) + 1 }); };
-  const params = (
-    <StatsCollapse key={'params' + (_budgetUi.pk || 0)} defaultOpen={desk || !sc.items.length || !!_budgetUi.pk} color={BUDGET_COLOR}
-      title="⚙️ PARAMÈTRES" right={`${sc.items.length} flux`}>
-      <BudgetSeg items={[['flux', '💸 Flux', sc.items.length], ['fx', '⚙️ Formules', fxN], ['loan', '🏠 Prêt immo']]} value={t1} onChange={v => setUi({ t1: v })} />
-      <div key={t1} style={BUDGET_FADE}>
-        {t1 === 'flux' && fluxBody}
-        {t1 === 'fx' && <BudgetFxConfig />}
-        {t1 === 'loan' && <BudgetLoanSim sc={sc} onAdd={items => { if (upd(s => ({ ...s, items: s.items.concat(items).slice(0, BUDGET_MAX_ITEMS) }))) setUi({ t1:'flux' }); }} />}
+  const prefill = init => { setForm({ init: { ...init, every: init.every || 0 }, edit:false }); setUi({ pk:(_budgetUi.pk || 0) + 1 }); };
+  const pk = _budgetUi.pk || 0, rk = _budgetUi.rk || 0;
+  const neverGen = !lastE;
+  const paramsChanged = !!lastE && (lastE.sig !== budgetSig(sc) || lastE.scen.h !== sc.h);
+  const horizonLbl = (BUDGET_HORIZONS.find(([n]) => n === sc.h) || [0, sc.h + ' mois'])[1];
+  const cushion3 = Math.round(outMonthly * 3 / 100) * 100;
+
+  // ── ① Point de départ ──
+  const startBody = (
+    <div style={{ display:'flex', flexDirection:'column', gap:10, fontSize:11, color:C.muted }}>
+      <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ width:92 }}>💰 Trésorerie au</span>
+        <BudgetField kind="date" value={sc.startDate} width={92} title="Date du solde (fin de journée)" onCommit={v => upd(s => ({ ...s, startDate: v }))} />
+        <BudgetField value={sc.start} width={100} placeholder="0" title="Solde disponible (comptes courants + livrets)" color={`${BUDGET_COLOR}66`} onCommit={v => upd(s => ({ ...s, start: v, startDate: s.start === v ? s.startDate : today }))} />
+        <span>€</span>
+        {actifs && <button onClick={fromActifs} title="Reprendre la trésorerie et les moyennes du classeur (mode Finance · Mes Actifs)" style={BUDGET_GHOST}>📥 Mes Actifs</button>}
       </div>
-    </StatsCollapse>
-  );
-  const results = (
-    <StatsCollapse key="results" defaultOpen={true} color={BUDGET_COLOR} title="📊 RÉSULTATS"
-      right={proj.lump < 0 ? `⚠ −${budgetK(-proj.lump)} €` : `${budgetK(proj.lump)} € plaçables`}>
-      <BudgetSeg items={t2s} value={t2} onChange={v => setUi({ t2: v })} />
-      <div key={t2} style={BUDGET_FADE}>
-        {t2 === 'mois' && <BudgetMonthTable proj={proj} cushion={sc.cushion} />}
-        {t2 === 'prov' && provBody}
-        {t2 === 'cmp' && <BudgetCompare scens={scens} horizon={horizon} today={today} onPick={id => setUi({ sel: id })} />}
-        {t2 === 'fxres' && <BudgetFxResults />}
-        {t2 === 'ai' && <BudgetAiBox sc={sc} proj={proj} onPrefill={prefill} />}
+      <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ width:92 }}>🛟 Matelas</span>
+        <BudgetField value={sc.cushion} width={100} placeholder="0" title="Épargne de précaution à ne jamais entamer" color="#e0a04066" onCommit={v => upd(s => ({ ...s, cushion: Math.max(0, Math.round(v)) }))} />
+        <span>€</span>
+        {outMonthly > 0 && Math.abs(sc.cushion - cushion3) > 1 && (
+          <button onClick={() => upd(s => ({ ...s, cushion: cushion3 }))} title="Règle courante : 3 mois de dépenses" style={BUDGET_GHOST}>= 3 mois ({budgetK(cushion3)} €)</button>
+        )}
       </div>
-    </StatsCollapse>
+      <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+        <span style={{ width:92 }}>🗓️ Horizon</span>
+        <BudgetSeg inline items={BUDGET_HORIZONS.map(([n, l]) => [n, l])} value={sc.h} onChange={n => upd(s => ({ ...s, h: n }))} />
+      </div>
+      {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Trésorerie saisie il y a {budgetDaysTo(sc.startDate, today)} jours : les flux depuis sont supposés passés comme prévu ({budgetEur(liveOpen)} aujourd’hui) — mets-la à jour pour plus de justesse.</div>}
+    </div>
   );
 
-  const lumpNeg = proj.lump < 0;
+  // ── 🚀 Le gros bouton ──
+  const GEN_STEP = { calc:'⏳ Calcul…', fx:'⏳ Lecture des formules par l’IA…', drive:'⏳ Envoi sur Google Drive…' };
+  const genCard = (
+    <div style={{ ...BUDGET_CARD(desk), alignItems:'stretch', border:`1px solid ${sc.color}55`, background:`linear-gradient(135deg, ${sc.color}16, ${C.surface} 70%)` }}>
+      <button onClick={generate} disabled={!!gen}
+        style={{ width:'100%', padding: desk ? '16px 18px' : '15px 16px', borderRadius:12, border:'none', background: fresh ? `${sc.color}2a` : sc.color, color: fresh ? sc.color : '#0a0a0a',
+          boxShadow: fresh ? `inset 0 0 0 1px ${sc.color}88` : `0 6px 22px ${sc.color}44`, fontSize: desk ? 16 : 15, fontWeight:900, letterSpacing:'0.04em',
+          cursor: gen ? 'wait' : 'pointer', fontFamily:'inherit', opacity: gen ? 0.8 : 1, transition:'background .15s, box-shadow .15s' }}>
+        {gen ? GEN_STEP[gen] : fresh ? '↻ REGÉNÉRER LE SCÉNARIO' : '🚀 GÉNÉRER LE SCÉNARIO'}
+      </button>
+      <div style={{ fontSize:10.5, color:C.muted, textAlign:'center', lineHeight:1.45 }}>
+        {fresh ? 'Déjà à jour : rien n’a changé depuis la dernière génération. ' : ''}
+        Calcule « {sc.name} » sur {horizonLbl}, l’ajoute à 🕘 l’historique{driveOk ? <> et l’enregistre sur ton Google Drive ({GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}).</> : '.'}
+      </div>
+      {!driveOk && gdriveConfigured() && (
+        <button onClick={() => gdriveLogin()} style={{ ...BUDGET_GHOST, alignSelf:'center', color:'#4ea3f5', borderColor:'#4ea3f555' }}>☁️ Connecter Google Drive pour y enregistrer les scénarios</button>
+      )}
+      {genMsg && genMsg.err && <div style={{ fontSize:11, color:FIN_DOWN, textAlign:'center' }}>{genMsg.err}</div>}
+      {genMsg && !genMsg.err && (
+        <div style={{ display:'flex', flexDirection:'column', gap:2, fontSize:10.5, textAlign:'center' }}>
+          {genMsg.ok.map(t => <span key={t} style={{ color:FIN_UP }}>{t}</span>)}
+          {genMsg.warn.map(t => <span key={t} style={{ color:'#e0a040' }}>⚠ {t}</span>)}
+        </div>
+      )}
+    </div>
+  );
+
+  // ── 📊 Résultats : uniquement ceux d'une génération ──
+  const cmpRows = scens.map(s => budgetLastGen(data, s.id)).filter(Boolean).map(e => ({ s: e.scen, p: budgetHistProj(e), e }));
+  const canAi = !viewE && !!lastE && !paramsChanged;
+  let resultsHead, results = null;
+  if (!shown) {
+    resultsHead = (
+      <div ref={resRef} style={{ ...BUDGET_CARD(desk), alignItems:'center', textAlign:'center', padding: desk ? '22px 18px' : '18px 14px', borderStyle:'dashed' }}>
+        <div style={{ fontSize:26 }}>📊</div>
+        <div style={{ fontSize:13, fontWeight:900 }}>Aucun résultat pour l’instant</div>
+        <div style={{ fontSize:11, color:C.muted, lineHeight:1.5, maxWidth:420 }}>Règle les étapes ① à ④, puis appuie sur <b style={{ color:sc.color }}>🚀 Générer le scénario</b>. Chiffres clés, courbe, mois par mois et analyse s’afficheront ici.</div>
+      </div>
+    );
+  } else {
+    const lumpNeg = gp.lump < 0;
+    const monthsLeft = gp.mons.length;
+    const avgNet = gp.net / monthsLeft;
+    const tauxEp = gp.inc > 0 ? gp.net / gp.inc * 100 : null;
+    const lastMonth = budgetMonthLbl(gp.mons[gp.mons.length - 1].idx, true);
+    const when = new Date(shown.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
+    resultsHead = (
+      <div ref={resRef} style={{ ...BUDGET_CARD(desk), gap:6, borderLeft:`3px solid ${ss.color}` }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+          <span style={{ flex:1, minWidth:0, fontSize: desk ? 14 : 13, fontWeight:900, color:ss.color }}>📊 Résultats · {ss.name}</span>
+          {driveBtn(shown, false)}
+        </div>
+        <div style={{ fontSize:10.5, color:C.muted }}>Généré le {when} · {ss.h} mois, du {budgetFmtDY(gp.today)} au {budgetFmtDY(gp.end)}</div>
+        {viewE && viewE.id !== (lastE && lastE.id) && (
+          <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:10.5, color:'#6f7bf5' }}>
+            <span style={{ flex:1 }}>🕘 Génération passée, affichée depuis l’historique.</span>
+            <button onClick={() => setUi({ view: null })} style={BUDGET_GHOST}>✕ Revenir à la dernière</button>
+          </div>
+        )}
+        {!viewE && paramsChanged && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Paramètres modifiés depuis : ces résultats ne les intègrent pas encore. Appuie sur 🚀 Générer.</div>}
+        {!viewE && !paramsChanged && lastE.today !== today && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Calculé le {budgetFmtDY(lastE.today)} : regénère pour repartir d’aujourd’hui.</div>}
+      </div>
+    );
+    results = (<>
+      <StatsCollapse key={'r-kpi' + rk} defaultOpen={true} color={ss.color} title="📈 CHIFFRES CLÉS & COURBE"
+        right={lumpNeg ? `⚠ −${budgetK(-gp.lump)} €` : `${budgetK(gp.lump)} € plaçables`}>
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(2, minmax(0, 1fr))', gap:8 }}>
+          <BudgetKpi big wide icon="📈" label="PLAÇABLE AUJOURD’HUI" color={lumpNeg ? FIN_DOWN : BUDGET_COLOR}
+            value={lumpNeg ? `−${budgetEur(-gp.lump)}` : budgetEur(gp.lump)}
+            sub={lumpNeg ? `il manque cette somme pour tenir le matelas${gp.below ? ' (dès le ' + budgetFmtD(gp.below.d) + ')' : ''}`
+              : gp.placed > gp.lump ? `puis ${budgetEur(gp.placed - gp.lump)} de plus d’ici fin ${lastMonth}` : 'sans jamais passer sous le matelas'} />
+          <BudgetKpi icon="🔁" label="OU CHAQUE MOIS" value={`${budgetEur(gp.dca)}`} sub={`versement sûr · ${monthsLeft} mois`} />
+          <BudgetKpi icon="📉" label="POINT BAS" color={gp.low.b < ss.cushion ? FIN_DOWN : C.text} value={budgetEur(gp.low.b)}
+            sub={`le ${budgetFmtDY(gp.low.d)}${gp.low.evs.length ? ' · ' + budgetCause(gp.low) : ''}`} />
+          <BudgetKpi icon="🏁" label={`FIN ${lastMonth.toUpperCase()}`} value={budgetEur(gp.endB)} color={gp.endB >= gp.open ? C.text : FIN_DOWN}
+            sub={`${gp.endB >= gp.open ? '+' : '−'}${budgetEur(Math.abs(gp.endB - gp.open))} vs départ`} />
+          <BudgetKpi icon="🐖" label="ÉPARGNE NETTE" value={`${budgetEur(avgNet)}/m`} color={avgNet >= 0 ? FIN_UP : FIN_DOWN}
+            sub={tauxEp != null ? `taux d’épargne ${tauxEp.toFixed(0)} %` : 'aucune rentrée'} />
+        </div>
+        <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius: desk ? 12 : 10, padding:'10px 10px 4px' }}>
+          <BudgetChart series={[{ name: ss.name, color: ss.color, pts: gp.pts }]} from={gp.today} to={gp.end} cushion={ss.cushion} low={gp.low} W={desk ? 620 : 400} height={desk ? 200 : 150} />
+        </div>
+      </StatsCollapse>
+      <StatsCollapse key={'r-mois' + rk} defaultOpen={false} color={ss.color} title="📅 MOIS PAR MOIS" right={`${monthsLeft} mois`}>
+        <BudgetMonthTable proj={gp} cushion={ss.cushion} />
+      </StatsCollapse>
+      <StatsCollapse key={'r-prov' + rk} defaultOpen={false} color={ss.color} title="🐖 À PRÉVOIR" right={prov.length ? `≈ ${budgetK(provTot)} €/mois` : null}>
+        {provBody}
+      </StatsCollapse>
+      {cmpRows.length > 1 && (
+        <StatsCollapse key={'r-cmp' + rk} defaultOpen={false} color={ss.color} title="🆚 COMPARER LES SCÉNARIOS" right={cmpRows.length}>
+          <BudgetCompare rows={cmpRows} onPick={id => setUi({ sel: id, view: null })} />
+        </StatsCollapse>
+      )}
+      {fxHas && (
+        <StatsCollapse key={'r-fx' + rk} defaultOpen={false} color={IA_COLOR} title="🔮 PRÉVISION PAR FORMULES">
+          <BudgetFxResults />
+        </StatsCollapse>
+      )}
+      <StatsCollapse key={'r-ai' + rk} defaultOpen={false} color={IA_COLOR} title="🤖 ANALYSE IA">
+        {canAi ? <BudgetAiBox sc={sc} proj={gp} onPrefill={prefill} />
+          : <div style={{ fontSize:11, color:C.muted }}>{viewE ? 'L’analyse IA porte sur la dernière génération : ✕ reviens-y pour la lancer.' : 'Paramètres modifiés depuis la génération : 🚀 regénère, puis lance l’analyse.'}</div>}
+      </StatsCollapse>
+    </>);
+  }
+
+  const paramsCol = (<>
+    <StatsCollapse key="p-start" defaultOpen={neverGen} color={BUDGET_COLOR} title="① POINT DE DÉPART" right={`${budgetK(sc.start)} € · ${horizonLbl}`}>
+      {startBody}
+    </StatsCollapse>
+    <StatsCollapse key={'p-flux' + pk} defaultOpen={neverGen || !sc.items.length || pk > 0} color={BUDGET_COLOR} title="② RENTRÉES & DÉPENSES" right={`${sc.items.length} flux`}>
+      {fluxBody}
+    </StatsCollapse>
+    <StatsCollapse key="p-loan" defaultOpen={false} color={BUDGET_COLOR} title="③ PRÊT IMMO · facultatif">
+      <BudgetLoanSim sc={sc} onAdd={items => { if (upd(s => ({ ...s, items: s.items.concat(items).slice(0, BUDGET_MAX_ITEMS) }))) setUi({ pk: pk + 1 }); }} />
+    </StatsCollapse>
+    <StatsCollapse key="p-fx" defaultOpen={false} color={BUDGET_COLOR} title="④ FORMULES DE PRÉVISION · facultatif" right={fxN ? `${fxN} formule${fxN > 1 ? 's' : ''}` : null}>
+      <BudgetFxConfig noRun />
+    </StatsCollapse>
+    {genCard}
+  </>);
+  const resultsCol = (<>
+    {resultsHead}
+    {results}
+    <StatsCollapse key="hist" defaultOpen={false} color={BUDGET_COLOR} title="🕘 HISTORIQUE DES GÉNÉRATIONS" right={hist.length || null}>
+      {histBody(true)}
+    </StatsCollapse>
+  </>);
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-      {/* ── Bandeau : scénario, point de départ, horizon (toujours visible) ── */}
+      {/* ── Bandeau : choix du scénario et état de sa génération (toujours visible) ── */}
       <div style={BUDGET_CARD(desk)}>
-        <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
-          <div style={{ display:'flex', gap:5, alignItems:'center', flex:'1 1 220px', minWidth:0, overflowX:'auto', scrollbarWidth:'none' }}>
-            {scens.map(s => (
-              <button key={s.id} onClick={() => { setUi({ sel: s.id }); setForm(null); setNaming(null); }}
-                style={{ ...budgetChip(s.id === sc.id, s.color), display:'inline-flex', alignItems:'center', gap:6, padding:'5px 11px', flexShrink:0, transition:'background .15s, color .15s' }}>
-                <span style={{ width:7, height:7, borderRadius:999, background:s.color, flexShrink:0 }} />{s.name}
-              </button>
-            ))}
-            <button onClick={() => createScen(null)} title="Nouveau scénario vide" style={{ ...BUDGET_ICON_BTN, flexShrink:0, borderRadius:999 }}>＋</button>
-          </div>
-          <BudgetSeg inline items={BUDGET_HORIZONS.map(([n, l]) => [n, l])} value={horizon} onChange={n => setUi({ horizon: n })} />
+        <div style={{ display:'flex', gap:5, alignItems:'center', minWidth:0, overflowX:'auto', scrollbarWidth:'none' }}>
+          {scens.map(s => (
+            <button key={s.id} onClick={() => { setUi({ sel: s.id, view: null }); setForm(null); setNaming(null); setGenMsg(null); }}
+              style={{ ...budgetChip(s.id === sc.id, s.color), display:'inline-flex', alignItems:'center', gap:6, padding:'5px 11px', flexShrink:0, transition:'background .15s, color .15s' }}>
+              <span style={{ width:7, height:7, borderRadius:999, background:s.color, flexShrink:0 }} />{s.name}
+            </button>
+          ))}
+          <button onClick={() => createScen(null)} title="Nouveau scénario vide" style={{ ...BUDGET_ICON_BTN, flexShrink:0, borderRadius:999 }}>＋</button>
         </div>
         <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
           {naming != null ? (<>
@@ -47124,56 +47495,22 @@ function BudgetPanel() {
           </>) : (
             <button onClick={() => setNaming(sc.name)} title="Renommer" style={{ background:'none', border:'none', padding:0, cursor:'text', fontFamily:'inherit', fontSize: desk ? 16 : 15, fontWeight:900, color:sc.color }}>{sc.name}</button>
           )}
+          <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:999,
+            color: neverGen ? C.muted : fresh ? FIN_UP : '#e0a040', background: neverGen ? '#ffffff0a' : fresh ? `${FIN_UP}18` : '#e0a04018' }}>
+            {neverGen ? '○ jamais généré' : fresh ? '✓ à jour' : paramsChanged ? '⚠ modifié depuis' : '⚠ à regénérer'}
+          </span>
           <span style={{ flex:1 }} />
           <button onClick={() => upd(s => ({ ...s, color: BUDGET_SCEN_COLORS[(BUDGET_SCEN_COLORS.indexOf(s.color) + 1) % BUDGET_SCEN_COLORS.length] }))} title="Changer de couleur" style={BUDGET_ICON_BTN}>🎨</button>
           <button onClick={() => createScen(sc)} title="Dupliquer pour tester une variante (« et si j'achète une voiture ? »)" style={BUDGET_ICON_BTN}>⧉</button>
-          <button onClick={delScen} title="Supprimer ce scénario" style={{ ...BUDGET_ICON_BTN, color:FIN_DOWN }}>🗑</button>
+          <button onClick={delScen} title="Supprimer ce scénario (ses générations restent dans l’historique)" style={{ ...BUDGET_ICON_BTN, color:FIN_DOWN }}>🗑</button>
         </div>
-        <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', fontSize:11, color:C.muted }}>
-          <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
-            <span>💰 Trésorerie au</span>
-            <BudgetField kind="date" value={sc.startDate} width={92} title="Date du solde (fin de journée)" onCommit={v => upd(s => ({ ...s, startDate: v }))} />
-            <BudgetField value={sc.start} width={100} placeholder="0" title="Solde disponible (comptes courants + livrets)" color={`${BUDGET_COLOR}66`} onCommit={v => upd(s => ({ ...s, start: v, startDate: s.start === v ? s.startDate : today }))} />
-            <span>€</span>
-          </span>
-          <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
-            <span>🛟 Matelas</span>
-            <BudgetField value={sc.cushion} width={86} placeholder="0" title="Épargne de précaution à ne jamais entamer" color="#e0a04066" onCommit={v => upd(s => ({ ...s, cushion: Math.max(0, Math.round(v)) }))} />
-            <span>€</span>
-          </span>
-          {outMonthly > 0 && Math.abs(sc.cushion - Math.round(outMonthly * 3 / 100) * 100) > 1 && (
-            <button onClick={() => upd(s => ({ ...s, cushion: Math.round(outMonthly * 3 / 100) * 100 }))} title="Règle courante : 3 mois de dépenses" style={BUDGET_GHOST}>= 3 mois ({budgetK(Math.round(outMonthly * 3 / 100) * 100)} €)</button>
-          )}
-          {actifs && <button onClick={fromActifs} title="Reprendre la trésorerie et les moyennes du classeur (mode Finance · Mes Actifs)" style={BUDGET_GHOST}>📥 Mes Actifs</button>}
-        </div>
-        {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Trésorerie saisie il y a {budgetDaysTo(sc.startDate, today)} jours : les flux depuis sont supposés passés comme prévu ({budgetEur(proj.open)} aujourd’hui) — mets-la à jour pour plus de justesse.</div>}
         {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
       </div>
 
-      {/* ── Chiffres clés : le plaçable en vedette ── */}
-      <div style={{ display:'grid', gridTemplateColumns: desk ? 'minmax(0, 1.4fr) repeat(4, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', gap:8 }}>
-        <BudgetKpi big wide={!desk} icon="📈" label="PLAÇABLE AUJOURD’HUI" color={lumpNeg ? FIN_DOWN : BUDGET_COLOR}
-          value={lumpNeg ? `−${budgetEur(-proj.lump)}` : budgetEur(proj.lump)}
-          sub={lumpNeg ? `il manque cette somme pour tenir le matelas${proj.below ? ' (dès le ' + budgetFmtD(proj.below.d) + ')' : ''}`
-            : proj.placed > proj.lump ? `puis ${budgetEur(proj.placed - proj.lump)} de plus d’ici fin ${lastMonth}` : 'sans jamais passer sous le matelas'} />
-        <BudgetKpi icon="🔁" label="OU CHAQUE MOIS" value={`${budgetEur(proj.dca)}`} sub={`versement sûr · ${monthsLeft} mois`} />
-        <BudgetKpi icon="📉" label="POINT BAS" color={proj.low.b < sc.cushion ? FIN_DOWN : C.text} value={budgetEur(proj.low.b)}
-          sub={`le ${budgetFmtDY(proj.low.d)}${proj.low.evs.length ? ' · ' + budgetCause(proj.low) : ''}`} />
-        <BudgetKpi icon="🏁" label={`FIN ${lastMonth.toUpperCase()}`} value={budgetEur(proj.endB)} color={proj.endB >= proj.open ? C.text : FIN_DOWN}
-          sub={`${proj.endB >= proj.open ? '+' : '−'}${budgetEur(Math.abs(proj.endB - proj.open))} vs aujourd’hui`} />
-        <BudgetKpi icon="🐖" label="ÉPARGNE NETTE" value={`${budgetEur(avgNet)}/m`} color={avgNet >= 0 ? FIN_UP : FIN_DOWN}
-          sub={tauxEp != null ? `taux d’épargne ${tauxEp.toFixed(0)} %` : 'aucune rentrée'} />
-      </div>
-
-      {/* ── Courbe du solde ── */}
-      <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius: desk ? 12 : 10, padding:'10px 10px 4px' }}>
-        <BudgetChart series={[{ name: sc.name, color: sc.color, pts: proj.pts }]} from={proj.today} to={proj.end} cushion={sc.cushion} low={proj.low} W={desk ? 1100 : 400} height={desk ? 210 : 150} />
-      </div>
-
-      {/* 🖥️ Ordinateur : paramètres à gauche, résultats à droite (placés par DeskCol, cf. DeskCols). */}
+      {/* 🖥️ Ordinateur : étapes + 🚀 à gauche, résultats + historique à droite (placés par DeskCol). */}
       <DeskCols cols={2} min={380} gap={12}>
-        <DeskCol n={0}>{params}</DeskCol>
-        <DeskCol n={1}>{results}</DeskCol>
+        <DeskCol n={0}>{paramsCol}</DeskCol>
+        <DeskCol n={1}>{resultsCol}</DeskCol>
       </DeskCols>
     </div>
   );
