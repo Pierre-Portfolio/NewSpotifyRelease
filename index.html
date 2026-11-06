@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.231';
+const APP_VERSION = '13.21.232';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32574,6 +32574,13 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.232', date:'2026-11-06', title:'📐 Prévision : créer, comparer, confronter au réel', items:[
+    'En arrivant dans Finance › Prévision, trois gros boutons : ✨ Créer un scénario, 🆚 Comparer deux scénarios, 📏 Réel vs dernier scénario.',
+    '🆚 Choisis deux générations sur ton Drive : courbes superposées, écarts chiffrés (plaçable, point bas, épargne…), flux ajoutés, retirés ou modifiés, solde mois par mois.',
+    '📏 Tes vrais soldes du classeur Mes Actifs face à la prévision : écart de trésorerie, % de dépenses et de rentrées en plus ou en moins.',
+    '🔁 Après une génération ou une comparaison : « Regénérer un scénario ajusté ? ». Coche, choisis un %, le Hub montre quels flux bougent et de combien (courses oui, prêt non), puis génère la variante.',
+    'Les scénarios générés vivent sur ton Google Drive seulement (HUB_Pierre/Prevision), plus sur le téléphone. Seuls tes brouillons en cours restent sur l’appareil.',
+  ] },
   { v:'13.21.231', date:'2026-11-06', title:'🚀 Prévision : générer ses scénarios', items:[
     'Finance › Prévision se remplit en étapes repliables : ① point de départ (trésorerie, matelas, horizon), ② rentrées et dépenses, ③ prêt immo, ④ formules. Puis un gros bouton 🚀 Générer le scénario.',
     'Aucun graphique avant la génération. Ensuite, les résultats arrivent en sous-menus : chiffres clés et courbe, mois par mois, à prévoir, comparaison, analyse IA.',
@@ -32593,11 +32600,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.228', date:'2026-11-06', title:'📅 TV Time : date du dernier épisode', items:[
     'Dans Prochaines sorties, le bouton « Last » (à droite du 1️⃣) affiche pour chaque série la date de sortie de son dernier épisode diffusé, au lieu du prochain. Un second appui revient au prochain épisode.',
-  ] },
-  { v:'13.21.227', date:'2026-11-05', title:'📐 Finance : Prévision refaite', items:[
-    'Tout tient maintenant en deux volets : ⚙️ Paramètres (flux, formules, simulateur de prêt) et 📊 Résultats (mois par mois, dépenses à prévoir, comparaison des scénarios, prévision et analyse IA), chacun rangé en onglets.',
-    'En haut, toujours visibles : tes scénarios, la trésorerie et le matelas, l’horizon, le montant plaçable en grand, les chiffres clés et la courbe du solde.',
-    'Les modèles rapides tiennent sur une rangée qui défile, et une suggestion de l’Analyse IA ouvre directement le formulaire dans Paramètres.',
   ] },
 ];
 
@@ -45563,10 +45565,13 @@ function FinancePanel() {
 const BUDGET_COLOR = '#32c4b0';
 const BUDGET_LS = 'spotifyplus_budget';   // { v:1, scenarios:[{ id, name, color, start, startDate, cushion, h, at, items, ai }], fx, hist:[…] }
 const BUDGET_MAX_SCEN = 12, BUDGET_MAX_ITEMS = 250;
-// 🕘 Historique des générations (« 🚀 Générer le scénario ») : instantanés FIGÉS, les plus récents
-// d'abord. ⚠ Les graphiques n'affichent QUE des générations : modifier un paramètre ne redessine
-// rien tant qu'on ne regénère pas (demande utilisateur). Fichier Drive : HUB_Pierre/<BUDGET_DRIVE_SUB>.
-const BUDGET_MAX_HIST = 30, BUDGET_DRIVE_SUB = 'Prevision';
+// 🚀 Générations (« Générer le scénario ») : instantanés FIGÉS, stockés sur GOOGLE DRIVE SEUL
+// (HUB_Pierre/<BUDGET_DRIVE_SUB>, demande utilisateur : « on ne save plus les scénarios sur mon
+// tel »). Les brouillons en cours d'édition (`scenarios`) restent locaux. ⚠ Les graphiques
+// n'affichent QUE des générations : modifier un paramètre ne redessine rien tant qu'on ne
+// regénère pas. `hist` local = anciennes générations (13.21.231) en attente d'envoi
+// (`budgetDriveMigrate`), jamais réalimenté.
+const BUDGET_MAX_HIST = 30, BUDGET_DRIVE_SUB = 'Prevision', BUDGET_DRIVE_TAG = 'hubprev';
 const BUDGET_BIG = 300;   // € — dépense non mensuelle à partir de laquelle on la « provisionne »
 const BUDGET_EVERY = [[0, 'Une fois'], [1, 'Chaque mois'], [3, 'Chaque trimestre'], [6, 'Tous les 6 mois'], [12, 'Chaque année'], [24, 'Tous les 2 ans']];
 const BUDGET_EVERY_SHORT = { 0:'une fois', 1:'/ mois', 3:'/ trimestre', 6:'/ 6 mois', 12:'/ an', 24:'/ 2 ans' };
@@ -45732,15 +45737,12 @@ function budgetScenNorm(s, i) {
 }
 // Une génération = le scénario TEL QU'IL ÉTAIT (`scen`, sans l'analyse IA) + le jour de calcul
 // (`today`) : `budgetHistProj` refait exactement la même projection, jamais « recalée » sur
-// aujourd'hui. `drive` = fichier envoyé ({ id, url }) ou null (Drive non connecté / échec).
+// aujourd'hui. C'est le contenu du fichier JSON posé sur Drive (`budgetDriveSave`).
 function budgetHistEntryNorm(x) {
   if (!x || typeof x !== 'object' || !x.scen) return null;
   const scen = budgetScenNorm(x.scen, 0), today = budgetIso(x.today);
   if (!scen || !today) return null;
-  const did = x.drive && typeof x.drive === 'object' && /^[\w-]{10,200}$/.test(x.drive.id || '') ? x.drive.id : '';
-  const url = did && typeof x.drive.url === 'string' && /^https:\/\/(docs|drive)\.google\.com\//.test(x.drive.url) ? x.drive.url.slice(0, 300) : '';
-  return { id: String(x.id || budgetId()).slice(0, 40), at: +x.at || 0, today, sig: String(x.sig || budgetSig(scen)).slice(0, 20),
-    drive: did ? { id: did, url: url || `https://drive.google.com/file/d/${did}/view` } : null, scen: { ...scen, ai: null } };
+  return { id: String(x.id || budgetId()).slice(0, 40), at: +x.at || 0, today, sig: String(x.sig || budgetSig(scen)).slice(0, 20), scen: { ...scen, ai: null } };
 }
 function budgetHistNorm(list) {
   return (Array.isArray(list) ? list : []).map(budgetHistEntryNorm).filter(Boolean)
@@ -45753,10 +45755,11 @@ function budgetHistProj(e) {
   if (!p) { p = budgetProject(e.scen, e.scen.h, e.today); _budgetHistProj.set(e.id, p); }
   return p;
 }
-// Dernière génération d'un scénario (null = jamais généré ⇒ aucun graphique).
-const budgetLastGen = (d, sid) => d.hist.find(e => e.scen.id === sid) || null;
+// Dernière génération (RÉSUMÉ Drive, cf. `budgetDriveSum`) d'un brouillon : null = jamais
+// généré, ou liste Drive pas encore lue ⇒ aucun graphique.
+const budgetLastGen = sid => (_bDrive.list || []).find(x => x.sid === sid) || null;
 // Génération à jour = mêmes paramètres (empreinte + horizon) ET calculée aujourd'hui.
-const budgetGenFresh = (e, sc, today) => !!e && !!sc && e.sig === budgetSig(sc) && e.scen.h === sc.h && e.today === today;
+const budgetGenFresh = (x, sc, today) => !!x && !!sc && x.sig === budgetSig(sc) && x.h === sc.h && x.today === today;
 
 // ── Stockage : cache module-level + abonnés (le panneau et l'IA Action lisent la même chose) ──
 const _budget = { data: null, subs: new Set() };
@@ -45814,26 +45817,15 @@ function budgetMerge(inc) {
     if ((s.at || 0) > (cur[i].at || 0)) cur[i] = s;
   });
   const fxIn = budgetFxNorm(inc.fx), fxCur = budgetLoad().fx;
-  // 🕘 Générations : union par id ; à id égal, celle qui a un fichier Drive gagne.
-  const hist = budgetLoad().hist.slice(), hpos = new Map(hist.map((e, i) => [e.id, i]));
-  budgetHistNorm(inc.hist).forEach(e => {
-    if (!hpos.has(e.id)) { hpos.set(e.id, hist.length); hist.push(e); }
-    else if (e.drive && !hist[hpos.get(e.id)].drive) hist[hpos.get(e.id)] = e;
-  });
-  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur, hist });
+  // ⚠ Pas de `hist` : les générations vivent sur Drive, pas dans la sauvegarde.
+  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur });
 }
-// 🚀 Génère : fige le scénario dans l'historique. Rien n'a bougé depuis la dernière génération
-// du jour ⇒ on la REPREND (pas de doublon, son fichier Drive reste valable). Rend l'entrée ou null (stockage plein).
+// 🚀 Génère : `{ e }` = nouvelle génération à envoyer ; `{ sum }` = rien n'a bougé depuis la
+// dernière génération du jour ⇒ on la REPREND (pas de doublon sur Drive).
 function budgetGenerate(sc, today) {
-  const d = budgetLoad(), sig = budgetSig(sc), last = budgetLastGen(d, sc.id);
-  const same = last && last.sig === sig && last.scen.h === sc.h && last.today === today
-    && last.scen.name === sc.name && last.scen.color === sc.color;
-  if (same) return last;
-  const e = budgetHistEntryNorm({ id: budgetId(), at: Date.now(), today, sig, drive: null, scen: sc });
-  return budgetSave({ hist: [e].concat(d.hist) }) ? e : null;
-}
-function budgetHistPatch(id, patch) {
-  return budgetSave({ hist: budgetLoad().hist.map(e => (e.id === id ? { ...e, ...patch } : e)) });
+  const last = budgetLastGen(sc.id);
+  if (budgetGenFresh(last, sc, today) && last.name === sc.name && last.color === sc.color) return { sum: last };
+  return { e: budgetHistEntryNorm({ id: budgetId(), at: Date.now(), today, sig: budgetSig(sc), scen: sc }) };
 }
 
 // ── ☁️ Drive : une génération = une feuille Google Sheets (CSV importé) dans HUB_Pierre/Prevision ──
@@ -45880,38 +45872,239 @@ function budgetHistCsv(e) {
     (BUDGET_EVERY.find(([v]) => v === it.every) || [0, ''])[1], budgetFmtFull(it.date), budgetFmtFull(it.until), it.off ? 'non' : 'oui'));
   return R.join('\r\n') + '\r\n';
 }
-async function budgetDrivePost(token, meta, csv) {
+async function budgetDrivePost(token, meta, body, ctype) {
   const b = 'hubbudget' + Math.random().toString(36).slice(2);
-  const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: text/csv; charset=UTF-8\r\n\r\n${csv}\r\n--${b}--`;
-  return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
-    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${b}` }, body });
+  const mp = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${ctype}; charset=UTF-8\r\n\r\n${body}\r\n--${b}--`;
+  return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${b}` }, body: mp });
 }
-// Envoie la génération `hid` (feuille Google Sheets ; conversion refusée ⇒ simple .csv).
-// Dossier caché supprimé côté Drive (404) ⇒ cache oublié, dossier recréé, un seul nouvel essai.
 const budgetDriveReady = () => gdriveConnected() && gdriveHasScope(GDRIVE_SCOPE_BASE);
-async function budgetDriveSend(hid) {
+
+// ── ☁️ Générations sur Drive : seul stockage (cf. BUDGET_DRIVE_SUB) ──────────────────────────
+// Une génération = DEUX fichiers dans HUB_Pierre/Prevision :
+//  · une feuille Google Sheets lisible (CSV importé, `budgetHistCsv` ; conversion refusée ⇒ .csv) ;
+//  · `<id>.prevision.json` = l'entrée complète, relue pour afficher / comparer. Son RÉSUMÉ
+//    (nom, couleur, date, empreinte, plaçable, point bas, id de la feuille) est dans ses
+//    `appProperties` (clé `BUDGET_DRIVE_TAG`) ⇒ la liste = UNE requête, sans rien télécharger.
+// ⚠ appProperties : clé + valeur ≤ 124 octets chacune (nom de scénario ≤ 40 car.).
+// Cache module-level `_bDrive` (liste, entrées complètes par id de fichier) + abonnés.
+const _bDrive = { list: null, loading: false, err: '', at: 0, full: new Map(), subs: new Set() };
+function bDrivePub() { for (const f of _bDrive.subs) { try { f(); } catch {} } }
+function useBudgetDrive() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  React.useEffect(() => { _bDrive.subs.add(bump); return () => { _bDrive.subs.delete(bump); }; }, []);
+  return _bDrive;
+}
+const BUDGET_FID_RE = /^[\w-]{10,200}$/;
+function budgetDriveSum(f) {
+  const a = f && f.appProperties;
+  if (!a || a[BUDGET_DRIVE_TAG] !== '1' || !BUDGET_FID_RE.test(f.id || '')) return null;
+  const today = budgetIso(a.today);
+  if (!today) return null;
+  const sheet = BUDGET_FID_RE.test(a.sheet || '') ? a.sheet : '';
+  return { fid: f.id, id: String(a.gid || f.id).slice(0, 40), sid: String(a.sid || ''), name: String(a.name || 'Scénario').slice(0, 40),
+    color: /^#[0-9a-f]{6}$/i.test(a.color || '') ? a.color : BUDGET_COLOR, at: +a.at || 0, h: +a.h || 6, sig: String(a.sig || ''), today,
+    lump: Math.round(+a.lump || 0), low: Math.round(+a.low || 0), sheet,
+    sheetUrl: !sheet ? '' : a.sk === 'c' ? `https://drive.google.com/file/d/${sheet}/view` : `https://docs.google.com/spreadsheets/d/${sheet}/edit` };
+}
+// 401 ⇒ jeton oublié ; dossier caché supprimé côté Drive (404) ⇒ cache oublié + un seul nouvel essai.
+async function budgetDriveRun(fn) {
   const token = gdriveToken();
   if (!token) throw new Error('Google Drive non connecté');
-  const e = budgetLoad().hist.find(x => x.id === hid);
-  if (!e) throw new Error('Génération introuvable.');
-  const csv = budgetHistCsv(e);
+  let res = await fn(token, await gdriveHubSubfolder(token, BUDGET_DRIVE_SUB));
+  if (res.status === 404) { gdriveHubFolderReset(BUDGET_DRIVE_SUB); res = await fn(token, await gdriveHubSubfolder(token, BUDGET_DRIVE_SUB)); }
+  if (res.status === 401) { gdriveLogout(); throw new Error('Session Google expirée — reconnecte-toi'); }
+  if (res.status !== 200) throw new Error('Drive : HTTP ' + res.status);
+  return res;
+}
+// Liste des générations (cache 5 min, `force` pour relire).
+async function budgetDriveList(force) {
+  if (!budgetDriveReady() || _bDrive.loading) return _bDrive.list;
+  if (!force && _bDrive.list && Date.now() - _bDrive.at < 5 * 60e3) return _bDrive.list;
+  _bDrive.loading = true; _bDrive.err = ''; bDrivePub();
+  try {
+    const res = await budgetDriveRun(async (token, folder) => {
+      const q = `'${folder}' in parents and trashed=false and appProperties has { key='${BUDGET_DRIVE_TAG}' and value='1' }`;
+      const out = []; let page = '';
+      do {
+        const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&fields=${encodeURIComponent('nextPageToken,files(id,appProperties)')}&pageSize=200${page ? '&pageToken=' + encodeURIComponent(page) : ''}`,
+          { headers: { Authorization: `Bearer ${token}` }, signal: fetchSig(20000) });
+        if (!r.ok) return { status: r.status };
+        const d = await r.json();
+        (d.files || []).forEach(f => out.push(f));
+        page = d.nextPageToken || '';
+      } while (page);
+      return { status: 200, out };
+    });
+    _bDrive.list = res.out.map(budgetDriveSum).filter(Boolean).sort((a, b) => b.at - a.at);
+    _bDrive.at = Date.now();
+  } catch (e) { _bDrive.err = (e && e.message) || 'Lecture Drive impossible.'; }
+  _bDrive.loading = false; bDrivePub();
+  return _bDrive.list;
+}
+// Envoie une génération (feuille lisible puis JSON) ; la feuille est facultative (`sheetErr`).
+async function budgetDriveSave(e) {
+  const p = budgetHistProj(e), csv = budgetHistCsv(e);
   const stamp = new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' }).replace(/\//g, '-').replace(':', 'h');
   const name = `Prévision · ${e.scen.name} · ${stamp}`;
-  const send = async () => {
-    const folder = await gdriveHubSubfolder(token, BUDGET_DRIVE_SUB);
-    let r = await budgetDrivePost(token, { name, mimeType: ACTIFS_MIME_SHEET, parents: [folder] }, csv);
-    if (!r.ok && r.status !== 401 && r.status !== 404) r = await budgetDrivePost(token, { name: name + '.csv', mimeType: 'text/csv', parents: [folder] }, csv);
-    return r;
-  };
-  let r = await send();
-  if (r.status === 404) { gdriveHubFolderReset(BUDGET_DRIVE_SUB); r = await send(); }
+  const res = await budgetDriveRun(async (token, folder) => {
+    let sheet = '', sk = '', sheetErr = '';
+    const r = await budgetDrivePost(token, { name, mimeType: ACTIFS_MIME_SHEET, parents: [folder] }, csv, 'text/csv');
+    if (r.status === 401 || r.status === 404) return { status: r.status };
+    if (r.ok) { sheet = (await r.json()).id || ''; sk = 's'; }
+    else {
+      const r2 = await budgetDrivePost(token, { name: name + '.csv', mimeType: 'text/csv', parents: [folder] }, csv, 'text/csv');
+      if (r2.ok) { sheet = (await r2.json()).id || ''; sk = 'c'; } else sheetErr = 'feuille non créée (HTTP ' + r2.status + ')';
+    }
+    const props = { [BUDGET_DRIVE_TAG]: '1', gid: e.id, sid: e.scen.id, name: e.scen.name, color: e.scen.color, at: String(e.at),
+      h: String(e.scen.h), sig: e.sig, today: e.today, lump: String(p.lump), low: String(Math.round(p.low.b)) };
+    if (sheet) { props.sheet = sheet; props.sk = sk; }
+    const body = JSON.stringify({ v: 1, id: e.id, at: e.at, today: e.today, sig: e.sig, scen: e.scen });
+    const j = await budgetDrivePost(token, { name: `${e.id}.prevision.json`, mimeType: 'application/json', parents: [folder], appProperties: props }, body, 'application/json');
+    if (!j.ok) return { status: j.status };
+    return { status: 200, fid: (await j.json()).id, props, sheetErr };
+  });
+  const sum = budgetDriveSum({ id: res.fid, appProperties: res.props });
+  if (!sum) throw new Error('Drive : réponse sans fichier.');
+  _bDrive.full.set(sum.fid, e);
+  _bDrive.list = [sum].concat((_bDrive.list || []).filter(x => x.fid !== sum.fid));
+  bDrivePub();
+  return { sum, sheetErr: res.sheetErr };
+}
+// Entrée complète d'une génération (JSON), gardée en mémoire : une génération ne change jamais.
+async function budgetDriveEntry(sum) {
+  if (_bDrive.full.has(sum.fid)) return _bDrive.full.get(sum.fid);
+  const token = gdriveToken();
+  if (!token) throw new Error('Google Drive non connecté');
+  const r = await fetch(`https://www.googleapis.com/drive/v3/files/${sum.fid}?alt=media`, { headers: { Authorization: `Bearer ${token}` } });
   if (r.status === 401) { gdriveLogout(); throw new Error('Session Google expirée — reconnecte-toi'); }
   if (!r.ok) throw new Error('Drive : HTTP ' + r.status);
-  const d = await r.json();
-  if (!d.id) throw new Error('Drive : réponse sans fichier.');
-  const drive = { id: d.id, url: d.webViewLink || `https://drive.google.com/file/d/${d.id}/view` };
-  if (!budgetHistPatch(hid, { drive })) throw new Error('Envoyé sur Drive, mais stockage local plein : lien non conservé.');
-  return drive;
+  let e = null;
+  try { e = budgetHistEntryNorm(JSON.parse(await r.text())); } catch {}
+  if (!e) throw new Error('Fichier de scénario illisible.');
+  _bDrive.full.set(sum.fid, e);
+  return e;
+}
+// `{ e }` | `{ loading:true }` | `{ err }` | {} (rien demandé).
+function useBudgetDriveEntry(sum) {
+  const fid = sum ? sum.fid : '';
+  const [st, setSt] = React.useState({});
+  React.useEffect(() => {
+    if (!fid || _bDrive.full.has(fid)) return;
+    let live = true;
+    setSt({ loading: true });
+    budgetDriveEntry(sum).then(e => { if (live) setSt({ e }); }, x => { if (live) setSt({ err: (x && x.message) || 'Lecture impossible.' }); });
+    return () => { live = false; };
+  }, [fid]);
+  if (!fid) return {};
+  return _bDrive.full.has(fid) ? { e: _bDrive.full.get(fid) } : st;
+}
+// 🗑 Supprime la génération de Drive (JSON + feuille). drive.file : seuls nos fichiers.
+async function budgetDriveDelete(sum) {
+  const token = gdriveToken();
+  if (!token) throw new Error('Google Drive non connecté');
+  await gdriveDeleteFile(token, sum.fid);
+  if (sum.sheet) { try { await gdriveDeleteFile(token, sum.sheet); } catch {} }
+  _bDrive.full.delete(sum.fid);
+  _bDrive.list = (_bDrive.list || []).filter(x => x.fid !== sum.fid);
+  bDrivePub();
+}
+// Anciennes générations locales (13.21.231) ⇒ Drive, puis retirées du téléphone.
+let _budgetMigrating = false;
+async function budgetDriveMigrate() {
+  if (_budgetMigrating || !budgetDriveReady() || !budgetLoad().hist.length) return;
+  _budgetMigrating = true;
+  try {
+    for (const e of budgetLoad().hist.slice().reverse()) {
+      await budgetDriveSave(e);
+      budgetSave({ hist: budgetLoad().hist.filter(x => x.id !== e.id) });
+    }
+  } catch {}
+  _budgetMigrating = false;
+}
+
+// ── 🔁 Variante ajustée : quels flux bougent avec le % choisi, et de combien ──────────────────
+// Poids par catégorie (1 = suit entièrement le %, 0 = fixe) + la raison affichée. % > 0 = plus
+// PRUDENT : une dépense monte de poids × %, une rentrée BAISSE de poids × % ; % < 0 = l'inverse.
+const BUDGET_SHOCK = {
+  courant:[1, 'dépense variable'], loisir:[1, 'dépense variable'], cadeau:[1, 'dépense variable'], projet:[1, 'montant estimé'],
+  autre_out:[1, 'dépense variable'], energie:[0.8, 'suit les prix'], auto:[0.8, 'suit les prix'], sante:[0.6, 'en partie remboursée'],
+  assurance:[0.5, 'révisée chaque année'], logement:[0.5, 'charges révisées'], impot:[0.3, 'peu variable'], pret:[0, 'fixe (contrat)'],
+  salaire:[0, 'fixe (contrat)'], loyer_in:[0.3, 'peu variable'], prime:[1, 'incertaine'], vente:[1, 'incertaine'],
+  rembours:[0.5, 'incertain'], autre_in:[1, 'incertaine'],
+};
+function budgetShock(scen, pct) {
+  const k = Math.max(-90, Math.min(200, pct)) / 100;
+  const changes = [];
+  const items = scen.items.map(it => {
+    const [w, why] = BUDGET_SHOCK[it.cat] || [1, 'variable'];
+    const eff = it.off ? 0 : w * k * (it.kind === 'in' ? -1 : 1);
+    const to = Math.max(1, Math.round(it.amount * (1 + eff)));
+    changes.push({ it, eff: eff * 100, to: eff ? to : it.amount, why });
+    return eff ? { ...it, amount: to } : it;
+  });
+  return { items, changes };
+}
+
+// ── 🆚 Écarts entre deux générations ──────────────────────────────────────────────────────────
+// KPI côte à côte (`good` : +1 si une hausse est bonne, −1 si mauvaise), mois communs, et flux
+// appariés par id puis par libellé (une copie ⧉ change les ids).
+function budgetDiff(a, b) {
+  const pa = budgetHistProj(a), pb = budgetHistProj(b);
+  const kpis = [
+    ['📈', 'Plaçable aujourd’hui', pa.lump, pb.lump, 1], ['🔁', 'Versement sûr / mois', pa.dca, pb.dca, 1],
+    ['📉', 'Point bas', pa.low.b, pb.low.b, 1], ['🏁', 'Solde fin d’horizon', pa.endB, pb.endB, 1],
+    ['➕', 'Rentrées (horizon)', pa.inc, pb.inc, 1], ['➖', 'Sorties (horizon)', pa.out, pb.out, -1],
+    ['🐖', 'Épargne nette / mois', pa.net / pa.mons.length, pb.net / pb.mons.length, 1],
+    ['💰', 'Trésorerie de départ', a.scen.start, b.scen.start, 1], ['🛟', 'Matelas', a.scen.cushion, b.scen.cushion, 0],
+  ];
+  const mb = new Map(pb.mons.map(m => [m.idx, m]));
+  const months = pa.mons.filter(m => mb.has(m.idx)).map(m => ({ idx: m.idx, a: m, b: mb.get(m.idx) }));
+  const key = it => it.kind + ':' + budgetNormTxt(it.label);
+  const bById = new Map(b.scen.items.map(it => [it.id, it])), bByKey = new Map();
+  b.scen.items.forEach(it => { if (!bByKey.has(key(it))) bByKey.set(key(it), it); });
+  const used = new Set(), rows = [];
+  for (const ia of a.scen.items) {
+    let ib = bById.get(ia.id);
+    if (!ib || used.has(ib.id)) ib = bByKey.get(key(ia));
+    if (ib && used.has(ib.id)) ib = null;
+    if (!ib) { rows.push({ t: 'del', a: ia }); continue; }
+    used.add(ib.id);
+    if (ia.amount !== ib.amount || ia.every !== ib.every || ia.date !== ib.date || !!ia.off !== !!ib.off) rows.push({ t: 'chg', a: ia, b: ib });
+  }
+  b.scen.items.forEach(ib => { if (!used.has(ib.id)) rows.push({ t: 'add', b: ib }); });
+  return { pa, pb, kpis, months, rows };
+}
+
+// ── 📏 Réel (Mes Actifs) vs une génération ────────────────────────────────────────────────────
+// Mois du classeur couverts par la projection : trésorerie disponible (`BUDGET_LIQUID`) vs solde
+// prévu en fin de mois ; rentrées (revenu, sinon salaire) et sorties (dépense + dette, comme 📥)
+// vs prévues. ⚠ Le mois de la génération n'est projeté qu'à partir de son jour ⇒ « entamé »,
+// exclu des écarts en % (le réel, lui, couvre tout le mois).
+function budgetRealRows(e, a) {
+  const p = budgetHistProj(e);
+  const pm = new Map(p.mons.map(m => [m.idx, m]));
+  const rows = [];
+  for (const m of (a && Array.isArray(a.months) ? a.months : [])) {
+    if (!m || !m.t) continue;
+    const idx = budgetMonthIdx(localDayStr(new Date(m.t)));
+    const mo = pm.get(idx);
+    if (!mo) continue;
+    const num = k => (typeof m[k] === 'number' && isFinite(m[k]) ? m[k] : null);
+    const liq = BUDGET_LIQUID.filter(k => num(k) != null);
+    const outK = ['depense', 'dette'].filter(k => num(k) != null);
+    rows.push({ idx, mo, partial: idx === p.mons[0].idx && p.today.slice(8) !== '01',
+      liquid: liq.length ? Math.round(liq.reduce((s, k) => s + m[k], 0)) : null,
+      inc: num('revenu') != null ? num('revenu') : num('salaire'),
+      out: outK.length ? outK.reduce((s, k) => s + Math.abs(m[k]), 0) : null });
+  }
+  rows.sort((x, y) => x.idx - y.idx);
+  const pct = (kR, kP) => {
+    const ok = rows.filter(r => !r.partial && r[kR] != null);
+    const sp = ok.reduce((s, r) => s + r.mo[kP], 0), sr = ok.reduce((s, r) => s + r[kR], 0);
+    return ok.length && sp > 0 ? (sr / sp - 1) * 100 : null;
+  };
+  return { p, rows, outPct: pct('out', 'out'), incPct: pct('inc', 'inc') };
 }
 // Empreinte du contenu (pas de `at`) : l'analyse IA sait si le scénario a bougé depuis elle.
 function budgetSig(s) {
@@ -46287,7 +46480,10 @@ const budgetAiErr = e => (e && e.message === 'NO_KEY' ? "Aucune clé d'IA : ajou
 
 // ── UI ────────────────────────────────────────────────────────────────────────
 // État d'écran module-level : `StatsCollapse` démonte ses enfants (piège 5).
-const _budgetUi = { sel: null, view: null, loan: null };   // `view` = id de génération affichée (👁) | null = la dernière
+// `page` : null = écran de choix (3 boutons) | 'create' | 'cmp' | 'real' — jamais persisté.
+// `view` = id de FICHIER Drive de la génération affichée (null = la dernière du brouillon) ;
+// `cmpSel` = 2 ids de fichier au plus ; `realSel` ; `autoGen` = brouillon à générer dès l'arrivée.
+const _budgetUi = { page: null, sel: null, view: null, loan: null, cmpSel: [], realSel: null, autoGen: null };
 const BUDGET_IN = { background:'#111', border:`1px solid ${C.border}`, borderRadius:6, padding:'6px 8px', fontSize:12, color:C.text, outline:'none', fontFamily:'inherit', minWidth:0, boxSizing:'border-box' };
 const budgetChip = (on, col) => {
   const c = col || BUDGET_COLOR;
@@ -46349,10 +46545,11 @@ function BudgetChart({ series, from, to, cushion, low, height, W = 400 }) {
   vmin -= pad; vmax += pad;
   const X = t => PL + (t - t0) / span * (W - PL - PR);
   const Y = v => PT + (1 - (v - vmin) / (vmax - vmin)) * (H - PT - PB);
-  const path = pts => {
+  // `stop` (série 📏 Réel) : la marche s'arrête au dernier point au lieu de filer jusqu'au bord.
+  const path = (pts, stop) => {
     let s = `M${X(budgetT(pts[0].d)).toFixed(1)},${Y(pts[0].b).toFixed(1)}`;
     for (let i = 1; i < pts.length; i++) s += `H${X(budgetT(pts[i].d)).toFixed(1)}V${Y(pts[i].b).toFixed(1)}`;
-    return s + `H${(W - PR).toFixed(1)}`;
+    return stop ? s : s + `H${(W - PR).toFixed(1)}`;
   };
   const at = (pts, t) => { let p = pts[0]; for (const q of pts) { if (budgetT(q.d) <= t) p = q; else break; } return p; };
   const single = series.length === 1;
@@ -46395,7 +46592,7 @@ function BudgetChart({ series, from, to, cushion, low, height, W = 400 }) {
           </g>
         )}
         {single && <path d={path(series[0].pts) + `V${H - PB}H${X(t0).toFixed(1)}Z`} fill={`url(#${gid})`} />}
-        {series.map((s, i) => <path key={i} d={path(s.pts)} fill="none" stroke={s.color} strokeWidth={single ? 1.8 : 1.6} strokeLinejoin="round" />)}
+        {series.map((s, i) => <path key={i} d={path(s.pts, s.stop)} fill="none" stroke={s.color} strokeWidth={single ? 1.8 : s.stop ? 2.4 : 1.6} strokeDasharray={s.dash || undefined} strokeLinejoin="round" />)}
         {single && low && (
           <g>
             <circle cx={X(budgetT(low.d))} cy={Y(low.b)} r="3.2" fill={low.b < cushion ? FIN_DOWN : '#e0a040'} stroke={C.bg} strokeWidth="1" />
@@ -46599,39 +46796,6 @@ function BudgetLoanSim({ sc, onAdd }) {
         {!debut && <span style={{ fontSize:10.5, color:FIN_DOWN }}>Date de signature illisible.</span>}
       </div>
       <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.45 }}>Estimation : mensualité constante, assurance sur le capital initial, notaire au forfait. Les frais de garantie et de dossier ne sont pas comptés.</div>
-    </div>
-  );
-}
-
-// Dernière GÉNÉRATION de chaque scénario, côte à côte (`rows` = [{ s: instantané, p: projection, e }]).
-function BudgetCompare({ rows, onPick }) {
-  const desk = useDesk();
-  const from = rows.reduce((m, r) => (r.p.today < m ? r.p.today : m), rows[0].p.today);
-  const to = rows.reduce((m, r) => (r.p.end > m ? r.p.end : m), rows[0].p.end);
-  const th = { fontSize:9, color:C.muted, fontWeight:700, textAlign:'right', padding:'3px 4px' };
-  const td = (v, col) => ({ fontSize:11, fontFamily:'DM Mono,monospace', textAlign:'right', padding:'5px 4px', color: col || C.text, whiteSpace:'nowrap', borderTop:`1px solid ${C.border}` });
-  const best = Math.max(...rows.map(r => r.p.lump));
-  return (
-    <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-      <BudgetChart series={rows.map(r => ({ name: r.s.name, color: r.s.color, pts: r.p.pts }))} from={from} to={to} cushion={0} W={desk ? 620 : 400} height={desk ? 190 : 150} />
-      <div style={{ overflowX:'auto' }}>
-        <table style={{ width:'100%', borderCollapse:'collapse' }}>
-          <thead><tr>
-            <th style={{ ...th, textAlign:'left' }}>Scénario</th><th style={th}>Solde fin</th><th style={th}>Point bas</th><th style={th}>Plaçable</th><th style={th}>/ mois</th>
-          </tr></thead>
-          <tbody>{rows.map(({ s, p }) => (
-            <tr key={s.id} onClick={() => onPick(s.id)} style={{ cursor:'pointer' }}>
-              <td style={{ ...td(), textAlign:'left', fontFamily:'inherit', fontWeight:700 }}><span style={{ color:s.color }}>●</span> {s.name}{p.lump === best && rows.length > 1 && best > 0 ? ' 🏆' : ''}
-                <span style={{ display:'block', fontSize:9, fontWeight:400, color:C.dim }}>{s.h} mois · généré le {budgetFmtDY(p.today)}</span></td>
-              <td style={td(null)}>{budgetK(p.endB)}</td>
-              <td style={td(null, p.low.b < s.cushion ? FIN_DOWN : null)}>{budgetK(p.low.b)}</td>
-              <td style={td(null, p.lump < 0 ? FIN_DOWN : FIN_UP)}>{p.lump < 0 ? '−' + budgetK(-p.lump) : budgetK(p.lump)}</td>
-              <td style={td(null)}>{budgetK(p.dca)}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </div>
-      <div style={{ fontSize:9.5, color:C.dim }}>En euros, dernière génération de chaque scénario. « Plaçable » = tout de suite, sans passer sous le matelas du scénario ; « / mois » = versement mensuel sûr. Toucher une ligne ouvre le scénario.</div>
     </div>
   );
 }
@@ -46975,7 +47139,8 @@ const BUDGET_CARD = desk => ({ background:C.surface, border:`1px solid ${C.borde
 const BUDGET_ICON_BTN = { ...BUDGET_GHOST, padding:'5px 8px', lineHeight:1 };
 
 
-function BudgetPanel() {
+// 📐 ✨ Créer un scénario : étapes ①–④, 🚀 Générer (⇒ Drive), puis résultats de la génération.
+function BudgetCreatePage({ go }) {
   const desk = useDesk();
   const data = useBudget();
   const [, bump] = React.useReducer(x => x + 1, 0);
@@ -46990,18 +47155,20 @@ function BudgetPanel() {
   const [pErr, setPErr] = React.useState('');
   const [gen, setGen] = React.useState(null);          // étape de 🚀 en cours : 'calc' | 'fx' | 'drive' | null
   const [genMsg, setGenMsg] = React.useState(null);    // { ok:[], warn:[] } | { err }
-  const [driveBusy, setDriveBusy] = React.useState(null); // id de la génération en cours d'envoi
   const resRef = React.useRef(null);
-  const scens = data.scenarios, hist = data.hist;
+  const bd = useBudgetDrive();
+  const scens = data.scenarios;
   const sc = scens.find(s => s.id === _budgetUi.sel) || scens[0] || null;
   const today = localDayStr();
-  // Résultats affichés = une GÉNÉRATION (👁 choisie dans l'historique, sinon la dernière du
-  // scénario) — jamais les paramètres en cours de saisie.
-  const viewE = (_budgetUi.view && hist.find(e => e.id === _budgetUi.view)) || null;
-  const lastE = sc ? budgetLastGen(data, sc.id) : null;
-  const shown = viewE || lastE;
+  // Résultats affichés = une GÉNÉRATION Drive (👁 choisie dans 🆚, sinon la dernière du
+  // scénario) — jamais les paramètres en cours de saisie. `viewS`/`lastS` = résumés, `shown` = entrée complète.
+  const viewS = (_budgetUi.view && (bd.list || []).find(x => x.fid === _budgetUi.view)) || null;
+  const lastS = sc ? budgetLastGen(sc.id) : null;
+  const shownS = viewS || lastS;
+  const ent = useBudgetDriveEntry(shownS);
+  const shown = ent.e || null;
   const gp = shown ? budgetHistProj(shown) : null;
-  const fresh = budgetGenFresh(lastE, sc, today);
+  const fresh = budgetGenFresh(lastS, sc, today);
   // Solde d'aujourd'hui des paramètres EN COURS : seulement pour l'avertissement « trésorerie ancienne ».
   const liveOpen = React.useMemo(() => (sc ? budgetProject(sc, 1, today).open : 0), [sc, today]);
   React.useEffect(() => { if (!undo) return; const t = setTimeout(() => setUndo(null), 7000); return () => clearTimeout(t); }, [undo]);
@@ -47067,7 +47234,7 @@ function BudgetPanel() {
     if (add.length && upd(s => ({ ...s, items: s.items.concat(add).slice(0, BUDGET_MAX_ITEMS) }))) { setParsed(null); setPhrase(''); }
   };
 
-  // ── 🚀 Générer : fige le scénario (historique), relit les formules si besoin, envoie sur Drive ──
+  // ── 🚀 Générer : relit les formules si besoin, fige le scénario et l'envoie sur Drive (seul stockage) ──
   // ⚠ Lit `budgetLoad()` et non `sc` : le clic fait d'abord perdre le focus au champ en cours,
   // dont le blur vient d'enregistrer la valeur (`BudgetField`) — `sc` date du rendu d'avant.
   const generate = async () => {
@@ -47075,12 +47242,9 @@ function BudgetPanel() {
     const cur = budgetLoad().scenarios.find(s => s.id === sc.id);
     if (!cur) return;
     if (!cur.items.some(it => !it.off)) { setGenMsg({ err: 'Ajoute au moins une rentrée ou une dépense active (étape ②) avant de générer.' }); return; }
+    if (!budgetDriveReady()) { setGenMsg({ err: '☁️ Connecte Google Drive : les scénarios générés y sont enregistrés, plus sur le téléphone.' }); return; }
     setGenMsg(null); setGen('calc');
-    const e = budgetGenerate(cur, localDayStr());
-    if (!e) { setGen(null); setGenMsg({ err: '⚠ Stockage local plein : génération NON enregistrée.' }); return; }
-    setUi({ view: null, rk: (_budgetUi.rk || 0) + 1 });
-    setTimeout(() => { try { if (resRef.current) resRef.current.scrollIntoView({ block:'start', behavior:'smooth' }); } catch {} }, 80);
-    const ok = ['✅ Scénario généré et ajouté à 🕘 l’historique.'], warn = [];
+    const ok = [], warn = [];
     const fx = budgetLoad().fx;
     if (fx && Object.keys(fx.f || {}).length && (!fx.rules || fx.sig !== budgetFxSig(fx.f))) {
       if (!aiAnyKey()) warn.push('Formules de prévision non relues : aucune clé d’IA (🔌 API).');
@@ -47090,79 +47254,30 @@ function BudgetPanel() {
         catch (x) { warn.push('Formules : ' + budgetAiErr(x)); }
       }
     }
-    if (e.drive) ok.push('☁️ Déjà sur ton Drive (rien n’a changé depuis).');
-    else if (budgetDriveReady()) {
+    if (!_bDrive.list) await budgetDriveList();   // pour reconnaître une génération identique
+    const g = budgetGenerate(cur, localDayStr());
+    if (g.sum) ok.unshift('✅ Déjà généré aujourd’hui : rien n’a changé depuis (fichier Drive inchangé).');
+    else {
       setGen('drive');
-      try { await budgetDriveSend(e.id); ok.push(`☁️ Enregistré sur ton Drive (${GDRIVE_HUB_FOLDER}/${BUDGET_DRIVE_SUB}).`); }
-      catch (x) { warn.push('Drive : ' + ((x && x.message) || 'échec') + ' — renvoie-le depuis 🕘 Historique.'); }
-    } else warn.push('Google Drive non connecté : génération gardée sur l’appareil seulement.');
+      try {
+        const r = await budgetDriveSave(g.e);
+        ok.unshift(`✅ Scénario généré et enregistré sur ton Drive (${GDRIVE_HUB_FOLDER}/${BUDGET_DRIVE_SUB}).`);
+        if (r.sheetErr) warn.push('Google Sheets : ' + r.sheetErr + ' — les données restent sur Drive.');
+      } catch (x) { setGen(null); setGenMsg({ err: '⚠ ' + ((x && x.message) || 'Envoi Drive impossible') + ' : scénario NON généré.' }); return; }
+    }
+    setUi({ view: null, rk: (_budgetUi.rk || 0) + 1 });
+    setTimeout(() => { try { if (resRef.current) resRef.current.scrollIntoView({ block:'start', behavior:'smooth' }); } catch {} }, 80);
     setGen(null); setGenMsg({ ok, warn });
   };
-  const sendDrive = async id => {
-    if (driveBusy) return;
-    setDriveBusy(id); setErr('');
-    try { await budgetDriveSend(id); } catch (x) { setErr('☁️ ' + ((x && x.message) || 'Envoi Drive impossible.')); }
-    setDriveBusy(null);
-  };
-  // ↩ Reprendre une génération : remet ses paramètres dans le scénario (ou le recrée s'il a été supprimé).
-  const restoreFrom = e => {
-    const live = scens.find(s => s.id === e.scen.id);
-    const when = new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
-    if (live) {
-      if (!confirm(`Remettre « ${live.name} » dans l’état de la génération du ${when} ?\n\nSes paramètres actuels (trésorerie, matelas, horizon, ${live.items.length} flux) seront remplacés.`)) return;
-      if (write(budgetUpdateScen(live.id, s => ({ ...s, start: e.scen.start, startDate: e.scen.startDate, cushion: e.scen.cushion, h: e.scen.h, items: e.scen.items })))) { setUi({ sel: live.id, view: null }); setForm(null); }
-      return;
-    }
-    if (scens.length >= BUDGET_MAX_SCEN) return setErr(`⚠ ${BUDGET_MAX_SCEN} scénarios au plus.`);
-    const s = budgetScenNew(e.scen.name, scens.length, { ...e.scen, items: e.scen.items.map(it => ({ ...it, id: budgetId() })) });
-    if (write(budgetSave({ scenarios: scens.concat([s]) }))) setUi({ sel: s.id, view: null });
-  };
-  const delHist = e => {
-    if (!confirm(`Retirer cette génération de l’historique ?${e.drive ? '\n\nLe fichier reste sur ton Google Drive.' : ''}`)) return;
-    if (write(budgetSave({ hist: hist.filter(x => x.id !== e.id) })) && _budgetUi.view === e.id) setUi({ view: null });
-  };
+  // 🔁 Variante créée ailleurs (Comparer, Réel, résultats) : générée dès l'arrivée ici.
+  React.useEffect(() => { if (sc && _budgetUi.autoGen === sc.id) { _budgetUi.autoGen = null; generate(); } });
   const driveOk = budgetDriveReady();
-  const driveBtn = (e, small) => e.drive
-    ? <a href={safeHref(e.drive.url)} target="_blank" rel="noopener noreferrer" title="Ouvrir sur Google Drive"
-        style={{ ...BUDGET_GHOST, textDecoration:'none', color:'#4ea3f5', borderColor:'#4ea3f555', padding: small ? '4px 7px' : BUDGET_GHOST.padding }}>☁️{small ? '' : ' Ouvrir sur Drive'}</a>
-    : driveOk
-      ? <button onClick={() => sendDrive(e.id)} disabled={!!driveBusy} title="Envoyer cette génération sur Google Drive"
-          style={{ ...BUDGET_GHOST, padding: small ? '4px 7px' : BUDGET_GHOST.padding }}>{driveBusy === e.id ? '⏳' : small ? '⤴☁️' : '⤴ Envoyer sur Drive'}</button>
-      : null;
-  // 🕘 Liste des générations (tous scénarios). Δ = plaçable vs la génération précédente du même scénario.
-  const histBody = canView => {
-    if (!hist.length) return <div style={{ fontSize:11, color:C.muted }}>Aucune génération pour l’instant.</div>;
-    return (
-      <div style={{ display:'flex', flexDirection:'column' }}>
-        {hist.map((e, i) => {
-          const p = budgetHistProj(e);
-          const prev = hist.slice(i + 1).find(x => x.scen.id === e.scen.id);
-          const dl = prev ? p.lump - budgetHistProj(prev).lump : null;
-          const on = shown && shown.id === e.id;
-          return (
-            <div key={e.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'7px 6px', borderTop: i ? `1px solid ${C.border}` : 'none', background: on ? `${e.scen.color}12` : 'none', borderRadius: on ? 8 : 0 }}>
-              <span style={{ width:8, height:8, borderRadius:999, background:e.scen.color, flexShrink:0 }} />
-              <span style={{ flex:1, minWidth:0 }}>
-                <span style={{ display:'block', fontSize:12, fontWeight:800, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{e.scen.name}
-                  <span style={{ fontWeight:400, color:C.dim, fontSize:10 }}> · {new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })} · {e.scen.h} mois</span></span>
-                <span style={{ display:'block', fontSize:10, color:C.muted, fontFamily:'DM Mono,monospace' }}>
-                  <span style={{ color: p.lump < 0 ? FIN_DOWN : BUDGET_COLOR }}>{p.lump < 0 ? '−' + budgetK(-p.lump) : budgetK(p.lump)} € plaçables</span> · bas {budgetK(p.low.b)} €
-                  {dl != null && Math.round(dl) !== 0 && <span style={{ color: dl > 0 ? FIN_UP : FIN_DOWN }}> · {dl > 0 ? '+' : '−'}{budgetK(Math.abs(dl))} € vs avant</span>}
-                </span>
-              </span>
-              {canView && <button onClick={() => setUi({ view: e.id, sel: scens.some(s => s.id === e.scen.id) ? e.scen.id : _budgetUi.sel, rk: (_budgetUi.rk || 0) + 1 })} title="Afficher ses résultats"
-                style={{ ...BUDGET_GHOST, padding:'4px 7px', color: on ? e.scen.color : C.muted }}>👁</button>}
-              {driveBtn(e, true)}
-              <button onClick={() => restoreFrom(e)} title={scens.some(s => s.id === e.scen.id) ? 'Remettre ces paramètres dans le scénario' : 'Recréer ce scénario (supprimé depuis)'} style={{ ...BUDGET_GHOST, padding:'4px 7px' }}>↩</button>
-              <button onClick={() => delHist(e)} title="Retirer de l’historique" style={{ ...BUDGET_GHOST, padding:'4px 7px', color:FIN_DOWN }}>🗑</button>
-            </div>
-          );
-        })}
-        <div style={{ fontSize:9.5, color:C.dim, marginTop:6, lineHeight:1.45 }}>Chaque génération est figée (paramètres + résultats du jour où elle a été faite) : 👁 l’affiche, ↩ remet ses paramètres, ☁️ ouvre sa feuille Google Sheets dans {GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}. {BUDGET_MAX_HIST} générations gardées au plus.</div>
-      </div>
-    );
-  };
-  // ── Aucun scénario : accueil (+ les formules, indépendantes des scénarios, + l'historique) ──
+  const sheetBtn = x => x && x.sheetUrl
+    ? <a href={safeHref(x.sheetUrl)} target="_blank" rel="noopener noreferrer" title="Ouvrir la feuille sur Google Drive"
+        style={{ ...BUDGET_GHOST, textDecoration:'none', color:'#4ea3f5', borderColor:'#4ea3f555' }}>☁️ Ouvrir sur Drive</a>
+    : null;
+
+  // ── Aucun brouillon : accueil ──
   const fxHas = !!(data.fx && data.fx.rules);
   const fxN = Object.keys((data.fx && data.fx.f) || {}).length;
   if (!sc) {
@@ -47173,25 +47288,12 @@ function BudgetPanel() {
           <div style={{ fontSize:12, color:C.text, lineHeight:1.55 }}>
             Prépare tes <b>3, 6, 12 ou 24 prochains mois</b> : salaire, prêt immo, charges, taxe foncière, contrôle technique, assurances, vacances…
             Appuie sur <b>🚀 Générer</b> : le Hub calcule ton solde jour par jour, ton <b>point bas</b>, et <b style={{ color:BUDGET_COLOR }}>combien tu peux investir</b> sans passer sous ton matelas de sécurité.
-            Chaque génération est gardée dans un historique et enregistrée sur ton Google Drive. Fais plusieurs scénarios (prudent, avec achat immo…) et compare-les.
+            Chaque génération est enregistrée sur ton Google Drive. Fais plusieurs scénarios (prudent, avec achat immo…) et compare-les.
           </div>
           <button onClick={() => createScen(null)} style={{ ...budgetBtn(BUDGET_COLOR, true), padding:'9px 16px', fontSize:12.5 }}>✨ Créer mon premier scénario</button>
           {actifs && <div style={{ fontSize:10.5, color:C.muted }}>Astuce : une fois créé, 📥 reprend ta trésorerie et tes moyennes depuis le mode Finance (Mes Actifs).</div>}
           {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
         </div>
-        <StatsCollapse key="fxcfg" defaultOpen={fxN > 0 && !fxHas} color={BUDGET_COLOR} title="⚙️ FORMULES DE PRÉVISION" right={fxN ? `${fxN} formule${fxN > 1 ? 's' : ''}` : null}>
-          <BudgetFxConfig />
-        </StatsCollapse>
-        {fxHas && (
-          <StatsCollapse key="fxres" defaultOpen={true} color={IA_COLOR} title="🔮 PRÉVISION IA · NOUVEAUX MOIS">
-            <BudgetFxResults />
-          </StatsCollapse>
-        )}
-        {hist.length > 0 && (
-          <StatsCollapse key="hist" defaultOpen={false} color={BUDGET_COLOR} title="🕘 HISTORIQUE DES GÉNÉRATIONS" right={hist.length}>
-            {histBody(false)}
-          </StatsCollapse>
-        )}
       </div>
     );
   }
@@ -47313,8 +47415,8 @@ function BudgetPanel() {
   // change (`pk`) ⇒ il se remonte OUVERT, même replié avant.
   const prefill = init => { setForm({ init: { ...init, every: init.every || 0 }, edit:false }); setUi({ pk:(_budgetUi.pk || 0) + 1 }); };
   const pk = _budgetUi.pk || 0, rk = _budgetUi.rk || 0;
-  const neverGen = !lastE;
-  const paramsChanged = !!lastE && (lastE.sig !== budgetSig(sc) || lastE.scen.h !== sc.h);
+  const neverGen = !lastS;
+  const paramsChanged = !!lastS && (lastS.sig !== budgetSig(sc) || lastS.h !== sc.h);
   const horizonLbl = (BUDGET_HORIZONS.find(([n]) => n === sc.h) || [0, sc.h + ' mois'])[1];
   const cushion3 = Math.round(outMonthly * 3 / 100) * 100;
 
@@ -47356,10 +47458,10 @@ function BudgetPanel() {
       </button>
       <div style={{ fontSize:10.5, color:C.muted, textAlign:'center', lineHeight:1.45 }}>
         {fresh ? 'Déjà à jour : rien n’a changé depuis la dernière génération. ' : ''}
-        Calcule « {sc.name} » sur {horizonLbl}, l’ajoute à 🕘 l’historique{driveOk ? <> et l’enregistre sur ton Google Drive ({GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}).</> : '.'}
+        Calcule « {sc.name} » sur {horizonLbl} et l’enregistre sur ton Google Drive ({GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}) : une feuille Google Sheets lisible + les données pour comparer.
       </div>
       {!driveOk && gdriveConfigured() && (
-        <button onClick={() => gdriveLogin()} style={{ ...BUDGET_GHOST, alignSelf:'center', color:'#4ea3f5', borderColor:'#4ea3f555' }}>☁️ Connecter Google Drive pour y enregistrer les scénarios</button>
+        <button onClick={() => gdriveLogin()} style={{ ...budgetBtn('#4ea3f5', true), alignSelf:'center', padding:'8px 14px' }}>☁️ Connecter Google Drive (obligatoire pour générer)</button>
       )}
       {genMsg && genMsg.err && <div style={{ fontSize:11, color:FIN_DOWN, textAlign:'center' }}>{genMsg.err}</div>}
       {genMsg && !genMsg.err && (
@@ -47371,16 +47473,23 @@ function BudgetPanel() {
     </div>
   );
 
-  // ── 📊 Résultats : uniquement ceux d'une génération ──
-  const cmpRows = scens.map(s => budgetLastGen(data, s.id)).filter(Boolean).map(e => ({ s: e.scen, p: budgetHistProj(e), e }));
-  const canAi = !viewE && !!lastE && !paramsChanged;
+  // ── 📊 Résultats : uniquement ceux d'une génération (lue sur Drive) ──
+  const canAi = !viewS && !!lastS && !paramsChanged;
   let resultsHead, results = null;
-  if (!shown) {
+  if (shownS && !shown) {
+    resultsHead = (
+      <div ref={resRef} style={{ ...BUDGET_CARD(desk), alignItems:'center', textAlign:'center', padding:'18px 14px' }}>
+        <div style={{ fontSize:12, color: ent.err ? FIN_DOWN : C.muted }}>{ent.err ? '⚠ ' + ent.err : '⏳ Lecture du scénario sur Drive…'}</div>
+      </div>
+    );
+  } else if (!shown) {
     resultsHead = (
       <div ref={resRef} style={{ ...BUDGET_CARD(desk), alignItems:'center', textAlign:'center', padding: desk ? '22px 18px' : '18px 14px', borderStyle:'dashed' }}>
         <div style={{ fontSize:26 }}>📊</div>
         <div style={{ fontSize:13, fontWeight:900 }}>Aucun résultat pour l’instant</div>
         <div style={{ fontSize:11, color:C.muted, lineHeight:1.5, maxWidth:420 }}>Règle les étapes ① à ④, puis appuie sur <b style={{ color:sc.color }}>🚀 Générer le scénario</b>. Chiffres clés, courbe, mois par mois et analyse s’afficheront ici.</div>
+        {driveOk && bd.loading && <div style={{ fontSize:10, color:C.dim }}>⏳ Lecture de tes scénarios sur Drive…</div>}
+        {bd.err && <div style={{ fontSize:10, color:FIN_DOWN }}>☁️ {bd.err}</div>}
       </div>
     );
   } else {
@@ -47394,17 +47503,21 @@ function BudgetPanel() {
       <div ref={resRef} style={{ ...BUDGET_CARD(desk), gap:6, borderLeft:`3px solid ${ss.color}` }}>
         <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
           <span style={{ flex:1, minWidth:0, fontSize: desk ? 14 : 13, fontWeight:900, color:ss.color }}>📊 Résultats · {ss.name}</span>
-          {driveBtn(shown, false)}
+          {sheetBtn(shownS)}
         </div>
         <div style={{ fontSize:10.5, color:C.muted }}>Généré le {when} · {ss.h} mois, du {budgetFmtDY(gp.today)} au {budgetFmtDY(gp.end)}</div>
-        {viewE && viewE.id !== (lastE && lastE.id) && (
+        {viewS && viewS.fid !== (lastS && lastS.fid) && (
           <div style={{ display:'flex', alignItems:'center', gap:8, fontSize:10.5, color:'#6f7bf5' }}>
-            <span style={{ flex:1 }}>🕘 Génération passée, affichée depuis l’historique.</span>
-            <button onClick={() => setUi({ view: null })} style={BUDGET_GHOST}>✕ Revenir à la dernière</button>
+            <span style={{ flex:1 }}>🕘 Génération passée, ouverte depuis ton Drive.</span>
+            {lastS && <button onClick={() => setUi({ view: null })} style={BUDGET_GHOST}>✕ Revenir à la dernière</button>}
           </div>
         )}
-        {!viewE && paramsChanged && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Paramètres modifiés depuis : ces résultats ne les intègrent pas encore. Appuie sur 🚀 Générer.</div>}
-        {!viewE && !paramsChanged && lastE.today !== today && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Calculé le {budgetFmtDY(lastE.today)} : regénère pour repartir d’aujourd’hui.</div>}
+        {!viewS && paramsChanged && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Paramètres modifiés depuis : ces résultats ne les intègrent pas encore. Appuie sur 🚀 Générer.</div>}
+        {!viewS && !paramsChanged && lastS.today !== today && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Calculé le {budgetFmtDY(lastS.today)} : regénère pour repartir d’aujourd’hui.</div>}
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', marginTop:2 }}>
+          <button onClick={() => go('cmp', { cmpSel: [shownS.fid] })} style={budgetBtn('#4ea3f5')}>🆚 Comparer à un autre scénario</button>
+          <button onClick={() => go('real', { realSel: shownS.fid })} style={budgetBtn('#e0a040')}>📏 Comparer au réel</button>
+        </div>
       </div>
     );
     results = (<>
@@ -47433,11 +47546,6 @@ function BudgetPanel() {
       <StatsCollapse key={'r-prov' + rk} defaultOpen={false} color={ss.color} title="🐖 À PRÉVOIR" right={prov.length ? `≈ ${budgetK(provTot)} €/mois` : null}>
         {provBody}
       </StatsCollapse>
-      {cmpRows.length > 1 && (
-        <StatsCollapse key={'r-cmp' + rk} defaultOpen={false} color={ss.color} title="🆚 COMPARER LES SCÉNARIOS" right={cmpRows.length}>
-          <BudgetCompare rows={cmpRows} onPick={id => setUi({ sel: id, view: null })} />
-        </StatsCollapse>
-      )}
       {fxHas && (
         <StatsCollapse key={'r-fx' + rk} defaultOpen={false} color={IA_COLOR} title="🔮 PRÉVISION PAR FORMULES">
           <BudgetFxResults />
@@ -47445,7 +47553,10 @@ function BudgetPanel() {
       )}
       <StatsCollapse key={'r-ai' + rk} defaultOpen={false} color={IA_COLOR} title="🤖 ANALYSE IA">
         {canAi ? <BudgetAiBox sc={sc} proj={gp} onPrefill={prefill} />
-          : <div style={{ fontSize:11, color:C.muted }}>{viewE ? 'L’analyse IA porte sur la dernière génération : ✕ reviens-y pour la lancer.' : 'Paramètres modifiés depuis la génération : 🚀 regénère, puis lance l’analyse.'}</div>}
+          : <div style={{ fontSize:11, color:C.muted }}>{viewS ? 'L’analyse IA porte sur la dernière génération du brouillon : ✕ reviens-y pour la lancer.' : 'Paramètres modifiés depuis la génération : 🚀 regénère, puis lance l’analyse.'}</div>}
+      </StatsCollapse>
+      <StatsCollapse key={'r-var' + rk} defaultOpen={true} color={BUDGET_COLOR} title="🔁 REGÉNÉRER UNE VARIANTE ?">
+        <BudgetRegen base={shown.scen} go={go} />
       </StatsCollapse>
     </>);
   }
@@ -47468,9 +47579,6 @@ function BudgetPanel() {
   const resultsCol = (<>
     {resultsHead}
     {results}
-    <StatsCollapse key="hist" defaultOpen={false} color={BUDGET_COLOR} title="🕘 HISTORIQUE DES GÉNÉRATIONS" right={hist.length || null}>
-      {histBody(true)}
-    </StatsCollapse>
   </>);
 
   return (
@@ -47497,12 +47605,12 @@ function BudgetPanel() {
           )}
           <span style={{ fontSize:10, fontWeight:800, padding:'2px 8px', borderRadius:999,
             color: neverGen ? C.muted : fresh ? FIN_UP : '#e0a040', background: neverGen ? '#ffffff0a' : fresh ? `${FIN_UP}18` : '#e0a04018' }}>
-            {neverGen ? '○ jamais généré' : fresh ? '✓ à jour' : paramsChanged ? '⚠ modifié depuis' : '⚠ à regénérer'}
+            {driveOk && !bd.list ? '… Drive' : neverGen ? '○ jamais généré' : fresh ? '✓ à jour' : paramsChanged ? '⚠ modifié depuis' : '⚠ à regénérer'}
           </span>
           <span style={{ flex:1 }} />
           <button onClick={() => upd(s => ({ ...s, color: BUDGET_SCEN_COLORS[(BUDGET_SCEN_COLORS.indexOf(s.color) + 1) % BUDGET_SCEN_COLORS.length] }))} title="Changer de couleur" style={BUDGET_ICON_BTN}>🎨</button>
           <button onClick={() => createScen(sc)} title="Dupliquer pour tester une variante (« et si j'achète une voiture ? »)" style={BUDGET_ICON_BTN}>⧉</button>
-          <button onClick={delScen} title="Supprimer ce scénario (ses générations restent dans l’historique)" style={{ ...BUDGET_ICON_BTN, color:FIN_DOWN }}>🗑</button>
+          <button onClick={delScen} title="Supprimer ce brouillon (ses générations restent sur Drive)" style={{ ...BUDGET_ICON_BTN, color:FIN_DOWN }}>🗑</button>
         </div>
         {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
       </div>
@@ -47512,6 +47620,484 @@ function BudgetPanel() {
         <DeskCol n={0}>{paramsCol}</DeskCol>
         <DeskCol n={1}>{resultsCol}</DeskCol>
       </DeskCols>
+    </div>
+  );
+}
+
+// ── ↩ / 🔁 Brouillons tirés d'une génération ────────────────────────────────────────────────
+// ↩ Reprendre : les paramètres de la génération reviennent dans le brouillon du MÊME scénario
+// (même id ⇒ ses générations Drive restent rattachées), recréé s'il a été supprimé. Rend l'id, ou ''.
+function budgetAdoptEntry(e) {
+  const d = budgetLoad(), live = d.scenarios.find(s => s.id === e.scen.id);
+  const when = new Date(e.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' });
+  if (live) {
+    if (!confirm(`Remettre le brouillon « ${live.name} » dans l’état de la génération du ${when} ?\n\nSes paramètres actuels (trésorerie, matelas, horizon, ${live.items.length} flux) seront remplacés.`)) return '';
+    return budgetUpdateScen(live.id, s => ({ ...s, start: e.scen.start, startDate: e.scen.startDate, cushion: e.scen.cushion, h: e.scen.h, items: e.scen.items })) ? live.id : '';
+  }
+  if (d.scenarios.length >= BUDGET_MAX_SCEN) { alert(`${BUDGET_MAX_SCEN} brouillons au plus : supprimes-en un.`); return ''; }
+  const s = budgetScenNorm({ ...e.scen, at: Date.now(), ai: null }, d.scenarios.length);
+  return budgetSave({ scenarios: d.scenarios.concat([s]) }) ? s.id : '';
+}
+// 🔁 Variante : NOUVEAU brouillon « <nom> +10 % » (flux ajustés par `budgetShock`), `rebase` =
+// { start, startDate } pour repartir de la trésorerie réelle. Rend { id } | { err }.
+function budgetVariantDraft(base, pct, rebase) {
+  const d = budgetLoad();
+  if (d.scenarios.length >= BUDGET_MAX_SCEN) return { err: `${BUDGET_MAX_SCEN} brouillons au plus : supprimes-en un dans ✨ Créer.` };
+  const tag = `${pct > 0 ? '+' : ''}${String(pct).replace('.', ',')} %`;
+  const items = budgetShock(base, pct).items.map(it => ({ ...it, id: budgetId() }));
+  const s = budgetScenNew(`${base.name.slice(0, 39 - tag.length)} ${tag}`, d.scenarios.length, { ...base, ...(rebase || {}), items });
+  return budgetSave({ scenarios: d.scenarios.concat([s]) }) ? { id: s.id } : { err: 'Stockage local plein : brouillon non créé.' };
+}
+const budgetSigned = v => `${v > 0 ? '+' : v < 0 ? '−' : ''}${budgetK(Math.abs(v))}`;
+const budgetPctTxt = v => (v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(Math.abs(v) < 10 ? 1 : 0).replace('.', ',')} %`);
+
+// 🔁 « Regénérer un nouveau scénario ? » : case à cocher, puis le % ; le Hub dit quels flux
+// bougent et de combien (`BUDGET_SHOCK`), crée le brouillon et le génère dans ✨ Créer.
+function BudgetRegen({ base, go, defPct, why, rebase }) {
+  const [on, setOn] = React.useState(false);
+  const [txt, setTxt] = React.useState(defPct != null && isFinite(defPct) && Math.round(defPct) !== 0 ? String(Math.round(defPct)) : '10');
+  const [useBase, setUseBase] = React.useState(true);
+  const [err, setErr] = React.useState('');
+  const pct = budgetNum(txt);
+  const okPct = pct != null && isFinite(pct) && pct !== 0 && pct >= -90 && pct <= 200;
+  const sh = React.useMemo(() => (on && okPct ? budgetShock(base, pct) : null), [on, okPct, pct, base]);
+  const moved = sh ? sh.changes.filter(c => c.eff).sort((x, y) => Math.abs(y.to - y.it.amount) - Math.abs(x.to - x.it.amount)) : [];
+  const fixed = sh ? sh.changes.filter(c => !c.eff && !c.it.off) : [];
+  const perMonth = moved.filter(c => c.it.every).reduce((s, c) => s + (c.to - c.it.amount) / c.it.every * (c.it.kind === 'in' ? 1 : -1), 0);
+  const once = moved.filter(c => !c.it.every).reduce((s, c) => s + (c.to - c.it.amount) * (c.it.kind === 'in' ? 1 : -1), 0);
+  const make = () => {
+    const r = budgetVariantDraft(base, pct, rebase && useBase ? { start: rebase.start, startDate: rebase.startDate } : null);
+    if (r.err) return setErr(r.err);
+    go('create', { sel: r.id, autoGen: r.id, view: null });
+  };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:9 }}>
+      <label style={{ display:'flex', alignItems:'center', gap:10, padding:'10px 12px', borderRadius:10, cursor:'pointer',
+        background: on ? `${BUDGET_COLOR}14` : '#ffffff06', border:`1px solid ${on ? BUDGET_COLOR + '66' : C.border}`, transition:'background .15s, border-color .15s' }}>
+        <input type="checkbox" checked={on} onChange={() => setOn(!on)} style={{ width:18, height:18, accentColor:BUDGET_COLOR }} />
+        <span style={{ flex:1 }}>
+          <span style={{ display:'block', fontSize:12.5, fontWeight:800 }}>Oui, regénérer un scénario ajusté</span>
+          <span style={{ display:'block', fontSize:10.5, color:C.muted }}>Copie de « {base.name} » où seuls les flux qui varient vraiment bougent. L’original ne change pas.</span>
+        </span>
+      </label>
+      {why && <div style={{ fontSize:11, color:'#e0a040', lineHeight:1.45 }}>💡 {why}</div>}
+      {on && (<>
+        <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', fontSize:11.5 }}>
+          <span>Ajuster de</span>
+          <input value={txt} onChange={e => setTxt(e.target.value)} inputMode="decimal" maxLength={6}
+            style={{ ...BUDGET_IN, width:64, textAlign:'right', fontFamily:'DM Mono,monospace', borderColor: okPct ? `${BUDGET_COLOR}66` : FIN_DOWN }} />
+          <span>%</span>
+          {[-10, 5, 10, 20].map(v => <button key={v} onClick={() => setTxt(String(v))} style={budgetChip(pct === v)}>{v > 0 ? '+' : ''}{v} %</button>)}
+        </div>
+        <div style={{ fontSize:10, color:C.dim, lineHeight:1.45 }}>+ = plus prudent (dépenses variables en hausse, rentrées incertaines en baisse) · − = plus optimiste. Entre −90 et +200 %.</div>
+        {rebase && (
+          <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:11, cursor:'pointer' }}>
+            <input type="checkbox" checked={useBase} onChange={() => setUseBase(!useBase)} style={{ accentColor:BUDGET_COLOR }} />
+            <span>Repartir de ta trésorerie réelle : <b style={{ fontFamily:'DM Mono,monospace' }}>{budgetEur(rebase.start)}</b> au {budgetFmtDY(rebase.startDate)}</span>
+          </label>
+        )}
+        {sh && (
+          <div style={{ display:'flex', flexDirection:'column', gap:2, padding:'8px 10px', borderRadius:9, background:C.surfaceHigh, border:`1px solid ${C.border}` }}>
+            <div style={{ fontSize:9.5, color:C.muted, fontWeight:800, letterSpacing:'0.05em', marginBottom:3 }}>CE QUI BOUGE ({moved.length})</div>
+            {!moved.length && <div style={{ fontSize:11, color:C.muted }}>Aucun flux variable : tout est fixe dans ce scénario.</div>}
+            {moved.map(c => (
+              <div key={c.it.id} style={{ display:'flex', alignItems:'center', gap:8, fontSize:11, padding:'3px 0' }}>
+                <span style={{ width:18, textAlign:'center' }}>{budgetCat(c.it.cat, c.it.kind).icon}</span>
+                <span style={{ flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{c.it.label} <span style={{ color:C.dim }}>· {c.why}</span></span>
+                <span style={{ fontFamily:'DM Mono,monospace', color:C.muted, whiteSpace:'nowrap' }}>{budgetK(c.it.amount)} → <b style={{ color:C.text }}>{budgetK(c.to)}</b></span>
+                <span style={{ fontFamily:'DM Mono,monospace', fontSize:10, width:54, textAlign:'right', color: (c.to > c.it.amount) === (c.it.kind === 'out') ? FIN_DOWN : FIN_UP }}>{budgetPctTxt(c.eff)}</span>
+              </div>
+            ))}
+            {fixed.length > 0 && <div style={{ fontSize:10, color:C.dim, marginTop:4, lineHeight:1.4 }}>Inchangés ({fixed.length}) : {fixed.slice(0, 6).map(c => c.it.label).join(', ')}{fixed.length > 6 ? '…' : ''} — fixes ou contractuels.</div>}
+            {moved.length > 0 && (
+              <div style={{ fontSize:11, fontWeight:800, marginTop:5, display:'flex', justifyContent:'space-between', gap:8, flexWrap:'wrap' }}>
+                <span>Effet sur l’épargne</span>
+                <span style={{ fontFamily:'DM Mono,monospace', color: perMonth < 0 || once < 0 ? FIN_DOWN : FIN_UP }}>
+                  {perMonth ? `${budgetSigned(perMonth)} € / mois` : ''}{perMonth && once ? ' · ' : ''}{once ? `${budgetSigned(once)} € ponctuel` : ''}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+        {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>⚠ {err}</div>}
+        <button onClick={make} disabled={!okPct}
+          style={{ ...budgetBtn(BUDGET_COLOR, true), padding:'11px 14px', fontSize:13, fontWeight:900, opacity: okPct ? 1 : 0.45 }}>
+          🚀 Générer « {base.name.slice(0, 24)} {okPct ? `${pct > 0 ? '+' : ''}${String(pct).replace('.', ',')} %` : '…'} »
+        </button>
+      </>)}
+    </div>
+  );
+}
+
+// ── 🏠 Écran de choix (arrivée sur Prévision) ────────────────────────────────────────────────
+const BUDGET_PAGES = {
+  create: { icon:'✨', color: BUDGET_COLOR, title:'Créer un scénario',
+    text:'Trésorerie, rentrées, dépenses, horizon… puis 🚀 Générer : solde jour par jour, point bas, montant plaçable.' },
+  cmp: { icon:'🆚', color:'#4ea3f5', title:'Comparer deux scénarios',
+    text:'Choisis deux générations sur ton Drive : courbes superposées, écarts chiffrés, flux ajoutés ou modifiés.' },
+  real: { icon:'📏', color:'#e0a040', title:'Réel vs dernier scénario',
+    text:'Tes vrais soldes (Mes Actifs) face à ce que prévoyait ta dernière génération : où ça dérive, et de combien.' },
+};
+function BudgetHome({ go }) {
+  const desk = useDesk();
+  const data = useBudget();
+  const bd = useBudgetDrive();
+  const driveOk = budgetDriveReady();
+  const list = bd.list || [];
+  const a = loadActifs();
+  const lastM = a && Array.isArray(a.months) && a.months[0];
+  const chip = {
+    create: data.scenarios.length ? `${data.scenarios.length} brouillon${data.scenarios.length > 1 ? 's' : ''}` : 'commence ici',
+    cmp: !driveOk ? '☁️ Drive requis' : bd.list == null ? '…' : list.length < 2 ? `${list.length}/2 générations` : `${list.length} générations`,
+    real: !driveOk ? '☁️ Drive requis' : !lastM ? 'classeur non synchronisé' : list[0] ? `dernière : ${budgetFmtDY(list[0].today)}` : 'aucune génération',
+  };
+  const warn = { cmp: driveOk && bd.list != null && list.length < 2, real: driveOk && (!lastM || (bd.list != null && !list.length)) };
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap: desk ? 14 : 10 }}>
+      <div style={{ ...BUDGET_CARD(desk), padding: desk ? '18px 20px' : '14px 14px', background:`linear-gradient(135deg, ${BUDGET_COLOR}1c, #4ea3f50d 55%, ${C.surface})`, border:`1px solid ${BUDGET_COLOR}33`, gap:4 }}>
+        <div style={{ fontSize: desk ? 19 : 17, fontWeight:900 }}>📐 Prévision</div>
+        <div style={{ fontSize:12, color:C.muted, lineHeight:1.5 }}>Que veux-tu faire ?</div>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns: desk ? 'repeat(3, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: desk ? 14 : 10 }}>
+        {['create', 'cmp', 'real'].map(id => {
+          const P = BUDGET_PAGES[id], c = P.color;
+          return (
+            <button key={id} onClick={() => go(id)}
+              style={{ display:'flex', flexDirection: desk ? 'column' : 'row', alignItems: desk ? 'flex-start' : 'center', gap: desk ? 12 : 14, textAlign:'left',
+                padding: desk ? '20px 18px' : '15px 14px', borderRadius:16, cursor:'pointer', fontFamily:'inherit', color:C.text, minHeight: desk ? 210 : 0,
+                background:`linear-gradient(160deg, ${c}1f, ${C.surface} 62%)`, border:`1px solid ${c}55`, boxShadow:`0 8px 26px ${c}14`, transition:'transform .15s, box-shadow .15s' }}
+              onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 12px 30px ${c}2a`; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = `0 8px 26px ${c}14`; }}>
+              <span style={{ width: desk ? 60 : 54, height: desk ? 60 : 54, borderRadius:18, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center',
+                fontSize: desk ? 30 : 27, background:`radial-gradient(circle at 30% 25%, ${c}66, ${c}1a 70%)`, boxShadow:`inset 0 0 0 1px ${c}77, 0 4px 14px ${c}33` }}>{P.icon}</span>
+              <span style={{ flex:1, minWidth:0, display:'flex', flexDirection:'column', gap:4 }}>
+                <span style={{ fontSize: desk ? 16 : 15, fontWeight:900, color:c }}>{P.title}</span>
+                <span style={{ fontSize:11.5, color:C.muted, lineHeight:1.45 }}>{P.text}</span>
+                <span style={{ alignSelf:'flex-start', marginTop:4, fontSize:10, fontWeight:800, padding:'3px 9px', borderRadius:999,
+                  color: warn[id] ? '#e0a040' : c, background: warn[id] ? '#e0a04018' : `${c}1c` }}>{chip[id]}</span>
+              </span>
+              {!desk && <span style={{ fontSize:18, color:`${c}aa` }}>›</span>}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', fontSize:11, color:C.muted, padding:'9px 12px', borderRadius:10, background:'#ffffff05', border:`1px solid ${C.border}` }}>
+        {driveOk ? (<>
+          <span style={{ flex:1, minWidth:0 }}>☁️ Google Drive connecté · scénarios générés dans <b style={{ color:C.text }}>{GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}</b>, plus sur le téléphone{bd.loading ? ' · ⏳' : ''}</span>
+          <button onClick={() => budgetDriveList(true)} title="Relire la liste sur Drive" style={BUDGET_GHOST}>↻</button>
+        </>) : (<>
+          <span style={{ flex:1, minWidth:0 }}>☁️ Les scénarios générés sont enregistrés sur ton Google Drive uniquement.</span>
+          {gdriveConfigured() && <button onClick={() => gdriveLogin()} style={budgetBtn('#4ea3f5', true)}>Connecter Google Drive</button>}
+        </>)}
+        {bd.err && <span style={{ width:'100%', color:FIN_DOWN }}>⚠ {bd.err}</span>}
+      </div>
+    </div>
+  );
+}
+function BudgetBackBar({ go, page }) {
+  const P = BUDGET_PAGES[page];
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+      <button onClick={() => go(null)} style={{ ...BUDGET_GHOST, padding:'6px 11px', fontSize:11.5 }}>‹ Choix</button>
+      <span style={{ fontSize:14, fontWeight:900, color:P.color }}>{P.icon} {P.title}</span>
+    </div>
+  );
+}
+// Drive absent : carte d'appel commune aux pages 🆚 et 📏.
+function BudgetNeedDrive({ desk }) {
+  return (
+    <div style={{ ...BUDGET_CARD(desk), alignItems:'center', textAlign:'center', padding:'22px 16px' }}>
+      <div style={{ fontSize:28 }}>☁️</div>
+      <div style={{ fontSize:12, color:C.muted, lineHeight:1.5, maxWidth:420 }}>Les scénarios générés vivent sur ton Google Drive ({GDRIVE_HUB_FOLDER}/{BUDGET_DRIVE_SUB}). Connecte-le pour les retrouver ici.</div>
+      {gdriveConfigured() && <button onClick={() => gdriveLogin()} style={{ ...budgetBtn('#4ea3f5', true), padding:'9px 16px' }}>Connecter Google Drive</button>}
+    </div>
+  );
+}
+// Une génération Drive dans une liste : pastille de sélection (A/B…), résumé, actions.
+function BudgetGenRow({ x, badge, badgeColor, onPick, children, first }) {
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:9, padding:'8px 6px', borderTop: first ? 'none' : `1px solid ${C.border}`, borderRadius: badge ? 9 : 0,
+      background: badge ? `${badgeColor || x.color}14` : 'none' }}>
+      <button onClick={onPick} style={{ display:'flex', alignItems:'center', gap:9, flex:1, minWidth:0, background:'none', border:'none', padding:0, cursor:'pointer', fontFamily:'inherit', color:C.text, textAlign:'left' }}>
+        <span style={{ width:24, height:24, borderRadius:999, flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:900,
+          background: badge ? (badgeColor || x.color) : 'none', color:'#0a0a0a', boxShadow: badge ? 'none' : `inset 0 0 0 2px ${x.color}88` }}>{badge || ''}</span>
+        <span style={{ flex:1, minWidth:0 }}>
+          <span style={{ display:'block', fontSize:12, fontWeight:800, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{x.name}
+            <span style={{ fontWeight:400, color:C.dim, fontSize:10 }}> · {new Date(x.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })} · {x.h} mois</span></span>
+          <span style={{ display:'block', fontSize:10, fontFamily:'DM Mono,monospace', color:C.muted }}>
+            <span style={{ color: x.lump < 0 ? FIN_DOWN : BUDGET_COLOR }}>{x.lump < 0 ? '−' + budgetK(-x.lump) : budgetK(x.lump)} € plaçables</span> · bas {budgetK(x.low)} €
+          </span>
+        </span>
+      </button>
+      {children}
+    </div>
+  );
+}
+
+// ── 🆚 Comparer deux générations ─────────────────────────────────────────────────────────────
+function BudgetCmpPage({ go }) {
+  const desk = useDesk();
+  const bd = useBudgetDrive();
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  const [busy, setBusy] = React.useState('');
+  const [err, setErr] = React.useState('');
+  const list = bd.list || [];
+  const picked = (_budgetUi.cmpSel || []).map(fid => list.find(x => x.fid === fid)).filter(Boolean).slice(0, 2);
+  // A = la plus ANCIENNE, B = la plus récente : les écarts se lisent « B par rapport à A ».
+  const [A, B] = picked.length === 2 ? picked.slice().sort((x, y) => x.at - y.at) : [picked[0] || null, null];
+  const ea = useBudgetDriveEntry(A), eb = useBudgetDriveEntry(B);
+  if (!budgetDriveReady()) return <BudgetNeedDrive desk={desk} />;
+  const toggle = fid => {
+    let s = (_budgetUi.cmpSel || []).filter(f => list.some(x => x.fid === f));
+    s = s.includes(fid) ? s.filter(f => f !== fid) : s.concat([fid]).slice(-2);
+    _budgetUi.cmpSel = s; bump();
+  };
+  const adopt = async x => {
+    setBusy(x.fid); setErr('');
+    try { const id = budgetAdoptEntry(await budgetDriveEntry(x)); if (id) go('create', { sel: id, view: null }); }
+    catch (e) { setErr((e && e.message) || 'Lecture impossible.'); }
+    setBusy('');
+  };
+  const del = async x => {
+    if (!confirm(`Supprimer la génération « ${x.name} » du ${budgetFmtDY(x.today)} de ton Google Drive (données + feuille) ?\n\nIrréversible.`)) return;
+    setBusy(x.fid); setErr('');
+    try { await budgetDriveDelete(x); } catch (e) { setErr((e && e.message) || 'Suppression impossible.'); }
+    setBusy('');
+  };
+  const view = x => go('create', { sel: budgetLoad().scenarios.some(s => s.id === x.sid) ? x.sid : _budgetUi.sel, view: x.fid });
+  const ab = x => (A && x.fid === A.fid ? 'A' : B && x.fid === B.fid ? 'B' : '');
+  const listCard = (
+    <StatsCollapse key="cmp-list" defaultOpen={picked.length < 2} color="#4ea3f5" title="📂 TES SCÉNARIOS SUR DRIVE" right={bd.list ? list.length : '…'}>
+      <div style={{ fontSize:10.5, color:C.muted, lineHeight:1.45 }}>Touche deux générations : <b style={{ color:'#4ea3f5' }}>A</b> = la plus ancienne, <b style={{ color:'#4ea3f5' }}>B</b> = la plus récente. Deux générations du même scénario montrent ce qui a changé entre-temps.</div>
+      {bd.loading && !bd.list && <div style={{ fontSize:11, color:C.muted }}>⏳ Lecture sur Drive…</div>}
+      {bd.list && !list.length && <div style={{ fontSize:11, color:C.muted }}>Aucune génération sur Drive : passe par ✨ Créer un scénario puis 🚀 Générer.</div>}
+      <div style={{ display:'flex', flexDirection:'column' }}>
+        {list.map((x, i) => (
+          <BudgetGenRow key={x.fid} x={x} first={!i} badge={ab(x)} badgeColor="#4ea3f5" onPick={() => toggle(x.fid)}>
+            {x.sheetUrl && <a href={safeHref(x.sheetUrl)} target="_blank" rel="noopener noreferrer" title="Ouvrir la feuille Google Sheets" style={{ ...BUDGET_GHOST, padding:'4px 7px', textDecoration:'none' }}>☁️</a>}
+            <button onClick={() => view(x)} title="Afficher ses résultats" style={{ ...BUDGET_GHOST, padding:'4px 7px' }}>👁</button>
+            <button onClick={() => adopt(x)} disabled={!!busy} title="Reprendre ses paramètres dans un brouillon" style={{ ...BUDGET_GHOST, padding:'4px 7px' }}>{busy === x.fid ? '⏳' : '↩'}</button>
+            <button onClick={() => del(x)} disabled={!!busy} title="Supprimer de Google Drive" style={{ ...BUDGET_GHOST, padding:'4px 7px', color:FIN_DOWN }}>🗑</button>
+          </BudgetGenRow>
+        ))}
+      </div>
+      <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+        <span style={{ flex:1, fontSize:9.5, color:C.dim }}>☁️ feuille lisible · 👁 résultats · ↩ reprendre les paramètres · 🗑 supprimer de Drive</span>
+        <button onClick={() => budgetDriveList(true)} title="Relire la liste" style={BUDGET_GHOST}>↻</button>
+      </div>
+      {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>⚠ {err}</div>}
+    </StatsCollapse>
+  );
+  let body = null;
+  if (picked.length < 2) {
+    body = (
+      <div style={{ ...BUDGET_CARD(desk), alignItems:'center', textAlign:'center', padding:'20px 14px', borderStyle:'dashed' }}>
+        <div style={{ fontSize:26 }}>🆚</div>
+        <div style={{ fontSize:12, color:C.muted }}>{picked.length ? 'Choisis une deuxième génération.' : 'Choisis deux générations dans la liste.'}</div>
+      </div>
+    );
+  } else if (!ea.e || !eb.e) {
+    body = <div style={{ ...BUDGET_CARD(desk), alignItems:'center', fontSize:12, color: ea.err || eb.err ? FIN_DOWN : C.muted }}>{ea.err || eb.err ? '⚠ ' + (ea.err || eb.err) : '⏳ Lecture des deux scénarios sur Drive…'}</div>;
+  } else body = <BudgetDiffView a={ea.e} b={eb.e} go={go} />;
+  return (
+    <DeskCols cols={2} min={380} gap={12} template="minmax(0, 0.8fr) minmax(0, 1.2fr)">
+      <DeskCol n={0}>{listCard}</DeskCol>
+      <DeskCol n={1}>{body}</DeskCol>
+    </DeskCols>
+  );
+}
+const BUDGET_A = '#9aa3b2', BUDGET_B = '#4ea3f5';
+function BudgetDiffView({ a, b, go }) {
+  const desk = useDesk();
+  const d = React.useMemo(() => budgetDiff(a, b), [a, b]);
+  const { pa, pb } = d;
+  const from = pa.today < pb.today ? pa.today : pb.today, to = pa.end > pb.end ? pa.end : pb.end;
+  const dl = pb.lump - pa.lump, dLow = pb.low.b - pa.low.b, dNet = pb.net / pb.mons.length - pa.net / pa.mons.length;
+  const verdict = [
+    Math.round(dl) === 0 ? 'Même montant plaçable.' : `B laisse ${budgetK(Math.abs(dl))} € de ${dl > 0 ? 'plus' : 'moins'} à placer que A.`,
+    Math.round(dLow) === 0 ? '' : `Point bas ${dLow > 0 ? 'plus haut' : 'plus bas'} de ${budgetK(Math.abs(dLow))} €.`,
+    Math.round(dNet) === 0 ? '' : `Épargne nette ${dNet > 0 ? '+' : '−'}${budgetK(Math.abs(dNet))} € / mois.`,
+  ].filter(Boolean).join(' ');
+  const who = (lbl, e, c) => (
+    <span style={{ display:'inline-flex', alignItems:'center', gap:6, fontSize:11.5, minWidth:0 }}>
+      <span style={{ width:20, height:20, borderRadius:999, background:c, color:'#0a0a0a', fontWeight:900, fontSize:10.5, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}>{lbl}</span>
+      <span style={{ fontWeight:800, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.scen.name}</span>
+      <span style={{ color:C.dim, fontSize:10, flexShrink:0 }}>{budgetFmtDY(e.today)}</span>
+    </span>
+  );
+  const th = { fontSize:9, color:C.muted, fontWeight:800, textAlign:'right', padding:'3px 4px', letterSpacing:'0.03em' };
+  const td = col => ({ fontSize:11, fontFamily:'DM Mono,monospace', textAlign:'right', padding:'6px 4px', color: col || C.text, whiteSpace:'nowrap', borderTop:`1px solid ${C.border}` });
+  const dCol = (v, good) => (!good || Math.round(v) === 0 ? C.muted : v * good > 0 ? FIN_UP : FIN_DOWN);
+  const freq = it => `${budgetK(it.amount)} € ${BUDGET_EVERY_SHORT[it.every]}${it.off ? ' (désactivé)' : ''}`;
+  const adds = d.rows.filter(r => r.t === 'add'), dels = d.rows.filter(r => r.t === 'del'), chgs = d.rows.filter(r => r.t === 'chg');
+  const flowRow = (key, icon, label, txt, col) => (
+    <div key={key} style={{ display:'flex', alignItems:'center', gap:8, fontSize:11.5, padding:'5px 0', borderTop:`1px solid ${C.border}` }}>
+      <span style={{ width:18, textAlign:'center' }}>{icon}</span>
+      <span style={{ flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{label}</span>
+      <span style={{ fontFamily:'DM Mono,monospace', fontSize:10.5, color: col || C.muted, whiteSpace:'nowrap' }}>{txt}</span>
+    </div>
+  );
+  return (<>
+    <div style={{ ...BUDGET_CARD(desk), gap:8, borderLeft:`3px solid ${BUDGET_B}` }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+        {who('A', a, BUDGET_A)}<span style={{ color:C.dim }}>→</span>{who('B', b, BUDGET_B)}
+      </div>
+      {verdict && <div style={{ fontSize:12.5, fontWeight:700, lineHeight:1.45 }}>{verdict}</div>}
+      <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 10px 4px' }}>
+        <BudgetChart series={[{ name: 'A · ' + a.scen.name, color: BUDGET_A, pts: pa.pts, dash:'5 3' }, { name: 'B · ' + b.scen.name, color: BUDGET_B, pts: pb.pts }]}
+          from={from} to={to} cushion={0} W={desk ? 620 : 400} height={desk ? 200 : 150} />
+      </div>
+    </div>
+    <StatsCollapse key="d-kpi" defaultOpen={true} color={BUDGET_B} title="📊 ÉCARTS CLÉS" right={`${dl >= 0 ? '+' : '−'}${budgetK(Math.abs(dl))} € plaçables`}>
+      <div style={{ overflowX:'auto' }}>
+        <table style={{ width:'100%', borderCollapse:'collapse' }}>
+          <thead><tr><th style={{ ...th, textAlign:'left' }}></th><th style={th}>A</th><th style={th}>B</th><th style={th}>ÉCART</th></tr></thead>
+          <tbody>{d.kpis.map(([ic, lbl, va, vb, good]) => (
+            <tr key={lbl}>
+              <td style={{ ...td(), textAlign:'left', fontFamily:'inherit' }}>{ic} {lbl}</td>
+              <td style={td(C.muted)}>{budgetK(va)}</td><td style={td()}>{budgetK(vb)}</td>
+              <td style={{ ...td(dCol(vb - va, good)), fontWeight:800 }}>{Math.round(vb - va) === 0 ? '=' : budgetSigned(vb - va)}</td>
+            </tr>
+          ))}
+          {a.scen.h !== b.scen.h && <tr><td style={{ ...td(), textAlign:'left', fontFamily:'inherit' }}>🗓️ Horizon</td><td style={td(C.muted)}>{a.scen.h} m</td><td style={td()}>{b.scen.h} m</td><td style={td(C.muted)}>⚠ différent</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize:9.5, color:C.dim }}>En euros. Écart vert = mieux pour toi (une hausse des sorties est rouge). Chaque génération garde son jour de calcul.</div>
+    </StatsCollapse>
+    <StatsCollapse key="d-flux" defaultOpen={d.rows.length > 0 && d.rows.length <= 12} color={BUDGET_B} title="💸 FLUX DIFFÉRENTS" right={d.rows.length || '='}>
+      {!d.rows.length && <div style={{ fontSize:11, color:C.muted }}>Mêmes flux des deux côtés : l’écart vient de la trésorerie, du matelas, de l’horizon ou de la date de calcul.</div>}
+      {adds.length > 0 && <div><div style={{ fontSize:9.5, color:FIN_UP, fontWeight:800, letterSpacing:'0.05em' }}>➕ SEULEMENT DANS B ({adds.length})</div>
+        {adds.map(r => flowRow(r.b.id, budgetCat(r.b.cat, r.b.kind).icon, r.b.label, (r.b.kind === 'in' ? '+' : '−') + freq(r.b), r.b.kind === 'in' ? FIN_UP : FIN_DOWN))}</div>}
+      {dels.length > 0 && <div><div style={{ fontSize:9.5, color:FIN_DOWN, fontWeight:800, letterSpacing:'0.05em' }}>➖ SEULEMENT DANS A ({dels.length})</div>
+        {dels.map(r => flowRow(r.a.id, budgetCat(r.a.cat, r.a.kind).icon, r.a.label, (r.a.kind === 'in' ? '+' : '−') + freq(r.a)))}</div>}
+      {chgs.length > 0 && <div><div style={{ fontSize:9.5, color:'#e0a040', fontWeight:800, letterSpacing:'0.05em' }}>✏️ MODIFIÉS ({chgs.length})</div>
+        {chgs.map(r => flowRow(r.a.id + r.b.id, budgetCat(r.b.cat, r.b.kind).icon, r.b.label,
+          r.a.amount !== r.b.amount ? `${budgetK(r.a.amount)} → ${budgetK(r.b.amount)} € (${budgetPctTxt((r.b.amount / r.a.amount - 1) * 100)})`
+            : r.a.every !== r.b.every ? `${BUDGET_EVERY_SHORT[r.a.every]} → ${BUDGET_EVERY_SHORT[r.b.every]}`
+            : r.a.date !== r.b.date ? `${budgetFmtDY(r.a.date)} → ${budgetFmtDY(r.b.date)}` : (r.b.off ? 'désactivé' : 'réactivé')))}</div>}
+    </StatsCollapse>
+    <StatsCollapse key="d-mois" defaultOpen={false} color={BUDGET_B} title="📅 SOLDE FIN DE MOIS" right={`${d.months.length} mois communs`}>
+      {!d.months.length ? <div style={{ fontSize:11, color:C.muted }}>Aucun mois en commun.</div> : (
+        <table style={{ width:'100%', borderCollapse:'collapse' }}>
+          <thead><tr><th style={{ ...th, textAlign:'left' }}>MOIS</th><th style={th}>A</th><th style={th}>B</th><th style={th}>ÉCART</th></tr></thead>
+          <tbody>{d.months.map(m => (
+            <tr key={m.idx}>
+              <td style={{ ...td(), textAlign:'left', fontFamily:'inherit' }}>{budgetMonthLbl(m.idx, true)}</td>
+              <td style={td(C.muted)}>{budgetK(m.a.endB)}</td><td style={td()}>{budgetK(m.b.endB)}</td>
+              <td style={{ ...td(dCol(m.b.endB - m.a.endB, 1)), fontWeight:800 }}>{Math.round(m.b.endB - m.a.endB) === 0 ? '=' : budgetSigned(m.b.endB - m.a.endB)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      )}
+    </StatsCollapse>
+    <StatsCollapse key="d-var" defaultOpen={true} color={BUDGET_COLOR} title="🔁 REGÉNÉRER UN NOUVEAU SCÉNARIO ?">
+      <BudgetRegen base={b.scen} go={go} />
+    </StatsCollapse>
+  </>);
+}
+
+// ── 📏 Réel (Mes Actifs) vs une génération ───────────────────────────────────────────────────
+function BudgetRealPage({ go }) {
+  const desk = useDesk();
+  const bd = useBudgetDrive();
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  const list = bd.list || [];
+  const sum = list.find(x => x.fid === _budgetUi.realSel) || list[0] || null;
+  const ent = useBudgetDriveEntry(sum);
+  const a = loadActifs();
+  const res = React.useMemo(() => (ent.e ? budgetRealRows(ent.e, a) : null), [ent.e, a]);
+  if (!budgetDriveReady()) return <BudgetNeedDrive desk={desk} />;
+  const lastM = a && Array.isArray(a.months) && a.months[0];
+  const picker = list.length > 0 && (
+    <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', fontSize:11, color:C.muted }}>
+      <span>Scénario comparé</span>
+      <select value={sum ? sum.fid : ''} onChange={e => { _budgetUi.realSel = e.target.value; bump(); }} style={{ ...BUDGET_IN, flex:'1 1 200px' }}>
+        {list.map((x, i) => <option key={x.fid} value={x.fid}>{i === 0 ? '⭐ ' : ''}{x.name} · {new Date(x.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })}</option>)}
+      </select>
+    </div>
+  );
+  const box = (icon, txt) => (
+    <div style={{ ...BUDGET_CARD(desk), alignItems:'center', textAlign:'center', padding:'20px 14px' }}>
+      <div style={{ fontSize:26 }}>{icon}</div><div style={{ fontSize:12, color:C.muted, lineHeight:1.5, maxWidth:460 }}>{txt}</div>
+    </div>
+  );
+  if (bd.loading && !bd.list) return box('⏳', 'Lecture de tes scénarios sur Drive…');
+  if (!list.length) return box('📐', 'Aucune génération sur ton Drive : passe par ✨ Créer un scénario puis 🚀 Générer.');
+  if (!lastM) return <>{picker}{box('📊', 'Classeur Mes Actifs jamais synchronisé sur cet appareil : ouvre Finance › mode Finance une fois, puis reviens ici.')}</>;
+  if (!res) return <>{picker}{box(ent.err ? '⚠' : '⏳', ent.err || 'Lecture du scénario sur Drive…')}</>;
+  const { p, rows, outPct, incPct } = res;
+  const sc = ent.e.scen;
+  if (!rows.length) return (<>{picker}{box('🗓️', `Aucun mois réel couvert par cette génération : elle prévoit ${budgetMonthLbl(p.mons[0].idx, true)} → ${budgetMonthLbl(p.mons[p.mons.length - 1].idx, true)}, ton classeur s’arrête à ${fmtActifMonth(lastM.t)}. Reviens quand il aura ces mois, ou choisis une génération plus ancienne.`)}</>);
+  const withLiq = rows.filter(r => r.liquid != null);
+  const last = withLiq[withLiq.length - 1] || null;
+  const dLiq = last ? last.liquid - last.mo.endB : null;
+  const [ly, lm] = last ? [Math.floor(last.idx / 12), last.idx % 12] : [0, 0];
+  const lastDay = last ? budgetYmd(ly, lm, 31) : '';
+  const realPts = withLiq.map(r => ({ d: budgetYmd(Math.floor(r.idx / 12), r.idx % 12, 31), b: r.liquid, evs: [] }));
+  const verdict = [
+    last ? `Fin ${budgetMonthLbl(last.idx, true)} : ${budgetK(last.liquid)} € réels contre ${budgetK(last.mo.endB)} € prévus (${budgetSigned(dLiq)} €).` : '',
+    outPct == null ? '' : Math.abs(outPct) < 2 ? 'Tes dépenses suivent la prévision.' : `Tu dépenses ${budgetPctTxt(outPct).replace(/^[+−]/, '')} de ${outPct > 0 ? 'plus' : 'moins'} que prévu.`,
+    incPct == null || Math.abs(incPct) < 2 ? '' : `Rentrées ${incPct > 0 ? 'au-dessus' : 'en dessous'} de ${budgetPctTxt(incPct).replace(/^[+−]/, '')}.`,
+  ].filter(Boolean).join(' ');
+  const kpi = (icon, label, value, sub, col) => <BudgetKpi icon={icon} label={label} value={value} sub={sub} color={col} />;
+  const th = { fontSize:9, color:C.muted, fontWeight:800, textAlign:'right', padding:'3px 3px' };
+  const td = col => ({ fontSize:10.5, fontFamily:'DM Mono,monospace', textAlign:'right', padding:'6px 3px', color: col || C.text, whiteSpace:'nowrap', borderTop:`1px solid ${C.border}` });
+  const why = outPct != null && Math.abs(outPct) >= 2
+    ? `Suggéré d’après le réel : sorties ${budgetPctTxt(outPct)} par rapport à la prévision.` : null;
+  return (<>
+    {picker}
+    <div style={{ ...BUDGET_CARD(desk), gap:8, borderLeft:'3px solid #e0a040' }}>
+      <div style={{ fontSize:12.5, fontWeight:700, lineHeight:1.5 }}>{verdict}</div>
+      <div style={{ background:C.surfaceHigh, border:`1px solid ${C.border}`, borderRadius:10, padding:'10px 10px 4px' }}>
+        <BudgetChart series={[{ name:'Prévu · ' + sc.name, color: sc.color, pts: p.pts }, ...(realPts.length ? [{ name:'Réel (Mes Actifs)', color:'#e0a040', pts: realPts, stop:true }] : [])]}
+          from={p.today} to={p.end} cushion={0} W={desk ? 1100 : 400} height={desk ? 210 : 150} />
+      </div>
+      <div style={{ fontSize:9.5, color:C.dim, lineHeight:1.45 }}>Réel = comptes disponibles du classeur (courant, livret A, N26, Paypal, liquide) en fin de mois ; sorties réelles = dépense + dette. Le mois de la génération, entamé, ne compte pas dans les %.</div>
+    </div>
+    <div style={{ display:'grid', gridTemplateColumns: desk ? 'repeat(3, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', gap:8 }}>
+      {last && kpi('🏦', `TRÉSO FIN ${budgetMonthLbl(last.idx).toUpperCase()}`, `${budgetSigned(dLiq)} €`, `${budgetK(last.liquid)} réel / ${budgetK(last.mo.endB)} prévu`, dLiq >= 0 ? FIN_UP : FIN_DOWN)}
+      {kpi('➖', 'SORTIES VS PRÉVU', budgetPctTxt(outPct), outPct == null ? 'mois complet manquant' : outPct > 0 ? 'tu dépenses plus' : 'tu dépenses moins', outPct == null ? C.text : outPct > 2 ? FIN_DOWN : outPct < -2 ? FIN_UP : C.text)}
+      {kpi('➕', 'RENTRÉES VS PRÉVU', budgetPctTxt(incPct), incPct == null ? 'mois complet manquant' : incPct >= 0 ? 'au-dessus' : 'en dessous', incPct == null ? C.text : incPct < -2 ? FIN_DOWN : incPct > 2 ? FIN_UP : C.text)}
+    </div>
+    <StatsCollapse key="r-rows" defaultOpen={true} color="#e0a040" title="📅 MOIS PAR MOIS" right={`${rows.length} mois`}>
+      <div style={{ overflowX:'auto' }}>
+        <table style={{ width:'100%', borderCollapse:'collapse' }}>
+          <thead><tr><th style={{ ...th, textAlign:'left' }}>MOIS</th><th style={th}>SOLDE PRÉVU</th><th style={th}>RÉEL</th><th style={th}>ÉCART</th><th style={th}>SORTIES P. / R.</th></tr></thead>
+          <tbody>{rows.map(r => (
+            <tr key={r.idx}>
+              <td style={{ ...td(), textAlign:'left', fontFamily:'inherit' }}>{budgetMonthLbl(r.idx)}{r.partial ? ' ◔' : ''}</td>
+              <td style={td(C.muted)}>{budgetK(r.mo.endB)}</td>
+              <td style={td()}>{r.liquid == null ? '—' : budgetK(r.liquid)}</td>
+              <td style={{ ...td(r.liquid == null ? C.muted : r.liquid >= r.mo.endB ? FIN_UP : FIN_DOWN), fontWeight:800 }}>{r.liquid == null ? '—' : budgetSigned(r.liquid - r.mo.endB)}</td>
+              <td style={td(C.muted)}>{budgetK(r.mo.out)} / {r.out == null ? '—' : budgetK(r.out)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {rows.some(r => r.partial) && <div style={{ fontSize:9.5, color:C.dim }}>◔ mois de la génération : prévu seulement à partir du {budgetFmtDY(p.today)}.</div>}
+    </StatsCollapse>
+    <StatsCollapse key="r-var" defaultOpen={true} color={BUDGET_COLOR} title="🔁 REGÉNÉRER UN NOUVEAU SCÉNARIO ?">
+      <BudgetRegen key={sum.fid} base={sc} go={go} defPct={outPct != null && Math.abs(outPct) >= 2 ? outPct : null} why={why}
+        rebase={last ? { start: last.liquid, startDate: lastDay } : null} />
+    </StatsCollapse>
+  </>);
+}
+
+// 📐 Prévision : écran de choix (3 boutons) puis la page choisie (`_budgetUi.page`, jamais persisté).
+function BudgetPanel() {
+  const [, bump] = React.useReducer(x => x + 1, 0);
+  const go = (page, patch) => { Object.assign(_budgetUi, patch || {}, { page }); bump(); };
+  useBudgetDrive();
+  React.useEffect(() => { budgetDriveList().then(() => budgetDriveMigrate()); }, []);
+  const page = BUDGET_PAGES[_budgetUi.page] ? _budgetUi.page : null;
+  if (!page) return <BudgetHome go={go} />;
+  return (
+    <div key={page} style={{ display:'flex', flexDirection:'column', gap:10, animation:'hub-fade .2s ease' }}>
+      <BudgetBackBar go={go} page={page} />
+      {page === 'create' && <BudgetCreatePage go={go} />}
+      {page === 'cmp' && <BudgetCmpPage go={go} />}
+      {page === 'real' && <BudgetRealPage go={go} />}
     </div>
   );
 }
