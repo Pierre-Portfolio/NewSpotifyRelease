@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.230';
+const APP_VERSION = '13.21.231';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -1544,6 +1544,20 @@ const ACTIFS_TOTAL_KEYS = ['revenu','salaire','vente','refonte','coursInfo','ach
 // La répartition 50/30/20 de l'année (`charge`/`loisir`/`invest`, colonnes BJ:BL des lignes
 // « Total ») est en revanche REPRISE du classeur : c'est une moyenne pondérée qu'il calcule
 // sur ses propres colonnes de dépenses, impossible à refaire depuis les mois.
+// Clé de mois commune aux onglets Actif et Depense (dates lues en ms).
+function actifsYm(t) { const d = new Date(t); return d.getFullYear() * 12 + d.getMonth(); }
+// Prêt immo payé chaque mois = postes « Pret … » de l'onglet Depense (principal + taux 0).
+// Map vide si l'onglet n'a pas été lu : la barre des dépenses reste alors d'une seule couleur.
+function actifsPretByMonth(dep) {
+  const out = new Map();
+  for (const m of (dep && dep.months) || []) {
+    if (!m || !m.cats || !isFinite(m.t)) continue;
+    let v = 0, hit = false;
+    for (const [label, x] of Object.entries(m.cats)) if (/^pr[eê]t\b/i.test(label) && isFinite(x)) { v += x; hit = true; }
+    if (hit) out.set(actifsYm(m.t), (out.get(actifsYm(m.t)) || 0) + v);
+  }
+  return out;
+}
 function actifsYearTotals(months, sheetTotals) {
   const byYear = new Map();
   for (const m of months) {
@@ -32574,6 +32588,12 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.231', date:'2026-11-08', title:'📈 Finance : graphiques et Prévision', items:[
+    'Revenus vs dépenses et Bilan annuel : les ventes de placements (crypto, actions, objets revendus) ne comptent plus comme un revenu, et le prêt immo a sa propre couleur dans la barre des dépenses.',
+    'Amortissement : années complètes sous le graphique, la première et la dernière toujours affichées.',
+    'Prévision : 📊 Générer télécharge le scénario en CSV (Excel) et en dépose une copie Google Sheets dans Drive › HUB_Pierre › Finance ; les 3 derniers fichiers sont dans 📊 Résultats › 🕘 Historique.',
+    'Prévision : nouvel horizon 5 ans ; sous le nom du scénario, il ne reste que l’import du classeur (trésorerie et matelas sont dans ⚙️ Paramètres › Flux).',
+  ] },
   { v:'13.21.230', date:'2026-11-06', title:'🚗 Mode Voiture', items:[
     'Dans le lecteur réduit (écran petit), un bouton 🚗 à droite du ❤ active le mode Voiture.',
     'Mode actif, page ouverte : changer de titre sur l’autoradio (suivant, précédent, retour au début, saut dans le titre) fait comme ta flèche droite. Le titre suivant du feed démarre à 25 %, celui quitté est marqué écouté.',
@@ -32592,11 +32612,6 @@ const RELEASE_NOTES = [
     'Tout tient maintenant en deux volets : ⚙️ Paramètres (flux, formules, simulateur de prêt) et 📊 Résultats (mois par mois, dépenses à prévoir, comparaison des scénarios, prévision et analyse IA), chacun rangé en onglets.',
     'En haut, toujours visibles : tes scénarios, la trésorerie et le matelas, l’horizon, le montant plaçable en grand, les chiffres clés et la courbe du solde.',
     'Les modèles rapides tiennent sur une rangée qui défile, et une suggestion de l’Analyse IA ouvre directement le formulaire dans Paramètres.',
-  ] },
-  { v:'13.21.226', date:'2026-11-02', title:'📊 Finance : les graphiques du classeur', items:[
-    'Mes Actifs reprend les graphiques de ton onglet « Graphique » : revenus vs dépenses mois par mois, bilan annuel, dépenses par groupe et par an, rendement réel vs fixe, pyramide du patrimoine réel vs cible, valeur de l’appartement vs capital restant dû.',
-    'En plus : dépenses du mois poste par poste, charges fixes vs variables, détail de l’étage exotique, gains par actif (12 mois, total, rendements), gain du mois, fiche de l’appartement (onglet Immo) et amortissement du prêt année par année.',
-    'Survole (ou touche) une barre pour lire ses valeurs ; la légende masque une série. Couleurs choisies pour rester distinctes en cas de daltonisme.',
   ] },
 ];
 
@@ -43267,9 +43282,12 @@ function useActifHidden() {
 // part du zéro vers le bas (empilement : positifs au-dessus, négatifs en dessous).
 // `rows` = [{ label, sub?, <clé série>: valeur }] dans l'ordre d'affichage.
 // Une série peut porter `neg` : couleur des barres négatives (gain / perte).
+// En mode 'group', des séries de même `grp` s'EMPILENT dans une seule barre (ex. dépenses =
+// prêt immo + le reste) ; `total` sur la 1re série du groupe écrit sa somme au survol.
+// `edges` : la 1re ET la dernière étiquette d'abscisse toujours écrites (années de l'amortissement).
 // Survol (ou doigt) : la colonne est surlignée et ses valeurs s'écrivent dans le bandeau du
 // haut, à hauteur FIXE pour que le graphique ne saute pas.
-function ActifBarChart({ rows, series, mode, fmt, height, note }) {
+function ActifBarChart({ rows, series, mode, fmt, height, note, edges }) {
   const [hidden, toggle] = useActifHidden();
   const [hover, setHover] = React.useState(null);
   const svgRef = React.useRef(null);
@@ -43284,13 +43302,21 @@ function ActifBarChart({ rows, series, mode, fmt, height, note }) {
   if (!n || !vis.length || !any) {
     return <div><div style={{ fontSize:10, color:C.muted, textAlign:'center', padding:'14px 0' }}>Pas de données.</div>{legend}</div>;
   }
+  // Colonnes d'une catégorie : une par série, sauf les séries d'un même `grp` (une barre empilée).
+  const groups = [];
+  for (const s of vis) {
+    const g = s.grp || s.k;
+    let o = groups.find(x => x.g === g);
+    if (!o) groups.push(o = { g, ss: [] });
+    o.ss.push(s);
+  }
   let vmin = 0, vmax = 0;
   for (const r of rows) {
-    if (stack) {
+    for (const gr of (stack ? [{ ss: vis }] : groups)) {
       let pos = 0, neg = 0;
-      for (const s of vis) { const v = num(r[s.k]); if (v == null) continue; if (v >= 0) pos += v; else neg += v; }
+      for (const s of gr.ss) { const v = num(r[s.k]); if (v == null) continue; if (v >= 0) pos += v; else neg += v; }
       vmax = Math.max(vmax, pos); vmin = Math.min(vmin, neg);
-    } else for (const s of vis) { const v = num(r[s.k]); if (v == null) continue; vmax = Math.max(vmax, v); vmin = Math.min(vmin, v); }
+    }
   }
   if (vmax === vmin) vmax = vmin + 1;
   const pad = (vmax - vmin) * 0.06;
@@ -43315,12 +43341,18 @@ function ActifBarChart({ rows, series, mode, fmt, height, note }) {
         rects.push({ key: `${i}-${s.k}`, x: bx(i), y: y1, w: inner, h, fill: v < 0 && s.neg ? s.neg : s.color });
       }
     } else {
-      const m = vis.length, w = Math.max(0.8, (inner - GAP * (m - 1)) / m);
-      vis.forEach((s, j) => {
-        const v = num(r[s.k]);
-        if (v == null) return;
-        const y1 = Y(Math.max(0, v)), y0 = Y(Math.min(0, v));
-        rects.push({ key: `${i}-${s.k}`, x: bx(i) + j * (w + GAP), y: y1, w, h: Math.max(0.5, y0 - y1), fill: v < 0 && s.neg ? s.neg : s.color });
+      const m = groups.length, w = Math.max(0.8, (inner - GAP * (m - 1)) / m);
+      groups.forEach((gr, j) => {
+        let pos = 0, neg = 0;
+        for (const s of gr.ss) {
+          const v = num(r[s.k]);
+          if (v == null || (v === 0 && gr.ss.length > 1)) continue;
+          const from = v >= 0 ? pos : neg, to = from + v;
+          if (v >= 0) pos = to; else neg = to;
+          const y1 = Y(Math.max(from, to)), y0 = Y(Math.min(from, to));
+          const h = Math.max(0.5, y0 - y1 - (gr.ss.length > 1 && y0 - y1 > 3 ? GAP : 0));
+          rects.push({ key: `${i}-${s.k}`, x: bx(i) + j * (w + GAP), y: y1, w, h, fill: v < 0 && s.neg ? s.neg : s.color });
+        }
       });
     }
   });
@@ -43334,6 +43366,10 @@ function ActifBarChart({ rows, series, mode, fmt, height, note }) {
   const hi = hover != null && hover < n ? hover : null;
   const readout = hi == null ? [] : vis.map(s => ({ s, v: num(rows[hi][s.k]) })).filter(x => x.v != null && x.v !== 0);
   const tot = stack && readout.length > 1 ? readout.reduce((a, x) => a + x.v, 0) : null;
+  const grpTots = stack || hi == null ? [] : groups.filter(gr => gr.ss[0].total && gr.ss.length > 1).map(gr => {
+    const xs = gr.ss.map(s => num(rows[hi][s.k])).filter(v => v != null);
+    return xs.length > 1 ? { g: gr.g, label: gr.ss[0].total, v: xs.reduce((a, v) => a + v, 0) } : null;
+  }).filter(Boolean);
   return (
     <div>
       <div style={{ minHeight:26, fontSize:9.5, fontFamily:'DM Mono,monospace', color:C.muted,
@@ -43346,6 +43382,7 @@ function ActifBarChart({ rows, series, mode, fmt, height, note }) {
           </span>
         ))}
         {tot != null && <span style={{ color:C.text, fontWeight:700 }}>Σ {fmtV(tot)}</span>}
+        {grpTots.map(x => <span key={x.g} style={{ color:C.text, fontWeight:700 }}>Σ {x.label} {fmtV(x.v)}</span>)}
       </div>
       <svg ref={svgRef} viewBox={`0 0 ${W} ${H + AX}`} style={{ width:'100%', height:'auto', display:'block', touchAction:'pan-y', cursor:'crosshair' }}
         onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
@@ -43361,9 +43398,14 @@ function ActifBarChart({ rows, series, mode, fmt, height, note }) {
           <text key={f} x={PL + 1} y={PT + f * (H - PT - PB) - 3} fill={C.muted} fontSize="8.5" fontFamily="DM Mono,monospace"
             stroke={C.surface} strokeWidth="3" strokeLinejoin="round" paintOrder="stroke">{fmtV(vmax - f * (vmax - vmin))}</text>
         ))}
-        {rows.map((r, i) => (i % every) ? null : (
-          <text key={i} x={PL + i * band + band / 2} y={H + 13} fill={C.dim} fontSize="8.5" fontFamily="DM Mono,monospace" textAnchor="middle">{r.label}</text>
-        ))}
+        {rows.map((r, i) => {
+          // `edges` : la dernière étiquette s'écrit toujours, celle d'avant s'efface si elle la touche.
+          const show = edges ? (i === n - 1 || (i % every === 0 && n - 1 - i >= every * 0.6)) : !(i % every);
+          if (!show) return null;
+          const anchor = edges && i === 0 ? 'start' : edges && i === n - 1 ? 'end' : 'middle';
+          const x = anchor === 'start' ? PL + i * band : anchor === 'end' ? PL + (i + 1) * band : PL + i * band + band / 2;
+          return <text key={i} x={x} y={H + 13} fill={C.dim} fontSize="8.5" fontFamily="DM Mono,monospace" textAnchor={anchor}>{r.label}</text>;
+        })}
       </svg>
       {legend}
       {note && <div style={{ fontSize:8.5, color:C.dim, fontFamily:'DM Mono,monospace', marginTop:4, lineHeight:1.45 }}>{note}</div>}
@@ -43613,10 +43655,25 @@ function MesActifsPanel() {
   // Mêmes plages que les graphiques Excel quand elles ont un sens fixe (28 derniers mois
   // pour « Revenus vs dépenses », 60 premiers mois du prêt pour l'appartement).
   const asc = months.slice().sort((a, b) => a.t - b.t);
+  // ⚠ Revenus SANS « Placement - Vente » (demande utilisateur) : sortir de la crypto, d'eToro ou
+  // revendre un objet n'est pas un revenu (capital ET plus-value retirés). Symétrique : acheter
+  // un placement n'a jamais été une dépense (colonne « Depense » = onglet Depense seul).
+  // Le prêt immo (colonnes « Pret … » de l'onglet Depense) a sa propre couleur dans la barre
+  // des dépenses : `actifsPretByMonth` le retrouve par mois (clé année*12+mois).
+  const revHors = (rev, vente) => rev == null ? null : rev - (vente || 0);
+  const pretBy = actifsPretByMonth(data.depense);
+  const splitDep = (dep, pret) => dep == null ? { depAutre: null, pret: null } : pret == null ? { depAutre: dep, pret: null } : { depAutre: dep - pret, pret };
   const flowRows = asc.filter(m => m.revenu != null || m.depense != null).slice(-28)
-    .map(m => ({ label: fmtActifShortMonth(m.t), revenu: m.revenu, depense: m.depense }));
+    .map(m => ({ label: fmtActifShortMonth(m.t), revenu: revHors(m.revenu, m.vente), ...splitDep(m.depense, pretBy.get(actifsYm(m.t))) }));
+  const pretYear = new Map();
+  for (const [ym, v] of pretBy) { const y = Math.floor(ym / 12); pretYear.set(y, (pretYear.get(y) || 0) + v); }
   const yearRows = data.totals.slice().sort((a, b) => a.year - b.year).filter(y => y.revenu != null || y.depense != null)
-    .map(y => ({ label: String(y.year), sub: y.months > 0 && y.months < 12 ? `(${y.months} mois)` : '', revenu: y.revenu, depense: y.depense, achat: y.achat }));
+    .map(y => ({ label: String(y.year), sub: y.months > 0 && y.months < 12 ? `(${y.months} mois)` : '', revenu: revHors(y.revenu, y.vente),
+      ...splitDep(y.depense, pretYear.has(y.year) ? pretYear.get(y.year) : null), achat: y.achat }));
+  const DEP_SERIES = [
+    { k:'pret',     label:'Prêt immo',         color:'#c98500', grp:'dep', total:'Dépenses' },
+    { k:'depAutre', label:'Autres dépenses',   color:'#d95926', grp:'dep' },
+  ];
   const gainRows = asc.filter(m => m.gainMoyen != null).slice(-24).map(m => ({ label: fmtActifShortMonth(m.t), gain: m.gainMoyen }));
   const gainSel = data.gains && data.gains[gainView];
   const gainIsPct = gainView === 'r12' || gainView === 'rTot';
@@ -43640,10 +43697,10 @@ function MesActifsPanel() {
   if (immo) for (const x of immo.sched) {
     const y = new Date(x.t).getFullYear();
     let o = amortRows[amortRows.length - 1];
-    if (!o || o.year !== y) amortRows.push(o = { year: y, label: String(y).slice(2), sub: '', interet: 0, capital: 0, n: 0 });
+    if (!o || o.year !== y) amortRows.push(o = { year: y, label: String(y), sub: '', interet: 0, capital: 0, n: 0 });
     o.interet += x.interet || 0; o.capital += x.capital || 0; o.n++;
   }
-  for (const o of amortRows) { o.sub = `${o.year}${o.n < 12 ? ` (${o.n} mois)` : ''}`; o.label = "'" + o.label; }
+  for (const o of amortRows) o.sub = o.n < 12 ? `(${o.n} mois)` : '';
   const fmtYears = v => v == null || isNaN(v) ? '—' : Number(v).toLocaleString('fr-FR', { maximumFractionDigits:1 }) + ' ans';
 
   return (
@@ -43838,16 +43895,16 @@ function MesActifsPanel() {
       <ActifSection title="💶 REVENUS VS DÉPENSES" right="28 derniers mois">
         <ActifBarChart rows={flowRows} series={[
           { k:'revenu',  label:'Revenus',  color:'#3987e5' },
-          { k:'depense', label:'Dépenses', color:'#d95926' },
-        ]} />
+          ...DEP_SERIES,
+        ]} note="Revenus hors ventes de placements (crypto, actions, objets revendus). Placer de l'argent n'est pas compté en dépense." />
       </ActifSection>
 
       <ActifSection title="📊 BILAN ANNUEL" right="revenus · dépenses · placements">
         <ActifBarChart rows={yearRows} series={[
           { k:'revenu',  label:'Revenus',            color:'#3987e5' },
-          { k:'depense', label:'Dépenses',           color:'#d95926' },
+          ...DEP_SERIES,
           { k:'achat',   label:'Placements (achat)', color:'#199e70' },
-        ]} note="Année en cours incomplète : le nombre de mois relevés s'affiche au survol." />
+        ]} note="Revenus hors ventes de placements. Année en cours incomplète : le nombre de mois relevés s'affiche au survol." />
       </ActifSection>
 
       {depYearSeries && depYearRows.length > 0 && (
@@ -44010,7 +44067,7 @@ function MesActifsPanel() {
       )}
       {amortRows.length > 1 && (
         <ActifSection title="🏦 AMORTISSEMENT" right="par an (empilé)">
-          <ActifBarChart mode="stack" rows={amortRows} series={[
+          <ActifBarChart mode="stack" edges rows={amortRows} series={[
             { k:'capital', label:'Capital remboursé',            color:'#3987e5' },
             { k:'interet', label:'Intérêts + assurance + frais', color:'#d95926' },
           ]} note="Tableau d'amortissement complet de l'onglet Appartement (mois à venir compris) : la part de capital grandit chaque année." />
@@ -45565,7 +45622,7 @@ const BUDGET_MAX_SCEN = 12, BUDGET_MAX_ITEMS = 250;
 const BUDGET_BIG = 300;   // € — dépense non mensuelle à partir de laquelle on la « provisionne »
 const BUDGET_EVERY = [[0, 'Une fois'], [1, 'Chaque mois'], [3, 'Chaque trimestre'], [6, 'Tous les 6 mois'], [12, 'Chaque année'], [24, 'Tous les 2 ans']];
 const BUDGET_EVERY_SHORT = { 0:'une fois', 1:'/ mois', 3:'/ trimestre', 6:'/ 6 mois', 12:'/ an', 24:'/ 2 ans' };
-const BUDGET_HORIZONS = [[3, '3 mois'], [6, '6 mois'], [12, '1 an'], [24, '2 ans']];
+const BUDGET_HORIZONS = [[3, '3 mois'], [6, '6 mois'], [12, '1 an'], [24, '2 ans'], [60, '5 ans']];
 const BUDGET_SCEN_COLORS = ['#32c4b0', '#4ea3f5', '#e0c060', '#b06cf5', '#f5813c', '#e0608a', '#45c552', '#c792ea'];
 const BUDGET_CATS = [
   { id:'salaire',   icon:'💼', label:'Salaire',               kind:'in' },
@@ -45732,16 +45789,127 @@ function budgetLoad() {
   let raw = null;
   try { raw = JSON.parse(lsGet(BUDGET_LS) || 'null'); } catch {}
   const list = (raw && Array.isArray(raw.scenarios) ? raw.scenarios : []).map(budgetScenNorm).filter(Boolean);
-  _budget.data = { v: 1, scenarios: list, fx: budgetFxNorm(raw && raw.fx) };
+  const gens = budgetGensNorm(raw && raw.gens);
+  _budget.data = { v: 1, scenarios: list, fx: budgetFxNorm(raw && raw.fx), gens, genN: budgetGenNOf(raw && raw.genN, gens) };
   return _budget.data;
+}
+// 🕘 Fichiers « Scénario_N » générés par 📊 (les BUDGET_GEN_KEEP derniers, plus récent d'abord).
+// `genN` = dernier numéro donné : il ne redescend jamais, même quand l'historique est rogné.
+const BUDGET_GEN_KEEP = 3;
+function budgetGensNorm(list) {
+  const fin = v => (isFinite(+v) ? Math.round(+v * 100) / 100 : null);
+  return (Array.isArray(list) ? list : []).filter(g => g && isFinite(+g.n) && +g.n > 0).map(g => ({
+    n: Math.round(+g.n), at: +g.at || 0, name: String(g.name || '').slice(0, 40), h: +g.h || 0,
+    lump: fin(g.lump), dca: fin(g.dca), low: fin(g.low), endB: fin(g.endB),
+    link: typeof g.link === 'string' && /^https:\/\//.test(g.link) ? g.link.slice(0, 300) : '',
+  })).sort((a, b) => b.n - a.n).filter((g, i, arr) => arr.findIndex(x => x.n === g.n) === i).slice(0, BUDGET_GEN_KEEP);
+}
+function budgetGenNOf(v, gens) { return Math.max(Math.round(+v) || 0, ...gens.map(g => g.n), 0); }
+
+// 📊 GÉNÉRER (demande utilisateur) : le scénario affiché devient « Scénario_N » :
+// · un CSV TÉLÉCHARGÉ (séparateur « ; », virgule décimale, BOM : Excel FR l'ouvre tel quel) ;
+// · une copie Google Sheets dans Drive HUB_Pierre/Finance : import d'un CSV à VIRGULES en
+//   multipart (Drive convertit ; un « ; » finirait en une seule colonne).
+// Drive non connecté ou en échec ⇒ le téléchargement est fait quand même, l'entrée de
+// l'historique n'a pas de lien. Contenu : paramètres, résultats, mois par mois, flux, et les
+// mois des ⚙️ Formules quand l'IA les a lues.
+function budgetCsvRows(sc, proj, horizon, n) {
+  const hl = (BUDGET_HORIZONS.find(([v]) => v === horizon) || [0, horizon + ' mois'])[1];
+  const rows = [
+    ['Prévision', `Scénario_${n}`],
+    ['Scénario', sc.name],
+    ['Généré le', new Date().toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })],
+    ['Horizon', hl],
+    ['Trésorerie au ' + budgetFmtDY(sc.startDate), sc.start],
+    ['Matelas de sécurité', sc.cushion],
+    [],
+    ['RÉSULTATS'],
+    ['Plaçable aujourd’hui', proj.lump],
+    ['Ou chaque mois', proj.dca],
+    ['Point bas', proj.low.b, budgetFmtDY(proj.low.d)],
+    ['Solde en fin d’horizon', proj.endB],
+    ['Épargne nette moyenne / mois', proj.net / Math.max(1, proj.mons.length)],
+    [],
+    ['MOIS PAR MOIS'],
+    ['Mois', 'Rentrées', 'Sorties', 'Solde fin', 'Point bas du mois', 'À placer'],
+    ...proj.mons.map(m => [budgetMonthLbl(m.idx, true), m.inc, -m.out, m.endB, m.minB, m.invest]),
+    [],
+    ['FLUX'],
+    ['Libellé', 'Sens', 'Montant', 'Tous les (mois)', 'Date', 'Jusqu’au', 'Catégorie', 'Actif'],
+    ...sc.items.map(it => [it.label, it.kind === 'in' ? 'Rentrée' : 'Dépense', it.kind === 'in' ? it.amount : -it.amount,
+      it.every || 'une fois', budgetFmtDY(it.date), it.until ? budgetFmtDY(it.until) : '', budgetCat(it.cat, it.kind).label, it.off ? 'non' : 'oui']),
+  ];
+  const fx = budgetLoad().fx;
+  const p = fx && fx.rules ? budgetFxProject(fx, loadActifs()) : null;
+  if (p && p.rows.length) {
+    const cols = [];
+    if (p.rules.salaire) cols.push(['salaire', 'Salaire']);
+    if (p.rules.depense) cols.push(['depense', 'Dépenses']);
+    if (p.rules.salaire || p.rules.depense) cols.push(['reste', 'Reste']);
+    for (const fd of p.fields) if (!fd.flow && p.rules[fd.key]) cols.push([fd.key, fd.label.replace(/^\S+\s/, '')]);
+    cols.push(['total', 'Total des comptes']);
+    rows.push([], ['PRÉVISION DES FORMULES (NOUVEAUX MOIS)'], ['Mois', ...cols.map(c => c[1])],
+      ...p.rows.map(r => [budgetMonthLbl(r.idx, true), ...cols.map(([k]) => r.v[k])]));
+  }
+  return rows;
+}
+function budgetCsv(rows, fr) {
+  const cell = v => {
+    if (v == null) return '';
+    if (typeof v === 'number') {
+      if (!isFinite(v)) return '';
+      const x = String(Math.round(v * 100) / 100);
+      return fr ? x.replace('.', ',') : x;
+    }
+    const t = String(v);
+    return /[",;\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+  return rows.map(r => r.map(cell).join(fr ? ';' : ',')).join('\r\n');
+}
+async function budgetDriveSheet(token, name, csv) {
+  const send = async () => {
+    const folder = await gdriveHubSubfolder(token, 'Finance');
+    const b = 'hubcsv' + Date.now().toString(36);
+    const meta = { name, mimeType: 'application/vnd.google-apps.spreadsheet', parents: [folder] };
+    const body = `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n`
+      + `--${b}\r\nContent-Type: text/csv; charset=UTF-8\r\n\r\n${csv}\r\n--${b}--`;
+    return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${b}` }, body, signal: fetchSig(30000) });
+  };
+  let r = await send();
+  if (r.status === 404) { gdriveHubFolderReset('Finance'); r = await send(); }   // dossier supprimé côté Drive
+  if (r.status === 401) { gdriveLogout(); throw new Error('session Google expirée, reconnecte-toi'); }
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const d = await r.json();
+  return d.webViewLink || `https://docs.google.com/spreadsheets/d/${d.id}/edit`;
+}
+async function budgetGenerate(sc, proj, horizon) {
+  const n = budgetLoad().genN + 1;
+  const name = `Scénario_${n}`;
+  const rows = budgetCsvRows(sc, proj, horizon, n);
+  flip7Download(new Blob(['\ufeff' + budgetCsv(rows, true)], { type: 'text/csv;charset=utf-8' }), name + '.csv');
+  let link = '', driveErr = '';
+  const token = gdriveToken();
+  if (!token) driveErr = 'Google Drive non connecté';
+  else {
+    try { link = await budgetDriveSheet(token, name, budgetCsv(rows, false)); }
+    catch (e) { driveErr = (e && e.message) || 'erreur Drive'; }
+  }
+  const d = budgetLoad();
+  const g = { n, at: Date.now(), name: sc.name, h: horizon, lump: proj.lump, dca: proj.dca, low: proj.low.b, endB: proj.endB, link };
+  const ok = budgetSave({ scenarios: d.scenarios, gens: [g].concat(d.gens), genN: n });
+  return { n, name, link, driveErr, ok };
 }
 // ⚠ Piège 14 : stockage plein ⇒ `false`, et le cache garde l'état d'AVANT (l'écran ne montre
 // jamais une modification que le disque ignore).
 // ⚠ `fx` (⚙️ formules de prévision) vit dans le MÊME objet : un appel qui ne le passe pas
 // (tous ceux des scénarios) le CONSERVE — ne jamais l'écrire `{ scenarios }` « tout court ».
+// Même règle pour `gens` / `genN` (🕘 historique des fichiers générés) : absents ⇒ conservés.
 function budgetSave(next) {
   const fx = next.fx !== undefined ? budgetFxNorm(next.fx) : budgetLoad().fx;
-  const d = { v: 1, scenarios: (next.scenarios || []).slice(0, BUDGET_MAX_SCEN), fx };
+  const gens = next.gens !== undefined ? budgetGensNorm(next.gens) : budgetLoad().gens;
+  const genN = budgetGenNOf(next.genN !== undefined ? next.genN : budgetLoad().genN, gens);
+  const d = { v: 1, scenarios: (next.scenarios || []).slice(0, BUDGET_MAX_SCEN), fx, gens, genN };
   if (!lsSet(BUDGET_LS, JSON.stringify(d))) return false;
   _budget.data = d;
   for (const f of _budget.subs) { try { f(d); } catch {} }
@@ -45779,7 +45947,10 @@ function budgetMerge(inc) {
     if ((s.at || 0) > (cur[i].at || 0)) cur[i] = s;
   });
   const fxIn = budgetFxNorm(inc.fx), fxCur = budgetLoad().fx;
-  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur });
+  // 🕘 Historique : union par numéro (les BUDGET_GEN_KEEP plus récents), compteur au MAX (piège 17).
+  const gens = budgetGensNorm(budgetLoad().gens.concat(budgetGensNorm(inc.gens)));
+  return budgetSave({ scenarios: cur, fx: fxIn && (!fxCur || fxIn.at > fxCur.at) ? fxIn : fxCur,
+    gens, genN: Math.max(budgetLoad().genN, budgetGenNOf(inc.genN, gens)) });
 }
 // Empreinte du contenu (pas de `at`) : l'analyse IA sait si le scénario a bougé depuis elle.
 function budgetSig(s) {
@@ -46851,6 +47022,7 @@ function BudgetPanel() {
   const [parsed, setParsed] = React.useState(null);    // [{ it, on }] proposés par l'IA
   const [pBusy, setPBusy] = React.useState(false);
   const [pErr, setPErr] = React.useState('');
+  const [gen, setGen] = React.useState(null);          // { busy } | { msg, warn } — 📊 Générer
   const scens = data.scenarios;
   const sc = scens.find(s => s.id === _budgetUi.sel) || scens[0] || null;
   const horizon = _budgetUi.horizon;
@@ -46977,6 +47149,23 @@ function BudgetPanel() {
   );
 
   const fluxBody = (<>
+      <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', fontSize:11, color:C.muted, padding:'8px 10px', borderRadius:10, background:'#ffffff05', border:`1px solid ${C.border}` }}>
+        <span style={{ fontSize:9.5, fontWeight:800, letterSpacing:'0.05em', color:C.muted, width:'100%' }}>🏁 POINT DE DÉPART</span>
+        <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
+          <span>💰 Trésorerie au</span>
+          <BudgetField kind="date" value={sc.startDate} width={92} title="Date du solde (fin de journée)" onCommit={v => upd(s => ({ ...s, startDate: v }))} />
+          <BudgetField value={sc.start} width={100} placeholder="0" title="Solde disponible (comptes courants + livrets)" color={`${BUDGET_COLOR}66`} onCommit={v => upd(s => ({ ...s, start: v, startDate: s.start === v ? s.startDate : today }))} />
+          <span>€</span>
+        </span>
+        <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
+          <span>🛟 Matelas</span>
+          <BudgetField value={sc.cushion} width={86} placeholder="0" title="Épargne de précaution à ne jamais entamer" color="#e0a04066" onCommit={v => upd(s => ({ ...s, cushion: Math.max(0, Math.round(v)) }))} />
+          <span>€</span>
+        </span>
+        {outMonthly > 0 && Math.abs(sc.cushion - Math.round(outMonthly * 3 / 100) * 100) > 1 && (
+          <button onClick={() => upd(s => ({ ...s, cushion: Math.round(outMonthly * 3 / 100) * 100 }))} title="Règle courante : 3 mois de dépenses" style={BUDGET_GHOST}>= 3 mois ({budgetK(Math.round(outMonthly * 3 / 100) * 100)} €)</button>
+        )}
+      </div>
       {form && !form.edit
         ? <BudgetItemForm init={form.init} color={sc.color} onSave={saveItem} onCancel={() => setForm(null)} />
         : <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
@@ -47069,9 +47258,42 @@ function BudgetPanel() {
   if (scens.length > 1) t2s.push(['cmp', '🆚 Comparer', scens.length]);
   if (fxHas) t2s.push(['fxres', '🔮 Prévision IA']);
   t2s.push(['ai', '🤖 Analyse IA']);
+  t2s.push(['hist', '🕘 Historique', data.gens.length]);
   const t2 = t2s.some(t => t[0] === _budgetUi.t2) ? _budgetUi.t2 : 'mois';
   // L'Analyse IA propose un flux oublié : il s'ouvre dans ⚙️ Paramètres › Flux. La clé du collapse
   // change (`pk`) ⇒ il se remonte OUVERT, même replié avant.
+  const genRun = async () => {
+    setGen({ busy: true });
+    const r = await budgetGenerate(sc, proj, horizon).catch(e => ({ fail: (e && e.message) || 'erreur' }));
+    if (r.fail) return setGen({ msg: `⚠ Génération impossible : ${r.fail}`, warn: true });
+    setGen({ warn: !r.link || !r.ok, msg: r.link
+      ? `✓ ${r.name}.csv téléchargé · copie Google Sheets dans Drive › HUB_Pierre › Finance${r.ok ? '' : ' (historique non enregistré : stockage plein)'}`
+      : `✓ ${r.name}.csv téléchargé · ⚠ pas de copie Drive (${r.driveErr})` });
+  };
+  const histBody = !data.gens.length ? (
+    <div style={{ fontSize:11, color:C.muted, lineHeight:1.5 }}>Aucun fichier généré. 📊 Générer (en haut) télécharge le scénario affiché et en garde une trace ici : les {BUDGET_GEN_KEEP} derniers.</div>
+  ) : (
+    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      {data.gens.map(g => (
+        <div key={g.n} style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', padding:'8px 10px', borderRadius:10, background:C.surfaceHigh, border:`1px solid ${C.border}` }}>
+          <div style={{ flex:'1 1 180px', minWidth:0 }}>
+            <div style={{ fontSize:12.5, fontWeight:900, color:C.text }}>Scénario_{g.n} <span style={{ fontWeight:600, color:C.muted, fontSize:11 }}>· {g.name}</span></div>
+            <div style={{ fontSize:10, color:C.dim, fontFamily:'DM Mono,monospace' }}>
+              {new Date(g.at).toLocaleString('fr-FR', { dateStyle:'short', timeStyle:'short' })} · {(BUDGET_HORIZONS.find(([v]) => v === g.h) || [0, g.h + ' mois'])[1]}
+            </div>
+          </div>
+          <div style={{ display:'flex', gap:10, fontSize:10.5, fontFamily:'DM Mono,monospace', color:C.muted, flexWrap:'wrap' }}>
+            <span>plaçable <b style={{ color: g.lump < 0 ? FIN_DOWN : BUDGET_COLOR }}>{budgetK(g.lump)} €</b></span>
+            <span>fin <b style={{ color:C.text }}>{budgetK(g.endB)} €</b></span>
+            <span>point bas <b style={{ color:C.text }}>{budgetK(g.low)} €</b></span>
+          </div>
+          {g.link && safeHref(g.link)
+            ? <a href={safeHref(g.link)} target="_blank" rel="noopener noreferrer" style={{ ...BUDGET_GHOST, textDecoration:'none' }}>Ouvrir dans Drive ↗</a>
+            : <span style={{ fontSize:10, color:C.dim }}>téléchargé seulement</span>}
+        </div>
+      ))}
+    </div>
+  );
   const prefill = init => { setForm({ init: { ...init, every: init.every || 0 }, edit:false }); setUi({ t1:'flux', pk:(_budgetUi.pk || 0) + 1 }); };
   const params = (
     <StatsCollapse key={'params' + (_budgetUi.pk || 0)} defaultOpen={desk || !sc.items.length || !!_budgetUi.pk} color={BUDGET_COLOR}
@@ -47094,6 +47316,7 @@ function BudgetPanel() {
         {t2 === 'cmp' && <BudgetCompare scens={scens} horizon={horizon} today={today} onPick={id => setUi({ sel: id })} />}
         {t2 === 'fxres' && <BudgetFxResults />}
         {t2 === 'ai' && <BudgetAiBox sc={sc} proj={proj} onPrefill={prefill} />}
+        {t2 === 'hist' && histBody}
       </div>
     </StatsCollapse>
   );
@@ -47129,24 +47352,17 @@ function BudgetPanel() {
           <button onClick={() => createScen(sc)} title="Dupliquer pour tester une variante (« et si j'achète une voiture ? »)" style={BUDGET_ICON_BTN}>⧉</button>
           <button onClick={delScen} title="Supprimer ce scénario" style={{ ...BUDGET_ICON_BTN, color:FIN_DOWN }}>🗑</button>
         </div>
-        <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center', fontSize:11, color:C.muted }}>
-          <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
-            <span>💰 Trésorerie au</span>
-            <BudgetField kind="date" value={sc.startDate} width={92} title="Date du solde (fin de journée)" onCommit={v => upd(s => ({ ...s, startDate: v }))} />
-            <BudgetField value={sc.start} width={100} placeholder="0" title="Solde disponible (comptes courants + livrets)" color={`${BUDGET_COLOR}66`} onCommit={v => upd(s => ({ ...s, start: v, startDate: s.start === v ? s.startDate : today }))} />
-            <span>€</span>
-          </span>
-          <span style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
-            <span>🛟 Matelas</span>
-            <BudgetField value={sc.cushion} width={86} placeholder="0" title="Épargne de précaution à ne jamais entamer" color="#e0a04066" onCommit={v => upd(s => ({ ...s, cushion: Math.max(0, Math.round(v)) }))} />
-            <span>€</span>
-          </span>
-          {outMonthly > 0 && Math.abs(sc.cushion - Math.round(outMonthly * 3 / 100) * 100) > 1 && (
-            <button onClick={() => upd(s => ({ ...s, cushion: Math.round(outMonthly * 3 / 100) * 100 }))} title="Règle courante : 3 mois de dépenses" style={BUDGET_GHOST}>= 3 mois ({budgetK(Math.round(outMonthly * 3 / 100) * 100)} €)</button>
-          )}
-          {actifs && <button onClick={fromActifs} title="Reprendre la trésorerie et les moyennes du classeur (mode Finance · Mes Actifs)" style={BUDGET_GHOST}>📥 Mes Actifs</button>}
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
+          <button onClick={fromActifs} disabled={!actifs} style={{ ...BUDGET_GHOST, opacity: actifs ? 1 : 0.5 }}
+            title={actifs ? 'Reprendre la trésorerie et les moyennes du classeur (mode Finance · Mes Actifs)' : 'Ouvre une fois le mode Finance pour synchroniser ton classeur'}>📥 Importer depuis mon classeur</button>
+          <span style={{ flex:1 }} />
+          <button onClick={genRun} disabled={!!(gen && gen.busy)} style={budgetBtn(BUDGET_COLOR, true)}
+            title="Télécharge le scénario en CSV (Excel) et en dépose une copie Google Sheets dans Drive › HUB_Pierre › Finance">
+            {gen && gen.busy ? '⏳ Génération…' : `📊 Générer Scénario_${data.genN + 1}`}
+          </button>
         </div>
-        {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Trésorerie saisie il y a {budgetDaysTo(sc.startDate, today)} jours : les flux depuis sont supposés passés comme prévu ({budgetEur(proj.open)} aujourd’hui) — mets-la à jour pour plus de justesse.</div>}
+        {gen && gen.msg && <div style={{ fontSize:10.5, color: gen.warn ? '#e0a040' : FIN_UP }}>{gen.msg}</div>}
+        {stale && <div style={{ fontSize:10.5, color:'#e0a040' }}>⚠ Trésorerie saisie il y a {budgetDaysTo(sc.startDate, today)} jours : les flux depuis sont supposés passés comme prévu ({budgetEur(proj.open)} aujourd’hui) — mets-la à jour dans ⚙️ Paramètres › Flux.</div>}
         {err && <div style={{ fontSize:10.5, color:FIN_DOWN }}>{err}</div>}
       </div>
 
