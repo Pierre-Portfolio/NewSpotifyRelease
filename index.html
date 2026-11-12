@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.233';
+const APP_VERSION = '13.21.234';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2392,10 +2392,35 @@ let _playerPollKick = null;
 // ⚠ `_carSelfAt` = dernière commande lecteur envoyée PAR L'APP (posé par `apiPut`) : pendant
 // CAR_SELF_GRACE_MS on ne juge rien, sinon nos propres play/seek (flèches, auto-avance, saut à
 // 25 %) se détecteraient eux-mêmes et l'app avancerait en boucle.
+// Le même bouton fait un cycle à 5 temps : coupé → 🚗 Voiture (bleu, 'on') → 🔴 Défilement
+// '5' → '10' → '15' → coupé. En Défilement, toutes les N s l'app passe au titre suivant du
+// feed, démarré à CAR_SKIP_PCT (même geste que la flèche droite) ; la détection autoradio
+// est alors COUPÉE (carModeOn faux) : nos propres sauts toutes les 5 s la tromperaient.
+// `carModeSet` prévient le minuteur du StoreProvider (`_carSubs`) et relance le poll.
 const CAR_MODE_LS = 'spotifyplus_car_mode';
 const PLAYER_POLL_CAR_MS = 1000, CAR_SELF_GRACE_MS = 4000, CAR_TOL_MS = 3000;
+const CAR_SKIP_STEPS = [5, 10, 15], CAR_SKIP_PCT = 0.33, CAR_BLUE = '#3b8bff', CAR_RED = '#e5484d';
 let _carSelfAt = 0;
-function carModeOn() { try { return localStorage.getItem(CAR_MODE_LS) === 'on'; } catch { return false; } }
+const _carSubs = new Set();
+function carModeGet() {
+  let v = null;
+  try { v = localStorage.getItem(CAR_MODE_LS); } catch {}
+  return v === 'on' || CAR_SKIP_STEPS.includes(Number(v)) ? v : 'off';
+}
+function carModeOn() { return carModeGet() === 'on'; }
+function carSkipSec() { const n = Number(carModeGet()); return CAR_SKIP_STEPS.includes(n) ? n : 0; }
+// Mode suivant du cycle (voir plus haut).
+function carModeNext(v) {
+  if (v === 'off') return 'on';
+  if (v === 'on') return String(CAR_SKIP_STEPS[0]);
+  const i = CAR_SKIP_STEPS.indexOf(Number(v));
+  return i >= 0 && i < CAR_SKIP_STEPS.length - 1 ? String(CAR_SKIP_STEPS[i + 1]) : 'off';
+}
+function carModeSet(v) {
+  lsSet(CAR_MODE_LS, v);
+  _carSubs.forEach(f => { try { f(v); } catch {} });
+  if (_playerPollKick) _playerPollKick();
+}
 // Deux lectures `{uri, ms, playing, dur, at}` du poll → l'utilisateur a-t-il agi ailleurs ?
 // · fin de titre naturelle (reste ≤ temps écoulé + marge) : JAMAIS un changement, l'auto-avance
 //   existante s'en charge (enchaînement de l'album, rebouclage) ;
@@ -4616,7 +4641,8 @@ function StoreProvider({ children }) {
   // `usePlayerControls`) — titre suivant du feed, démarré à 25 %, titre quitté marqué écouté —
   // mais calculé depuis le titre QUITTÉ (`leaving`), pas depuis celui que l'autoradio vient de
   // lancer. Titre quitté hors du feed ⇒ repli sur la dernière position connue, comme navigateFeed.
-  carAdvanceRef.current = async (leaving) => {
+  // `pct` : point de départ du titre suivant (25 % par défaut, CAR_SKIP_PCT en Défilement).
+  carAdvanceRef.current = async (leaving, pct = 0.25) => {
     const f = filteredFeedRef.current;
     if (!f.length) return;
     const li = leaving ? (filteredFeedIndexRef.current.get(leaving) ?? -1) : -1;
@@ -4628,9 +4654,37 @@ function StoreProvider({ children }) {
     if (leaving) advancedForRef.current = leaving;   // l'auto-avance de fin de titre ne double pas
     currentFeedIdxRef.current = idx;
     await playTrack(next.spotifyUri);
-    if (next.duration_ms > 0) setTimeout(() => seek(Math.floor(next.duration_ms * 0.25)), 400);
+    if (next.duration_ms > 0) setTimeout(() => seek(Math.floor(next.duration_ms * pct)), 400);
     if (li !== -1) markListened(leaving);
   };
+
+  // 🔴 Défilement du mode Voiture (voir CAR_SKIP_STEPS) : chaîne de setTimeout, le délai
+  // repart APRÈS chaque saut (N s d'écoute réelle, pas d'empilement si Spotify traîne).
+  // Rien ne se lance tant que la musique est en pause : un saut relancerait la lecture.
+  const [carSkip, setCarSkip] = React.useState(carSkipSec);
+  React.useEffect(() => {
+    const f = () => setCarSkip(carSkipSec());
+    _carSubs.add(f);
+    return () => { _carSubs.delete(f); };
+  }, []);
+  const carNowRef = React.useRef(now);
+  carNowRef.current = now;
+  React.useEffect(() => {
+    if (authState !== 'connected' || !carSkip) return;
+    let stop = false, timer = null;
+    const loop = () => {
+      if (stop) return;
+      timer = setTimeout(async () => {
+        const n = carNowRef.current;
+        if (!stop && n?.playing && n.uri) {
+          try { await carAdvanceRef.current(n.uri, CAR_SKIP_PCT); } catch {}
+        }
+        loop();
+      }, carSkip * 1000);
+    };
+    loop();
+    return () => { stop = true; clearTimeout(timer); };
+  }, [authState, carSkip]);
 
   // Sync des likes Spotify → DB dès que la DB est prête
   React.useEffect(() => {
@@ -32588,6 +32642,9 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.234', date:'2026-11-12', title:'🚗 Musique : mode Défilement', items:[
+    'Bouton 🚗 du lecteur réduit : après le bleu (Voiture), un clic de plus le passe en rouge « 5 » : titre suivant toutes les 5 s, démarré à 33 %. Puis 10 s, 15 s, et un dernier clic coupe.',
+  ] },
   { v:'13.21.233', date:'2026-11-08', title:'🔍 Alertes : recherche', items:[
     'Nouvelle barre de recherche sous les rappels en retard : tape un mot pour retrouver une alerte (rubriques, Mes rappels, garanties, anniversaires) et modifier sa date directement.',
   ] },
@@ -32604,12 +32661,6 @@ const RELEASE_NOTES = [
     'Dans le lecteur réduit (écran petit), un bouton 🚗 à droite du ❤ active le mode Voiture.',
     'Mode actif, page ouverte : changer de titre sur l’autoradio (suivant, précédent, retour au début, saut dans le titre) fait comme ta flèche droite. Le titre suivant du feed démarre à 25 %, celui quitté est marqué écouté.',
     'Une pause ou une reprise ne compte pas. Le site vérifie la lecture chaque seconde tant que le mode est actif. Bouton grisé ou Spotify utilisé sans le site : rien ne change.',
-  ] },
-  { v:'13.21.229', date:'2026-11-06', title:'🛒 Bon Plan refait', items:[
-    'Nouveaux bons plans : Dealabs (hot et nouveaux), Le Dénicheur, jeux offerts. Ils sont relevés toutes les 2 h côté serveur, donc le module ne dépend plus des relais qui le rendaient muet.',
-    'Une seule barre de recherche, pour un produit ou un jeu PC : bons plans en cours, prix chez les marchands (IA, si une clé est enregistrée) et liens directs vers Le Dénicheur, Dealabs, Idealo, Amazon…',
-    '⭐ Favoris : chaque recherche suivie est relancée une fois par jour à l’ouverture. Une pop-up te prévient si le prix passe sous ta cible 🎯 ou sous son plus bas connu, avec la courbe des relevés.',
-    'Les jeux vidéo restent là (promos Steam, Epic, CheapShark, liste de souhaits Steam), et un onglet 💡 Astuces regroupe historique de prix, codes promo et cashback.',
   ] },
 ];
 
@@ -66741,13 +66792,16 @@ function CompactPlayer() {
           togglePlayPause, prevTrack, nextTrack, toggleLike } = usePlayerControls();
   // 🚗 Mode Voiture (voir CAR_MODE_LS) : grisé = coupé. Le poll est relancé tout de suite pour
   // passer à 1 s (ou revenir à 5 s) sans attendre le tick en cours.
-  const [car, setCar] = React.useState(carModeOn);
+  // Cycle coupé → bleu → rouge 5 → 10 → 15 → coupé (voir CAR_SKIP_STEPS).
+  const [carMode, setCarMode] = React.useState(carModeGet);
   const carToggle = () => {
-    const v = !car;
-    setCar(v);
-    lsSet(CAR_MODE_LS, v ? 'on' : 'off');
-    if (_playerPollKick) _playerPollKick();
+    const v = carModeNext(carMode);
+    setCarMode(v);
+    carModeSet(v);
   };
+  const car = carMode !== 'off';
+  const carSkipN = CAR_SKIP_STEPS.includes(Number(carMode)) ? Number(carMode) : 0;
+  const carCol = carSkipN ? CAR_RED : car ? CAR_BLUE : C.muted;
 
   const btn = { background:'none', border:'none', cursor:'pointer', padding:12, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 };
 
@@ -66780,11 +66834,13 @@ function CompactPlayer() {
                 <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
               </svg>
             </button>
-            <button onClick={carToggle} aria-pressed={car} style={{ ...btn, opacity: car ? 1 : 0.35 }}
-              title={car ? 'Mode Voiture actif : un changement fait sur l’autoradio passe au titre suivant du feed' : 'Mode Voiture coupé'}>
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={car ? C.accent : C.muted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <button onClick={carToggle} aria-pressed={car} style={{ ...btn, flexDirection:'column', gap:1, opacity: car ? 1 : 0.35 }}
+              title={carSkipN ? `Défilement : titre suivant toutes les ${carSkipN} s, démarré à 33 % (cliquer : ${carSkipN < CAR_SKIP_STEPS[CAR_SKIP_STEPS.length - 1] ? 'plus lent' : 'couper'})`
+                : car ? 'Mode Voiture actif : un changement fait sur l’autoradio passe au titre suivant du feed (cliquer : défilement 5 s)' : 'Mode Voiture coupé'}>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={carCol} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M5 17H3v-5l2-5h14l2 5v5h-2"/><path d="M3 12h18"/><circle cx="7.5" cy="17" r="2"/><circle cx="16.5" cy="17" r="2"/><path d="M9.5 17h5"/>
               </svg>
+              {carSkipN > 0 && <span style={{ fontSize:10, fontWeight:700, lineHeight:1, color:CAR_RED, fontFamily:'DM Mono,monospace' }}>{carSkipN}</span>}
             </button>
           </div>
         </>
