@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.234';
+const APP_VERSION = '13.21.235';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -28932,6 +28932,8 @@ function mergeTvItem(a, b) {
   base.cartoon = !!(a.cartoon || b.cartoon);
   base.epAlert = !!(a.epAlert || b.epAlert);   // 🔔 suivi des sorties : union, comme les labels
   if (a.dropped || b.dropped) base.dropped = true;         // « ne plus suivre » conservé à la fusion
+  if (a.masked || b.masked) base.masked = true;           // 🙈 série masquée : idem
+  else if (a.masked === false || b.masked === false) base.masked = false;   // rouverte (tvIsMasked)
   if (a.unlimited || b.unlimited) base.unlimited = true;   // plafond 500 retiré : on garde le plus permissif
   if (a.keepShorts || b.keepShorts) base.keepShorts = true; // tag « garder les Shorts » : on garde le plus permissif
   if (a.shortsOnly || b.shortsOnly) base.shortsOnly = true; // tag « garder uniquement les Shorts »
@@ -32642,6 +32644,9 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.235', date:'2026-11-12', title:'🙈 TV Time : série masquée', items:[
+    'Le 🙈 d’une série la masque pour de bon : un nouvel épisode ou une nouvelle saison ne la remet plus dans « En cours ». Changer son statut ou cocher un épisode la fait revenir.',
+  ] },
   { v:'13.21.234', date:'2026-11-12', title:'🚗 Musique : mode Défilement', items:[
     'Bouton 🚗 du lecteur réduit : après le bleu (Voiture), un clic de plus le passe en rouge « 5 » : titre suivant toutes les 5 s, démarré à 33 %. Puis 10 s, 15 s, et un dernier clic coupe.',
   ] },
@@ -32656,11 +32661,6 @@ const RELEASE_NOTES = [
     'Amortissement : années complètes sous le graphique, la première et la dernière toujours affichées.',
     'Prévision : 📊 Générer télécharge le scénario en CSV (Excel) et en dépose une copie Google Sheets dans Drive › HUB_Pierre › Finance ; les 3 derniers fichiers sont dans 📊 Résultats › 🕘 Historique.',
     'Prévision : nouvel horizon 5 ans ; sous le nom du scénario, il ne reste que l’import du classeur (trésorerie et matelas sont dans ⚙️ Paramètres › Flux).',
-  ] },
-  { v:'13.21.230', date:'2026-11-06', title:'🚗 Mode Voiture', items:[
-    'Dans le lecteur réduit (écran petit), un bouton 🚗 à droite du ❤ active le mode Voiture.',
-    'Mode actif, page ouverte : changer de titre sur l’autoradio (suivant, précédent, retour au début, saut dans le titre) fait comme ta flèche droite. Le titre suivant du feed démarre à 25 %, celui quitté est marqué écouté.',
-    'Une pause ou une reprise ne compte pas. Le site vérifie la lecture chaque seconde tant que le mode est actif. Bouton grisé ou Spotify utilisé sans le site : rien ne change.',
   ] },
 ];
 
@@ -48333,6 +48333,12 @@ function tvSpecialsSeen(item) {
 // ⚠ « Ignoré » et « vu » sont EXCLUSIFS : un épisode coché après coup sort de lui-même des
 // ignorés (filtrage par le set des vus à chaque lecture), sans qu'il faille nettoyer la
 // liste stockée — c'est ce qui rend le mécanisme réversible d'un simple clic sur la coche.
+// 🙈 Série MASQUÉE (voir `ignoreUnwatched`) : `masked` vrai, ou — fiches masquées AVANT que le
+// drapeau existe — absent avec des épisodes ignorés. Un geste qui la rouvre pose `masked:false`
+// (et non `undefined`), sinon l'ancienne règle la re-masquerait.
+function tvIsMasked(it) {
+  return !!it && (it.masked === true || (it.masked == null && it.type === 'tv' && tvIgnoredSet(it).length > 0));
+}
 function tvIgnoredSet(item)  { return Array.isArray(item && item.ignoredSet) ? item.ignoredSet : []; }
 function ytIgnoredIds(item)  { return Array.isArray(item && item.ignoredIds) ? item.ignoredIds : []; }
 // Set des clés/ids réellement ignorés = mémorisés ET pas (ou plus) vus.
@@ -48598,8 +48604,8 @@ function tvUncheckUnaired(items) {
       if (kept.length === set.length) return it;
       changed = true;
       const next = { ...it, watchedSet: kept, watchedEps: kept.length };
-      // Une série « Vu » qui perd des épisodes n'est plus « tout vu » (sauf abandon assumé).
-      if (next.status === 'done' && !next.dropped) { next.status = 'watching'; next.doneAt = undefined; }
+      // Une série « Vu » qui perd des épisodes n'est plus « tout vu » (sauf abandon assumé ou 🙈 masquée).
+      if (next.status === 'done' && !next.dropped && !tvIsMasked(next)) { next.status = 'watching'; next.doneAt = undefined; }
       return next;
     }
     if (it.type === 'youtube') {
@@ -48655,7 +48661,7 @@ function tvStaleShows(items, force) {
       // Série 'done' : refetch UNIQUEMENT si elle a été « validée sans voir les épisodes
       // manquants » (dropped=false, pas tout vu) → détecter un nouvel épisode diffusé et la
       // réactiver (applyFresh). Une série « tout vu » ou « plus suivie » (dropped) n'est jamais refetch.
-      if (it.status === 'done' && (it.dropped || (it.watchedEps || 0) >= (it.totalEps || 0))) return false;
+      if (it.status === 'done' && (it.dropped || tvIsMasked(it) || (it.watchedEps || 0) >= (it.totalEps || 0))) return false;
       return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
         && !tvRefreshFresh(it, force, TV_REFRESH_TTL);
     }
@@ -48750,7 +48756,9 @@ function tvApplyFresh(m) {
     const merged = { ...it, ...f };
     // Série « validée sans voir les épisodes manquants » (done, non abandonnée, pas tout vu) :
     // un nouvel épisode diffusé au-delà de ce qui était acté (`ackEps`) la repasse EN COURS.
-    if (it.type === 'tv' && it.status === 'done' && !it.dropped
+    // ⚠ Série MASQUÉE par le 🙈 (`masked`, voir `ignoreUnwatched`) : JAMAIS rouverte ici, ni par
+    // ce test ni par le suivant — l'utilisateur a choisi de ne plus la voir revenir.
+    if (it.type === 'tv' && it.status === 'done' && !it.dropped && !tvIsMasked(it)
         && (it.watchedEps || 0) < (it.totalEps || 0)
         && (f.totalEps || 0) > (it.ackEps != null ? it.ackEps : (it.totalEps || 0))) {
       merged.status = 'watching'; merged.doneAt = undefined;
@@ -48759,7 +48767,7 @@ function tvApplyFresh(m) {
     // épisode est sorti depuis, elle repasse EN COURS. Test distinct du précédent : quand un
     // épisode ANNONCÉ finit par sortir, `totalEps` ne change pas (TMDB le listait déjà), donc
     // la comparaison à `ackEps` ne détecte rien.
-    if (it.type === 'tv' && merged.status === 'done' && !it.dropped && f.lastEp && f.lastEp.s) {
+    if (it.type === 'tv' && merged.status === 'done' && !it.dropped && !tvIsMasked(it) && f.lastEp && f.lastEp.s) {
       const k = `S${f.lastEp.s}E${f.lastEp.e}`;
       if (!new Set(tvWatchedSet(it)).has(k) && !tvIgnoredSet(it).includes(k)) {
         merged.status = 'watching'; merged.doneAt = undefined;
@@ -51267,6 +51275,7 @@ function TvTimePanel() {
       doneAt: status === 'done' ? Date.now() : it.doneAt,
       // Repasser en actif (watching/towatch/paused) = re-suivre → on lève le drapeau « ne plus suivre »
       dropped: status === 'done' ? it.dropped : false,
+      masked: status === 'done' ? it.masked : false,   // idem pour le 🙈 masqué (voir tvIsMasked)
     };
     }));
   };
@@ -51274,18 +51283,22 @@ function TvTimePanel() {
   // passe en VUS avec la progression ACTUELLE (ne coche PAS les vidéos non vues) et
   // SANS poser `dropped` → ytCheckNewVideos repassera la chaîne « En cours » dès qu'une
   // nouvelle vidéo sort. Diffère de setStatus('done') (coche tout) et de unfollow (dropped).
+  // ⚠ Séries : le 🙈 pose aussi `masked` = la série est MASQUÉE, un nouvel épisode ou une
+  // nouvelle saison ne la repasse PLUS « En cours » (`tvApplyFresh`, `tvStaleShows`). Seul un
+  // geste de l'utilisateur la rouvre (changer son statut, cocher/dé-ignorer un épisode).
   // ⚠ 7.8.0 — le 🙈 MÉMORISE désormais ce qu'il a fait sauter (demande utilisateur : « ça les
   // barre, comme ça je sais lesquels j'ai ignoré, et ils ne doivent plus être pris en compte
   // dans la progress bar »). On empile sur les ignorés existants (un 2e 🙈 après de nouveaux
   // épisodes ajoute les nouveaux sans effacer les anciens) et on n'y met QUE du non-vu.
   const ignoreUnwatched = item => update(items.map(it => {
     if (it.id !== item.id || it.type !== item.type) return it;
-    // Séries : on mémorise le nb d'épisodes ACTÉS (`ackEps` = totalEps du moment) → un
-    // épisode DIFFUSÉ au-delà (nouvel épisode) la repassera EN COURS via applyFresh.
+    // Séries : on mémorise le nb d'épisodes ACTÉS (`ackEps` = totalEps du moment) et on la
+    // MASQUE (`masked`) : plus aucun nouvel épisode ne la repasse EN COURS.
     const next = { ...it, status: 'done', dropped: false, doneAt: Date.now() };
     if (it.type === 'tv') {
       const seen = new Set(tvWatchedSet(it));
       next.ackEps = it.totalEps || 0;
+      next.masked = true;
       next.ignoredSet = [...new Set([...tvIgnoredSet(it), ...tvAllKeys(it).filter(k => !seen.has(k))])];
     } else if (it.type === 'youtube') {
       const seen = new Set(it.watchedIds || []);
@@ -51299,7 +51312,7 @@ function TvTimePanel() {
     if (it.id !== item.id || it.type !== item.type) return it;
     const rest = tvIgnoredSet(it).filter(k => k !== `S${n}E${e}`);
     const next = { ...it, ignoredSet: rest };
-    if (it.status === 'done' && (next.watchedEps || 0) < tvCountedTotal(next)) { next.status = 'watching'; next.doneAt = undefined; }
+    if (it.status === 'done' && (next.watchedEps || 0) < tvCountedTotal(next)) { next.status = 'watching'; next.doneAt = undefined; next.masked = false; }
     return next;
   }));
   const unignoreVideo = (item, v) => update(items.map(it => {
@@ -51649,6 +51662,7 @@ function TvTimePanel() {
       if (arr.length >= tot && it.status !== 'done') { next.status = 'done'; next.doneAt = Date.now(); }
       else if (arr.length < tot && it.status === 'done') next.status = 'watching';
     }
+    if (next.status !== 'done') next.masked = false;   // regardée de nouveau : plus masquée
     return next;
   };
   const setWatchedSet = (item, set) => update(items.map(it => (it.id !== item.id || it.type !== item.type) ? it :
@@ -52268,7 +52282,7 @@ function TvTimePanel() {
                   {it.type === 'movie' && <button onClick={() => setStatus(it, 'towatch')} title="Repasser en À voir" style={abtn('#f5b81f')}>📌</button>}
                   {it.type !== 'tv' && <button onClick={() => setStatus(it, 'done')} title={it.type === 'youtube' ? 'Tout vu' : 'Film vu'} style={abtn('#4caf50')}>✓</button>}
                   {it.type === 'tv' && <button onClick={() => setStatus(it, 'paused')} title="Mettre en pause (arrêter de regarder)" style={abtn('#f5b81f')}>⏸</button>}
-                  {it.type === 'tv' && <button onClick={() => ignoreUnwatched(it)} title="Valider sans voir les épisodes manquants (passe en Vus ; un nouvel épisode diffusé la repasse En cours)" style={abtn('#3fa0d0')}>🙈</button>}
+                  {it.type === 'tv' && <button onClick={() => ignoreUnwatched(it)} title="Masquer : valider sans voir les épisodes manquants (passe en Vus ; ne revient plus En cours, même à la sortie d’un nouvel épisode ou d’une saison)" style={abtn('#3fa0d0')}>🙈</button>}
                   {it.type === 'tv' && <button onClick={() => abandonSeries(it)} title="Ne plus suivre (passe en Vus sans valider les épisodes restants ; ne resurgit plus, même à la sortie d'un nouvel épisode)" style={abtn('#e07b39')}>🚫</button>}
                   <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
                 </>
@@ -69146,6 +69160,7 @@ function iaTvWithStatus(it, status) {
     pagesRead: (status === 'done' && it.type === 'book') ? (it.pages || it.pagesRead || 0) : it.pagesRead,
     doneAt: status === 'done' ? Date.now() : it.doneAt,
     dropped: status === 'done' ? it.dropped : false,
+    masked: status === 'done' ? it.masked : false,
   };
 }
 function iaTvWithSet(it, set) {
