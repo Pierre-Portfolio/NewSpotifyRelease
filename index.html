@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.238';
+const APP_VERSION = '13.21.239';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32644,6 +32644,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.239', date:'2026-11-14', title:'📅 TV Time : prochaines sorties', items:[
+    'Une série vue en entier, ou indiquée terminée, est de nouveau surveillée (tous les 3 jours) : sa nouvelle saison apparaît dans Prochaines sorties au lieu d’être ignorée.',
+    'Une saison annoncée sans date s’affiche aussi (« Saison 2 annoncée · date inconnue »), en fin de liste.',
+  ] },
   { v:'13.21.238', date:'2026-11-12', title:'📷 Santé : photo du repas', items:[
     'Photo d’un plat : les ingrédients ne sont plus séparés quand ils sont mélangés (lasagnes, salade composée, curry…) ; l’IA donne alors le plat entier. Ils restent séparés seulement s’ils sont posés à part dans l’assiette.',
   ] },
@@ -32655,9 +32659,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.235', date:'2026-11-12', title:'🙈 TV Time : série masquée', items:[
     'Le 🙈 d’une série la masque pour de bon : un nouvel épisode ou une nouvelle saison ne la remet plus dans « En cours ». Changer son statut ou cocher un épisode la fait revenir.',
-  ] },
-  { v:'13.21.234', date:'2026-11-12', title:'🚗 Musique : mode Défilement', items:[
-    'Bouton 🚗 du lecteur réduit : après le bleu (Voiture), un clic de plus le passe en rouge « 5 » : titre suivant toutes les 5 s, démarré à 33 %. Puis 10 s, 15 s, et un dernier clic coupe.',
   ] },
 ];
 
@@ -47616,6 +47617,7 @@ const TVTIME_SORTS = [
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w92';   // affiches (vignettes)
 const TMDB_STILL = 'https://image.tmdb.org/t/p/w185'; // vignettes d'épisodes (16:9)
 const TV_REFRESH_TTL = 24 * 60 * 60 * 1000;          // TTL du refresh « prochaines sorties »
+const TV_DORMANT_TTL = 3 * 24 * 60 * 60 * 1000;       // séries « en sommeil » (vues en entier ou Ended) : voir tvStaleShows
 const TVTIME_EPS_LS = 'spotifyplus_tvtime_eps';      // cache des épisodes par saison
 const TV_EPS_TTL = 7 * 24 * 60 * 60 * 1000;          // TTL du cache épisodes (7 j)
 const TV_EPS_CACHE_MAX = 80;                          // nb max de saisons en cache (éviction des plus anciennes)
@@ -48199,6 +48201,37 @@ async function ytCheckNewVideos(opts) {
   return changed;
 }
 
+// SAISON ANNONCÉE pas encore commencée : 1re saison (hors spéciaux) APRÈS celle du dernier
+// épisode diffusé. ⚠ TMDB liste une saison annoncée bien avant d'en dater les épisodes, et
+// `next_episode_to_air` reste alors `null` (ou sans `air_date`) : sans ce repli, une saison 2
+// annoncée sans date n'apparaissait nulle part. `episode_count` 0 accepté exprès (saison vide
+// = annonce seule). ⚠ Exige `last_episode_to_air` : une fiche sans aucun épisode diffusé connu
+// (données TMDB lacunaires) verrouillerait sinon toute la série (`tvEpLocked`).
+function tmdbUpSeason(d) {
+  const last = d && d.last_episode_to_air;
+  if (!last || !last.season_number) return null;
+  const up = (d.seasons || []).filter(x => x.season_number > last.season_number)
+    .sort((a, b) => a.season_number - b.season_number)[0];
+  return up ? { s: up.season_number, date: up.air_date || '', eps: up.episode_count || 0 } : null;
+}
+// Prochaine sortie d'une série, pour l'affichage et les alertes : `nextEp` daté d'abord, sinon
+// `nextEp` sans date, sinon la saison annoncée (`upSeason`, épisode 1). `date` peut être '' =
+// inconnue. `null` = rien d'annoncé.
+function tvUpcomingEp(it) {
+  if (!it || it.type !== 'tv') return null;
+  const ne = it.nextEp, up = it.upSeason;
+  if (ne && ne.s && ne.date) return ne;
+  if (ne && ne.s) return { ...ne, date: (up && up.s === ne.s && up.date) || '' };
+  if (up && up.s) return { s: up.s, e: 1, date: up.date || '', name: '', announced: true };
+  return null;
+}
+// Série dont on suit encore les sorties : tout sauf une série « Vu » abandonnée (🚫 `dropped`)
+// ou masquée (🙈). ⚠ Une série « Vu » vue EN ENTIER en fait partie : c'est précisément elle
+// qui attend sa saison suivante (cause du bug « Edgerunners 2 / Black Clover absents »).
+function tvFollowsReleases(it) {
+  return !!it && it.type === 'tv' && !(it.status === 'done' && (it.dropped || tvIsMasked(it)));
+}
+
 // Détails d'un film/série → item TV Time normalisé et AUTO-SUFFISANT (tout en cache).
 // item = { id, type:'movie'|'tv', title, poster, year, status:'towatch'|'watching'|'done',
 //          addedAt, doneAt? · film: runtime (min) · série: epRuntime (min/ép.), totalEps,
@@ -48235,6 +48268,7 @@ async function tmdbFetchItem(type, id) {
     lastEp: d.last_episode_to_air
       ? { date: d.last_episode_to_air.air_date || '', s: d.last_episode_to_air.season_number, e: d.last_episode_to_air.episode_number }
       : null,
+    upSeason: tmdbUpSeason(d),
     refreshedAt: Date.now(),
     watchedEps: 0,
     watchedSet: [],   // épisodes vus (cochage individuel) — voir tvWatchedSet
@@ -48286,8 +48320,9 @@ function tvNextToWatch(item) {
 // à regarder n'est pas encore sorti (nextEp dans le futur). Une telle série ne doit PAS
 // apparaître dans EN COURS (rien à regarder maintenant) — seulement dans PROCHAINES SORTIES.
 function tvCaughtUp(item) {
-  if (!item || item.type !== 'tv' || !item.nextEp || !item.nextEp.date) return false;
-  if (tvDaysUntil(item.nextEp.date) <= 0) return false;   // le prochain épisode est déjà sorti → à regarder
+  const up = tvUpcomingEp(item);   // date '' = annoncé sans date, donc pas encore sorti
+  if (!up) return false;
+  if (up.date && tvDaysUntil(up.date) <= 0) return false;   // le prochain épisode est déjà sorti → à regarder
   const nk = tvNextToWatch(item);   // 1er épisode non vu, ou null si tout vu
   if (!nk) return true;
   const m = nk.match(/^S(\d+)E(\d+)$/);
@@ -48295,7 +48330,7 @@ function tvCaughtUp(item) {
   const ns = +m[1], ne = +m[2];
   // À jour si le 1er épisode non vu est le prochain à diffuser (non sorti) ou au-delà :
   // tous les épisodes déjà diffusés sont donc vus.
-  return ns > item.nextEp.s || (ns === item.nextEp.s && ne >= item.nextEp.e);
+  return ns > up.s || (ns === up.s && ne >= up.e);
 }
 
 // Décompte des épisodes vus PAR SAISON (membres du set) — pour la fiche série.
@@ -48368,8 +48403,13 @@ function tvForcedDone(it) {
   // ⚠ Le total de référence est celui de `tvAllKeys` — EXACTEMENT ce que le ✓ coche — et non
   // `totalEps`, qui vient du `number_of_episodes` de TMDB et peut le dépasser (épisodes annoncés
   // hors saisons chargées) : une série pourtant finie serait passée en rouge.
-  const tot = tvAllKeys(it).length || (it.totalEps || 0);
-  return tot > 0 && new Set(tvWatchedSet(it)).size < tot;
+  // ⚠ Épisodes PAS ENCORE SORTIS exclus : une série vue en entier dont TMDB liste déjà la
+  // saison suivante (refetch des séries en sommeil, `tvStaleShows`) n'est pas « finie sans
+  // être vue ».
+  const seen = new Set(tvWatchedSet(it));
+  const all = tvAllKeys(it);
+  if (!all.length) return (it.totalEps || 0) > 0 && seen.size < it.totalEps;
+  return all.some(k => { const m = k.match(/^S(\d+)E(\d+)$/); return !seen.has(k) && !(m && tvEpLocked(null, it, +m[1], +m[2])); });
 }
 // ⚠ 8.7.4 — VIDÉOS COCHÉES QUI NE SONT PLUS DANS LA LISTE (cause du « 500/375 ») : en levant
 // le plafond de 500 on charge tout l'historique d'une chaîne, on coche des vidéos anciennes,
@@ -48544,7 +48584,12 @@ function tvDateLocked(iso) {
 function tvEpLocked(date, item, n, e) {
   if (date) return tvDateLocked(date);
   const ne = item && item.nextEp;
-  if (!ne || !ne.s) return false;
+  if (!ne || !ne.s) {
+    // Repli : saison annoncée (`upSeason`, aucun épisode diffusé) — elle et les suivantes
+    // sont verrouillées tant que sa date est inconnue ou à venir.
+    const up = item && item.upSeason;
+    return !!(up && up.s && n >= up.s && (!up.date || tvDateLocked(up.date)));
+  }
   if (n !== ne.s) return n > ne.s;
   if (e !== ne.e) return e > ne.e;
   return tvDateLocked(ne.date);
@@ -48658,9 +48703,15 @@ function tvStaleShows(items, force) {
       // Série 'done' : refetch UNIQUEMENT si elle a été « validée sans voir les épisodes
       // manquants » (dropped=false, pas tout vu) → détecter un nouvel épisode diffusé et la
       // réactiver (applyFresh). Une série « tout vu » ou « plus suivie » (dropped) n'est jamais refetch.
-      if (it.status === 'done' && (it.dropped || tvIsMasked(it) || (it.watchedEps || 0) >= (it.totalEps || 0))) return false;
-      return !/^(Ended|Canceled)$/i.test(it.tvStatus || '')
-        && !tvRefreshFresh(it, force, TV_REFRESH_TTL);
+      // ⚠ 13.21.239 — Série « tout vu » ou Ended/Canceled = EN SOMMEIL, et non plus exclue à
+      // vie : c'est elle qui reçoit une saison suivante (Edgerunners 2, Black Clover…) et TMDB
+      // repasse une série Ended en « Returning Series » quand elle revient. Revérifiée tous les
+      // `TV_DORMANT_TTL`, quel que soit `force` (le ↻ manuel ne les refait pas toutes).
+      if (it.status === 'done' && (it.dropped || tvIsMasked(it))) return false;
+      const dormant = (it.status === 'done' && (it.watchedEps || 0) >= (it.totalEps || 0))
+        || /^(Ended|Canceled)$/i.test(it.tvStatus || '');
+      if (dormant) return Date.now() - ((it.refreshedAt) || 0) >= TV_DORMANT_TTL;
+      return !tvRefreshFresh(it, force, TV_REFRESH_TTL);
     }
     if (it.status === 'done') return false;
     // Films : suit uniquement la date des films PAS ENCORE VUS
@@ -48679,7 +48730,7 @@ async function tvRefreshShows(items, force, onStep) {
     if (i > 0) await sleep(120);   // throttle : évite un burst si beaucoup de titres à backfill
     const f = await tmdbFetchItem(it.type, it.id);
     if (!f) continue;   // échec → refreshedAt inchangé : nouvel essai au prochain montage du panneau
-    if (it.type === 'tv') out.set('tv' + it.id, { seasons: f.seasons, specialEps: f.specialEps, totalEps: f.totalEps, epRuntime: f.epRuntime, tvStatus: f.tvStatus, nextEp: f.nextEp, lastEp: f.lastEp, poster: f.poster || it.poster, refreshedAt: Date.now() });
+    if (it.type === 'tv') out.set('tv' + it.id, { seasons: f.seasons, specialEps: f.specialEps, totalEps: f.totalEps, epRuntime: f.epRuntime, tvStatus: f.tvStatus, nextEp: f.nextEp, lastEp: f.lastEp, upSeason: f.upSeason, poster: f.poster || it.poster, refreshedAt: Date.now() });
     else out.set('movie' + it.id, { releaseDate: f.releaseDate, runtime: f.runtime || it.runtime, year: f.year || it.year, poster: f.poster || it.poster, refreshedAt: Date.now() });
   }
   return out;
@@ -48867,8 +48918,8 @@ function syncTvEpisodeAlerts() {
   // reprendra si un nouvel épisode la fait repasser « en cours ».
   const due = [];
   for (const it of items) {
-    if (it.type !== 'tv' || !it.epAlert || it.status === 'done') continue;
-    const ep = it.nextEp;
+    if (!tvFollowsReleases(it) || !it.epAlert) continue;
+    const ep = tvUpcomingEp(it);
     if (!ep || !ep.date) continue;
     const d = tvDaysUntil(ep.date);
     if (d == null || d < 0 || d > 1) continue;   // la veille (1) et le jour J (0), rien d'autre
@@ -51855,18 +51906,20 @@ function TvTimePanel() {
   // PROCHAINES SORTIES : séries (prochain épisode à diffuser) + films PAS ENCORE SORTIS.
   // Le contenu suit le filtre Films/Séries/Les deux :
   // Séries → prochains épisodes ; Films → films à venir ; Les deux → les deux, triés par date.
-  const upSeries = items.filter(it => it.type === 'tv' && it.status !== 'done' && it.nextEp && it.nextEp.date);
+  // ⚠ Séries « Vu » comprises (sauf 🚫/🙈, `tvFollowsReleases`) : une série vue en entier
+  // attend sa saison suivante. Date inconnue (saison annoncée) ⇒ en fin de liste.
+  const upSeries = items.filter(it => tvFollowsReleases(it) && tvUpcomingEp(it));
   const upMovies = items.filter(isUpcomingMovie);
-  const upDate = it => it.type === 'tv' ? it.nextEp.date : it.releaseDate;
+  const upDate = it => (it.type === 'tv' ? tvUpcomingEp(it).date : it.releaseDate) || '9999';
   // Le filtre par nom s'applique aussi ici (demande utilisateur : « Koh » doit filtrer les sorties).
   const premCan = forcedCan;   // seuls onglets où un « épisode 1 » peut exister
   const premOn  = premOnly && premCan;
-  const upcoming = (premOn ? upSeries.filter(it => Number(it.nextEp.e) === 1) : mediaFilter === 'movie' ? upMovies : mediaFilter === 'tv' ? upSeries : [...upSeries, ...upMovies])
+  const upcoming = (premOn ? upSeries.filter(it => Number(tvUpcomingEp(it).e) === 1) : mediaFilter === 'movie' ? upMovies : mediaFilter === 'tv' ? upSeries : [...upSeries, ...upMovies])
     .filter(it => !nameQ || (it.title || '').toLowerCase().includes(nameQ))
     .slice().sort((a, b) => { const da = upDate(a), db = upDate(b); return da < db ? -1 : da > db ? 1 : 0; });
   // « Last » : épisodes des saisons en cours lus UN par UN (pas de rafale sur TMDB), seulement
   // quand le bouton est actif ; la clé change si une série entame une nouvelle saison.
-  const finaleKey = lastShow && premCan ? upSeries.map(it => `${it.id}:${it.nextEp.s}`).join(',') : '';
+  const finaleKey = lastShow && premCan ? upSeries.map(it => `${it.id}:${tvUpcomingEp(it).s}`).join(',') : '';
   React.useEffect(() => {
     if (!finaleKey) return;
     let stop = false;
@@ -52394,8 +52447,9 @@ function TvTimePanel() {
                         <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
                       );
                     }
+                    const up = tvUpcomingEp(it);
                     if (lastShow && premCan) {
-                      const ns = Number(it.nextEp.s);
+                      const ns = Number(up.s);
                       const fin = finales[`${it.id}:${ns}`];
                       const fe = fin ? fin.e : ((it.seasons || []).find(x => x.n === ns) || {}).eps;
                       if (!fe) return row(it, `Fin de la saison ${ns} : inconnue`, null);
@@ -52408,10 +52462,11 @@ function TvTimePanel() {
                         <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: ld !== null && ld >= 0 && ld <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{lwhen}</span>
                       );
                     }
-                    const dj = tvDaysUntil(it.nextEp.date);
+                    const dj = tvDaysUntil(up.date);
                     const when = dj === null ? '' : dj < 0 ? 'diffusé' : dj === 0 ? "aujourd'hui" : dj === 1 ? 'demain' : `dans ${dj} j`;
+                    const ud = up.date ? new Date(up.date + 'T00:00:00') : null;
                     return row(it,
-                      `S${it.nextEp.s}E${it.nextEp.e}${it.nextEp.name ? ` « ${it.nextEp.name} »` : ''} · ${new Date(it.nextEp.date + 'T00:00:00').toLocaleDateString('fr-FR')}`,
+                      `${up.announced ? `Saison ${up.s} annoncée` : `S${up.s}E${up.e}${up.name ? ` « ${up.name} »` : ''}`} · ${!ud ? 'date inconnue' : isNaN(ud) ? up.date : ud.toLocaleDateString('fr-FR')}`,
                       <span style={{ fontSize:9, fontFamily:'DM Mono,monospace', fontWeight:700, color: dj !== null && dj <= 1 ? TVTIME_COLOR : C.muted, flexShrink:0 }}>{when}</span>
                     );
                   })}</DeskGrid>)}
