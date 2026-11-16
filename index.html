@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.244';
+const APP_VERSION = '13.21.245';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32713,6 +32713,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.245', date:'2026-11-16', title:'👆 Vidéos : infos au tap, sous-titres', items:[
+    'Lecteur vidéo : un tap sur la vidéo affiche la barre de temps et les infos du bas (titre, vidéaste, date) ; un second tap les masque. Elles sont masquées à l’ouverture.',
+    'Nouveau bouton CC en haut : affiche ou masque les sous-titres (français si la vidéo en a). La vidéo se recharge à la même seconde.',
+    'À la souris, la pause passe au double clic au centre (le clic simple affiche les infos).',
+  ] },
   { v:'13.21.244', date:'2026-11-16', title:'🙈 TV Time : ignorer une vidéo', items:[
     'Fiche d’une chaîne YouTube : chaque vidéo non vue a son 🙈. Elle est barrée, sort de la progression et des stats, sans être marquée vue ; un second clic la remet à voir.',
     'Ignorer la dernière vidéo à voir sort la chaîne de « En cours ». La chaîne reste suivie : sa prochaine vidéo la fait revenir.',
@@ -32725,10 +32730,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.241', date:'2026-11-16', title:'🎤 Musique : nouveaux artistes d’abord', items:[
     'Chaque synchro (manuelle ou automatique) scanne d’abord les artistes suivis jamais scannés, avant de reprendre là où elle s’était arrêtée : un artiste tout juste suivi n’attend plus son tour pendant des jours.',
-  ] },
-  { v:'13.21.240', date:'2026-11-14', title:'📺 TV Time : fiche à jour', items:[
-    'Ouvrir la fiche d’une série ou d’un film la relit chez TMDB (si sa dernière lecture date de plus de 6 h) : une nouvelle saison déjà sortie apparaît tout de suite.',
-    'L’actualisation faite à l’ouverture de TV Time s’applique au fur et à mesure et n’est plus perdue si on quitte le module avant la fin.',
   ] },
 ];
 
@@ -50335,6 +50336,13 @@ const YT_COUNT_ON       = '#e05050'; // bord du compteur SÉLECTIONNÉ dans la b
 // (aucune clé de stockage : c'est un réglage de confort, pas une donnée à sauvegarder).
 const YT_SPLIT_MIN = 15, YT_SPLIT_MAX = 85, YT_SPLIT_DEF = 60;
 let _ytSumSplit = YT_SPLIT_DEF;
+// 💬 Sous-titres (bouton CC de la barre) : préférence de SESSION, module-level comme
+// `_ytSumSplit` — elle suit la file d'une vidéo à l'autre. Aucune clé de stockage.
+// ⚠ Activés par l'URL de l'embed (`cc_load_policy=1`, langue `YT_CC_LANG`), pas par une
+// commande postMessage : rien ne garantit que l'embed accepte `loadModule('captions')`.
+// Basculer RECHARGE donc l'iframe, reprise à la seconde près par `start=`.
+let _ytCc = false;
+const YT_CC_LANG = 'fr';
 // Une entrée de file est un Short si sa durée est sous YT_MIN_MINUTES. ⚠ `dur` est en
 // MINUTES ARRONDIES dans TV Time et une durée INCONNUE vaut 0 : elle compte donc comme un
 // Short — même convention que ytShortsQueue et le tag `shortsOnly` d'ytBuildItem.
@@ -50436,6 +50444,13 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
   // sur la vidéo, ET par les messages `infoDelivery` du lecteur (état 2 = en pause), ce qui
   // garde le bouton juste même quand la pause vient des contrôles YouTube eux-mêmes.
   const [paused, setPaused] = React.useState(false);
+  // 👆 13.21.245 — UN tap sur la vidéo affiche / masque la barre de temps (`YtSeekBar`) et les
+  // infos du bas (titre, vidéaste, date…). Masquées à l'ouverture ; l'état suit la file.
+  const [infoOn, setInfoOn] = React.useState(false);
+  const [cc, setCc] = React.useState(_ytCc);
+  // Position de reprise après bascule des sous-titres, LIÉE à la vidéo : une autre vidéo ne
+  // doit jamais démarrer à cette seconde-là.
+  const [ccAt, setCcAt] = React.useState(null);   // { id, t } | null
   const v = queue[index] || null;
   const vid = v ? v.id : null;
   // ⚠ 7.6.92 — Le lecteur est monté ⇒ layout responsive GELÉ (cf. useImmersiveLock).
@@ -50614,7 +50629,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       if (seekTimerRef.current) { clearTimeout(seekTimerRef.current); seekTimerRef.current = null; }
       clear();
     };
-  }, [vid, index, queue.length, autoNext, showComments, showSum]);   // ⚠ showSum : `armable` le lit — absent des deps, ouvrir le résumé ne désarmait pas l'auto-avance
+  }, [vid, index, queue.length, autoNext, showComments, showSum, cc]);   // ⚠ cc : la bascule recharge l'embed, qui attend un nouveau handshake `listening`   // ⚠ showSum : `armable` le lit — absent des deps, ouvrir le résumé ne désarmait pas l'auto-avance
 
   // Swipe horizontal (7.7.8, sens inversé) : GAUCHE = suivante, DROITE = précédente.
   // Swipe VERTICAL (7.7.9, ⚠ INVERSÉ en 8.0.0 à la demande de l'utilisateur) : HAUT = suivante,
@@ -50664,6 +50679,17 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     seekTimerRef.current = setTimeout(() => { seekTimerRef.current = null; setSeekFlash(0); }, YT_SEEK_FLASH_MS);
   };
   const swipeRef = React.useRef(null);
+  const singleRef = React.useRef(null);   // minuteur du tap simple (13.21.245)
+  const clearSingle = () => { if (singleRef.current) { clearTimeout(singleRef.current); singleRef.current = null; } };
+  React.useEffect(() => clearSingle, []);
+  // 💬 CC : on note la position AVANT de recharger l'embed, pour y reprendre.
+  const toggleCc = () => {
+    const st = timeRef.current;
+    const t = st && st.at ? Math.floor(st.t + (paused ? 0 : Math.min((Date.now() - st.at) / 1000, YT_TIME_MAX_DRIFT))) : 0;
+    _ytCc = !cc;
+    setCcAt(v && t > 0 ? { id:v.id, t } : null);
+    setCc(_ytCc);
+  };
   // Dernier tap tactile retenu pour la détection du double tap (8.9.1).
   const tapRef = React.useRef(null);
   const onSwipeDown = e => {
@@ -50681,14 +50707,16 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       // diagonale : on ne devine pas l'intention, on ne fait rien.
       // ⚠ Un swipe ANNULE le tap en attente : sans ça, un tap, un swipe puis un tap
       // formeraient un « double tap » à cheval sur deux vidéos différentes.
-      if (ax >= YT_SWIPE_MIN && ax >= ay * 1.4) { tapRef.current = null; go(dx > 0 ? -1 : +1); return; }   // gauche = suivante
-      if (ay >= YT_SWIPE_MIN && ay >= ax * 1.4) { tapRef.current = null; go(dy > 0 ? -1 : +1); return; }   // haut = suivante (8.0.0)
+      if (ax >= YT_SWIPE_MIN && ax >= ay * 1.4) { tapRef.current = null; clearSingle(); go(dx > 0 ? -1 : +1); return; }   // gauche = suivante
+      if (ay >= YT_SWIPE_MIN && ay >= ax * 1.4) { tapRef.current = null; clearSingle(); go(dy > 0 ? -1 : +1); return; }   // haut = suivante (8.0.0)
     }
     // ⚠ 8.7.7 — CLIC GAUCHE DE LA SOURIS = pause / reprise (demande utilisateur). Restreint
     // au pointeur SOURIS et au bouton gauche : au doigt, un appui sert déjà de fin de
     // glissé et la moindre imprécision mettrait la vidéo en pause sans qu'on l'ait demandé.
     // Le seuil `YT_CLICK_SLOP` distingue un vrai clic d'un glissé trop court pour naviguer.
-    if (e.pointerType === 'mouse' && e.button === 0 && ax < YT_CLICK_SLOP && ay < YT_CLICK_SLOP) { togglePause(); return; }
+    // ⚠ 13.21.245 — REMPLACÉ : la souris suit désormais le doigt (1 clic = infos, double clic
+    // = saut ou pause selon la zone, cf. plus bas). Seul son seuil de clic reste plus serré.
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
     // ⚠ 8.9.1 — DOUBLE TAP AU DOIGT (demande utilisateur). On arrive ici seulement quand le
     // geste n'était PAS un swipe : c'est donc un tap posé (`YT_TAP_SLOP` tolère le jitter du
     // doigt). Le 1er tap ne fait rien d'autre que se mémoriser ; c'est le 2e, assez rapproché
@@ -50699,12 +50727,13 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
     // `1 - YT_DTAP_EDGE` de la largeur) = +5 s, moitié gauche = −5 s, bande CENTRALE =
     // pause/reprise (le comportement de 8.9.1, conservé). La zone est mesurée sur la couche
     // de capture elle-même, pas sur la fenêtre : elle ne couvre pas toute la hauteur.
-    if (e.pointerType === 'mouse') return;
-    if (ax >= YT_TAP_SLOP || ay >= YT_TAP_SLOP) { tapRef.current = null; return; }
+    const slop = e.pointerType === 'mouse' ? YT_CLICK_SLOP : YT_TAP_SLOP;
+    if (ax >= slop || ay >= slop) { tapRef.current = null; clearSingle(); return; }
     const prev = tapRef.current, now = Date.now();
     if (prev && now - prev.t <= YT_DTAP_MS &&
         Math.abs(e.clientX - prev.x) < YT_DTAP_SLOP && Math.abs(e.clientY - prev.y) < YT_DTAP_SLOP) {
       tapRef.current = null;
+      clearSingle();   // 2e tap : le tap simple en attente n'aura pas lieu
       const box = e.currentTarget && e.currentTarget.getBoundingClientRect ? e.currentTarget.getBoundingClientRect() : null;
       const frac = box && box.width > 0 ? (e.clientX - box.left) / box.width : 0.5;
       if (frac <= YT_DTAP_EDGE) seekBy(-YT_SEEK_STEP);
@@ -50713,6 +50742,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       return;
     }
     tapRef.current = { x:e.clientX, y:e.clientY, t:now };
+    // 👆 Tap SIMPLE = infos, mais seulement une fois sûr qu'aucun 2e tap ne suit : sinon chaque
+    // double tap (±5 s) ferait aussi clignoter la barre.
+    clearSingle();
+    singleRef.current = setTimeout(() => { singleRef.current = null; setInfoOn(o => !o); }, YT_DTAP_MS);
   };
   // ⚠ 8.7.6 — MOLETTE : elle vit sur la MÊME couche de capture que le swipe (l'iframe est
   // cross-origin, elle avalerait l'événement). Pas de `preventDefault` : React attache les
@@ -50790,14 +50823,16 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
       {/* `enablejsapi=1` + `origin=` = ce qui autorise le dialogue postMessage avec l'embed
           (fin de vidéo → auto-avance, cf. 7.9.8). Aucun script tiers n'est chargé pour ça. */}
       <iframe key={v.id} ref={frameRef}
-        src={`${YT_EMBED_ORIGIN}/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&enablejsapi=1&origin=${encodeURIComponent(location.origin)}`}
+        src={`${YT_EMBED_ORIGIN}/embed/${encodeURIComponent(v.id)}?autoplay=1&rel=0&playsinline=1&enablejsapi=1${cc ? `&cc_load_policy=1&cc_lang_pref=${YT_CC_LANG}` : ''}${ccAt && ccAt.id === v.id ? `&start=${ccAt.t}` : ''}&origin=${encodeURIComponent(location.origin)}`}
         title={v.title || 'Vidéo YouTube'} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowFullScreen
         style={{ position:'absolute', inset:0, width:'100%', height: showSum ? `${sumSplit}%` : '100%', border:'none' }} />
       {/* Couche de capture du SWIPE (7.7.2, sens inversé en 7.7.8), posée SUR l'iframe mais SOUS la barre d'actions
           (ordre du DOM) → les boutons du haut restent cliquables. `touchAction:'none'` évite
           que le navigateur interprète le geste (retour arrière, pull-to-refresh). */}
-      {queue.length > 1 && !showComments && !showSum && (
-        <div onPointerDown={onSwipeDown} onPointerUp={onSwipeUp} onPointerCancel={() => { swipeRef.current = null; }}
+      {/* ⚠ 13.21.245 — rendue AUSSI pour une vidéo seule : c'est elle qui reçoit le tap
+          « infos » (l'iframe avalerait le geste). Swipe et molette n'y font alors rien (`go`). */}
+      {!showComments && !showSum && (
+        <div onPointerDown={onSwipeDown} onPointerUp={onSwipeUp} onPointerCancel={() => { swipeRef.current = null; clearSingle(); }}
           onWheel={onWheel}
           style={{ position:'absolute', left:0, right:0, top:0, bottom:YT_SWIPE_BOTTOM, touchAction:'none',
             userSelect:'none', WebkitUserSelect:'none', WebkitTapHighlightColor:'transparent' }} />
@@ -50816,7 +50851,7 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             reste dans `title` ET dans `aria-label` (bouton à icône seule = sans texte
             accessible sinon), comme les marqueurs de Vêtement en 8.1.9. */}
         <button onClick={togglePause} aria-label={paused ? 'Reprendre la vidéo' : 'Mettre la vidéo en pause'}
-          title={paused ? 'Reprendre la lecture (ou clic gauche / double tap au CENTRE de la vidéo)' : 'Mettre en pause (ou clic gauche / double tap au CENTRE de la vidéo)'}
+          title={paused ? 'Reprendre la lecture (ou double tap / double clic au CENTRE de la vidéo)' : 'Mettre en pause (ou double tap / double clic au CENTRE de la vidéo)'}
           style={{ ...obtn(YT_COLOR, false), ...(paused ? { background:YT_COLOR + 'dd', border:`1px solid ${YT_COLOR}` } : null) }}>
           {paused ? '▶' : '⏸'}
         </button>
@@ -50886,6 +50921,9 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
               : copied === -1 ? { background:'#e05050cc', border:'1px solid #e05050' } : null) }}>
           {copied === 1 ? '✓ Copié' : copied === -1 ? '✕ Refusé' : '🔗'}
         </button>
+        <button onClick={toggleCc} aria-label={cc ? 'Masquer les sous-titres' : 'Afficher les sous-titres'} aria-pressed={cc}
+          title={cc ? 'Masquer les sous-titres (la vidéo se recharge à la même seconde)' : 'Afficher les sous-titres (français si dispo ; la vidéo se recharge à la même seconde)'}
+          style={{ ...obtn(YT_COLOR, false), ...(cc ? { background:YT_COLOR + 'dd', border:`1px solid ${YT_COLOR}` } : null) }}>CC</button>
         {/* ⚠ 9.2.0 — résumé Gemini, sur les vidéos NON-Short uniquement. Il s'insère AVANT le
             💬 pour que celui-ci reste le dernier élément, donc en haut à DROITE (7.9.9). */}
         {/* ⚠ `pointerEvents:'auto'` OBLIGATOIRE : la barre est en `none` (elle ne doit pas
@@ -50906,9 +50944,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
             ...(showComments ? { background:YT_COLOR + 'dd', border:`1px solid ${YT_COLOR}` } : null) }}>💬</button>
       </div>
       {/* ⏱ Barre de temps du Hub : APRÈS la couche de capture dans le DOM, donc au-dessus d'elle. */}
-      <YtSeekBar key={'bar' + v.id} timeRef={timeRef} paused={paused} onSeek={seekAbs} />
-      {/* Titre + chaîne en bas (n'entrave pas les contrôles YouTube, qui sont plus haut) */}
-      <div style={{ position:'absolute', left:0, right:0, bottom:0, padding:'26px 14px 8px', pointerEvents:'none',
+      {infoOn && <YtSeekBar key={'bar' + v.id} timeRef={timeRef} paused={paused} onSeek={seekAbs} />}
+      {/* Titre + chaîne en bas (n'entrave pas les contrôles YouTube, qui sont plus haut).
+          Affichés par un tap, comme la barre de temps (13.21.245). */}
+      {infoOn && <div style={{ position:'absolute', left:0, right:0, bottom:0, padding:'26px 14px 8px', pointerEvents:'none',
         background:'linear-gradient(rgba(0,0,0,0), rgba(0,0,0,0.72))' }}>
         <div style={{ fontSize:12, fontWeight:700, color:'#fff', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{v.title}</div>
         <div style={{ fontSize:10, color:'#ffffffaa', fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
@@ -50916,10 +50955,10 @@ function YtFullscreenPlayer({ queue, index, onIndex, onClose, onPlaying, onValid
         </div>
         {queue.length > 1 && !showComments && !showSum && (
           <div style={{ fontSize:9, color:'#ffffff77', fontFamily:'DM Mono,monospace', marginTop:3 }}>
-            👉 glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante · double tap : à droite = +{YT_SEEK_STEP} s, à gauche = −{YT_SEEK_STEP} s, au centre = pause
+            👉 1 tap = afficher / masquer ces infos · glisse vers la gauche ou vers le haut · molette vers le bas = vidéo suivante · double tap : à droite = +{YT_SEEK_STEP} s, à gauche = −{YT_SEEK_STEP} s, au centre = pause
           </div>
         )}
-      </div>
+      </div>}
       {/* 💬 Feuille de commentaires (7.9.9) : rendue EN DERNIER donc AU-DESSUS du reste,
           mais elle démarre à 38 % de la hauteur → la barre d'actions (⏭, ← Retour…) reste
           visible et cliquable, et on voit toujours la vidéo. Tant qu'elle est ouverte, la
