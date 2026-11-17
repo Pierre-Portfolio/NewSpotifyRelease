@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.246';
+const APP_VERSION = '13.21.247';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2403,10 +2403,22 @@ let _playerPollKick = null;
 //   et `carVolChanged` compare deux lectures. Appareil sans volume (`null`) ⇒ rien. Nos propres
 //   commandes restent couvertes par `_carSelfAt` (l'app n'envoie jamais de volume) ;
 // · repasser en portrait en 🔴 Défilement remet le mode à coupé (cleanup de `CompactPlayer`).
+// ⚠ Rien ne prouve que Spotify remonte le volume système du téléphone (touches, écouteurs) :
+// `_carVolSeen` publie la dernière lecture (`vol` null = non transmis) et `CompactPlayer`
+// l'affiche, pour que l'utilisateur voie si le chiffre bouge. En plus, un `keydown`
+// AudioVolumeUp/Down (rarement transmis par Chrome Android) passe au suivant, et l'écran reste
+// allumé (`useWakeLock`) : écran éteint = onglet caché = poll arrêté = plus aucune détection.
 const CAR_MODE_LS = 'spotifyplus_car_mode';
 const PLAYER_POLL_CAR_MS = 1000, CAR_SELF_GRACE_MS = 4000, CAR_TOL_MS = 3000;
 const CAR_SKIP_STEPS = [5, 10, 15], CAR_SKIP_PCT = 0.33, CAR_BLUE = '#3b8bff', CAR_RED = '#e5484d';
 let _carSelfAt = 0, _carCompact = false;
+let _carVolSeen = null;
+const _carVolSubs = new Set();
+function carVolPublish(v) {
+  if (_carVolSeen && v && _carVolSeen.vol === v.vol && _carVolSeen.dev === v.dev) return;
+  _carVolSeen = v;
+  _carVolSubs.forEach(f => { try { f(v); } catch {} });
+}
 const _carSubs = new Set();
 function carModeGet() {
   let v = null;
@@ -4219,6 +4231,7 @@ function StoreProvider({ children }) {
         // Pas de jugement pendant nos propres commandes (`_carSelfAt`) ni après un trou > 10 s.
         if (!stop && r?.item && carModeOn()) {
           const vol = carVol && typeof r.device?.volume_percent === 'number' ? r.device.volume_percent : null;
+          if (carVol) carVolPublish({ vol, dev: r.device?.name || '' });
           const cur = { uri: r.item.uri, ms: r.progress_ms || 0, playing: !!r.is_playing, dur: r.item.duration_ms || 0, at: Date.now(), vol };
           const fresh = carPrev && cur.at - carPrev.at <= 10000 && cur.at - _carSelfAt > CAR_SELF_GRACE_MS;
           if (fresh && (carChanged(carPrev, cur) || carVolChanged(carPrev, cur))) { const leaving = carPrev.uri; carPrev = null; carAdvanceRef.current(leaving); }
@@ -32726,6 +32739,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.247', date:'2026-11-17', title:'🔊 Mode Voiture : volume visible', items:[
+    'À l’horizontale en mode Voiture bleu, le volume que Spotify voit s’affiche sous le titre (avec l’appareil). S’il ne bouge pas quand tu montes ou baisses le son, Spotify ne le transmet pas.',
+    'Les touches volume passent aussi au titre suivant quand le navigateur les transmet.',
+    'L’écran reste allumé en mode Voiture à l’horizontale : écran éteint, l’app ne voit plus rien.',
+  ] },
   { v:'13.21.246', date:'2026-11-17', title:'🚗 Musique : volume = titre suivant', items:[
     'Téléphone à l’horizontale, mode Voiture bleu : changer le volume passe au titre suivant du feed.',
     'Téléphone à l’horizontale, Défilement rouge (5, 10 ou 15 s) : revenir à la verticale coupe le mode Voiture.',
@@ -32741,9 +32759,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.243', date:'2026-11-16', title:'⏱ Vidéos : barre de temps', items:[
     'Le lecteur vidéo (TV Time et Actu) a sa propre barre de temps, sous les boutons du haut : glisser ou toucher dessus avance ou recule dans la vidéo, sans changer de vidéo.',
-  ] },
-  { v:'13.21.242', date:'2026-11-16', title:'🚗 Musique : réécouter coupe le Défilement', items:[
-    'Lancer un titre depuis l’historique des dernières écoutes arrête le Défilement du mode Voiture (5, 10 ou 15 s) : le titre choisi n’est plus sauté aussitôt.',
   ] },
 ];
 
@@ -67197,8 +67212,29 @@ function CompactPlayer() {
     if (_playerPollKick) _playerPollKick();
     return () => {
       _carCompact = false;
+      carVolPublish(null);
       if (carSkipSec()) carModeSet('off');
     };
+  }, []);
+  // Volume vu par Spotify (diagnostic, voir `_carVolSeen`).
+  const [carVol, setCarVol] = React.useState(_carVolSeen);
+  React.useEffect(() => {
+    _carVolSubs.add(setCarVol);
+    return () => { _carVolSubs.delete(setCarVol); };
+  }, []);
+  // Touches volume, si le navigateur les transmet (ref : piège 6 ; 1,5 s anti-rafale).
+  const nextRef = React.useRef(nextTrack);
+  nextRef.current = nextTrack;
+  React.useEffect(() => {
+    let last = 0;
+    const h = e => {
+      if (!carModeOn() || !/^(Audio)?Volume(Up|Down)$/.test(e.key || '')) return;
+      if (Date.now() - last < 1500) return;
+      last = Date.now();
+      nextRef.current();
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
   }, []);
   const carToggle = () => {
     const v = carModeNext(carMode);
@@ -67208,6 +67244,7 @@ function CompactPlayer() {
   const car = carMode !== 'off';
   const carSkipN = CAR_SKIP_STEPS.includes(Number(carMode)) ? Number(carMode) : 0;
   const carCol = carSkipN ? CAR_RED : car ? CAR_BLUE : C.muted;
+  useWakeLock(car);
 
   const btn = { background:'none', border:'none', cursor:'pointer', padding:12, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 };
 
@@ -67221,6 +67258,13 @@ function CompactPlayer() {
             <div style={{ fontSize:11, color:C.muted, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
               {now.artist}{currentIndex >= 0 ? ` · ${currentIndex + 1}/${filteredFeed.length}` : ''}
             </div>
+            {carMode === 'on' && (
+              <div style={{ fontSize:10, color:CAR_BLUE, fontFamily:'DM Mono,monospace', marginTop:2, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                {!carVol ? '🔊 lecture du volume…'
+                  : carVol.vol == null ? `🔊 volume non transmis par Spotify${carVol.dev ? ` · ${carVol.dev}` : ''}`
+                  : `🔊 ${carVol.vol} %${carVol.dev ? ` · ${carVol.dev}` : ''}`}
+              </div>
+            )}
           </div>
           {/* Contrôles : précédent / play-pause / suivant */}
           <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:18 }}>
