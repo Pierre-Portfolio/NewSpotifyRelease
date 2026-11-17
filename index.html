@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.245';
+const APP_VERSION = '13.21.246';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2397,10 +2397,16 @@ let _playerPollKick = null;
 // feed, démarré à CAR_SKIP_PCT (même geste que la flèche droite) ; la détection autoradio
 // est alors COUPÉE (carModeOn faux) : nos propres sauts toutes les 5 s la tromperaient.
 // `carModeSet` prévient le minuteur du StoreProvider (`_carSubs`) et relance le poll.
+// 📱 PAYSAGE (`_carCompact`, vrai tant que `CompactPlayer` est monté) :
+// · en 🚗 bleu, changer le VOLUME = titre suivant. Aucun événement de touche volume n'arrive à
+//   une page web : le poll lit alors `/me/player` (≠ currently-playing) pour `device.volume_percent`
+//   et `carVolChanged` compare deux lectures. Appareil sans volume (`null`) ⇒ rien. Nos propres
+//   commandes restent couvertes par `_carSelfAt` (l'app n'envoie jamais de volume) ;
+// · repasser en portrait en 🔴 Défilement remet le mode à coupé (cleanup de `CompactPlayer`).
 const CAR_MODE_LS = 'spotifyplus_car_mode';
 const PLAYER_POLL_CAR_MS = 1000, CAR_SELF_GRACE_MS = 4000, CAR_TOL_MS = 3000;
 const CAR_SKIP_STEPS = [5, 10, 15], CAR_SKIP_PCT = 0.33, CAR_BLUE = '#3b8bff', CAR_RED = '#e5484d';
-let _carSelfAt = 0;
+let _carSelfAt = 0, _carCompact = false;
 const _carSubs = new Set();
 function carModeGet() {
   let v = null;
@@ -2435,6 +2441,10 @@ function carChanged(a, b) {
   if (a.uri !== b.uri) return true;
   const run = a.playing || b.playing ? elapsed : 0;
   return b.ms < a.ms - CAR_TOL_MS || b.ms > a.ms + run + CAR_TOL_MS;
+}
+// Volume changé entre deux lectures (paysage seulement, voir `_carCompact`).
+function carVolChanged(a, b) {
+  return !!a && !!b && a.vol != null && b.vol != null && a.vol !== b.vol;
 }
 const RL_LS_KEY = 'spotifyplus_blocked_until';
 // ⚠ `try` OBLIGATOIRE, et pas par prudence de principe : c'était le SEUL des ~180 accès
@@ -4198,7 +4208,9 @@ function StoreProvider({ children }) {
       ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
       const to = ctrl ? setTimeout(() => ctrl.abort(), PLAYER_POLL_TIMEOUT_MS) : null;
       try {
-        const r = await apiGet('https://api.spotify.com/v1/me/player/currently-playing', false, ctrl ? { signal: ctrl.signal } : undefined);
+        // Paysage + 🚗 bleu : `/me/player` (mêmes champs + `device`) pour lire le volume.
+        const carVol = carModeOn() && _carCompact;
+        const r = await apiGet('https://api.spotify.com/v1/me/player' + (carVol ? '' : '/currently-playing'), false, ctrl ? { signal: ctrl.signal } : undefined);
         if (!stop) idleSince = r?.item ? 0 : (idleSince || Date.now());
         // Fenêtre 429 active : garder l'état affiché tel quel — setNow(null) ferait
         // disparaître le player et polluerait les effets d'auto-avance alors que la musique joue
@@ -4206,9 +4218,10 @@ function StoreProvider({ children }) {
         // 🚗 Mode Voiture : un changement fait ailleurs (autoradio) = flèche droite de l'app.
         // Pas de jugement pendant nos propres commandes (`_carSelfAt`) ni après un trou > 10 s.
         if (!stop && r?.item && carModeOn()) {
-          const cur = { uri: r.item.uri, ms: r.progress_ms || 0, playing: !!r.is_playing, dur: r.item.duration_ms || 0, at: Date.now() };
+          const vol = carVol && typeof r.device?.volume_percent === 'number' ? r.device.volume_percent : null;
+          const cur = { uri: r.item.uri, ms: r.progress_ms || 0, playing: !!r.is_playing, dur: r.item.duration_ms || 0, at: Date.now(), vol };
           const fresh = carPrev && cur.at - carPrev.at <= 10000 && cur.at - _carSelfAt > CAR_SELF_GRACE_MS;
-          if (fresh && carChanged(carPrev, cur)) { const leaving = carPrev.uri; carPrev = null; carAdvanceRef.current(leaving); }
+          if (fresh && (carChanged(carPrev, cur) || carVolChanged(carPrev, cur))) { const leaving = carPrev.uri; carPrev = null; carAdvanceRef.current(leaving); }
           else carPrev = cur;
         } else carPrev = null;
         // Capture « Découvertes de la semaine » par la LECTURE : l'utilisateur écoute une
@@ -32713,6 +32726,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.246', date:'2026-11-17', title:'🚗 Musique : volume = titre suivant', items:[
+    'Téléphone à l’horizontale, mode Voiture bleu : changer le volume passe au titre suivant du feed.',
+    'Téléphone à l’horizontale, Défilement rouge (5, 10 ou 15 s) : revenir à la verticale coupe le mode Voiture.',
+  ] },
   { v:'13.21.245', date:'2026-11-16', title:'👆 Vidéos : infos au tap, sous-titres', items:[
     'Lecteur vidéo : un tap sur la vidéo affiche la barre de temps et les infos du bas (titre, vidéaste, date) ; un second tap les masque. Elles sont masquées à l’ouverture.',
     'Nouveau bouton CC en haut : affiche ou masque les sous-titres (français si la vidéo en a). La vidéo se recharge à la même seconde.',
@@ -32727,9 +32744,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.242', date:'2026-11-16', title:'🚗 Musique : réécouter coupe le Défilement', items:[
     'Lancer un titre depuis l’historique des dernières écoutes arrête le Défilement du mode Voiture (5, 10 ou 15 s) : le titre choisi n’est plus sauté aussitôt.',
-  ] },
-  { v:'13.21.241', date:'2026-11-16', title:'🎤 Musique : nouveaux artistes d’abord', items:[
-    'Chaque synchro (manuelle ou automatique) scanne d’abord les artistes suivis jamais scannés, avant de reprendre là où elle s’était arrêtée : un artiste tout juste suivi n’attend plus son tour pendant des jours.',
   ] },
 ];
 
@@ -67177,6 +67191,15 @@ function CompactPlayer() {
     _carSubs.add(f);
     return () => { _carSubs.delete(f); };
   }, []);
+  // Paysage (voir `_carCompact`) : volume ⇒ suivant en 🚗 bleu ; retour en portrait ⇒ 🔴 coupé.
+  React.useEffect(() => {
+    _carCompact = true;
+    if (_playerPollKick) _playerPollKick();
+    return () => {
+      _carCompact = false;
+      if (carSkipSec()) carModeSet('off');
+    };
+  }, []);
   const carToggle = () => {
     const v = carModeNext(carMode);
     setCarMode(v);
@@ -67219,7 +67242,7 @@ function CompactPlayer() {
             </button>
             <button onClick={carToggle} aria-pressed={car} style={{ ...btn, flexDirection:'column', gap:1, opacity: car ? 1 : 0.35 }}
               title={carSkipN ? `Défilement : titre suivant toutes les ${carSkipN} s, démarré à 33 % (cliquer : ${carSkipN < CAR_SKIP_STEPS[CAR_SKIP_STEPS.length - 1] ? 'plus lent' : 'couper'})`
-                : car ? 'Mode Voiture actif : un changement fait sur l’autoradio passe au titre suivant du feed (cliquer : défilement 5 s)' : 'Mode Voiture coupé'}>
+                : car ? 'Mode Voiture actif : un changement fait sur l’autoradio, ou un changement de volume, passe au titre suivant du feed (cliquer : défilement 5 s)' : 'Mode Voiture coupé'}>
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={carCol} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M5 17H3v-5l2-5h14l2 5v5h-2"/><path d="M3 12h18"/><circle cx="7.5" cy="17" r="2"/><circle cx="16.5" cy="17" r="2"/><path d="M9.5 17h5"/>
               </svg>
