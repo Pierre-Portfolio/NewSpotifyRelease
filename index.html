@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.253';
+const APP_VERSION = '13.21.254';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4881,6 +4881,52 @@ function StoreProvider({ children }) {
       let pageNum   = 0;
 
       if (skipCount > 0) log(`↩ Reprise à partir de l'artiste #${skipCount + 1}`, 'ok');
+
+      // 🎤 DÉBUT DE BOUCLE (passage parti de la page 1) : « Artistes suivis » montre TOUTE la
+      // liste du X/X, y compris les suivis jamais scannés (demande utilisateur, 13.21.254). Liste
+      // entière relue ici (hors quota : seules les pages d'albums comptent) ; un suivi sans ligne
+      // reçoit une ligne VIDE à la sentinelle FULL_SCRAPE_FROM ⇒ badge JAMAIS SCANNÉ, et son scan,
+      // quand le curseur l'atteindra (ordre inchangé), reste un PREMIER scan intégral.
+      // ⚠ Pas de statut : ce n'est ni un 'partial' (aucun scan commencé) ni un 'ok'.
+      // ⚠ Best effort : une page en erreur arrête l'ajout SANS arrêter la synchro ; seul un 429
+      // (`SYNC_RATE_ABORT`) remonte. Liste COMPLÈTE ⇒ `following` mis à jour tout de suite aussi.
+      if (!resumeUrl && skipCount === 0) {
+        setStatus('Mise à jour des artistes suivis…', 'pulse');
+        let fUrl = 'https://api.spotify.com/v1/me/following?type=artist&limit=50', fPages = 0, fTotal = null, added = 0;
+        const fIds = new Set();
+        try {
+          while (fUrl && fPages < 60) {
+            const d = await apiGetSafe(fUrl);
+            fPages++;
+            const items = d?.artists?.items;
+            if (!Array.isArray(items)) break;
+            if (typeof d.artists.total === 'number') fTotal = d.artists.total;
+            for (const a of items) {
+              if (!a?.id || fIds.has(a.id)) continue;
+              fIds.add(a.id);
+              if (scrapedDates[a.id]) continue;
+              dbRun(
+                `INSERT OR IGNORE INTO artists_scraped
+                   (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [a.id, FULL_SCRAPE_FROM, a.name || null, a.images?.[1]?.url || a.images?.[0]?.url || null,
+                 a.popularity ?? null, a.followers?.total ?? null, JSON.stringify(a.genres || []), a.external_urls?.spotify || null]
+              );
+              scrapedDates[a.id] = FULL_SCRAPE_FROM;
+              added++;
+            }
+            fUrl = d.artists.next || null;
+            if (fUrl) await sleep(300);
+          }
+          if (!fUrl && fIds.size && !(fTotal != null && fIds.size < fTotal)) artistsApplyFollowing(fIds);
+        } catch (err) {
+          if (err.message === 'SYNC_RATE_ABORT') throw err;
+          log(`⚠ Liste des abonnements lue en partie (${err.message}) — « Artistes suivis » complété avec ce qui a été lu.`, 'warn');
+        }
+        if (added) log(`🎤 ${added} artiste(s) suivi(s) jamais scanné(s) ajouté(s) à « Artistes suivis » — scannés quand la boucle arrivera à eux.`, 'info');
+        try { setArtists(loadArtistsFromDB()); } catch {}
+        if (added) saveDB().catch(() => {});
+      }
 
       while (nextUrl) {
         pageNum++;
@@ -32651,6 +32697,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.254', date:'2026-11-19', title:'🎤 Artistes suivis : jamais scannés visibles', items:[
+    'Au début de chaque nouvelle boucle de scraping, 🎤 Artistes suivis se met à jour avec toute ta liste d’abonnements : les artistes jamais scannés y apparaissent avec le badge JAMAIS SCANNÉ (filtre « jamais scanné »).',
+    'Ils sont scannés quand la boucle arrive à eux, dans l’ordre habituel.',
+  ] },
   { v:'13.21.253', date:'2026-11-19', title:'🎵 Scraping : ordre d’origine', items:[
     'Retour à l’ordre d’avant : le scraping suit la liste des artistes suivis du début à la fin, sans passer d’abord les artistes jamais scannés. Un nouvel artiste est scanné quand la boucle arrive à lui.',
   ] },
@@ -32664,10 +32714,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.250', date:'2026-11-19', title:'🔴 Défilement : plus de titre répété', items:[
     'En Défilement 5 s, l’app ne relance plus le même titre deux fois de suite et ne saute plus de titre : le saut part toujours du titre réellement lancé.',
-  ] },
-  { v:'13.21.249', date:'2026-11-18', title:'🎵 Scraping : compteur d’artistes', items:[
-    'Pendant le scraping, la case Artistes ne reste plus bloquée à 0 : les artistes jamais scannés (traités en premier) sont comptés, et le total s’affiche dès le début.',
-    'Une reprise affiche directement sa position au lieu de repartir de 0.',
   ] },
 ];
 
