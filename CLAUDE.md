@@ -80,7 +80,6 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 
 - `syncState` `'idle'|'running'|'paused'|'rl_waiting'` via `setSync` (ref synchrone). **`checkpoint()`** avant chaque appel : une seule attente pour pause et 429. `endSync(reason)` : seul `'completed'` efface `spotifyplus_sync_progress`.
 - **429** : `_rlSet(max(Retry-After, 15 min), true)`, persisté dans `spotifyplus_blocked_until`, s'applique à **tous** les appels sauf les commandes de lecture (`apiPut(…, {player:true})`), qui ne respectent que le vrai Retry-After (`_rlSpotUntil`).
-- **Passe prioritaire** : chaque passe relit d'abord TOUT `/me/following` (hors quota) et scanne les suivis jamais scannés (`priorityDone`), puis reprend le curseur.
 - **Premier scan = toute la discographie** (pages déroulées, plafond `FIRST_SCRAPE_MAX_PAGES`) ; artiste connu = **une page** (+1 page `include_groups=single` si la 1re n'a aucun single). ⚠ **Une page d'albums = une unité de quota**, comptée APRÈS la requête ; l'artiste en cours est toujours terminé. ⚠ `FULL_SCRAPE_FROM` est un **état** (« premier scan pas fini ») posé par `writeLightRow()`.
 - Albums `limit=10` (piège 21) → `releaseInRange` (piège 19) → tracks. `single` de `EP_MIN_TRACKS`+ titres = EP (`release_type='ep'`).
 - **Désabonnement = `following=0`, JAMAIS un DELETE** (réabonnement ⇒ repart de sa date). Balayage `artistsApplyFollowing` (absent ⇒ 0, revu ⇒ 1) sur une liste **complète** seulement : fin d'un passage parti de la page 1, ou lecture de `/me/following` par 🔀 Delta (`deltaFollowSync`, `meta.complete`).

@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.252';
+const APP_VERSION = '13.21.253';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -4860,13 +4860,6 @@ function StoreProvider({ children }) {
 
       const seenUris = new Set(knownUrisRef.current);
       let totalTracks = 0, totalReleases = 0, artistsScanned = skipCount, totalArtists = ESTIMATED_TOTAL;
-      // Compteur « Artistes » du panneau = position du curseur (`artistsScanned`, aussi celle de
-      // la reprise) + artistes de la passe prioritaire que le curseur n'a pas encore croisés
-      // (`prioAhead`, décrémenté quand il les saute). Sans ce second terme, la passe prioritaire
-      // — souvent tout le quota du jour — laissait « 0 » affiché pendant que X/100 montait.
-      let prioAhead = 0;
-      const showArtists = () => setStats(s => ({ ...s, artists: Math.min(artistsScanned + prioAhead, totalArtists || Infinity) }));
-      showArtists();
       // #opt : loadArtistsFromDB() relit toute la table → throttle à 1×/1.5s pendant la
       // sync (endSync fait un refresh final inconditionnel). Évite un coût O(n²) sur N artistes.
       let _lastArtistsRefresh = 0;
@@ -4886,349 +4879,6 @@ function StoreProvider({ children }) {
       let nextUrl   = resumeUrl || 'https://api.spotify.com/v1/me/following?type=artist&limit=50';
       let firstPage = true;
       let pageNum   = 0;
-
-      // Scan d'UN artiste (albums → pistes → ligne `artists_scraped`), partagé par la passe
-      // prioritaire et la boucle par curseur. `label` = préfixe du statut affiché.
-      const scanArtist = async (artist, label) => {
-        // PREMIÈRE FOIS qu'on voit cet artiste → TOUTE sa discographie, page par page.
-        // Vaut aussi pour la reprise d'un premier scan interrompu, reconnaissable à la
-        // sentinelle FULL_SCRAPE_FROM laissée par la ligne « légère ».
-        const prevScraped = scrapedDates[artist.id];
-        const firstScrape = !prevScraped || prevScraped.slice(0, 10) <= FULL_SCRAPE_FROM;
-        // Cutoff tronqué au JOUR du dernier scan : une sortie publiée le jour même du scan
-        // mais indexée après ne doit pas être ratée (les doublons sont absorbés par INSERT OR IGNORE).
-        // Au premier scan, le cutoff est la sentinelle (1900) : plus RIEN n'est filtré par la date.
-        const cutoffISO = firstScrape ? FULL_SCRAPE_FROM : (prevScraped || DEFAULT_SCRAPE_FROM).slice(0, 10);
-        const cutoff = new Date(cutoffISO);
-        // ⚠ Ce qui est ÉCRIT sur la ligne légère n'est pas ce qui FILTRE : au premier scan
-        // c'est la sentinelle, sinon l'artiste cesserait d'être « jamais scanné » alors que
-        // son scan n'est pas terminé.
-        const lightISO = firstScrape ? FULL_SCRAPE_FROM : cutoffISO;
-        if (firstScrape) setStatus(`${label} — ${artist.name} · premier scan, discographie complète`, 'pulse');
-
-        // Ligne "légère" écrite DÈS la PREMIÈRE page d'albums lue, avant les pistes ET
-        // avant les pages suivantes : l'artiste devient visible dans le panneau même si un
-        // 429 coupe le scan plus bas — et un premier scan intégral en déroule beaucoup.
-        // ⚠ last_scraped_at posé à `lightISO` (date existante, ou la sentinelle
-        // FULL_SCRAPE_FROM au premier scan), JAMAIS avancée ici → aucun titre raté, et un
-        // premier scan coupé en route reste un PREMIER scan. Statut 'partial' jusqu'à la fin.
-        // ON CONFLICT ne touche QUE les métadonnées (pas last_scraped_at/scan_count/total).
-        const writeLightRow = () => {
-          try {
-            dbRun(
-              `INSERT INTO artists_scraped
-                 (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_scan_status)  -- following prend son DEFAULT 1
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'partial')
-               ON CONFLICT(spotify_id) DO UPDATE SET
-                 name        = excluded.name,
-                 image_url   = excluded.image_url,
-                 popularity  = excluded.popularity,
-                 followers   = excluded.followers,
-                 genres      = excluded.genres,
-                 spotify_url = excluded.spotify_url,
-                 following   = 1`,
-              [
-                artist.id, lightISO, artist.name || null,
-                artist.images?.[1]?.url || artist.images?.[0]?.url || null, artist.popularity ?? null,
-                artist.followers?.total ?? null, JSON.stringify(artist.genres || []),
-                artist.external_urls?.spotify || null,
-              ]
-            );
-            refreshArtists(); // visible rapidement (throttlé), avant même la 1re piste
-          } catch {}
-        };
-
-        // ── Lecture des albums ───────────────────────────────────────────────────────
-        // Artiste connu : UNE page (les sorties viennent des plus récentes aux plus
-        // anciennes, le cutoff coupe le reste). Premier scan : on déroule `next` jusqu'au
-        // bout — chaque page lue coûte une unité de quota, comptée plus bas.
-        let albumsData   = null;   // { items } agrégé ; null = même la 1re page a échoué → branche d'erreur
-        let albumPages   = 0;      // pages RÉELLEMENT demandées = coût de cet artiste en quota
-        let albumsCut    = false;  // plafond atteint : discographie incomplète, on le DIT
-        {
-          // ⚠ Migration Spotify fév./mars 2026 : limit max de cet endpoint réduit de 50 à 10
-          // (limit=20 → 400 "Invalid limit" depuis le 9 mars 2026, même pour les apps existantes)
-          let albUrl = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`;
-          const albItems = [];
-          while (albUrl) {
-            const page = await apiGetSafe(albUrl);
-            albumPages++;              // la requête est partie : elle est due, réponse exploitable ou non
-            if (!page?.items) break;   // 1re page → albumsData reste null ; page suivante → on garde l'acquis
-            albItems.push(...page.items);
-            albumsData = { items: albItems, next: page.next || null };
-            if (albumPages === 1) writeLightRow();
-            if (!firstScrape) {
-              // ⚠ Avec `include_groups=album,single`, Spotify range les résultats PAR GROUPE
-              // (tous les albums du plus récent au plus ancien, PUIS les singles) : chez un
-              // artiste d'au moins 10 albums, la page 1 ne contient aucun single et un single
-              // sorti hier n'était jamais lu. Page pleine d'albums + suite ⇒ UNE requête de
-              // plus sur le seul groupe `single` (une unité de quota de plus, comptée plus bas).
-              if (page.next && !page.items.some(a => (a.album_group || a.album_type) === 'single')) {
-                const sp = await apiGetSafe(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=single&limit=10&market=FR`);
-                albumPages++;
-                if (sp?.items) albItems.push(...sp.items.filter(a => !albItems.some(b => b.id === a.id)));
-              }
-              break;                   // scan incrémental : une seule page (par groupe)
-            }
-            albUrl = page.next || null;
-            if (albUrl && albumPages >= FIRST_SCRAPE_MAX_PAGES) { albumsCut = true; albUrl = null; }
-          }
-        }
-
-        // Quota consommé APRÈS la/les requête(s) : un throw au-dessus (erreur API,
-        // disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné.
-        // ⚠ UNE PAGE D'ALBUMS = UN ARTISTE sur les 100 : un premier scan intégral qui a lu
-        // 5 pages compte pour 5 (cf. FIRST_SCRAPE_MAX_PAGES).
-        dailyCount += albumPages;
-        // `last` = instant de ce scrap : sert au reset d'inactivité (compteur remis
-        // à 0 si 24h passent sans nouveau scrap, même en dessous de 100).
-        const scrapAt = Date.now();
-        if (dailyCount >= QUOTA_MAX) {
-          // 100e artiste scrapé → ouvre la fenêtre glissante de 24h (gelée à cet instant)
-          const until = scrapAt + QUOTA_MS;
-          saveQuota(dailyCount, until, scrapAt);
-          setQuotaUntil(until);
-        } else {
-          saveQuota(dailyCount, 0, scrapAt);
-        }
-        setDailyScrapings(dailyCount);
-
-        // Le journal DIT ce que le premier scan a coûté : sans ça, le compteur du quota
-        // sauterait de 1 à 6 sans explication.
-        if (firstScrape && albumsData?.items) {
-          const cut = albumsCut ? ` · ⚠ plafond de ${FIRST_SCRAPE_MAX_PAGES} pages atteint, sorties plus anciennes non lues` : '';
-          log(`★ ${artist.name} · premier scan INTÉGRAL — ${albumsData.items.length} sortie(s) sur ${albumPages} page(s) · coûte ${albumPages} artiste(s) sur le quota (${dailyCount}/${QUOTA_MAX})${cut}`, 'info');
-        }
-
-        if (albumsData?.items) {
-          const inRange = albumsData.items.filter(a => releaseInRange(a.release_date, cutoff, ceiling));
-          if (inRange.length === 0) log(firstScrape
-            ? `→ ${artist.name} · aucune sortie publiée`
-            : `→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
-          let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
-          const artistFeedItems = []; // #opt : on batche les items de l'artiste → UN seul setFeed
-
-          for (const album of albumsData.items) {
-            if (!releaseInRange(album.release_date, cutoff, ceiling)) continue;
-            const rDate = new Date(album.release_date);
-
-            const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
-            if (!tracksData?.items?.length) continue;
-            // 50 = plafond de l'endpoint : une édition deluxe / une compilation plus longue
-            // perdait tout ce qui suit la 50e piste. `next` déroulé (plafonné, hors quota
-            // artistes comme la 1re page de pistes).
-            for (let tp = 0, nx = tracksData.next; nx && tp < ALBUM_TRACK_PAGES_MAX; tp++) {
-              const more = await apiGetSafe(nx);
-              if (!more?.items?.length) break;
-              tracksData.items.push(...more.items);
-              nx = more.next || null;
-            }
-            // EP : Spotify le classe `single` (4 à 6 titres). Le réduire à sa 1re piste comme un
-            // vrai single (titre + versions instrumentale/radio) en perdait 3 à 5 titres : à
-            // partir de EP_MIN_TRACKS il est traité comme un album (release_type 'ep').
-            const isSingle = album.album_type === 'single' && tracksData.items.length < EP_MIN_TRACKS;
-            const relType  = album.album_type === 'single' ? (isSingle ? 'single' : 'ep') : album.album_type;
-            const uris = tracksData.items.map(t => t.uri);
-            // Ne traiter que les pistes NOUVELLES : ni déjà en base, ni purgées (seenUris
-            // inclut purged_uris via knownUris). Un titre écouté puis purgé ne réapparaît
-            // donc plus au re-scan, et un album dont la piste 1 est sortie en single avant
-            // n'est pas sauté en entier (ses autres pistes restent nouvelles).
-            const newTracks = (isSingle ? tracksData.items.slice(0, 1) : tracksData.items)
-              .filter(t => !seenUris.has(t.uri));
-            if (newTracks.length === 0) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
-
-            // Sauvegarder en DB locale — images[1] = 300px (images[0] = 640px, inutile
-            // pour des vignettes de 38-80px : ~-75% de bande passante sur un feed de 1000)
-            const coverUrl = album.images?.[1]?.url || album.images?.[0]?.url || null;
-            if (isSingle) {
-              try {
-                dbRun(
-                  "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                  [newTracks[0].uri, artist.name, album.name, null, 'single', album.release_date || null, coverUrl, newTracks[0].duration_ms || null]
-                );
-              } catch {}
-            } else {
-              for (const t of newTracks) {
-                try {
-                  dbRun(
-                    "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [t.uri, artist.name, t.name, album.name, relType, album.release_date || null, coverUrl, t.duration_ms || null]
-                  );
-                } catch {}
-              }
-            }
-
-            uris.forEach(u => { seenUris.add(u); knownUrisRef.current.add(u); });
-            const addedCount = newTracks.length;
-            totalTracks  += addedCount;
-            totalReleases++;
-            artistTracks += addedCount;
-            artistReleases++;
-            setStats(s => ({ ...s, releases: totalReleases, tracks: totalTracks }));
-
-            const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
-            if (isSingle) {
-              artistFeedItems.push({
-                id:          newTracks[0].uri,
-                spotifyUri:  newTracks[0].uri,
-                label:       'Single',
-                artist:      artist.name,
-                title:       album.name,
-                subtitle:    null,
-                date:        dateStr,
-                rawDate:     album.release_date || '',
-                image:       coverUrl,
-                isNew:       true,
-                liked:       0,
-                duration_ms: newTracks[0].duration_ms || 0,
-              });
-            } else {
-              newTracks.forEach(t => artistFeedItems.push({
-                id:          t.uri,
-                spotifyUri:  t.uri,
-                label:       'Album',
-                artist:      artist.name,
-                title:       t.name,
-                subtitle:    album.name,
-                date:        dateStr,
-                rawDate:     album.release_date || '',
-                image:       coverUrl,
-                isNew:       true,
-                liked:       0,
-                duration_ms: t.duration_ms || 0,
-              }));
-            }
-            log(`✓ ${artist.name} — ${album.name} · ${addedCount} titre(s) sauvegardé(s)`, 'ok');
-          }
-          // #opt : un seul setFeed par artiste (au lieu d'une recopie du tableau par album)
-          if (artistFeedItems.length) setFeed(F => [...F, ...artistFeedItems].slice(0, 1000));
-
-          // Date de scan avancée UNIQUEMENT si la liste d'albums a bien été lue —
-          // sinon la fenêtre de scan serait brûlée sans avoir rien scanné (sorties perdues à jamais)
-          // UPSERT (et non INSERT OR REPLACE qui efface la ligne) : total_tracks_added et
-          // scan_count sont CUMULÉS, les métadonnées artiste sont rafraîchies à chaque scan.
-          dbRun(
-            `INSERT INTO artists_scraped
-               (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_release_count, total_tracks_added, last_scan_status, scan_count)
-             VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 1)
-             ON CONFLICT(spotify_id) DO UPDATE SET
-               last_scraped_at    = datetime('now'),
-               name               = excluded.name,
-               image_url          = excluded.image_url,
-               popularity         = excluded.popularity,
-               followers          = excluded.followers,
-               genres             = excluded.genres,
-               spotify_url        = excluded.spotify_url,
-               last_release_count = excluded.last_release_count,
-               total_tracks_added = total_tracks_added + excluded.total_tracks_added,
-               last_scan_status   = 'ok',
-               scan_count         = scan_count + 1,
-               following          = 1`,
-            [
-              artist.id,
-              artist.name || null,
-              artist.images?.[1]?.url || artist.images?.[0]?.url || null,
-              artist.popularity ?? null,
-              artist.followers?.total ?? null,
-              JSON.stringify(artist.genres || []),
-              artist.external_urls?.spotify || null,
-              artistReleases,
-              artistTracks,
-            ]
-          );
-        } else {
-          log(`⚠ ${artist.name} — albums inaccessibles, date de scan non avancée`, 'warn');
-          // Statut d'échec posé UNIQUEMENT si l'artiste a déjà une ligne (UPDATE) —
-          // ne jamais INSÉRER ici : poser last_scraped_at brûlerait la fenêtre de scan
-          dbRun("UPDATE artists_scraped SET last_scan_status = 'error' WHERE spotify_id = ?", [artist.id]);
-        }
-
-        // Rafraîchit la section Artistes en direct (ligne créée/maj ou statut d'erreur posé) —
-        // le compteur et les métadonnées montent en temps réel (throttlé), sans attendre endSync
-        refreshArtists();
-      };
-
-      // Quota 24h atteint : la fenêtre glissante a été ouverte au 100e artiste
-      // (dans l'incrément de `scanArtist`). Synchro arrêtée jusqu'à son expiration.
-      const quotaStop = async () => {
-        const until = ensureQuotaWindow(); // posée au 100e scan ; ouverte ici si absente
-        setQuotaUntil(until);
-        const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
-        log(`⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée. Prochaine synchro possible le ${when}.`, 'error');
-        setStatus('Quota 24h atteint', 'error');
-        notify('Spotify+ — Session terminée', `100 artistes scrapés. Prochaine synchro le ${when}.`);
-        await endSync('daily_limit');
-      };
-
-      const saveProgress = (name, pageUrl, offset) => localStorage.setItem('spotifyplus_sync_progress', JSON.stringify({
-        artists_scanned:  artistsScanned,
-        total_artists:    totalArtists,
-        last_artist_name: name,
-        page_url:         pageUrl,
-        page_offset:      offset,
-      }));
-
-      // ── PRIORITÉ AUX ARTISTES JAMAIS SCANNÉS (13.21.241) ─────────────────────────
-      // Demande utilisateur : « les artistes jamais scrapés ne se mettent jamais à jour seuls ».
-      // La boucle par curseur suit l'ordre de /me/following au rythme du quota (100/24 h) : sur
-      // ~1 600 abonnements, un artiste tout juste suivi attendait son tour plus de deux semaines,
-      // sans même avoir de ligne en base. Chaque passe relit donc d'abord la liste ENTIÈRE
-      // (~32 pages de 50, hors quota : seules les pages d'albums comptent) et scanne en premier
-      // les suivis sans scan terminé (pas de ligne, ou sentinelle FULL_SCRAPE_FROM), puis reprend
-      // le curseur ; ceux-là y sont sautés (`priorityDone`) pour ne pas payer deux fois.
-      // ⚠ Lecture best effort : une page en erreur arrête la recherche SANS arrêter la synchro
-      // (on garde ce qui a été lu) ; seul un 429 (`SYNC_RATE_ABORT`) remonte.
-      // ⚠ La progression (`saveProgress`) n'est PAS touchée ici : le curseur reprend où il était.
-      const priorityDone = new Set();
-      {
-        const prio = [], prioSeen = new Set();
-        let pUrl = 'https://api.spotify.com/v1/me/following?type=artist&limit=50', pPages = 0;
-        setStatus('Recherche des artistes jamais scannés…', 'pulse');
-        try {
-          while (pUrl && pPages < 60) {
-            const d = await apiGetSafe(pUrl);
-            pPages++;
-            const items = d?.artists?.items;
-            if (!Array.isArray(items)) break;
-            if (pPages === 1 && d.artists.total) {
-              totalArtists = d.artists.total;
-              setStats(s => ({ ...s, total: totalArtists }));
-            }
-            for (const a of items) {
-              if (!a?.id || prioSeen.has(a.id)) continue;
-              prioSeen.add(a.id);
-              const prev = scrapedDates[a.id];
-              if (!prev || prev.slice(0, 10) <= FULL_SCRAPE_FROM) prio.push(a);
-            }
-            pUrl = d.artists.next || null;
-            if (pUrl) await sleep(300);
-          }
-        } catch (err) {
-          if (err.message === 'SYNC_RATE_ABORT') throw err;
-          log(`⚠ Liste des abonnements lue en partie (${err.message}) — priorité limitée à ce qui a été lu.`, 'warn');
-        }
-        if (prio.length) log(`★ ${prio.length} artiste(s) suivi(s) jamais scanné(s) — scannés en priorité.`, 'info');
-        for (let k = 0; k < prio.length; k++) {
-          await checkpoint();
-          if (dailyCount >= QUOTA_MAX) { await quotaStop(); return; }
-          const artist = prio[k];
-          setCurrentArtist(artist.name);
-          const label = `Priorité ${k + 1}/${prio.length}`;
-          setStatus(`${label} — ${artist.name}`, 'pulse');
-          await scanArtist(artist, label);
-          priorityDone.add(artist.id);
-          prioAhead++;
-          showArtists();
-          saveDB().catch(() => {});
-          const delay = delayChoiceRef.current * 1000 + Math.random() * 2000 + 1000;
-          const nextName = k + 1 < prio.length ? prio[k + 1].name : 'reprise du scan habituel';
-          setStatus(`Pause avant : ${nextName}`, 'wait');
-          log(`⏳ Attente ${(delay/1000).toFixed(1)}s → ${nextName}`, 'wait');
-          const sec = Math.ceil(delay / 1000);
-          setNextCallTotal(sec); setNextCall(sec);
-          await sleep(delay);
-        }
-      }
 
       if (skipCount > 0) log(`↩ Reprise à partir de l'artiste #${skipCount + 1}`, 'ok');
 
@@ -5258,26 +4908,288 @@ function StoreProvider({ children }) {
 
           // Quota 24h atteint : la fenêtre glissante a été ouverte au 100e artiste
           // (dans l'incrément ci-dessous). Synchro arrêtée jusqu'à son expiration.
-          if (dailyCount >= QUOTA_MAX) { await quotaStop(); return; }
+          if (dailyCount >= QUOTA_MAX) {
+            const until = ensureQuotaWindow(); // posée au 100e scan ; ouverte ici si absente
+            setQuotaUntil(until);
+            const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
+            log(`⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée. Prochaine synchro possible le ${when}.`, 'error');
+            setStatus('Quota 24h atteint', 'error');
+            notify('Spotify+ — Session terminée', `100 artistes scrapés. Prochaine synchro le ${when}.`);
+            await endSync('daily_limit');
+            return;
+          }
           const artist = artists[i];
           artistsScanned++;
-          // Déjà scanné plus haut par la passe prioritaire : rien à redemander, la position avance
-          // (déjà compté par `prioAhead` : le total affiché ne bouge pas).
-          if (priorityDone.has(artist.id)) {
-            if (prioAhead > 0) prioAhead--;
-            showArtists();
-            saveProgress(artist.name, pageUrl, i + 1);
-            continue;
-          }
-          showArtists();
+          setStats(s => ({ ...s, artists: artistsScanned }));
           setCurrentArtist(artist.name);
           setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name}`, 'pulse');
 
-          await scanArtist(artist, `Scan ${artistsScanned}/${totalArtists}`);
+          // PREMIÈRE FOIS qu'on voit cet artiste → TOUTE sa discographie, page par page.
+          // Vaut aussi pour la reprise d'un premier scan interrompu, reconnaissable à la
+          // sentinelle FULL_SCRAPE_FROM laissée par la ligne « légère ».
+          const prevScraped = scrapedDates[artist.id];
+          const firstScrape = !prevScraped || prevScraped.slice(0, 10) <= FULL_SCRAPE_FROM;
+          // Cutoff tronqué au JOUR du dernier scan : une sortie publiée le jour même du scan
+          // mais indexée après ne doit pas être ratée (les doublons sont absorbés par INSERT OR IGNORE).
+          // Au premier scan, le cutoff est la sentinelle (1900) : plus RIEN n'est filtré par la date.
+          const cutoffISO = firstScrape ? FULL_SCRAPE_FROM : (prevScraped || DEFAULT_SCRAPE_FROM).slice(0, 10);
+          const cutoff = new Date(cutoffISO);
+          // ⚠ Ce qui est ÉCRIT sur la ligne légère n'est pas ce qui FILTRE : au premier scan
+          // c'est la sentinelle, sinon l'artiste cesserait d'être « jamais scanné » alors que
+          // son scan n'est pas terminé.
+          const lightISO = firstScrape ? FULL_SCRAPE_FROM : cutoffISO;
+          if (firstScrape) setStatus(`Scan ${artistsScanned}/${totalArtists} — ${artist.name} · premier scan, discographie complète`, 'pulse');
+
+          // Ligne "légère" écrite DÈS la PREMIÈRE page d'albums lue, avant les pistes ET
+          // avant les pages suivantes : l'artiste devient visible dans le panneau même si un
+          // 429 coupe le scan plus bas — et un premier scan intégral en déroule beaucoup.
+          // ⚠ last_scraped_at posé à `lightISO` (date existante, ou la sentinelle
+          // FULL_SCRAPE_FROM au premier scan), JAMAIS avancée ici → aucun titre raté, et un
+          // premier scan coupé en route reste un PREMIER scan. Statut 'partial' jusqu'à la fin.
+          // ON CONFLICT ne touche QUE les métadonnées (pas last_scraped_at/scan_count/total).
+          const writeLightRow = () => {
+            try {
+              dbRun(
+                `INSERT INTO artists_scraped
+                   (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_scan_status)  -- following prend son DEFAULT 1
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'partial')
+                 ON CONFLICT(spotify_id) DO UPDATE SET
+                   name        = excluded.name,
+                   image_url   = excluded.image_url,
+                   popularity  = excluded.popularity,
+                   followers   = excluded.followers,
+                   genres      = excluded.genres,
+                   spotify_url = excluded.spotify_url,
+                   following   = 1`,
+                [
+                  artist.id, lightISO, artist.name || null,
+                  artist.images?.[1]?.url || artist.images?.[0]?.url || null, artist.popularity ?? null,
+                  artist.followers?.total ?? null, JSON.stringify(artist.genres || []),
+                  artist.external_urls?.spotify || null,
+                ]
+              );
+              refreshArtists(); // visible rapidement (throttlé), avant même la 1re piste
+            } catch {}
+          };
+
+          // ── Lecture des albums ───────────────────────────────────────────────────────
+          // Artiste connu : UNE page (les sorties viennent des plus récentes aux plus
+          // anciennes, le cutoff coupe le reste). Premier scan : on déroule `next` jusqu'au
+          // bout — chaque page lue coûte une unité de quota, comptée plus bas.
+          let albumsData   = null;   // { items } agrégé ; null = même la 1re page a échoué → branche d'erreur
+          let albumPages   = 0;      // pages RÉELLEMENT demandées = coût de cet artiste en quota
+          let albumsCut    = false;  // plafond atteint : discographie incomplète, on le DIT
+          {
+            // ⚠ Migration Spotify fév./mars 2026 : limit max de cet endpoint réduit de 50 à 10
+            // (limit=20 → 400 "Invalid limit" depuis le 9 mars 2026, même pour les apps existantes)
+            let albUrl = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`;
+            const albItems = [];
+            while (albUrl) {
+              const page = await apiGetSafe(albUrl);
+              albumPages++;              // la requête est partie : elle est due, réponse exploitable ou non
+              if (!page?.items) break;   // 1re page → albumsData reste null ; page suivante → on garde l'acquis
+              albItems.push(...page.items);
+              albumsData = { items: albItems, next: page.next || null };
+              if (albumPages === 1) writeLightRow();
+              if (!firstScrape) {
+                // ⚠ Avec `include_groups=album,single`, Spotify range les résultats PAR GROUPE
+                // (tous les albums du plus récent au plus ancien, PUIS les singles) : chez un
+                // artiste d'au moins 10 albums, la page 1 ne contient aucun single et un single
+                // sorti hier n'était jamais lu. Page pleine d'albums + suite ⇒ UNE requête de
+                // plus sur le seul groupe `single` (une unité de quota de plus, comptée plus bas).
+                if (page.next && !page.items.some(a => (a.album_group || a.album_type) === 'single')) {
+                  const sp = await apiGetSafe(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=single&limit=10&market=FR`);
+                  albumPages++;
+                  if (sp?.items) albItems.push(...sp.items.filter(a => !albItems.some(b => b.id === a.id)));
+                }
+                break;                   // scan incrémental : une seule page (par groupe)
+              }
+              albUrl = page.next || null;
+              if (albUrl && albumPages >= FIRST_SCRAPE_MAX_PAGES) { albumsCut = true; albUrl = null; }
+            }
+          }
+
+          // Quota consommé APRÈS la/les requête(s) : un throw au-dessus (erreur API,
+          // disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné.
+          // ⚠ UNE PAGE D'ALBUMS = UN ARTISTE sur les 100 : un premier scan intégral qui a lu
+          // 5 pages compte pour 5 (cf. FIRST_SCRAPE_MAX_PAGES).
+          dailyCount += albumPages;
+          // `last` = instant de ce scrap : sert au reset d'inactivité (compteur remis
+          // à 0 si 24h passent sans nouveau scrap, même en dessous de 100).
+          const scrapAt = Date.now();
+          if (dailyCount >= QUOTA_MAX) {
+            // 100e artiste scrapé → ouvre la fenêtre glissante de 24h (gelée à cet instant)
+            const until = scrapAt + QUOTA_MS;
+            saveQuota(dailyCount, until, scrapAt);
+            setQuotaUntil(until);
+          } else {
+            saveQuota(dailyCount, 0, scrapAt);
+          }
+          setDailyScrapings(dailyCount);
+
+          // Le journal DIT ce que le premier scan a coûté : sans ça, le compteur du quota
+          // sauterait de 1 à 6 sans explication.
+          if (firstScrape && albumsData?.items) {
+            const cut = albumsCut ? ` · ⚠ plafond de ${FIRST_SCRAPE_MAX_PAGES} pages atteint, sorties plus anciennes non lues` : '';
+            log(`★ ${artist.name} · premier scan INTÉGRAL — ${albumsData.items.length} sortie(s) sur ${albumPages} page(s) · coûte ${albumPages} artiste(s) sur le quota (${dailyCount}/${QUOTA_MAX})${cut}`, 'info');
+          }
+
+          if (albumsData?.items) {
+            const inRange = albumsData.items.filter(a => releaseInRange(a.release_date, cutoff, ceiling));
+            if (inRange.length === 0) log(firstScrape
+              ? `→ ${artist.name} · aucune sortie publiée`
+              : `→ ${artist.name} · aucune sortie depuis ${cutoff.toLocaleDateString('fr-FR')}`, 'info');
+            let artistReleases = 0, artistTracks = 0; // compteurs de CE scan pour cet artiste
+            const artistFeedItems = []; // #opt : on batche les items de l'artiste → UN seul setFeed
+
+            for (const album of albumsData.items) {
+              if (!releaseInRange(album.release_date, cutoff, ceiling)) continue;
+              const rDate = new Date(album.release_date);
+
+              const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
+              if (!tracksData?.items?.length) continue;
+              // 50 = plafond de l'endpoint : une édition deluxe / une compilation plus longue
+              // perdait tout ce qui suit la 50e piste. `next` déroulé (plafonné, hors quota
+              // artistes comme la 1re page de pistes).
+              for (let tp = 0, nx = tracksData.next; nx && tp < ALBUM_TRACK_PAGES_MAX; tp++) {
+                const more = await apiGetSafe(nx);
+                if (!more?.items?.length) break;
+                tracksData.items.push(...more.items);
+                nx = more.next || null;
+              }
+              // EP : Spotify le classe `single` (4 à 6 titres). Le réduire à sa 1re piste comme un
+              // vrai single (titre + versions instrumentale/radio) en perdait 3 à 5 titres : à
+              // partir de EP_MIN_TRACKS il est traité comme un album (release_type 'ep').
+              const isSingle = album.album_type === 'single' && tracksData.items.length < EP_MIN_TRACKS;
+              const relType  = album.album_type === 'single' ? (isSingle ? 'single' : 'ep') : album.album_type;
+              const uris = tracksData.items.map(t => t.uri);
+              // Ne traiter que les pistes NOUVELLES : ni déjà en base, ni purgées (seenUris
+              // inclut purged_uris via knownUris). Un titre écouté puis purgé ne réapparaît
+              // donc plus au re-scan, et un album dont la piste 1 est sortie en single avant
+              // n'est pas sauté en entier (ses autres pistes restent nouvelles).
+              const newTracks = (isSingle ? tracksData.items.slice(0, 1) : tracksData.items)
+                .filter(t => !seenUris.has(t.uri));
+              if (newTracks.length === 0) { log(`${artist.name} — ${album.name} · déjà en base`, 'info'); continue; }
+
+              // Sauvegarder en DB locale — images[1] = 300px (images[0] = 640px, inutile
+              // pour des vignettes de 38-80px : ~-75% de bande passante sur un feed de 1000)
+              const coverUrl = album.images?.[1]?.url || album.images?.[0]?.url || null;
+              if (isSingle) {
+                try {
+                  dbRun(
+                    "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [newTracks[0].uri, artist.name, album.name, null, 'single', album.release_date || null, coverUrl, newTracks[0].duration_ms || null]
+                  );
+                } catch {}
+              } else {
+                for (const t of newTracks) {
+                  try {
+                    dbRun(
+                      "INSERT OR IGNORE INTO tracks (spotify_uri, artist_name, title, release_title, release_type, release_date, cover_url, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                      [t.uri, artist.name, t.name, album.name, relType, album.release_date || null, coverUrl, t.duration_ms || null]
+                    );
+                  } catch {}
+                }
+              }
+
+              uris.forEach(u => { seenUris.add(u); knownUrisRef.current.add(u); });
+              const addedCount = newTracks.length;
+              totalTracks  += addedCount;
+              totalReleases++;
+              artistTracks += addedCount;
+              artistReleases++;
+              setStats(s => ({ ...s, releases: totalReleases, tracks: totalTracks }));
+
+              const dateStr = rDate.toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
+              if (isSingle) {
+                artistFeedItems.push({
+                  id:          newTracks[0].uri,
+                  spotifyUri:  newTracks[0].uri,
+                  label:       'Single',
+                  artist:      artist.name,
+                  title:       album.name,
+                  subtitle:    null,
+                  date:        dateStr,
+                  rawDate:     album.release_date || '',
+                  image:       coverUrl,
+                  isNew:       true,
+                  liked:       0,
+                  duration_ms: newTracks[0].duration_ms || 0,
+                });
+              } else {
+                newTracks.forEach(t => artistFeedItems.push({
+                  id:          t.uri,
+                  spotifyUri:  t.uri,
+                  label:       'Album',
+                  artist:      artist.name,
+                  title:       t.name,
+                  subtitle:    album.name,
+                  date:        dateStr,
+                  rawDate:     album.release_date || '',
+                  image:       coverUrl,
+                  isNew:       true,
+                  liked:       0,
+                  duration_ms: t.duration_ms || 0,
+                }));
+              }
+              log(`✓ ${artist.name} — ${album.name} · ${addedCount} titre(s) sauvegardé(s)`, 'ok');
+            }
+            // #opt : un seul setFeed par artiste (au lieu d'une recopie du tableau par album)
+            if (artistFeedItems.length) setFeed(F => [...F, ...artistFeedItems].slice(0, 1000));
+
+            // Date de scan avancée UNIQUEMENT si la liste d'albums a bien été lue —
+            // sinon la fenêtre de scan serait brûlée sans avoir rien scanné (sorties perdues à jamais)
+            // UPSERT (et non INSERT OR REPLACE qui efface la ligne) : total_tracks_added et
+            // scan_count sont CUMULÉS, les métadonnées artiste sont rafraîchies à chaque scan.
+            dbRun(
+              `INSERT INTO artists_scraped
+                 (spotify_id, last_scraped_at, name, image_url, popularity, followers, genres, spotify_url, last_release_count, total_tracks_added, last_scan_status, scan_count)
+               VALUES (?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, 'ok', 1)
+               ON CONFLICT(spotify_id) DO UPDATE SET
+                 last_scraped_at    = datetime('now'),
+                 name               = excluded.name,
+                 image_url          = excluded.image_url,
+                 popularity         = excluded.popularity,
+                 followers          = excluded.followers,
+                 genres             = excluded.genres,
+                 spotify_url        = excluded.spotify_url,
+                 last_release_count = excluded.last_release_count,
+                 total_tracks_added = total_tracks_added + excluded.total_tracks_added,
+                 last_scan_status   = 'ok',
+                 scan_count         = scan_count + 1,
+                 following          = 1`,
+              [
+                artist.id,
+                artist.name || null,
+                artist.images?.[1]?.url || artist.images?.[0]?.url || null,
+                artist.popularity ?? null,
+                artist.followers?.total ?? null,
+                JSON.stringify(artist.genres || []),
+                artist.external_urls?.spotify || null,
+                artistReleases,
+                artistTracks,
+              ]
+            );
+          } else {
+            log(`⚠ ${artist.name} — albums inaccessibles, date de scan non avancée`, 'warn');
+            // Statut d'échec posé UNIQUEMENT si l'artiste a déjà une ligne (UPDATE) —
+            // ne jamais INSÉRER ici : poser last_scraped_at brûlerait la fenêtre de scan
+            dbRun("UPDATE artists_scraped SET last_scan_status = 'error' WHERE spotify_id = ?", [artist.id]);
+          }
+
+          // Rafraîchit la section Artistes en direct (ligne créée/maj ou statut d'erreur posé) —
+          // le compteur et les métadonnées montent en temps réel (throttlé), sans attendre endSync
+          refreshArtists();
 
           // Sauvegarder la progression pour reprise après redémarrage —
           // avec le curseur de page : la reprise ne re-paginera plus depuis le début
-          saveProgress(artist.name, pageUrl, i + 1);
+          localStorage.setItem('spotifyplus_sync_progress', JSON.stringify({
+            artists_scanned:  artistsScanned,
+            total_artists:    totalArtists,
+            last_artist_name: artist.name,
+            page_url:         pageUrl,
+            page_offset:      i + 1,
+          }));
 
           const isVeryLast = !nextUrl && i === artists.length - 1;
           if (!isVeryLast) {
@@ -32739,6 +32651,9 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.253', date:'2026-11-19', title:'🎵 Scraping : ordre d’origine', items:[
+    'Retour à l’ordre d’avant : le scraping suit la liste des artistes suivis du début à la fin, sans passer d’abord les artistes jamais scannés. Un nouvel artiste est scanné quand la boucle arrive à lui.',
+  ] },
   { v:'13.21.252', date:'2026-11-19', title:'🔔 Alertes : retirer une date', items:[
     'Une croix ✕ à droite de chaque date choisie la retire : l’alerte n’a plus de date (son heure part avec).',
     'La fenêtre de calendrier est celle du téléphone : on ne peut pas y ajouter de bouton, d’où la croix à côté du champ.',
@@ -32753,10 +32668,6 @@ const RELEASE_NOTES = [
   { v:'13.21.249', date:'2026-11-18', title:'🎵 Scraping : compteur d’artistes', items:[
     'Pendant le scraping, la case Artistes ne reste plus bloquée à 0 : les artistes jamais scannés (traités en premier) sont comptés, et le total s’affiche dès le début.',
     'Une reprise affiche directement sa position au lieu de repartir de 0.',
-  ] },
-  { v:'13.21.248', date:'2026-11-17', title:'🚗 Mode Voiture : volume retiré', items:[
-    'Changer le volume ne passe plus au titre suivant, et l’affichage du volume est retiré : Spotify ne transmet pas ce réglage de façon fiable.',
-    'Inchangé : revenir à la verticale en Défilement rouge coupe toujours le mode Voiture.',
   ] },
 ];
 

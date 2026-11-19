@@ -20,7 +20,7 @@
 ## Musique
 
 - Connexion **OAuth PKCE** 100 % client. Chaque artiste suivi est scanné depuis **sa propre date de dernier scan** ; la première fois, il rapporte **toute sa discographie** (et compte pour autant d'artistes qu'il a lu de pages).
-- **Quota de 100 artistes / 24 h glissantes**, artistes jamais scannés traités en premier à chaque synchro, pause / reprise, arrêt de 15 min minimum dès la première limite Spotify (429). **Scraping automatique** au lancement (À propos → ⏰ Lancement automatique).
+- **Quota de 100 artistes / 24 h glissantes**, pause / reprise, arrêt de 15 min minimum dès la première limite Spotify (429). **Scraping automatique** au lancement (À propos → ⏰ Lancement automatique).
 - **Feed** jusqu'à 1000 titres, filtres et tri sur toute la base. Clic = lecture, **×** = retiré, compté écouté seulement s'il était en lecture (↩ Annuler 5 s), **❤** = like. Fin de titre ⇒ marqué écouté + **auto-avance**, sans voler une lecture lancée ailleurs.
 - **🚗 Mode Voiture** (lecteur réduit à droite du ❤ ; à la verticale entre 🔁 et ⌄) : chaque clic avance d'un cran. 🔵 Bleu : page ouverte, tout changement fait sur l'autoradio (suivant, précédent, retour au début, saut) = flèche droite du site ; pause ignorée ; vérifie la lecture chaque seconde. 🔴 Rouge 5 → 10 → 15 : titre suivant automatique toutes les 5 / 10 / 15 s, démarré à 33 % (rien en pause) ; un clic de plus coupe ; passer de l'horizontale à la verticale coupe le rouge (le relancer à la verticale reste possible).
 - **Découvertes de la semaine** : bouton violet dans ⚙ Scraping, ou simplement **lancer la playlist** — le Hub range ses titres dans « En attente ».
