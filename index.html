@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.255';
+const APP_VERSION = '13.21.256';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32697,6 +32697,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.256', date:'2026-11-20', title:'📺 Vus non finis : saisons manquantes', items:[
+    'Dans TV Time, Vus avec le 🚫 actif : chaque série affiche le nombre de saisons sorties qu’il te reste à voir et la date de sortie de la dernière.',
+    'La fiche de chaque série est relue chez TMDB à ce moment-là (une fois par session) : le libellé se complète en quelques secondes.',
+  ] },
   { v:'13.21.255', date:'2026-11-20', title:'↩ Alertes : annuler une date retirée', items:[
     'Après avoir retiré la date d’une alerte, un bouton ↩ la remet. Il reste là tant que l’alerte n’a pas de nouvelle date (jusqu’au rechargement de la page).',
     'L’heure éventuelle n’est pas remise : elle part avec la date.',
@@ -32711,10 +32715,6 @@ const RELEASE_NOTES = [
   { v:'13.21.252', date:'2026-11-19', title:'🔔 Alertes : retirer une date', items:[
     'Une croix ✕ à droite de chaque date choisie la retire : l’alerte n’a plus de date (son heure part avec).',
     'La fenêtre de calendrier est celle du téléphone : on ne peut pas y ajouter de bouton, d’où la croix à côté du champ.',
-  ] },
-  { v:'13.21.251', date:'2026-11-19', title:'🚗 Mode Voiture à la verticale', items:[
-    'Le bouton 🚗 Mode Voiture / 🔴 Défilement s’affiche aussi dans le lecteur vertical, entre le bouton de boucle et la flèche ⌄.',
-    'Inchangé : passer de l’horizontale à la verticale en Défilement rouge coupe le mode ; un clic le relance.',
   ] },
 ];
 
@@ -48468,6 +48468,40 @@ function tvForcedDone(it) {
   if (!all.length) return (it.totalEps || 0) > 0 && seen.size < it.totalEps;
   return all.some(k => { const m = k.match(/^S(\d+)E(\d+)$/); return !seen.has(k) && !(m && tvEpLocked(null, it, +m[1], +m[2])); });
 }
+// 🚫 Vus NON FINIS : nombre de saisons manquantes + date de sortie de la dernière d'entre elles
+// (demande utilisateur, affiché seulement quand le 🚫 de l'en-tête est actif).
+// ⚠ `seasons` ne garde pas la date de chaque saison, et une série 🚫/🙈 n'est plus rafraîchie
+// (`tvFollowsReleases`) : sa liste de saisons peut dater. La fiche TMDB est donc relue À LA
+// DEMANDE, une fois par série et par session, en MÉMOIRE seulement (`_tvGapCache`) : rien
+// n'est écrit dans la fiche. Échec / pas de clé ⇒ repli sur `seasons` local, sans date.
+// Saison manquante = saison SORTIE (air_date ≤ aujourd'hui ; sans date : épisode non verrouillé)
+// dont au moins un épisode n'est pas coché.
+const _tvGapCache = new Map();   // id TMDB → [{ n, eps, date }] ou null (échec)
+async function tvGapFetch(id) {
+  if (_tvGapCache.has(id)) return;
+  const d = await tmdbGet(`/tv/${id}`);
+  _tvGapCache.set(id, d && Array.isArray(d.seasons)
+    ? d.seasons.filter(x => x.season_number > 0 && x.episode_count > 0).map(x => ({ n: x.season_number, eps: x.episode_count, date: x.air_date || '' }))
+    : null);
+}
+function tvMissingSeasons(it) {
+  const fresh = _tvGapCache.get(it.id);
+  const seasons = fresh || (it.seasons || []).map(x => ({ n: x.n, eps: x.eps, date: '' }));
+  const seen = new Set(tvWatchedSet(it)), today = localDayStr();
+  const miss = seasons.filter(x => {
+    if (x.date && x.date > today) return false;
+    for (let e = 1; e <= x.eps; e++) if (!seen.has(`S${x.n}E${e}`) && (x.date || !tvEpLocked(null, it, x.n, e))) return true;
+    return false;
+  });
+  const last = miss.reduce((m, x) => (!m || x.n > m.n ? x : m), null);
+  return { count: miss.length, last, loaded: _tvGapCache.has(it.id) };
+}
+function tvMissingLabel(it) {
+  const g = tvMissingSeasons(it);
+  if (!g.count) return g.loaded ? '' : 'saisons manquantes…';
+  const d = g.last && g.last.date ? g.last.date.split('-').reverse().join('/') : '';
+  return `${g.count} saison${g.count > 1 ? 's' : ''} manquante${g.count > 1 ? 's' : ''}` + (d ? ` · S${g.last.n} sortie le ${d}` : '');
+}
 // ⚠ 8.7.4 — VIDÉOS COCHÉES QUI NE SONT PLUS DANS LA LISTE (cause du « 500/375 ») : en levant
 // le plafond de 500 on charge tout l'historique d'une chaîne, on coche des vidéos anciennes,
 // puis en remettant le plafond `ytBuildItem` ne garde que les 500 plus récentes — les ids
@@ -52130,6 +52164,22 @@ function TvTimePanel() {
   const forcedCan  = mediaFilter === 'all' || mediaFilter === 'tv';   // seuls onglets à contenir des séries
   const forcedOn   = forcedOnly && forcedCan;
   const done     = forcedOn ? doneAll.filter(tvForcedDone) : doneAll;
+  // 🚫 actif : fiches TMDB des séries listées relues une à une (voir tvMissingSeasons), le
+  // libellé se complète au fil des réponses (`setGapTick`).
+  const [, setGapTick] = React.useState(0);
+  const gapIds = forcedOn ? done.filter(it => it.type === 'tv' && !_tvGapCache.has(it.id)).map(it => it.id).join(',') : '';
+  React.useEffect(() => {
+    if (!gapIds) return;
+    let stop = false;
+    (async () => {
+      for (const id of gapIds.split(',')) {
+        if (stop) return;
+        await tvGapFetch(Number(id) || id);
+        if (!stop) setGapTick(t => t + 1);
+      }
+    })();
+    return () => { stop = true; };
+  }, [gapIds]);
   // PROCHAINES SORTIES : séries (prochain épisode à diffuser) + films PAS ENCORE SORTIS.
   // Le contenu suit le filtre Films/Séries/Les deux :
   // Séries → prochains épisodes ; Films → films à venir ; Les deux → les deux, triés par date.
@@ -52712,7 +52762,10 @@ function TvTimePanel() {
           {secOpen.done && (done.length === 0
             ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>{forcedOn ? 'Aucune série marquée vue sans être finie' : 'Aucun film ou série vu·e'}</div>
             : <DeskGrid min={360}>{done.map(it => row(it,
-                it.type === 'movie' ? `Film${it.runtime ? ` · ${it.runtime} min` : ''}` : it.type === 'youtube' ? `${(it.watchedIds || []).length} vidéos vues` : `${it.watchedEps || 0} ép. vus${it.dropped ? ' · plus suivie' : ''}`,
+                it.type === 'movie' ? `Film${it.runtime ? ` · ${it.runtime} min` : ''}` : it.type === 'youtube' ? `${(it.watchedIds || []).length} vidéos vues` : forcedOn && it.type === 'tv' && tvMissingLabel(it)
+                  // 🚫 actif : saisons manquantes sur une 2e ligne (la 1re est tronquée sur mobile)
+                  ? <>{`${it.watchedEps || 0} ép. vus${it.dropped ? ' · plus suivie' : ''}`}<div style={{ color:'#e07b39', whiteSpace:'normal' }}>{tvMissingLabel(it)}</div></>
+                  : `${it.watchedEps || 0} ép. vus${it.dropped ? ' · plus suivie' : ''}`,
                 <>
                   <button onClick={() => setStatus(it, 'watching')} title="Repasser en cours" style={abtn(C.muted)}>↩</button>
                   <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
