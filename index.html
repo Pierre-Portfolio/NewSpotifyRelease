@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.256';
+const APP_VERSION = '13.21.257';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2402,6 +2402,11 @@ const CAR_MODE_LS = 'spotifyplus_car_mode';
 const PLAYER_POLL_CAR_MS = 1000, CAR_SELF_GRACE_MS = 4000, CAR_TOL_MS = 3000;
 const CAR_SKIP_STEPS = [5, 10, 15], CAR_SKIP_PCT = 0.33, CAR_BLUE = '#3b8bff', CAR_RED = '#e5484d';
 let _carSelfAt = 0;
+// ⏸ Pause demandée PAR L'APP (posée par `apiPut` sur /me/player/pause, levée par tout
+// /me/player/play, ou par le poll quand la lecture a repris ailleurs) : `_userPaused` = en pause
+// maintenant, `_userPauseAt` = heure du dernier ⏸. ⚠ Le Défilement et `_playConfirm` relancent
+// la lecture : sans ce drapeau, une pause dans les 5 s d'un saut était annulée par la vérif.
+let _userPaused = false, _userPauseAt = 0;
 const _carSubs = new Set();
 function carModeGet() {
   let v = null;
@@ -2517,6 +2522,8 @@ async function apiPut(url, body, _retried = false, opts) {
   // 🚗 Commande lecteur venue de l'app : le mode Voiture ne doit pas la prendre pour l'autoradio
   const selfPlayer = url.indexOf('/me/player') !== -1;
   if (selfPlayer) _carSelfAt = Date.now();
+  if (url.indexOf('/me/player/pause') !== -1) { _userPaused = true; _userPauseAt = Date.now(); }
+  else if (url.indexOf('/me/player/play') !== -1) _userPaused = false;
   try { return await _apiPut(url, body, _retried, opts); }
   finally { if (selfPlayer) _carSelfAt = Date.now(); }
 }
@@ -4218,6 +4225,9 @@ function StoreProvider({ children }) {
         if (!stop && r?.context?.type === 'playlist' && r?.item) {
           dwCaptureFromContext(r.context.uri, log).then(n => { if (n > 0 && !stop) reloadFeedRef.current(); }).catch(() => {});
         }
+        // ⏸ posé par l'app mais la musique rejoue (reprise depuis Spotify / l'autoradio) : levé,
+        // passé la fenêtre où Spotify renvoie encore l'état d'avant la pause.
+        if (!stop && r?.is_playing && _userPaused && Date.now() - _userPauseAt > CAR_SELF_GRACE_MS) _userPaused = false;
         if (!stop && r?.item) {
           const next = {
             title:    r.item.name,
@@ -4662,6 +4672,8 @@ function StoreProvider({ children }) {
   // 🔴 Défilement du mode Voiture (voir CAR_SKIP_STEPS) : chaîne de setTimeout, le délai
   // repart APRÈS chaque saut (N s d'écoute réelle, pas d'empilement si Spotify traîne).
   // Rien ne se lance tant que la musique est en pause : un saut relancerait la lecture.
+  // ⚠ `now.playing` traîne jusqu'à 5 s (poll) : on regarde `_userPaused` puis on RELIT l'état
+  // réel juste avant le saut. ⏸ arrivé pendant un saut en vol ⇒ son PUT play l'annule : re-pause.
   const [carSkip, setCarSkip] = React.useState(carSkipSec);
   React.useEffect(() => {
     const f = () => setCarSkip(carSkipSec());
@@ -4677,12 +4689,18 @@ function StoreProvider({ children }) {
       if (stop) return;
       timer = setTimeout(async () => {
         const n = carNowRef.current;
-        if (!stop && n?.playing && n.uri) {
+        let st = null;
+        if (!stop && n?.uri && !_userPaused) {
+          try { st = await apiGet('https://api.spotify.com/v1/me/player/currently-playing'); } catch {}
+        }
+        if (!stop && !_userPaused && st?.is_playing && st.item) {
           // ⚠ `_effUri` et non `n.uri` : le poll (5 s) et ce minuteur (5 s) se font la course,
           // et juste après un PUT Spotify renvoie encore l'ANCIEN titre. Partir de `n.uri`
           // calculait « suivant » depuis le titre d'avant ⇒ même titre relancé (son voisin
           // retiré de la liste) ou un titre sauté. `playTrack` pose le curseur optimiste.
+          const t0 = Date.now();
           try { await carAdvanceRef.current(_effUri(n.uri), CAR_SKIP_PCT); } catch {}
+          if (_userPauseAt > t0) { try { await apiPut('https://api.spotify.com/v1/me/player/pause', undefined, false, { player: true }); } catch {} }
         }
         loop();
       }, carSkip * 1000);
@@ -27122,6 +27140,7 @@ function usePlayerControls(opts) {
     if (!now) return;
     if (now.playing) await apiPut('https://api.spotify.com/v1/me/player/pause');
     else             await apiPut('https://api.spotify.com/v1/me/player/play');
+    if (_playerPollKick) _playerPollKick();   // ▶/⏸ affiché sans attendre le poll 5 s
   };
   const prevTrack = async () => {
     const idx = currentIndex > 0 ? currentIndex - 1 : filteredFeed.length - 1;
@@ -27655,15 +27674,17 @@ function _playAlert(msg) {
 // joue encore n'est corrigé qu'au dernier contrôle.
 let _playSeq = 0;
 const PLAY_CHECK_WAITS = [1200, 1500, 2500];
-async function _playConfirm(spotifyUri, seq, body) {
+// ⚠ `startAt` : un ⏸ de l'utilisateur après le lancement (`_userPauseAt`) arrête la vérif,
+// sinon « titre chargé mais en pause » le relançait.
+async function _playConfirm(spotifyUri, seq, body, startAt = 0) {
   const url = 'https://api.spotify.com/v1/me/player/play';
   let fixed = false;
   for (let i = 0; i < PLAY_CHECK_WAITS.length; i++) {
     await sleep(PLAY_CHECK_WAITS[i]);
-    if (seq !== _playSeq || document.visibilityState === 'hidden') return;
+    if (seq !== _playSeq || document.visibilityState === 'hidden' || _userPauseAt > startAt) return;
     let st;
     try { st = await apiGet('https://api.spotify.com/v1/me/player?market=from_token'); } catch { return; }
-    if (seq !== _playSeq || st?.rate_limited || st?.error) return;
+    if (seq !== _playSeq || st?.rate_limited || st?.error || _userPauseAt > startAt) return;
     const it   = st?.item;
     const same = !!it && (it.uri === spotifyUri || it.linked_from?.uri === spotifyUri);
     if (same && st.is_playing) return;
@@ -27740,6 +27761,7 @@ async function playTrack(spotifyUri, opts) {
   const warn = msg => { if (user) { _playAlertAt = Date.now(); alert(msg); } else _playAlert(msg); };
   _navUri = spotifyUri;
   _navAt  = Date.now();
+  const startAt = _navAt;
   const seq    = ++_playSeq;
   const url    = 'https://api.spotify.com/v1/me/player/play';
   let body     = await spotifyPlayBody(spotifyUri);
@@ -27776,7 +27798,7 @@ async function playTrack(spotifyUri, opts) {
   const kind = playErrKind(result);
   if (!kind) {
     if (_playerPollKick) _playerPollKick();   // lecture lancée : re-sonder sans attendre le tick lent
-    _playConfirm(spotifyUri, seq, body).catch(() => {});
+    _playConfirm(spotifyUri, seq, body, startAt).catch(() => {});
     return;
   }
   if (seq !== _playSeq) return;
@@ -32697,6 +32719,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.257', date:'2026-11-20', title:'🔴 Défilement : la pause tient', items:[
+    'En mode Voiture Défilement (5, 10 ou 15 s), ⏸ met vraiment la musique en pause : elle ne repart plus toute seule.',
+    'Le défilement reprend dès que tu relances la lecture, depuis l’app ou depuis Spotify.',
+  ] },
   { v:'13.21.256', date:'2026-11-20', title:'📺 Vus non finis : saisons manquantes', items:[
     'Dans TV Time, Vus avec le 🚫 actif : chaque série affiche le nombre de saisons sorties qu’il te reste à voir et la date de sortie de la dernière.',
     'La fiche de chaque série est relue chez TMDB à ce moment-là (une fois par session) : le libellé se complète en quelques secondes.',
@@ -32711,10 +32737,6 @@ const RELEASE_NOTES = [
   ] },
   { v:'13.21.253', date:'2026-11-19', title:'🎵 Scraping : ordre d’origine', items:[
     'Retour à l’ordre d’avant : le scraping suit la liste des artistes suivis du début à la fin, sans passer d’abord les artistes jamais scannés. Un nouvel artiste est scanné quand la boucle arrive à lui.',
-  ] },
-  { v:'13.21.252', date:'2026-11-19', title:'🔔 Alertes : retirer une date', items:[
-    'Une croix ✕ à droite de chaque date choisie la retire : l’alerte n’a plus de date (son heure part avec).',
-    'La fenêtre de calendrier est celle du téléphone : on ne peut pas y ajouter de bouton, d’où la croix à côté du champ.',
   ] },
 ];
 
