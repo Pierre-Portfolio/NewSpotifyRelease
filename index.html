@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.257';
+const APP_VERSION = '13.21.258';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -3588,19 +3588,29 @@ const FULL_SCRAPE_FROM = '1900-01-01';
 // déroulant `next` page par page — et non plus sa seule dernière année. La sentinelle
 // `FULL_SCRAPE_FROM` sert donc de cutoff RÉEL (rien n'est filtré par la date) en plus de
 // marquer l'état « premier scan pas encore terminé » (panneau Artistes, reprise après 429).
-// ⚠ CE QUE ÇA COÛTE, ET COMMENT C'EST PAYÉ : un artiste connu coûte UNE page d'albums, et
-// le quota des 24 h se compte en artistes. Une page d'albums = l'unité de ce quota : un
-// premier scan qui lit 5 pages consomme donc 5 unités sur les 100 (`dailyCount += pages`),
-// et le journal l'annonce en toutes lettres. Sans ça, dérouler la discographie ferait
-// silencieusement dix fois plus de requêtes que le quota ne le laisse croire.
-// ⚠ L'artiste en cours est toujours TERMINÉ avant l'arrêt sur quota (le test est en tête de
-// boucle) : le compteur peut donc dépasser 100 d'un artiste, jamais un premier scan ne se
-// fait couper en deux par le quota — il repartirait de la page 1 au scan suivant et
-// rebrûlerait les mêmes requêtes.
+// ⚠ CE QUE ÇA COÛTE, ET COMMENT C'EST PAYÉ : le quota des 24 h se compte en REQUÊTES de
+// scan (`quotaGet` dans `startSync`) : chaque page d'albums ET chaque page de pistes d'une
+// sortie coûte une unité. Ne compter que les pages d'albums laissait passer une requête de
+// pistes par sortie : un premier scan de 40 sorties affichait 4 et en faisait 44 ⇒ 429 réel
+// de Spotify alors que le compteur disait 50/100 (13.21.258).
+// ⚠ Le quota coupe EN PLEIN ARTISTE (avant la requête qui le dépasserait) : la liste des
+// sorties déjà lue et les sorties déjà traitées sont gardées dans `SYNC_ARTIST_LS`, la reprise
+// repart de là sans relire ce qui a été payé. Rien n'est jamais avancé sur la ligne de
+// l'artiste avant qu'il soit fini (la sentinelle reste posée).
 // ⚠ Plafond de sécurité : au-delà, la boucle s'arrête et LE DIT (ni silence, ni quota
 // entier englouti par un seul catalogue). 20 pages × 10 = 200 sorties, soit bien plus que
 // ce que publie n'importe quel artiste suivi à la main.
 const FIRST_SCRAPE_MAX_PAGES = 20;
+// Scan d'artiste interrompu (quota, 429, erreur) : { id, at, albums (forme réduite), next,
+// pages, cut, done:[ids d'albums traités] }. ⚠ `done` n'est écrit QUE juste avant le
+// `saveDB()` d'`endSync` : un rechargement brutal le perd (ses pistes, encore en mémoire, aussi),
+// jamais l'inverse (sortie notée faite dont les titres ne seraient pas en base).
+// Ignoré si l'id diffère ou s'il a plus de `SYNC_ARTIST_TTL` (une sortie parue entre-temps).
+const SYNC_ARTIST_LS = 'spotifyplus_sync_artist';
+const SYNC_ARTIST_TTL = 7 * 24 * 60 * 60 * 1000;
+// Écart minimal entre deux requêtes de scan : les pistes d'une discographie partaient en
+// rafale, sans pause, et la rafale suffit à déclencher le 429 de Spotify (fenêtre ~30 s).
+const SCAN_REQ_GAP_MS = 400;
 // Une release_date Spotify a une précision variable : 'day' ("2026-05-10"), 'month'
 // ("2026-05") ou 'year' ("2026"). new Date("2026") → 1er janvier : une nouveauté datée à
 // l'année seule passait alors SOUS le cutoff (ex. 2026-03-15) et était ratée. On considère
@@ -4789,7 +4799,7 @@ function StoreProvider({ children }) {
       const mins = Math.ceil((until - Date.now()) / 60000);
       const h = Math.floor(mins / 60), m = mins % 60;
       const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
-      log(`⛔ Quota de 100 artistes atteint — prochaine synchro possible le ${when} (dans ${h > 0 ? h + ' h ' : ''}${m} min).`, 'error');
+      log(`⛔ Quota de 100 requêtes atteint — prochaine synchro possible le ${when} (dans ${h > 0 ? h + ' h ' : ''}${m} min).`, 'error');
       setStatus('Quota 24h atteint', 'error');
       return;
     }
@@ -4801,6 +4811,8 @@ function StoreProvider({ children }) {
     setLogs([]);
     setStats({ artists:0, total:0, releases:0, tracks:0 });
     setEta(''); setStatus('Vérification du compte…', 'pulse');
+    // Artiste en cours : position pour la reprise + sauvegarde de son scan partiel (lus au catch).
+    let curScan = null;
 
     try {
       // Point de contrôle unique, attendu avant CHAQUE appel API de la synchro.
@@ -4861,6 +4873,30 @@ function StoreProvider({ children }) {
         }
       };
 
+      // ⚠ Toute requête d'un scan d'artiste passe ici : UNE requête = UNE unité du quota des 24 h
+      // (cf. FIRST_SCRAPE_MAX_PAGES). Refusée AVANT de partir si le quota est atteint ⇒
+      // `SYNC_QUOTA_STOP`, même en plein artiste. Comptée même en échec : elle est partie.
+      let lastScanReq = 0;
+      const quotaGet = async (url) => {
+        if (dailyCount >= QUOTA_MAX) throw new Error('SYNC_QUOTA_STOP');
+        const gap = lastScanReq + SCAN_REQ_GAP_MS - Date.now();
+        if (gap > 0) await sleep(gap);
+        try { return await apiGetSafe(url); }
+        finally {
+          lastScanReq = Date.now();
+          dailyCount++;
+          // `last` = instant de ce scrap : sert au reset d'inactivité. 100e requête ⇒ ouvre la
+          // fenêtre glissante de 24 h (gelée à cet instant).
+          if (dailyCount >= QUOTA_MAX) {
+            const until = lastScanReq + QUOTA_MS;
+            saveQuota(dailyCount, until, lastScanReq);
+            setQuotaUntil(until);
+          } else {
+            saveQuota(dailyCount, 0, lastScanReq);
+          }
+          setDailyScrapings(dailyCount);
+        }
+      };
       log('── Étape 1 : vérification du compte ──', 'info');
       const me = await apiGetSafe('https://api.spotify.com/v1/me');
       if (!me?.id) throw new Error('impossible de récupérer le compte');
@@ -4970,19 +5006,10 @@ function StoreProvider({ children }) {
           if (!resumeUrl && globalArtistIndex <= skipCount) continue;
           await checkpoint();
 
-          // Quota 24h atteint : la fenêtre glissante a été ouverte au 100e artiste
-          // (dans l'incrément ci-dessous). Synchro arrêtée jusqu'à son expiration.
-          if (dailyCount >= QUOTA_MAX) {
-            const until = ensureQuotaWindow(); // posée au 100e scan ; ouverte ici si absente
-            setQuotaUntil(until);
-            const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
-            log(`⛔ Quota de 100 artistes atteint (fenêtre de 24h). Synchro arrêtée. Prochaine synchro possible le ${when}.`, 'error');
-            setStatus('Quota 24h atteint', 'error');
-            notify('Spotify+ — Session terminée', `100 artistes scrapés. Prochaine synchro le ${when}.`);
-            await endSync('daily_limit');
-            return;
-          }
+          // Quota 24h atteint : arrêt traité dans le catch (`SYNC_QUOTA_STOP`), comme en plein artiste.
+          if (dailyCount >= QUOTA_MAX) throw new Error('SYNC_QUOTA_STOP');
           const artist = artists[i];
+          curScan = { pageUrl, offset: i, scanned: artistsScanned, total: totalArtists, name: artist.name, save: null };
           artistsScanned++;
           setStats(s => ({ ...s, artists: artistsScanned }));
           setCurrentArtist(artist.name);
@@ -5039,20 +5066,45 @@ function StoreProvider({ children }) {
           // ── Lecture des albums ───────────────────────────────────────────────────────
           // Artiste connu : UNE page (les sorties viennent des plus récentes aux plus
           // anciennes, le cutoff coupe le reste). Premier scan : on déroule `next` jusqu'au
-          // bout — chaque page lue coûte une unité de quota, comptée plus bas.
+          // bout — chaque page lue coûte une unité de quota (`quotaGet`).
+          // Scan de CET artiste coupé plus tôt (quota, 429) : on repart de ce qui a été payé.
+          let resumed = null;
+          try {
+            const p = JSON.parse(localStorage.getItem(SYNC_ARTIST_LS) || 'null');
+            if (p?.id === artist.id && Array.isArray(p.albums) && Date.now() - (p.at || 0) < SYNC_ARTIST_TTL) resumed = p;
+          } catch {}
+          const costFrom   = dailyCount;
+          const albumsDone = new Set(resumed?.done || []);   // sorties dont les pistes sont déjà en base
           let albumsData   = null;   // { items } agrégé ; null = même la 1re page a échoué → branche d'erreur
-          let albumPages   = 0;      // pages RÉELLEMENT demandées = coût de cet artiste en quota
-          let albumsCut    = false;  // plafond atteint : discographie incomplète, on le DIT
+          let albumPages   = resumed?.pages || 0;  // pages d'albums lues pour cet artiste (reprise comprise)
+          let albumsCut    = !!resumed?.cut;       // plafond atteint : discographie incomplète, on le DIT
+          const albItems   = resumed ? resumed.albums.slice() : [];
+          // Forme réduite : seuls les champs lus plus bas (pochette = images[0]).
+          const saveArtistScan = (next) => lsSet(SYNC_ARTIST_LS, JSON.stringify({
+            id: artist.id, at: Date.now(), next: next || null, pages: albumPages, cut: albumsCut,
+            done: [...albumsDone],
+            albums: albItems.map(a => ({
+              id: a.id, name: a.name, release_date: a.release_date, album_type: a.album_type,
+              album_group: a.album_group, images: [{ url: a.images?.[1]?.url || a.images?.[0]?.url || null }],
+            })),
+          }));
+          let albNext = null;        // page d'albums restant à lire (premier scan coupé en route)
+          curScan.save = () => { if (albItems.length) saveArtistScan(albNext); };
+          if (resumed) {
+            albumsData = { items: albItems };
+            log(`↩ ${artist.name} · reprise du scan interrompu — ${albItems.length} sortie(s) déjà listée(s), ${albumsDone.size} déjà traitée(s)`, 'info');
+          }
           {
             // ⚠ Migration Spotify fév./mars 2026 : limit max de cet endpoint réduit de 50 à 10
             // (limit=20 → 400 "Invalid limit" depuis le 9 mars 2026, même pour les apps existantes)
-            let albUrl = `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`;
-            const albItems = [];
+            let albUrl = resumed ? resumed.next : `https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=album,single&limit=10&market=FR`;
             while (albUrl) {
-              const page = await apiGetSafe(albUrl);
-              albumPages++;              // la requête est partie : elle est due, réponse exploitable ou non
+              albNext = albUrl;
+              const page = await quotaGet(albUrl);
+              albumPages++;
               if (!page?.items) break;   // 1re page → albumsData reste null ; page suivante → on garde l'acquis
-              albItems.push(...page.items);
+              // Dédoublonné : une page 1 relue à la reprise (coupée avant la page des singles).
+              albItems.push(...page.items.filter(a => !albItems.some(b => b.id === a.id)));
               albumsData = { items: albItems, next: page.next || null };
               if (albumPages === 1) writeLightRow();
               if (!firstScrape) {
@@ -5060,42 +5112,29 @@ function StoreProvider({ children }) {
                 // (tous les albums du plus récent au plus ancien, PUIS les singles) : chez un
                 // artiste d'au moins 10 albums, la page 1 ne contient aucun single et un single
                 // sorti hier n'était jamais lu. Page pleine d'albums + suite ⇒ UNE requête de
-                // plus sur le seul groupe `single` (une unité de quota de plus, comptée plus bas).
+                // plus sur le seul groupe `single` (une unité de quota de plus).
+                // ⚠ Coupé entre les deux : `albNext` pointe encore sur la page 1 ⇒ relue à la reprise.
                 if (page.next && !page.items.some(a => (a.album_group || a.album_type) === 'single')) {
-                  const sp = await apiGetSafe(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=single&limit=10&market=FR`);
+                  const sp = await quotaGet(`https://api.spotify.com/v1/artists/${artist.id}/albums?include_groups=single&limit=10&market=FR`);
                   albumPages++;
                   if (sp?.items) albItems.push(...sp.items.filter(a => !albItems.some(b => b.id === a.id)));
                 }
+                albNext = null;
                 break;                   // scan incrémental : une seule page (par groupe)
               }
               albUrl = page.next || null;
               if (albUrl && albumPages >= FIRST_SCRAPE_MAX_PAGES) { albumsCut = true; albUrl = null; }
+              albNext = albUrl;
+              saveArtistScan(albNext);   // liste payée : jamais relue si la suite est coupée
             }
+            albNext = null;
           }
 
-          // Quota consommé APRÈS la/les requête(s) : un throw au-dessus (erreur API,
-          // disjoncteur) ne brûle plus le quota d'un artiste qui n'a pas été scanné.
-          // ⚠ UNE PAGE D'ALBUMS = UN ARTISTE sur les 100 : un premier scan intégral qui a lu
-          // 5 pages compte pour 5 (cf. FIRST_SCRAPE_MAX_PAGES).
-          dailyCount += albumPages;
-          // `last` = instant de ce scrap : sert au reset d'inactivité (compteur remis
-          // à 0 si 24h passent sans nouveau scrap, même en dessous de 100).
-          const scrapAt = Date.now();
-          if (dailyCount >= QUOTA_MAX) {
-            // 100e artiste scrapé → ouvre la fenêtre glissante de 24h (gelée à cet instant)
-            const until = scrapAt + QUOTA_MS;
-            saveQuota(dailyCount, until, scrapAt);
-            setQuotaUntil(until);
-          } else {
-            saveQuota(dailyCount, 0, scrapAt);
-          }
-          setDailyScrapings(dailyCount);
-
-          // Le journal DIT ce que le premier scan a coûté : sans ça, le compteur du quota
-          // sauterait de 1 à 6 sans explication.
+          // Le journal DIT ce que le premier scan a lu ; son coût en requêtes est donné en fin
+          // d'artiste (« scan terminé »).
           if (firstScrape && albumsData?.items) {
             const cut = albumsCut ? ` · ⚠ plafond de ${FIRST_SCRAPE_MAX_PAGES} pages atteint, sorties plus anciennes non lues` : '';
-            log(`★ ${artist.name} · premier scan INTÉGRAL — ${albumsData.items.length} sortie(s) sur ${albumPages} page(s) · coûte ${albumPages} artiste(s) sur le quota (${dailyCount}/${QUOTA_MAX})${cut}`, 'info');
+            log(`★ ${artist.name} · premier scan INTÉGRAL — ${albumsData.items.length} sortie(s) sur ${albumPages} page(s)${cut}`, 'info');
           }
 
           if (albumsData?.items) {
@@ -5108,19 +5147,23 @@ function StoreProvider({ children }) {
 
             for (const album of albumsData.items) {
               if (!releaseInRange(album.release_date, cutoff, ceiling)) continue;
+              if (albumsDone.has(album.id)) continue;   // traitée avant l'interruption : déjà en base
               const rDate = new Date(album.release_date);
 
-              const tracksData = await apiGetSafe(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
-              if (!tracksData?.items?.length) continue;
+              const tracksData = await quotaGet(`https://api.spotify.com/v1/albums/${album.id}/tracks?limit=50`);
               // 50 = plafond de l'endpoint : une édition deluxe / une compilation plus longue
-              // perdait tout ce qui suit la 50e piste. `next` déroulé (plafonné, hors quota
-              // artistes comme la 1re page de pistes).
-              for (let tp = 0, nx = tracksData.next; nx && tp < ALBUM_TRACK_PAGES_MAX; tp++) {
-                const more = await apiGetSafe(nx);
+              // perdait tout ce qui suit la 50e piste. `next` déroulé (plafonné), chaque page
+              // comptée au quota. ⚠ Coupé ici : la sortie n'est pas notée faite ⇒ reprise entière.
+              for (let tp = 0, nx = tracksData?.items?.length ? tracksData.next : null; nx && tp < ALBUM_TRACK_PAGES_MAX; tp++) {
+                const more = await quotaGet(nx);
                 if (!more?.items?.length) break;
                 tracksData.items.push(...more.items);
                 nx = more.next || null;
               }
+              // Plus aucune requête pour cette sortie ⇒ notée faite (persistée seulement au catch,
+              // juste avant le saveDB d'endSync : cf. SYNC_ARTIST_LS).
+              albumsDone.add(album.id);
+              if (!tracksData?.items?.length) continue;
               // EP : Spotify le classe `single` (4 à 6 titres). Le réduire à sa 1re piste comme un
               // vrai single (titre + versions instrumentale/radio) en perdait 3 à 5 titres : à
               // partir de EP_MIN_TRACKS il est traité comme un album (release_type 'ep').
@@ -5200,6 +5243,7 @@ function StoreProvider({ children }) {
             }
             // #opt : un seul setFeed par artiste (au lieu d'une recopie du tableau par album)
             if (artistFeedItems.length) setFeed(F => [...F, ...artistFeedItems].slice(0, 1000));
+            if (firstScrape || resumed) log(`★ ${artist.name} · scan terminé — ${dailyCount - costFrom} requête(s) sur le quota (${dailyCount}/${QUOTA_MAX})`, 'info');
 
             // Date de scan avancée UNIQUEMENT si la liste d'albums a bien été lue —
             // sinon la fenêtre de scan serait brûlée sans avoir rien scanné (sorties perdues à jamais)
@@ -5240,6 +5284,10 @@ function StoreProvider({ children }) {
             // ne jamais INSÉRER ici : poser last_scraped_at brûlerait la fenêtre de scan
             dbRun("UPDATE artists_scraped SET last_scan_status = 'error' WHERE spotify_id = ?", [artist.id]);
           }
+
+          // Artiste fini (ou en échec) : plus de scan partiel à reprendre.
+          curScan = null;
+          try { localStorage.removeItem(SYNC_ARTIST_LS); } catch {}
 
           // Rafraîchit la section Artistes en direct (ligne créée/maj ou statut d'erreur posé) —
           // le compteur et les métadonnées montent en temps réel (throttlé), sans attendre endSync
@@ -5298,6 +5346,28 @@ function StoreProvider({ children }) {
       }
       await endSync('completed');
     } catch (err) {
+      // Coupé avant la fin d'un artiste : son scan partiel ET la position (cet artiste-là,
+      // pas le suivant) sont gardés pour la reprise, avant le saveDB d'endSync.
+      if (curScan) {
+        try { curScan.save?.(); } catch {}
+        lsSet('spotifyplus_sync_progress', JSON.stringify({
+          artists_scanned:  curScan.scanned,
+          total_artists:    curScan.total,
+          last_artist_name: curScan.name,
+          page_url:         curScan.pageUrl,
+          page_offset:      curScan.offset,
+        }));
+      }
+      if (err.message === 'SYNC_QUOTA_STOP') {
+        const until = ensureQuotaWindow(); // posée à la 100e requête ; ouverte ici si absente
+        setQuotaUntil(until);
+        const when = new Date(until).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' });
+        log(`⛔ Quota de ${QUOTA_MAX} requêtes atteint (fenêtre de 24h)${curScan ? ` — arrêt en plein scan de ${curScan.name}, repris là où il s'est arrêté` : ''}. Prochaine synchro possible le ${when}.`, 'error');
+        setStatus('Quota 24h atteint', 'error');
+        notify('Spotify+ — Session terminée', `Quota de ${QUOTA_MAX} requêtes atteint. Prochaine synchro le ${when}.`);
+        await endSync('daily_limit');
+        return;
+      }
       if (err.message === 'SYNC_RATE_ABORT') {
         log(`🚫 Rate limit 429 — synchro stoppée. Réessaie dans ~${err.blockMin} min.`, 'error');
         setStatus(`Bloqué ${err.blockMin} min — rate limit Spotify`, 'error');
@@ -27383,7 +27453,7 @@ function ScrapingStatusPanel({ compact=false }) {
       </div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap: compact?6:10, marginBottom: compact?10:14 }}>
         {[
-          ['Artistes', s.stats.total ? `${s.stats.artists}/${s.stats.total}` : s.stats.artists, C.accent, `${s.dailyScrapings}/100`],
+          ['Artistes', s.stats.total ? `${s.stats.artists}/${s.stats.total}` : s.stats.artists, C.accent, `${s.dailyScrapings}/100 req.`],
           ['Sorties',  s.stats.releases, C.accent, null],
           ['Titres',   s.stats.tracks,   C.accent, null],
         ].map(([lbl, val, color, sub]) => (
@@ -27397,7 +27467,7 @@ function ScrapingStatusPanel({ compact=false }) {
       <ProgressBar pct={pct} />
       {quotaLeft > 0 && (
         <div style={{ marginTop: compact?8:10, fontSize: compact?10:11, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'7px 10px', textAlign:'center', fontFamily:'DM Mono,monospace', lineHeight:1.5 }}>
-          ⏳ Quota de 100 artistes atteint<br/>Prochaine synchro le <b>{fmtQuotaWhen(s.quotaUntil)}</b> (dans {fmtRemaining(quotaLeft)})
+          ⏳ Quota de 100 requêtes atteint<br/>Prochaine synchro le <b>{fmtQuotaWhen(s.quotaUntil)}</b> (dans {fmtRemaining(quotaLeft)})
         </div>
       )}
       <div style={{ marginTop: compact?8:10, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
@@ -27442,7 +27512,7 @@ function DateRangePanel({ compact=false }) {
       {/* Bandeau quota 24h (100 artistes atteints) */}
       {quotaBlocked && !blocked && (
         <div style={{ fontSize:10, color:'#c08a40', background:'#181206', border:'1px solid #3a2a14', borderRadius:6, padding:'6px 10px', marginBottom:8, textAlign:'center' }}>
-          ⏳ Quota de 100 artistes atteint — prochaine synchro le <b>{fmtQuotaWhen(s.quotaUntil)}</b> (dans {fmtRemaining(s.quotaUntil - Date.now())})
+          ⏳ Quota de 100 requêtes atteint — prochaine synchro le <b>{fmtQuotaWhen(s.quotaUntil)}</b> (dans {fmtRemaining(s.quotaUntil - Date.now())})
         </div>
       )}
 
@@ -32719,6 +32789,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.258', date:'2026-11-22', title:'🎵 Scraping : quota au plus juste', items:[
+    'Le quota de 100 compte maintenant chaque requête envoyée à Spotify, titres compris : il ne se fait plus doubler par un 429.',
+    'Quota atteint en plein artiste : le scan s’arrête net et reprend plus tard exactement où il en était, sans relire ce qui est déjà fait.',
+  ] },
   { v:'13.21.257', date:'2026-11-20', title:'🔴 Défilement : la pause tient', items:[
     'En mode Voiture Défilement (5, 10 ou 15 s), ⏸ met vraiment la musique en pause : elle ne repart plus toute seule.',
     'Le défilement reprend dès que tu relances la lecture, depuis l’app ou depuis Spotify.',
@@ -32734,9 +32808,6 @@ const RELEASE_NOTES = [
   { v:'13.21.254', date:'2026-11-19', title:'🎤 Artistes suivis : jamais scannés visibles', items:[
     'Au début de chaque nouvelle boucle de scraping, 🎤 Artistes suivis se met à jour avec toute ta liste d’abonnements : les artistes jamais scannés y apparaissent avec le badge JAMAIS SCANNÉ (filtre « jamais scanné »).',
     'Ils sont scannés quand la boucle arrive à eux, dans l’ordre habituel.',
-  ] },
-  { v:'13.21.253', date:'2026-11-19', title:'🎵 Scraping : ordre d’origine', items:[
-    'Retour à l’ordre d’avant : le scraping suit la liste des artistes suivis du début à la fin, sans passer d’abord les artistes jamais scannés. Un nouvel artiste est scanné quand la boucle arrive à lui.',
   ] },
 ];
 
@@ -33614,7 +33685,7 @@ function VosEcoutesPanel() {
           FINANCE_CYAN)}
         {autoSwitch(autoMusic, toggleAutoMusic, '🎶 Scraping musique', '1×/jour, jusqu\'au quota',
           autoMusic
-            ? 'Activé : dès la connexion, le scraping part tout seul et va jusqu\'au quota de 100 artistes, même si tu es sur un autre module. Coupé par le quota, il reprend là où il s\'était arrêté dès que ta fenêtre de 24 h expire.'
+            ? 'Activé : dès la connexion, le scraping part tout seul et va jusqu\'au quota de 100 requêtes, même si tu es sur un autre module. Coupé par le quota, il reprend là où il s\'était arrêté dès que ta fenêtre de 24 h expire.'
             : 'Désactivé : le scraping ne démarre que si tu cliques sur « Lancer » dans Musique → ⚙ Scraping.',
           MUSIQUE_COLOR)}
         {autoSwitch(autoTv, toggleAutoTv, '🎬 Synchro TV Time', '1×/jour, vidéos & saisons',
@@ -69924,7 +69995,7 @@ const IA_ACTIONS = [
       if (c.store.offline) return 'Mode hors ligne : pas de scraping.';
       if (musicAutoDay() === tvDayKey()) return "Le scraping est déjà terminé pour aujourd'hui.";
       if (Date.now() < _rlUntil) return 'Spotify limite les requêtes en ce moment (fenêtre 429).';
-      if (loadQuota().count >= QUOTA_MAX) return 'Quota de 100 artistes atteint sur 24 h.';
+      if (loadQuota().count >= QUOTA_MAX) return 'Quota de 100 requêtes atteint sur 24 h.';
       if (c.store.scraping) return 'Un scraping est déjà en cours.';
       return null;
     },
