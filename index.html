@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.258';
+const APP_VERSION = '13.21.259';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -32789,6 +32789,11 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.259', date:'2026-11-24', title:'⏳ TV Time : en attente de sortie entière', items:[
+    'Séries : nouvelle section ⏳ En attente de sortie entière, pour les séries en pause dont la saison en cours n’est pas encore sortie en entier (épisode 1 déjà diffusé).',
+    'La série revient d’elle-même dans ⏸ En pause dès que le dernier épisode de la saison est sorti.',
+    'Films : la section En pause n’apparaît plus (seules les séries se mettent en pause).',
+  ] },
   { v:'13.21.258', date:'2026-11-22', title:'🎵 Scraping : quota au plus juste', items:[
     'Le quota de 100 compte maintenant chaque requête envoyée à Spotify, titres compris : il ne se fait plus doubler par un 429.',
     'Quota atteint en plein artiste : le scan s’arrête net et reprend plus tard exactement où il en était, sans relire ce qui est déjà fait.',
@@ -32804,10 +32809,6 @@ const RELEASE_NOTES = [
   { v:'13.21.255', date:'2026-11-20', title:'↩ Alertes : annuler une date retirée', items:[
     'Après avoir retiré la date d’une alerte, un bouton ↩ la remet. Il reste là tant que l’alerte n’a pas de nouvelle date (jusqu’au rechargement de la page).',
     'L’heure éventuelle n’est pas remise : elle part avec la date.',
-  ] },
-  { v:'13.21.254', date:'2026-11-19', title:'🎤 Artistes suivis : jamais scannés visibles', items:[
-    'Au début de chaque nouvelle boucle de scraping, 🎤 Artistes suivis se met à jour avec toute ta liste d’abonnements : les artistes jamais scannés y apparaissent avec le badge JAMAIS SCANNÉ (filtre « jamais scanné »).',
-    'Ils sont scannés quand la boucle arrive à eux, dans l’ordre habituel.',
   ] },
 ];
 
@@ -48375,6 +48376,15 @@ function tvUpcomingEp(it) {
   if (up && up.s) return { s: up.s, e: 1, date: up.date || '', name: '', announced: true };
   return null;
 }
+// Saison EN COURS de diffusion pas encore complète : le prochain épisode à sortir n'est PAS
+// un épisode 1 (l'épisode 1 de la saison est donc déjà diffusé) et n'est pas encore sorti
+// (date future ou inconnue). ⚠ Un épisode 1 à venir (nouvelle saison, même dans 3 j) ne
+// compte pas : la saison n'a pas commencé.
+function tvAwaitingFull(it) {
+  const ne = it && it.type === 'tv' ? it.nextEp : null;
+  if (!ne || !ne.s || !(Number(ne.e) > 1)) return false;
+  return !ne.date || tvDaysUntil(ne.date) > 0;
+}
 // Série dont on suit encore les sorties : tout sauf une série « Vu » abandonnée (🚫 `dropped`)
 // ou masquée (🙈). ⚠ Une série « Vu » vue EN ENTIER en fait partie : c'est précisément elle
 // qui attend sa saison suivante (cause du bug « Edgerunners 2 / Black Clover absents »).
@@ -51251,7 +51261,7 @@ function TvTimePanel() {
   const [ytRefreshingId, setYtRefreshingId] = React.useState(null);
   const hasYtKey = !!ytKey();
   // Sections repliables (header cliquable + chevron) — seule EN COURS ouverte par défaut
-  const [secOpen, setSecOpen] = React.useState({ watching: true, paused: false, towatch: false, upcoming: false, done: false, ytWatching: true, ytTowatch: false, ytDone: false, ytSubOnly: false, ytNoSub: false, bkReading: true, bkTowatch: false, bkDone: false });
+  const [secOpen, setSecOpen] = React.useState({ watching: true, paused: false, awaiting: false, towatch: false, upcoming: false, done: false, ytWatching: true, ytTowatch: false, ytDone: false, ytSubOnly: false, ytNoSub: false, bkReading: true, bkTowatch: false, bkDone: false });
   const toggleSec = k => setSecOpen(o => ({ ...o, [k]: !o[k] }));
   // Fiche série ouverte au clic sur l'affiche — { type, id } ; l'item est relu dans `items`
   // à chaque render pour que la fiche reflète les ±1 / coches saison en direct
@@ -52251,7 +52261,13 @@ function TvTimePanel() {
   // EN COURS exclut les séries « à jour » (prochain épisode pas encore sorti) : elles vivent
   // UNIQUEMENT dans PROCHAINES SORTIES tant que le nouvel épisode n'est pas diffusé.
   const watching = visible.filter(it => it.status === 'watching' && !tvCaughtUp(it));
-  const paused   = visible.filter(it => it.status === 'paused');   // séries mises en pause (visionnage suspendu)
+  // ⏸ EN PAUSE se scinde en deux VUES (rien de stocké, `status` reste 'paused') : une série
+  // dont la saison en cours de diffusion a déjà sorti son épisode 1 mais pas encore son
+  // dernier (`tvAwaitingFull`) va dans ⏳ EN ATTENTE DE SORTIE ENTIÈRE, et revient d'elle-même
+  // dans EN PAUSE dès que `nextEp` disparaît au refresh (dernier épisode sorti).
+  const pausedAll = visible.filter(it => it.status === 'paused');   // séries mises en pause (visionnage suspendu)
+  const awaiting = pausedAll.filter(tvAwaitingFull);
+  const paused   = pausedAll.filter(it => !tvAwaitingFull(it));
   const towatch  = visible.filter(it => it.status === 'towatch' && !isUpcomingMovie(it));
   const doneAll  = visible.filter(it => it.status === 'done');
   const forcedCan  = mediaFilter === 'all' || mediaFilter === 'tv';   // seuls onglets à contenir des séries
@@ -52761,17 +52777,23 @@ function TvTimePanel() {
                 </>
               ))}</DeskGrid>)}
 
-          {/* En pause (visionnage suspendu) — reprendre → EN COURS, arrêter → VUS */}
-          {secTitle('paused', '⏸', 'EN PAUSE', paused.length)}
-          {secOpen.paused && (paused.length === 0
-            ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>Aucune série en pause</div>
-            : <DeskGrid min={360}>{paused.map(it => row(it, progLabel(it),
-                <>
-                  <button onClick={() => setStatus(it, 'watching')} title="Reprendre le visionnage" style={abtn(TVTIME_COLOR)}>▶</button>
-                  <button onClick={() => abandonSeries(it)} title="Arrêter le visionnage (passer en Vus, sans valider les épisodes restants)" style={abtn('#4caf50')}>⏹</button>
-                  <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
-                </>
-              ))}</DeskGrid>)}
+          {/* En pause (visionnage suspendu) — reprendre → EN COURS, arrêter → VUS.
+              ⚠ Absente de l'onglet Films : seules les séries se mettent en pause. */}
+          {mediaFilter !== 'movie' && [['paused', '⏸', 'EN PAUSE', paused, 'Aucune série en pause'],
+            ['awaiting', '⏳', 'EN ATTENTE DE SORTIE ENTIÈRE', awaiting, 'Aucune saison en cours de diffusion']].map(([k, icon, label, list, empty]) => (
+            <React.Fragment key={k}>
+              {secTitle(k, icon, label, list.length)}
+              {secOpen[k] && (list.length === 0
+                ? <div style={{ fontSize:10, color:C.dim, fontStyle:'italic', textAlign:'center', padding:'2px 0', fontFamily:'DM Mono,monospace' }}>{empty}</div>
+                : <DeskGrid min={360}>{list.map(it => row(it, k === 'awaiting' && it.nextEp ? `${progLabel(it)} · S${it.nextEp.s}E${it.nextEp.e}${it.nextEp.date ? ' le ' + it.nextEp.date.split('-').reverse().join('/') : ''}` : progLabel(it),
+                    <>
+                      <button onClick={() => setStatus(it, 'watching')} title="Reprendre le visionnage" style={abtn(TVTIME_COLOR)}>▶</button>
+                      <button onClick={() => abandonSeries(it)} title="Arrêter le visionnage (passer en Vus, sans valider les épisodes restants)" style={abtn('#4caf50')}>⏹</button>
+                      <button onClick={() => removeItem(it)} title="Retirer" style={{ ...abtn('#e05050'), fontSize:22, fontWeight:700 }}>×</button>
+                    </>
+                  ))}</DeskGrid>)}
+            </React.Fragment>
+          ))}
 
           {/* À voir */}
           {secTitle('towatch', '📌', 'À VOIR', towatch.length)}
