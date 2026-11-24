@@ -79,7 +79,7 @@ purged_uris (spotify_uri PK)  -- jamais réinsérés par un re-scan
 ## Scraping (`startSync`)
 
 - `syncState` `'idle'|'running'|'paused'|'rl_waiting'` via `setSync` (ref synchrone). **`checkpoint()`** avant chaque appel : une seule attente pour pause et 429. `endSync(reason)` : seul `'completed'` efface `spotifyplus_sync_progress`.
-- **429** : `_rlSet(max(Retry-After, 15 min), true)`, persisté dans `spotifyplus_blocked_until`, s'applique à **tous** les appels sauf les commandes de lecture (`apiPut(…, {player:true})`), qui ne respectent que le vrai Retry-After (`_rlSpotUntil`).
+- **429** : `_rlSet` pose **24 h** (`RL_HARD_MS`, quel que soit le Retry-After), persisté dans `spotifyplus_blocked_until`, pour **tous** les appels, commandes de lecture comprises (`{player:true}` n'exempte plus) ; coupe le 🔴 Défilement.
 - **Début de boucle** (passage parti de la page 1) : TOUT `/me/following` relu (hors quota), chaque suivi sans ligne reçoit une ligne vide à `FULL_SCRAPE_FROM` (badge JAMAIS SCANNÉ dans 🎤 Artistes suivis) ; l'ordre du scan ne change pas.
 - **Premier scan = toute la discographie** (pages déroulées, plafond `FIRST_SCRAPE_MAX_PAGES`) ; artiste connu = **une page** (+1 page `include_groups=single` si la 1re n'a aucun single). ⚠ **Une requête de scan (page d'albums OU de pistes) = une unité de quota** (`quotaGet`, 400 ms entre deux) ; quota atteint ⇒ arrêt EN PLEIN artiste, scan partiel gardé dans `SYNC_ARTIST_LS` et repris là. ⚠ `FULL_SCRAPE_FROM` est un **état** (« premier scan pas fini ») posé par `writeLightRow()`.
 - Albums `limit=10` (piège 21) → `releaseInRange` (piège 19) → tracks. `single` de `EP_MIN_TRACKS`+ titres = EP (`release_type='ep'`).

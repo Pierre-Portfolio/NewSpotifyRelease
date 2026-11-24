@@ -283,7 +283,7 @@ const ESTIMATED_TOTAL = 1400;
 // major=floor(N/100), minor=floor(N/10)%10, patch=N%10 (ex. 243 → 2.4.3, 250 → 2.5.0).
 // À incrémenter manuellement à chaque commit (= git rev-list --count HEAD après le commit).
 // ⚠ Les commits automatiques de la GitHub Action (data/) gonflent aussi N — un par jour.
-const APP_VERSION = '13.21.259';
+const APP_VERSION = '13.21.260';
 
 // ════════════════════════════════════════════════
 // PKCE
@@ -2376,7 +2376,7 @@ function cryptoHoldTip(d, px, err) {
 // ── Rate-limit guard (module-level, PERSISTÉ) ────
 // Une seule fenêtre "aucune requête avant T", partagée par TOUS les appels
 // (player, login, synchro) et relue au chargement du module : un blocage
-// (429 player ou stop synchro min. 15 min) survit au F5 — avant, _rlUntil repartait
+// (tout 429 = 24 h, `RL_HARD_MS`) survit au F5 — avant, _rlUntil repartait
 // à 0 au refresh et le poll player re-hammerait une API qui venait de throttle.
 // Cadence du poll player (StoreProvider) : 5 s en lecture, 15 s après 2 min sans rien qui
 // joue, 10 s de plafond par requête. `_playerPollKick` = « re-sonde tout de suite », posé par
@@ -2452,17 +2452,18 @@ const RL_LS_KEY = 'spotifyplus_blocked_until';
 // cause que rien n'annonçait). Une fenêtre 429 oubliée est infiniment moins grave.
 let _rlUntil  = (() => { try { return parseInt(localStorage.getItem(RL_LS_KEY) || '0') || 0; } catch { return 0; } })();
 let _rlNotify = null;
-// `_rlSpotUntil` = la fenêtre que SPOTIFY a réellement demandée (Retry-After), sans le
-// minimum de 15 min que la synchro s'impose ensuite par prudence (`selfImposed`). Une
-// commande de lecture lancée d'un clic (`apiPut(..., {player:true})`) ne respecte que
-// celle-ci : sans ça, un 429 de quelques secondes pendant un scraping bloquait TOUT clic
-// sur un titre pendant 15 min, sans que Spotify ne refuse quoi que ce soit.
-let _rlSpotUntil = 0;
-function _rlSet(retryMs, selfImposed) {
-  if (!selfImposed) _rlSpotUntil = Math.max(_rlSpotUntil, Date.now() + retryMs + 2000);
-  _rlUntil = Date.now() + retryMs + 2000;
+// ⚠ TOUT 429 = PLUS AUCUNE requête vers api.spotify.com pendant `RL_HARD_MS` (24 h), quel
+// que soit le Retry-After, commandes de lecture COMPRISES (demande utilisateur) : respecter
+// le Retry-After court (et laisser passer poll player, 🔴 Défilement, clics) refaisait
+// tomber un 429 dès la reprise. La fenêtre ne fait que s'allonger (jamais raccourcie par un
+// 429 plus court) ; le 🔴 Défilement est coupé, il ne ferait que buter sur la fenêtre.
+const RL_HARD_MS = 24 * 60 * 60 * 1000;
+function _rlSet(retryMs) {
+  const ms = Math.max(Number(retryMs) || 0, RL_HARD_MS);
+  _rlUntil = Math.max(_rlUntil || 0, Date.now() + ms + 2000);
   try { localStorage.setItem(RL_LS_KEY, String(_rlUntil)); } catch {}
   if (_rlNotify) _rlNotify(_rlUntil);
+  try { if (carSkipSec()) carModeSet('off'); } catch {}
 }
 function _rlCheck() {
   // rate_limited:true permet aux callers de distinguer "bloqué" de "pas de données" (204/null)
@@ -2489,11 +2490,9 @@ function _parseRetryAfterMs(raw, fallbackMs) {
 }
 
 // `opts.signal` (facultatif) : AbortSignal transmis au fetch — le poll player s'en sert pour
-// borner chaque tick dans le temps. `opts.player` : même fenêtre 429 que `apiPut` (lecture).
+// borner chaque tick dans le temps.
 async function apiGet(url, _retried = false, opts) {
-  const blocked = opts && opts.player
-    ? (Date.now() < _rlSpotUntil ? { error: 'rate_limited', rate_limited: true, blockedUntil: _rlSpotUntil } : null)
-    : _rlCheck();
+  const blocked = _rlCheck();   // ⚠ `opts.player` n'exempte plus de la fenêtre 429 (voir `_rlSet`)
   if (blocked) return blocked;
   const token = await getToken();
   const res   = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: opts && opts.signal });
@@ -2528,9 +2527,7 @@ async function apiPut(url, body, _retried = false, opts) {
   finally { if (selfPlayer) _carSelfAt = Date.now(); }
 }
 async function _apiPut(url, body, _retried = false, opts) {
-  const blocked = opts && opts.player
-    ? (Date.now() < _rlSpotUntil ? { error: 'rate_limited', rate_limited: true, blockedUntil: _rlSpotUntil } : null)
-    : _rlCheck();
+  const blocked = _rlCheck();   // ⚠ `opts.player` n'exempte plus de la fenêtre 429 (voir `_rlSet`)
   if (blocked) return blocked;
   const token = await getToken();
   const res   = await fetch(url, {
@@ -4779,7 +4776,7 @@ function StoreProvider({ children }) {
   const startSync = async (options = {}) => {
     if (syncStateRef.current !== 'idle') return;
 
-    // Fenêtre rate-limit persistée (429 player ou stop synchro min. 15 min) — survit au F5
+    // Fenêtre rate-limit persistée (tout 429 = 24 h, `RL_HARD_MS`) — survit au F5
     if (Date.now() < _rlUntil) {
       setBlockedUntil(_rlUntil);
       log(`🚫 Synchro bloquée (rate limit Spotify) — réessaie dans ${Math.ceil((_rlUntil - Date.now()) / 60000)} min`, 'error');
@@ -4850,11 +4847,11 @@ function StoreProvider({ children }) {
             data = await apiGet(url);
           } catch (err) {
             if (err.message === 'RATE_LIMIT') {
-              // Stop complet immédiat : on bloque TOUS les appels (min. 15 min) via la
-              // fenêtre persistée — survit au F5. La progression est sauvegardée, le
+              // Stop complet immédiat : `apiGet` a déjà posé la fenêtre de 24 h (`RL_HARD_MS`)
+              // persistée — survit au F5. La progression est sauvegardée, le
               // bouton ↩ Reprendre réapparaît via endSync('error').
-              const blockMs = Math.max(err.waitMs || 0, 15 * 60 * 1000);
-              _rlSet(blockMs, true);   // minimum de 15 min = prudence de la synchro, pas Spotify
+              const blockMs = Math.max(err.waitMs || 0, RL_HARD_MS);
+              _rlSet(blockMs);
               setBlockedUntil(_rlUntil);
               const e = new Error('SYNC_RATE_ABORT');
               e.blockMin = Math.ceil(blockMs / 60000);
@@ -5369,8 +5366,8 @@ function StoreProvider({ children }) {
         return;
       }
       if (err.message === 'SYNC_RATE_ABORT') {
-        log(`🚫 Rate limit 429 — synchro stoppée. Réessaie dans ~${err.blockMin} min.`, 'error');
-        setStatus(`Bloqué ${err.blockMin} min — rate limit Spotify`, 'error');
+        log(`🚫 Rate limit 429 — synchro stoppée. Plus aucune requête Spotify pendant 24 h.`, 'error');
+        setStatus(`Bloqué 24 h — rate limit Spotify`, 'error');
       } else {
         log(`Erreur : ${err.message}`, 'error');
         setStatus('Erreur — arrêté.', 'wait');
@@ -32789,6 +32786,10 @@ const APROPOS_COLORS = { general:'#b06cf5', modules:'#8a7bf5', auth:'#5a9bff', a
 // ⚠ À TENIR À JOUR À CHAQUE COMMIT qui bumpe APP_VERSION : ajouter l'entrée en tête (même
 // `v` que APP_VERSION) et retirer la 6e. Texte pour l'utilisateur, pas le détail technique.
 const RELEASE_NOTES = [
+  { v:'13.21.260', date:'2026-11-24', title:'🚫 429 Spotify : 24 h sans aucune requête', items:[
+    'Dès que Spotify répond « trop de requêtes » (429), l’app ne lui envoie plus rien pendant 24 h : scraping, lecteur, mode Voiture, lecture d’un titre compris.',
+    'Le 🔴 Défilement du mode Voiture se coupe tout seul à ce moment-là.',
+  ] },
   { v:'13.21.259', date:'2026-11-24', title:'⏳ TV Time : en attente de sortie entière', items:[
     'Séries : nouvelle section ⏳ En attente de sortie entière, pour les séries en pause dont la saison en cours n’est pas encore sortie en entier (épisode 1 déjà diffusé).',
     'La série revient d’elle-même dans ⏸ En pause dès que le dernier épisode de la saison est sorti.',
@@ -32805,10 +32806,6 @@ const RELEASE_NOTES = [
   { v:'13.21.256', date:'2026-11-20', title:'📺 Vus non finis : saisons manquantes', items:[
     'Dans TV Time, Vus avec le 🚫 actif : chaque série affiche le nombre de saisons sorties qu’il te reste à voir et la date de sortie de la dernière.',
     'La fiche de chaque série est relue chez TMDB à ce moment-là (une fois par session) : le libellé se complète en quelques secondes.',
-  ] },
-  { v:'13.21.255', date:'2026-11-20', title:'↩ Alertes : annuler une date retirée', items:[
-    'Après avoir retiré la date d’une alerte, un bouton ↩ la remet. Il reste là tant que l’alerte n’a pas de nouvelle date (jusqu’au rechargement de la page).',
-    'L’heure éventuelle n’est pas remise : elle part avec la date.',
   ] },
 ];
 
